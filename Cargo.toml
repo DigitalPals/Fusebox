@@ -1,6 +1,6 @@
 [package]
 name = "fusebox"
-version = "0.4.0-rc.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "One fast binary that turns your Claude, ChatGPT, Gemini, Antigravity, Grok, Kimi, Meta, Devin and Vertex accounts into OpenAI, Anthropic and Gemini compatible APIs."
