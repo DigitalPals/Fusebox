@@ -103,10 +103,10 @@ target/compact/fusebox --version
 GNU binutils 2.38 or a compatible linker is required for this x86 flag. RELR
 requires glibc 2.36 or newer; the build environment may impose newer requirements
 through other symbols. In particular, the local Debian 13 artifact requires
-glibc 2.39, independently of RELR. The Docker build compiles on Debian 12 and
-runs on Debian 12's glibc 2.36. Linux ARM64, macOS, and Windows do not receive
-the x86 linker flag. Avoid adding it to global `RUSTFLAGS` for cross-platform
-source builds.
+glibc 2.39, independently of RELR. The Docker build and the Linux release
+archives compile on Debian 12, so they run on Debian 12's glibc 2.36. Linux
+ARM64, macOS, and Windows do not receive the x86 linker flag. Avoid adding it
+to global `RUSTFLAGS` for cross-platform source builds.
 
 Panic unwinding remains enabled. Aborting on any task panic would change the
 proxy's failure behavior. All providers, compression formats, HTTP/2, SOCKS,

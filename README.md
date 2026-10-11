@@ -37,7 +37,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 
 ## Quick start
 
-**1. Get the binary.** Download it for macOS, Linux or Windows from [Releases](https://github.com/DigitalPals/Fusebox/releases/latest), or build it with Rust 1.88 or newer:
+**1. Get the binary.** Download it for macOS, Linux or Windows from [Releases](https://github.com/DigitalPals/Fusebox/releases/latest). The Linux builds need glibc 2.36 or newer (Debian 12, Ubuntu 24.04 or later), and `gh attestation verify <archive> -R DigitalPals/Fusebox` confirms a download was built here. Or build it with Rust 1.88 or newer:
 
 ```sh
 cargo install --git https://github.com/DigitalPals/Fusebox
@@ -509,6 +509,18 @@ Real Claude Code and Codex clients keep their own identity on the way through, a
 
 See [release binary size](docs/binary-size.md) for compiler comparisons, measured
 savings, and Linux packed-relocation compatibility.
+
+### Releases
+
+Pushing a version tag publishes a release. Bump `version` in `Cargo.toml` and `Cargo.lock`, merge that to main, then tag it:
+
+```sh
+git tag -a v0.4.1 -m v0.4.1 && git push origin v0.4.1
+```
+
+The **Release** workflow checks that the tag matches `Cargo.toml`, builds the five archives and publishes them with `SHA256SUMS`, build attestations and a list of the pull requests since the last release, below `.github/release-notes/v0.4.1.md` if that file exists. A tag such as `v0.4.1-rc.1` publishes a prerelease. The **Docker** workflow tags the image `0.4.1`, `0.4` and `latest`; a prerelease gets only its own tag.
+
+Patch releases bring client-version catch-ups and fixes; minor releases bring features, new settings and changed behaviour.
 
 ## Credits
 
