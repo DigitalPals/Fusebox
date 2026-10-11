@@ -67,8 +67,10 @@ jobs:
             readelf --dynamic "$binary" | grep -E '\(RELR(SZ|ENT)?\)'
             readelf --version-info "$binary" | grep GLIBC_ABI_DT_RELR
           fi
-          glibc=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -n1)
-          echo "${{ matrix.target }} needs ${glibc/_/ } or newer" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The newest glibc symbol it uses, or 2.36 if it packs relocations.
+          glibc=$( { objdump -T "$binary" | grep -o 'GLIBC_[0-9][0-9.]*' | cut -d_ -f2
+            readelf --version-info "$binary" | grep -q GLIBC_ABI_DT_RELR && echo 2.36; } | sort -uV | tail -n1)
+          echo "${{ matrix.target }} needs glibc $glibc or newer" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Package
         shell: bash
         run: |
