@@ -6,12 +6,20 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Releases a tag that is already pushed, building its source with this
+  # workflow, for when the workflow at the tag is what failed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release, such as v0.4.0
+        required: true
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   version:
@@ -19,11 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
-          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "::error::Tag $TAG doesn't match version $version in Cargo.toml"
             exit 1
           fi
 
@@ -45,6 +55,8 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -68,13 +80,15 @@ jobs:
             readelf --version-info "$binary" | grep GLIBC_ABI_DT_RELR
           fi
           # The newest glibc symbol it uses, or 2.36 if it packs relocations.
-          glibc=$( { objdump -T "$binary" | grep -o 'GLIBC_[0-9][0-9.]*' | cut -d_ -f2
-            readelf --version-info "$binary" | grep -q GLIBC_ABI_DT_RELR && echo 2.36; } | sort -uV | tail -n1)
+          glibc=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9][0-9.]*' | cut -d_ -f2 | sort -uV | tail -n1)
+          if readelf --version-info "$binary" | grep GLIBC_ABI_DT_RELR > /dev/null; then
+            glibc=$(printf '%s\n' "$glibc" 2.36 | sort -V | tail -n1)
+          fi
           echo "${{ matrix.target }} needs glibc $glibc or newer" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Package
         shell: bash
         run: |
-          name="fusebox-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="fusebox-${TAG}-${{ matrix.target }}"
           mkdir "$name"
           cp README.md LICENSE "$name/"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
@@ -104,6 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
@@ -119,7 +134,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="$GITHUB_REF_NAME"
+          tag="$TAG"
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
             exit 0

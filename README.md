@@ -518,7 +518,7 @@ Pushing a version tag publishes a release. Bump `version` in `Cargo.toml` and `C
 git tag -a v0.4.1 -m v0.4.1 && git push origin v0.4.1
 ```
 
-The **Release** workflow checks that the tag matches `Cargo.toml`, builds the five archives and publishes them with `SHA256SUMS`, build attestations and a list of the pull requests since the last release, below `.github/release-notes/v0.4.1.md` if that file exists. A tag such as `v0.4.1-rc.1` publishes a prerelease. The **Docker** workflow tags the image `0.4.1`, `0.4` and `latest`; a prerelease gets only its own tag.
+The **Release** workflow checks that the tag matches `Cargo.toml`, builds the five archives and publishes them with `SHA256SUMS`, build attestations and a list of the pull requests since the last release, below `.github/release-notes/v0.4.1.md` if that file exists. A tag such as `v0.4.1-rc.1` publishes a prerelease. If the workflow itself fails, fix it on main and release the existing tag with `gh workflow run release.yml -f tag=v0.4.1`, rather than moving the tag. The **Docker** workflow tags the image `0.4.1`, `0.4` and `latest`; a prerelease gets only its own tag.
 
 Patch releases bring client-version catch-ups and fixes; minor releases bring features, new settings and changed behaviour.
 
