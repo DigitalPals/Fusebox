@@ -826,7 +826,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn muse_requests_match_1_4_4_identity() {
+    fn muse_requests_match_1_4_6_identity() {
         let cfg = Config {
             auth_dir: "/nonexistent".into(),
             meta_api_key: vec![crate::config::KeyEntry { api_key: "test".into(), ..Default::default() }],
@@ -854,7 +854,7 @@ mod tests {
         for (name, expected) in [
             (
                 "user-agent",
-                "muse-build/1.4.4 (interactive; macos-aarch64; build 1e1635eda6610b6dec0803bc76c1ceb0dbff7caa)",
+                "muse-build/1.4.6 (interactive; macos-aarch64; build db2475a6bd32831a854b97282a12b867123d6520)",
             ),
             ("x-client-id", "tbh:tui"),
             ("x-tbh-agent-role", "main"),
