@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -97,8 +97,21 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
             let format = format_for_path(req.uri().path());
             return (StatusCode::FORBIDDEN, axum::Json(formats::error_body(format, 403, problem))).into_response();
         }
+        let websocket = if req.method() == axum::http::Method::GET
+            && matches!(req.uri().path(), "/v1/responses" | "/backend-api/codex/responses")
+        {
+            let (mut parts, body) = req.into_parts();
+            // The extractor consumes OnUpgrade; preserve it for the route handler.
+            let extensions = parts.extensions.clone();
+            let valid = WebSocketUpgrade::from_request_parts(&mut parts, &app).await.is_ok();
+            parts.extensions = extensions;
+            req = Request::from_parts(parts, body);
+            valid
+        } else {
+            false
+        };
         if let Some(client) = named
-            && let Err(denied) = app.clients.admit(client, req.headers(), !is_websocket(req.headers()))
+            && let Err(denied) = app.clients.admit(client, req.headers(), !websocket)
         {
             let format = format_for_path(req.uri().path());
             let status = StatusCode::from_u16(denied.status).unwrap_or(StatusCode::FORBIDDEN);
@@ -127,10 +140,6 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
     let format = format_for_path(req.uri().path());
     (StatusCode::UNAUTHORIZED, axum::Json(formats::error_body(format, 401, "invalid or missing API key")))
         .into_response()
-}
-
-fn is_websocket(headers: &HeaderMap) -> bool {
-    headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
 fn format_for_path(path: &str) -> Format {

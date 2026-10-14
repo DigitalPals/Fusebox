@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
@@ -16,42 +16,83 @@ use serde::Serialize;
 use crate::accounts::wildcard;
 use crate::config::NamedClient;
 use crate::state::App;
+use crate::usage::{store::Store, types::Observation};
 
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
+const MAX_AGE: Duration = Duration::from_secs(90);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Clients {
     /// Requests in the current minute (UTC minute number, count).
-    rate: Mutex<HashMap<String, (i64, u32)>>,
-    spend: Mutex<Spends>,
+    rate: Arc<Mutex<HashMap<String, (i64, u32)>>>,
+    spend: Arc<Mutex<Spends>>,
+    store: Option<Store>,
 }
 
 #[derive(Default)]
 struct Spends {
     /// The day and month the totals are for; a new one starts from zero.
     day: Option<NaiveDate>,
-    by_client: HashMap<String, Spend>,
+    by_client: HashMap<String, Totals>,
+    /// Completions not yet acknowledged by a database snapshot.
+    pending: HashMap<String, Pending>,
+    refreshed: Option<Instant>,
+    available: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Totals {
+    tokens_today: u64,
+    cost_nanos: u64,
+    unknown_tokens: u64,
+    unpriced: u64,
+}
+
+impl Totals {
+    fn add(&mut self, other: Self) {
+        self.tokens_today = self.tokens_today.saturating_add(other.tokens_today);
+        self.cost_nanos = self.cost_nanos.saturating_add(other.cost_nanos);
+        self.unknown_tokens = self.unknown_tokens.saturating_add(other.unknown_tokens);
+        self.unpriced = self.unpriced.saturating_add(other.unpriced);
+    }
+
+    fn spend(self) -> Spend {
+        Spend { tokens_today: self.tokens_today, usd_month: self.cost_nanos as f64 / 1e9 }
+    }
+}
+
+struct Pending {
+    origin: String,
+    client: String,
+    event_at_ms: i64,
+    totals: Totals,
 }
 
 impl Spends {
-    /// On a new day, today's tokens start from zero (and the month's spend on the 1st)
-    /// until the next refresh reads the database.
+    /// A period change requires a fresh database snapshot before budget admission.
     fn roll(&mut self) {
         let today = Local::now().date_naive();
         match self.day {
             Some(day) if day == today => {}
-            Some(_) => {
-                let new_month = today.day() == 1;
+            Some(day) => {
+                let new_month = (day.year(), day.month()) != (today.year(), today.month());
                 for v in self.by_client.values_mut() {
                     v.tokens_today = 0;
+                    v.unknown_tokens = 0;
                     if new_month {
-                        v.usd_month = 0.0;
+                        v.cost_nanos = 0;
+                        v.unpriced = 0;
                     }
                 }
                 self.day = Some(today);
+                self.available = false;
             }
             None => self.day = Some(today),
         }
+    }
+
+    fn ready(&self) -> bool {
+        self.available && self.refreshed.is_some_and(|at| at.elapsed() < MAX_AGE)
     }
 }
 
@@ -89,6 +130,9 @@ pub fn counted_tokens(input_and_writes: u64, output: u64) -> u64 {
 }
 
 impl Clients {
+    pub fn new(store: Option<Store>) -> Self {
+        Self { store, ..Default::default() }
+    }
     /// Checks made before the request body is read: expiry, programs, rate and budgets.
     /// `count` is false for a WebSocket's opening request, whose turns count instead.
     pub fn admit(&self, client: &NamedClient, headers: &HeaderMap, count: bool) -> Result<(), Denied> {
@@ -104,7 +148,24 @@ impl Clients {
                 return Err(denied(403, format!("this key only works from {}", client.user_agents.join(", "))));
             }
         }
-        let spend = self.spend(&client.id);
+        let spend = {
+            let mut s = self.spend.lock();
+            s.roll();
+            let totals = s.by_client.get(&client.id).copied().unwrap_or_default();
+            if (client.tokens_per_day.is_some() || client.usd_per_month.is_some())
+                && (!s.ready() || self.store.as_ref().is_some_and(|store| !store.accounting_available()))
+                || client.tokens_per_day.is_some() && totals.unknown_tokens > 0
+                || client.usd_per_month.is_some() && totals.unpriced > 0
+            {
+                return Err(Denied {
+                    status: 503,
+                    message: "usage accounting is unavailable or incomplete; this key's budget cannot be checked"
+                        .into(),
+                    retry_after: Some(REFRESH_EVERY.as_secs()),
+                });
+            }
+            totals.spend()
+        };
         if let Some(limit) = client.tokens_per_day
             && spend.tokens_today >= limit
         {
@@ -136,23 +197,105 @@ impl Clients {
     pub fn spend(&self, id: &str) -> Spend {
         let mut s = self.spend.lock();
         s.roll();
-        s.by_client.get(id).copied().unwrap_or_default()
+        s.by_client.get(id).copied().unwrap_or_default().spend()
     }
 
-    /// Counts a finished request until the next refresh includes it.
-    pub fn add(&self, id: &str, tokens: u64) {
-        if tokens > 0 {
-            let mut s = self.spend.lock();
-            s.roll();
-            let entry = s.by_client.entry(id.to_string()).or_default();
-            entry.tokens_today = entry.tokens_today.saturating_add(tokens);
+    /// Counts each provider attempt, including partial work before a retry.
+    /// Called before its observation enters the writer queue.
+    pub fn record(&self, o: &Observation, store: Option<&Store>) {
+        let Some(id) = &o.client_id else { return };
+        let now = Local::now();
+        let (day_ms, month_ms) = period_starts(now);
+        if o.event_at_ms < month_ms {
+            return;
+        }
+        let t = &o.tokens;
+        let tokens =
+            counted_tokens(t.input.unwrap_or(0).saturating_add(t.cache_write.unwrap_or(0)), t.output.unwrap_or(0));
+        let chargeable = o.status.is_some_and(|s| s < 400) || tokens > 0 || t.cache_read.unwrap_or(0) > 0;
+        let price = store.and_then(|s| s.price(o).cost_nanos).map(|n| n.max(0) as u64);
+        let totals = Totals {
+            tokens_today: if o.event_at_ms >= day_ms { tokens } else { 0 },
+            cost_nanos: price.unwrap_or(0),
+            unknown_tokens: u64::from(
+                o.event_at_ms >= day_ms
+                    && chargeable
+                    && (t.input.is_none() || t.cache_write.is_none() || t.output.is_none()),
+            ),
+            unpriced: u64::from(chargeable && price.is_none()),
+        };
+        let mut s = self.spend.lock();
+        s.roll();
+        s.by_client.entry(id.clone()).or_default().add(totals);
+        if store.is_some_and(Store::accounting_available) {
+            s.pending.insert(
+                o.source_event_id.clone(),
+                Pending { origin: o.origin_id.clone(), client: id.clone(), event_at_ms: o.event_at_ms, totals },
+            );
         }
     }
 
-    fn replace(&self, day: NaiveDate, totals: HashMap<String, Spend>) {
+    fn unavailable(&self) {
+        self.spend.lock().available = false;
+    }
+
+    /// Runs on the database worker. The lock covers both queries and replacement;
+    /// record-before-enqueue prevents concurrent completions from being lost or doubled.
+    fn reconcile(&self, conn: &mut rusqlite::Connection) -> anyhow::Result<()> {
         let mut s = self.spend.lock();
-        s.day = Some(day);
+        let now = Local::now();
+        let (day_ms, month_ms) = period_starts(now);
+        let tx = conn.transaction()?;
+        let mut totals = {
+            let mut stmt = tx.prepare(
+                "SELECT client_id,
+                   SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
+                   SUM(COALESCE(cost_nanos,0)),
+                   SUM(CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
+                       AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(payload,'$.status') < 400) THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(payload,'$.status') < 400) THEN 1 ELSE 0 END)
+                 FROM usage_observations
+                 WHERE source = 'proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2
+                 GROUP BY client_id",
+            )?;
+            let rows = stmt.query_map([day_ms, month_ms], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    Totals {
+                        tokens_today: r.get::<_, i64>(1)?.max(0) as u64,
+                        cost_nanos: r.get::<_, i64>(2)?.max(0) as u64,
+                        unknown_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+                        unpriced: r.get::<_, i64>(4)?.max(0) as u64,
+                    },
+                ))
+            })?;
+            rows.collect::<Result<HashMap<_, _>, _>>()?
+        };
+        let mut acknowledged = Vec::new();
+        {
+            let mut stmt = tx.prepare("SELECT EXISTS(SELECT 1 FROM usage_observations WHERE source='proxy' AND origin_id=?1 AND source_event_id=?2)")?;
+            for (event, p) in &s.pending {
+                if p.event_at_ms < month_ms || stmt.query_row([&p.origin, event], |r| r.get::<_, bool>(0))? {
+                    acknowledged.push(event.clone());
+                } else {
+                    let mut delta = p.totals;
+                    if p.event_at_ms < day_ms {
+                        delta.tokens_today = 0;
+                        delta.unknown_tokens = 0;
+                    }
+                    totals.entry(p.client.clone()).or_default().add(delta);
+                }
+            }
+        }
+        tx.commit()?;
+        for event in acknowledged {
+            s.pending.remove(&event);
+        }
+        s.day = Some(now.date_naive());
         s.by_client = totals;
+        s.refreshed = Some(Instant::now());
+        s.available = true;
+        Ok(())
     }
 }
 
@@ -179,49 +322,59 @@ pub fn check_model(app: &App, headers: &HeaderMap, model: &str) -> Result<(), De
 }
 
 /// Keeps token and spend totals current for clients that have such limits.
+pub async fn refresh(app: &App) {
+    if app.cfg().named_clients.is_empty() {
+        return;
+    }
+    let Some(store) = app.usage.as_ref().filter(|s| s.accounting_available()) else {
+        app.clients.unavailable();
+        return;
+    };
+    let clients = app.clients.clone();
+    let result = tokio::time::timeout(Duration::from_secs(10), store.call(move |conn| clients.reconcile(conn))).await;
+    if !matches!(result, Ok(Ok(()))) || !store.accounting_available() {
+        app.clients.unavailable();
+        tracing::warn!("could not establish client usage totals; budget-limited keys are unavailable");
+    }
+}
+
 pub async fn refresher(app: Arc<App>) {
     let mut tick = tokio::time::interval(REFRESH_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let limited = app.cfg().named_clients.iter().any(|c| c.tokens_per_day.is_some() || c.usd_per_month.is_some());
-        let Some(store) = app.usage.clone().filter(|_| limited) else { continue };
-        let now = Local::now();
-        let (day_ms, month_ms) = period_starts(now);
-        let result = store
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT client_id,
-                       SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
-                       SUM(COALESCE(cost_nanos,0))
-                     FROM usage_observations
-                     WHERE source = 'proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2
-                     GROUP BY client_id",
-                )?;
-                let rows = stmt.query_map([day_ms, month_ms], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-                })?;
-                let mut out = HashMap::new();
-                for row in rows {
-                    let (id, tokens, nanos) = row?;
-                    out.insert(
-                        id,
-                        Spend { tokens_today: tokens.max(0) as u64, usd_month: nanos.max(0) as f64 / 1e9 },
-                    );
-                }
-                Ok(out)
-            })
-            .await;
-        match result {
-            Ok(totals) => app.clients.replace(now.date_naive(), totals),
-            Err(e) => tracing::warn!("could not read client usage for limits: {e:#}"),
-        }
+        refresh(&app).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seed(clients: &Clients, tokens: u64, nanos: u64) {
+        let mut s = clients.spend.lock();
+        s.day = Some(Local::now().date_naive());
+        s.refreshed = Some(Instant::now());
+        s.available = true;
+        s.by_client.insert("laptop".into(), Totals { tokens_today: tokens, cost_nanos: nanos, ..Default::default() });
+    }
+
+    fn observation(input: u64) -> Observation {
+        let mut o =
+            Observation::new("proxy", uuid::Uuid::new_v4().to_string(), "openai", Utc::now().timestamp_millis());
+        o.client_id = Some("laptop".into());
+        o.actual_model = Some("gpt-6-astra".into());
+        o.status = Some(200);
+        o.completeness = "complete".into();
+        o.tokens = crate::usage::types::Tokens {
+            input: Some(input),
+            cache_read: Some(0),
+            cache_write: Some(0),
+            output: Some(0),
+            ..Default::default()
+        };
+        o
+    }
 
     fn client() -> NamedClient {
         NamedClient { id: "laptop".into(), label: "Laptop".into(), key: "fbx_k".into(), ..Default::default() }
@@ -274,19 +427,83 @@ mod tests {
     fn token_and_spend_limits_use_the_counted_totals() {
         let clients = Clients::default();
         let c = NamedClient { tokens_per_day: Some(1000), ..client() };
-        clients.add("laptop", 999);
+        seed(&clients, 0, 0);
+        clients.record(&observation(999), None);
         assert!(clients.admit(&c, &HeaderMap::new(), true).is_ok());
-        clients.add("laptop", 1);
+        clients.record(&observation(1), None);
         let refused = clients.admit(&c, &HeaderMap::new(), true).unwrap_err();
         assert_eq!(refused.status, 429);
         assert!(refused.message.contains("1000 tokens"));
 
         let budget = NamedClient { usd_per_month: Some(5.0), ..client() };
-        let today = Local::now().date_naive();
-        clients.replace(today, HashMap::from([("laptop".into(), Spend { tokens_today: 0, usd_month: 4.99 })]));
+        seed(&clients, 0, 4_990_000_000);
         assert!(clients.admit(&budget, &HeaderMap::new(), true).is_ok());
-        clients.replace(today, HashMap::from([("laptop".into(), Spend { tokens_today: 0, usd_month: 5.0 })]));
+        seed(&clients, 0, 5_000_000_000);
         assert_eq!(clients.admit(&budget, &HeaderMap::new(), true).unwrap_err().status, 429);
+    }
+
+    #[test]
+    fn budgets_require_initialized_fresh_accounting() {
+        let clients = Clients::default();
+        for c in [
+            NamedClient { tokens_per_day: Some(1000), ..client() },
+            NamedClient { usd_per_month: Some(5.0), ..client() },
+        ] {
+            assert_eq!(clients.admit(&c, &HeaderMap::new(), true).unwrap_err().status, 503);
+        }
+        seed(&clients, 0, 0);
+        let c = NamedClient { usd_per_month: Some(5.0), ..client() };
+        assert!(clients.admit(&c, &HeaderMap::new(), true).is_ok());
+        clients.spend.lock().refreshed = Some(Instant::now() - MAX_AGE);
+        assert_eq!(clients.admit(&c, &HeaderMap::new(), true).unwrap_err().status, 503);
+        seed(&clients, 0, 0);
+        clients.unavailable();
+        assert_eq!(clients.admit(&c, &HeaderMap::new(), true).unwrap_err().status, 503);
+        assert!(clients.admit(&client(), &HeaderMap::new(), true).is_ok());
+    }
+
+    #[test]
+    fn a_new_period_requires_a_snapshot_and_resets_skipped_months() {
+        let clients = Clients::default();
+        seed(&clients, 999, 5_000_000_000);
+        clients.spend.lock().day = Some(Local::now().date_naive().with_day(1).unwrap().pred_opt().unwrap());
+        assert_eq!(clients.spend("laptop"), Spend::default());
+        let c = NamedClient { usd_per_month: Some(5.0), ..client() };
+        assert_eq!(clients.admit(&c, &HeaderMap::new(), true).unwrap_err().status, 503);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_preserves_completions_before_and_after_enqueue() {
+        let dir = std::env::temp_dir().join(format!("fusebox-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("usage.sqlite3"), 64, 90, None).unwrap();
+        let clients = Clients::new(Some(store.clone()));
+        let a = observation(100);
+        let b = observation(200);
+        let refresh = || {
+            let clients = clients.clone();
+            store.call(move |conn| clients.reconcile(conn))
+        };
+        refresh().await.unwrap();
+        clients.record(&a, Some(&store));
+        let first = clients.spend("laptop");
+        assert_eq!(first.tokens_today, 100);
+        assert!(first.usd_month > 0.0);
+        refresh().await.unwrap(); // The completion has not entered SQLite yet.
+        assert_eq!(clients.spend("laptop"), first);
+        assert!(store.enqueue(a));
+        clients.record(&b, Some(&store));
+        let both = clients.spend("laptop");
+        refresh().await.unwrap(); // One committed row and one pending completion.
+        assert_eq!(clients.spend("laptop"), both);
+        assert!(store.enqueue(b));
+        for _ in 0..3 {
+            refresh().await.unwrap();
+            assert_eq!(clients.spend("laptop"), both);
+        }
+        assert!(clients.spend.lock().pending.is_empty());
+        store.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

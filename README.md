@@ -172,6 +172,8 @@ curl http://127.0.0.1:8317/v1/messages \
 
 Clients authenticate with `Authorization: Bearer`, `x-api-key`, `x-goog-api-key` or `?key=`.
 
+Embeddings accept `encoding_format: float` (default) or `base64`; base64 encodes little-endian float32 values. Google adapters preserve input order, split Vertex batches to one text for Gemini embedding models or five for older text embedding models, and disable automatic truncation. A failed later chunk returns an error without replaying completed chunks; their usage is still recorded. Gemini embedding token counts are labelled estimates in the usage database. Models without a known price remain unpriced and cannot be treated as free by monthly budgets.
+
 JSON API requests and multipart image edits support `Content-Encoding: gzip` or `zstd`, as well as uncompressed bodies. Authentication runs before decompression; both compressed and decoded bodies are limited to 256 MiB. Unsupported or stacked encodings return 415, malformed compressed bodies return 400, and oversized bodies return 413. Encoding and JSON validation failures appear in request statistics and logs without a provider attempt.
 
 ### Providers
@@ -293,7 +295,7 @@ named-clients:
     expires: 2026-12-31               # the last day the key works, server time
 ```
 
-Days and months follow the server's time zone. Tokens and spend come from the usage database every 30 seconds plus what finished since, so a burst can run slightly past a limit. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it.
+Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it.
 
 ```yaml
 host: "127.0.0.1"             # 0.0.0.0 to expose it (set api-keys first)
@@ -302,7 +304,7 @@ auth-dir: "~/.fusebox"        # OAuth credential files (CLIProxyAPI's work too)
 api-keys: ["fbx_pick-anything"] # keys your clients must send; empty = open
 management-key: ""            # empty = dashboard only from localhost
 proxy-url: ""                 # optional http://, https:// or socks5:// upstream proxy; never falls back to direct
-request-retry: 3              # accounts to try before giving up (at most 10)
+request-retry: 3              # account/model choices across the whole request (at most 10)
 first-token-timeout-seconds: 120 # a stream silent this long moves to the next account; 0 = off
 routing: least-used           # new sessions: most quota left; or smart-quota, round-robin, fill-first
 session-affinity: true        # keep each coding session on one account, for prompt caching
@@ -374,7 +376,7 @@ Every account has a priority, 0 unless set. New sessions go to the highest prior
 
 ### When a request fails
 
-A request tries up to `request-retry` accounts (at most 10), and stops starting new attempts after two minutes. A connection that never opened gets one more try on the same account; one that broke after the request went out moves to the next account, so the same account never runs it twice. A 504 is answered, not repeated, because the provider may still be working on it.
+A request tries up to `request-retry` account/model choices and at most ten attempts, including temporary retries on the same account. These limits and the two-minute retry budget cover every model in a model group together. A connection that never opened gets one more try on the same account; one that broke after the request went out moves to the next account, so the same account never runs it twice. An upstream HTTP 504 is answered, including in a model group, because the provider may still be working on it.
 
 Streams are held back until their first content, at most 5 seconds after they start. A rate limit or overload that arrives inside a successful response before then moves the request to the next account, and the client never sees it. A stream that sends nothing at all for `first-token-timeout-seconds` (120 by default) moves too, and that account sits out the model for two minutes.
 

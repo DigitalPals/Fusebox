@@ -59,6 +59,7 @@ pub struct Store {
     shutdown_result: Arc<OnceCell<std::result::Result<(), String>>>,
     session_id: Arc<String>,
     startup_repriced: u64,
+    catalogue: Arc<Catalogue>,
 }
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -347,11 +348,25 @@ impl Store {
             shutdown_result: Arc::new(OnceCell::new()),
             session_id: Arc::new(session_id),
             startup_repriced,
+            catalogue: Arc::new(catalogue),
         })
     }
     /// Rows the startup reprice step updated when this handle opened the database.
     pub fn startup_repriced(&self) -> u64 {
         self.startup_repriced
+    }
+
+    pub fn price(&self, observation: &Observation) -> super::pricing::Snapshot {
+        self.catalogue.price(observation)
+    }
+
+    /// A limit cannot rely on totals if this writer has lost observations.
+    pub fn accounting_available(&self) -> bool {
+        !self.tx.is_closed()
+            && !self.health.closed.load(Ordering::Acquire)
+            && self.health.error.lock().unwrap().is_none()
+            && self.health.dropped.load(Ordering::Relaxed) == 0
+            && self.health.rejected.load(Ordering::Relaxed) == 0
     }
     pub fn enqueue(&self, observation: Observation) -> bool {
         if self.health.closed.load(Ordering::Acquire) {

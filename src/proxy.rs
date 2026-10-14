@@ -64,8 +64,6 @@ pub struct Tracker {
     analytics: Option<crate::usage::capture::RequestUsage>,
     downstream: crate::diagnostics::Downstream,
     logical_final: bool,
-    /// The client key's identity (a named client's id), for its limits.
-    client_id: Option<String>,
 }
 
 impl Tracker {
@@ -76,7 +74,6 @@ impl Tracker {
             analytics: Some(crate::usage::capture::RequestUsage::new(app.usage.clone(), model)),
             downstream: crate::diagnostics::Downstream::current(),
             logical_final: true,
-            client_id: None,
             started: Instant::now(),
             acct: None,
             stream_usage: Usage::default(),
@@ -130,10 +127,11 @@ impl Tracker {
     /// Names the client program from its User-Agent, for the dashboard.
     pub fn client_app(&mut self, headers: &HeaderMap) {
         self.log.client_app = client_app(headers);
-        self.client_id =
-            headers.get(crate::usage::capture::CLIENT_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
         if let Some(a) = &mut self.analytics {
             a.client(headers);
+            if crate::policy::named_client(&self.app.cfg(), headers).is_some() {
+                a.track_limits(self.app.clients.clone());
+            }
         }
     }
 
@@ -283,9 +281,6 @@ impl Tracker {
         self.log.input_tokens = input;
         self.log.output_tokens = output;
         self.log.cache_tokens = cache;
-        if let Some(id) = &self.client_id {
-            self.app.clients.add(id, crate::policy::counted_tokens(input, output));
-        }
         self.log.error = error.map(|e| e.chars().take(400).collect());
         if let Some(a) = &self.acct {
             if let Some(message) = &self.log.error
@@ -678,7 +673,59 @@ fn set_model(call: &mut Call, model: &str) {
 /// Whether the next model of a group should take over from an answer like this one:
 /// no account, rate limits, used-up quota or an upstream failure, not a bad request.
 fn group_moves_on(reply: &Reply) -> bool {
-    matches!(reply, Reply::Error(status, _) if matches!(status, 401 | 403 | 404 | 408 | 429) || *status >= 500)
+    // An upstream gateway timeout can represent work still running. The inner
+    // pipeline's terminal decision also applies to the outer model group.
+    matches!(reply, Reply::Error(status, _) if *status != 504 && (matches!(status, 401 | 403 | 404 | 408 | 429) || *status >= 500))
+}
+
+struct RetryBudget {
+    started: Instant,
+    remaining_accounts: usize,
+    remaining_attempts: usize,
+    selected: std::collections::HashSet<(String, String)>,
+}
+
+impl RetryBudget {
+    fn new(attempts: u32) -> Self {
+        Self {
+            started: Instant::now(),
+            remaining_accounts: (attempts as usize).clamp(1, MAX_ACCOUNTS),
+            remaining_attempts: MAX_ACCOUNTS,
+            selected: Default::default(),
+        }
+    }
+
+    fn available(&self) -> bool {
+        self.remaining_attempts > 0 && self.started.elapsed() < RETRY_BUDGET
+    }
+
+    fn next_model(&self) -> bool {
+        self.available() && self.remaining_accounts > 0
+    }
+
+    fn take(&mut self, model: &str, account: &str) -> bool {
+        if !self.available() {
+            return false;
+        }
+        let selection = (model.to_string(), account.to_string());
+        if !self.selected.contains(&selection) {
+            if self.remaining_accounts == 0 {
+                return false;
+            }
+            self.remaining_accounts -= 1;
+            self.selected.insert(selection);
+        }
+        self.remaining_attempts -= 1;
+        true
+    }
+
+    async fn wait(&self, delay: std::time::Duration) -> bool {
+        if !self.available() || delay >= RETRY_BUDGET.saturating_sub(self.started.elapsed()) {
+            return false;
+        }
+        tokio::time::sleep(delay).await;
+        self.available()
+    }
 }
 
 static GROUP_TURN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -708,9 +755,10 @@ pub fn group_order_for_tests(group: &crate::config::ModelGroup, session: Option<
 /// Runs a call, or for a model group, each of its models until one answers.
 async fn execute_models(app: Arc<App>, call: Call) -> Reply {
     let cfg = app.cfg();
+    let mut budget = RetryBudget::new(cfg.request_retry);
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
     let (base, _) = ir::split_model_suffix(&raw);
-    let Some(group) = cfg.model_groups.get(&base) else { return execute_inner(app, call).await };
+    let Some(group) = cfg.model_groups.get(&base) else { return execute_inner(app, call, &mut budget).await };
     let order = group_order(group, call.session.as_deref());
     let mut last = None;
     for (i, model) in order.iter().enumerate() {
@@ -726,8 +774,8 @@ async fn execute_models(app: Arc<App>, call: Call) -> Reply {
             routing_selection: if i == 0 { call.routing_selection.clone() } else { None },
         };
         set_model(&mut attempt, model);
-        let reply = execute_inner(app.clone(), attempt).await;
-        if i + 1 < order.len() && group_moves_on(&reply) {
+        let reply = execute_inner(app.clone(), attempt, &mut budget).await;
+        if i + 1 < order.len() && group_moves_on(&reply) && budget.next_model() {
             tracing::info!(group = %base, model = %model, "model group: trying the next model");
             last = Some(reply);
             continue;
@@ -737,7 +785,7 @@ async fn execute_models(app: Arc<App>, call: Call) -> Reply {
     last.unwrap_or_else(|| error_reply(call.format, 404, &format!("model group {base} lists no models")))
 }
 
-async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
+async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> Reply {
     let cfg = app.cfg();
     let raw_model =
         call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
@@ -760,7 +808,6 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
     // Same-account retries for blips (capacity errors, soft rate limits).
     let mut soft_tries: HashMap<String, u32> = HashMap::new();
     let attempts = (cfg.request_retry as usize).clamp(1, MAX_ACCOUNTS);
-    let started = std::time::Instant::now();
     let first_token =
         (cfg.first_token_timeout_seconds > 0).then(|| std::time::Duration::from_secs(cfg.first_token_timeout_seconds));
     let inferred = call.session_source == Some(crate::affinity::INFERRED_SOURCE);
@@ -773,7 +820,7 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
 
     while tried.len() < attempts {
         // Past the budget, the error so far is the answer rather than another wait.
-        if last_error.is_some() && started.elapsed() > RETRY_BUDGET {
+        if !budget.available() {
             break;
         }
         let pin = retry_same.take();
@@ -843,6 +890,9 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
             selected.reason = pending.reason;
             selected.strategy = pending.strategy;
             selected.previous_account = pending.previous_account;
+        }
+        if !budget.take(&model, &selected.account.id) {
+            break;
         }
         tracker.selected(&selected);
         // An inferred assignment is a best guess: it is written in the background, not
@@ -1013,9 +1063,11 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
                 let n = soft_tries.entry(acct.id.clone()).or_default();
                 if *n < 1 && e.is_connect() {
                     *n += 1;
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    retry_same = Some(acct.id.clone());
                     last_error = Some((502, formats::error_body(call.format, 502, &msg)));
+                    if !budget.wait(std::time::Duration::from_secs(1)).await {
+                        break;
+                    }
+                    retry_same = Some(acct.id.clone());
                     continue;
                 }
                 tried.push(acct.id.clone());
@@ -1061,9 +1113,11 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
                     let wait = delay.max(std::time::Duration::from_secs(if *n == 1 { 1 } else { 3 }));
                     tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                         status, retry_delay_seconds = wait.as_secs(), "upstream busy; retrying");
-                    tokio::time::sleep(wait).await;
-                    retry_same = Some(acct.id.clone());
                     last_error = Some((status, client_body));
+                    if !budget.wait(wait).await {
+                        break;
+                    }
+                    retry_same = Some(acct.id.clone());
                     continue;
                 }
                 // Still busy: step aside briefly, without the escalating backoff.
@@ -1717,6 +1771,25 @@ pub fn estimate_tokens(body: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retry_budget_bounds_soft_retries_models_and_waits() {
+        let mut budget = RetryBudget::new(2);
+        assert!(budget.take("one", "a"));
+        assert!(budget.take("one", "a")); // A soft retry preserves its account choice.
+        assert!(budget.take("two", "a"));
+        assert!(!budget.take("three", "a"));
+        assert!(!budget.next_model());
+        for _ in 3..MAX_ACCOUNTS {
+            assert!(budget.take("two", "a"));
+        }
+        assert!(!budget.take("two", "a"));
+        let mut budget = RetryBudget::new(10);
+        budget.started = Instant::now() - (RETRY_BUDGET - std::time::Duration::from_secs(1));
+        assert!(!budget.wait(std::time::Duration::from_secs(2)).await);
+        budget.started = Instant::now() - RETRY_BUDGET;
+        assert!(!budget.take("one", "a"));
+    }
 
     #[test]
     fn soft_failures_retry_and_quota_does_not() {

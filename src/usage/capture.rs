@@ -48,6 +48,17 @@ impl Capture {
     pub fn model(&self, model: &str) {
         self.0.lock().observation.actual_model = safe(model);
     }
+    /// Embeddings have no output or cache token categories. Estimates stay labelled.
+    pub fn embedding(&self, tokens: Option<u64>, estimated: bool) {
+        let mut captured = self.0.lock();
+        let o = &mut captured.observation;
+        o.tokens =
+            Tokens { input: tokens, cache_read: Some(0), cache_write: Some(0), output: Some(0), ..Default::default() };
+        o.completeness = if tokens.is_some() && !estimated { "complete" } else { "partial" }.into();
+        if estimated && let Some(n) = tokens {
+            o.numeric_metadata.insert("estimated_input_tokens".into(), n);
+        }
+    }
 }
 
 pub struct RequestUsage {
@@ -57,6 +68,7 @@ pub struct RequestUsage {
     client: Option<String>,
     session: Option<String>,
     current: Option<Capture>,
+    clients: Option<crate::policy::Clients>,
 }
 impl RequestUsage {
     pub fn new(store: Option<Store>, model: &str) -> Self {
@@ -67,6 +79,7 @@ impl RequestUsage {
             client: None,
             session: None,
             current: None,
+            clients: None,
         }
     }
     pub fn client(&mut self, h: &axum::http::HeaderMap) {
@@ -74,6 +87,9 @@ impl RequestUsage {
         if let Some(id) = h.get(REQUEST_HEADER).and_then(|v| v.to_str().ok()).and_then(safe) {
             self.logical_id = id;
         }
+    }
+    pub fn track_limits(&mut self, clients: crate::policy::Clients) {
+        self.clients = Some(clients);
     }
     pub fn session(&mut self, id: Option<&str>) {
         self.session = id.and_then(safe);
@@ -108,6 +124,11 @@ impl RequestUsage {
     ) -> Option<Observation> {
         let c = self.current.take()?;
         let o = c.snapshot(status, fallback, logical_final);
+        // Register before enqueueing: reconciliation must never see a database row
+        // whose in-memory completion has not been registered yet.
+        if let Some(clients) = &self.clients {
+            clients.record(&o, self.store.as_ref());
+        }
         if let Some(store) = &self.store {
             store.enqueue(o.clone());
         }

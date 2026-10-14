@@ -81,6 +81,7 @@ impl App {
         };
         // Read the system's TLS roots now, not on the first request's worker thread.
         crate::tls::warm();
+        let clients = crate::policy::Clients::new(usage.clone());
         Arc::new(Self {
             usage,
             usage_error,
@@ -103,7 +104,7 @@ impl App {
             live,
             quiet_until: AtomicI64::new(0),
             shutdown: Default::default(),
-            clients: Default::default(),
+            clients,
             key_guesses: Default::default(),
         })
     }

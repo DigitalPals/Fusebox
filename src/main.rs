@@ -212,6 +212,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     };
 
     let import_task = app.usage.clone().map(|s| tokio::spawn(usage::imports::poller(s)));
+    policy::refresh(&app).await;
     let background = [
         tokio::spawn(oauth::refresher(app.clone())),
         tokio::spawn(antigravity::version_updater(app.clone())),
