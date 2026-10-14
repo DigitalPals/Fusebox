@@ -38,12 +38,21 @@ pub struct App {
     pub live: broadcast::Sender<String>,
     /// Ignore our own writes to the auth dir in the file watcher.
     quiet_until: AtomicI64,
+    /// Fired when the server starts shutting down, so long-lived sockets can close cleanly.
+    pub shutdown: tokio_util::sync::CancellationToken,
+    /// Named clients' request rates and spend, for their limits.
+    pub clients: crate::policy::Clients,
+    /// Wrong management keys per address, for the lockout.
+    pub key_guesses: crate::mgmt::Guesses,
 }
 
 impl App {
     pub fn new(cfg: Config, cfg_path: PathBuf) -> Arc<Self> {
         let pool = Pool::default();
         pool.reload(&cfg);
+        pool.restore_cooldowns(&crate::accounts::Cooldowns::load(
+            &cfg.auth_dir().join(crate::accounts::COOLDOWNS_FILE),
+        ));
         let (live, _) = broadcast::channel(512);
         let sessions = Arc::new(crate::affinity::Sessions::load(&cfg.auth_dir(), cfg.session_affinity_idle_seconds));
         let push = crate::push::Push::load(&cfg.auth_dir());
@@ -93,6 +102,9 @@ impl App {
             started: Utc::now(),
             live,
             quiet_until: AtomicI64::new(0),
+            shutdown: Default::default(),
+            clients: Default::default(),
+            key_guesses: Default::default(),
         })
     }
 
@@ -250,9 +262,16 @@ impl Http {
             // CLIProxyAPI's spelling for "no proxy, not even the default one".
             b = b.no_proxy();
         } else if !proxy.is_empty() {
-            match reqwest::Proxy::all(&proxy) {
+            match crate::config::check_proxy_url(&proxy)
+                .and_then(|_| reqwest::Proxy::all(&proxy).map_err(|e| e.to_string()))
+            {
                 Ok(p) => b = b.proxy(p),
-                Err(e) => tracing::error!("invalid proxy-url {proxy}: {e}"),
+                Err(e) => {
+                    // Never fall back to a direct connection: send everything to an
+                    // address that can't resolve, so each request fails and says why.
+                    tracing::error!("unusable proxy, so requests through it fail: {e}");
+                    b = b.proxy(reqwest::Proxy::all("http://invalid-proxy-url.invalid:9").expect("static proxy"));
+                }
             }
         }
         if http1 {

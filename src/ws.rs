@@ -294,6 +294,15 @@ pub async fn handle(app: Arc<App>, headers: HeaderMap, socket: WebSocket) {
                     let Some(msg) = msg else { break };
                     msg
                 }
+                // Shutting down between turns: say so; Codex reconnects to the next run.
+                _ = app.shutdown.cancelled() => {
+                    let close = axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::AWAY,
+                        reason: "Fusebox is restarting".into(),
+                    };
+                    let _ = tx.send(Message::Close(Some(close))).await;
+                    break;
+                }
                 upstream = async {
                     match &mut sess.upstream {
                         Some((_, up)) => up.next().await,
@@ -437,6 +446,13 @@ async fn turn(
     }
 
     let cfg = app.cfg();
+    // Each turn counts against a named client's limits, as an HTTP request would.
+    if let Some(client) = crate::policy::named_client(&cfg, headers)
+        && let Err(d) = app.clients.admit(client, headers, true)
+    {
+        let err = crate::formats::error_body(Format::Responses, d.status, &d.message);
+        return send(tx, error_event(d.status, &err)).await;
+    }
     if cfg.codex_websockets {
         match native_turn(app, headers, sess, &body, full.as_deref(), tx).await {
             Native::Done => {
@@ -555,7 +571,11 @@ async fn native_turn(
         return Native::Fallback;
     }
     let (model, suffix) = ir::split_model_suffix(body["model"].as_str().unwrap_or_default());
-    if model.is_empty() {
+    // Model groups and the client's model limits are handled on the HTTP pipeline.
+    if model.is_empty()
+        || cfg.model_groups.contains_key(&model)
+        || crate::policy::check_model(app, headers, &model).is_err()
+    {
         return Native::Fallback;
     }
 

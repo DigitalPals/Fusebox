@@ -32,6 +32,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/responses/compact", post(compact))
         .route("/v1/images/generations", post(image_generations))
         .route("/v1/images/edits", post(image_edits))
+        .route("/v1/embeddings", post(embeddings))
         .route("/v1/videos/{kind}", post(video_create).get(video_status))
         .route("/v1/models", get(models))
         .route("/v1beta/models", get(gemini_models))
@@ -54,6 +55,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/sw.js", get(service_worker))
         .route("/ui/icons/{file}", get(ui_icon))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(crate::metrics::readyz))
+        .merge(
+            Router::new()
+                .route("/metrics", get(crate::metrics::metrics))
+                .layer(middleware::from_fn_with_state(app.clone(), crate::mgmt::auth)),
+        )
         .with_state(app)
 }
 
@@ -75,11 +82,33 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
     // Collector credentials are ingestion-only even on an otherwise open proxy.
     let collector_key = provided.as_deref().is_some_and(|k| k.starts_with("fbxc_"));
     let named = provided.as_ref().and_then(|k| cfg.named_clients.iter().find(|c| crate::mgmt::constant_eq(&c.key, k)));
+    let open = cfg.api_keys.is_empty() && cfg.named_clients.is_empty();
     if !collector_key
-        && ((cfg.api_keys.is_empty() && cfg.named_clients.is_empty())
+        && (open
             || named.is_some()
             || provided.as_ref().is_some_and(|k| cfg.api_keys.iter().any(|a| crate::mgmt::constant_eq(a, k))))
     {
+        // A proxy without client keys trusts whoever can reach it; on this machine
+        // alone, that must not include web pages.
+        if open
+            && cfg.is_loopback()
+            && let Some(problem) = crate::mgmt::foreign_page(&req)
+        {
+            let format = format_for_path(req.uri().path());
+            return (StatusCode::FORBIDDEN, axum::Json(formats::error_body(format, 403, problem))).into_response();
+        }
+        if let Some(client) = named
+            && let Err(denied) = app.clients.admit(client, req.headers(), !is_websocket(req.headers()))
+        {
+            let format = format_for_path(req.uri().path());
+            let status = StatusCode::from_u16(denied.status).unwrap_or(StatusCode::FORBIDDEN);
+            let mut resp =
+                (status, axum::Json(formats::error_body(format, denied.status, &denied.message))).into_response();
+            if let Some(wait) = denied.retry_after {
+                resp.headers_mut().insert(header::RETRY_AFTER, wait.into());
+            }
+            return resp;
+        }
         // Never trust an incoming internal scope header. Query-string credentials
         // and header credentials get the same namespace without forwarding keys.
         let scope = crate::affinity::scope_for_key(provided.as_deref());
@@ -98,6 +127,10 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
     let format = format_for_path(req.uri().path());
     (StatusCode::UNAUTHORIZED, axum::Json(formats::error_body(format, 401, "invalid or missing API key")))
         .into_response()
+}
+
+fn is_websocket(headers: &HeaderMap) -> bool {
+    headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
 fn format_for_path(path: &str) -> Format {
@@ -176,9 +209,19 @@ fn outcome(o: crate::media::Outcome) -> Response {
     }
 }
 
+/// A named client may only use the models its limits allow, media models included.
+fn model_denied(app: &App, headers: &HeaderMap, body: &Value, fallback: &str) -> Option<Response> {
+    let model = body["model"].as_str().filter(|m| !m.is_empty()).unwrap_or(fallback);
+    let denied = crate::policy::check_model(app, headers, model).err()?;
+    Some(outcome(Err((denied.status, formats::error_body(Format::Chat, denied.status, &denied.message)))))
+}
+
 async fn image_generations(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Chat, &headers, &body) {
-        Ok(v) => outcome(crate::media::images(app, headers, v, false).await),
+        Ok(v) => match model_denied(&app, &headers, &v, crate::media::DEFAULT_IMAGE_MODEL) {
+            Some(r) => r,
+            None => outcome(crate::media::images(app, headers, v, false).await),
+        },
         Err(r) => *r,
     }
 }
@@ -206,6 +249,9 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
             Err(r) => return *r,
         }
     };
+    if let Some(r) = model_denied(&app, &headers, &body, crate::media::DEFAULT_IMAGE_MODEL) {
+        return r;
+    }
     outcome(crate::media::images(app, headers, body, true).await)
 }
 
@@ -219,9 +265,56 @@ async fn video_create(
         return outcome(Err((404, formats::error_body(Format::Chat, 404, "unknown video endpoint"))));
     }
     match parse_body(&app, Format::Chat, &headers, &body) {
-        Ok(v) => outcome(crate::media::video_create(app, headers, v, &kind).await),
+        Ok(v) => match model_denied(&app, &headers, &v, crate::media::DEFAULT_VIDEO_MODEL) {
+            Some(r) => r,
+            None => outcome(crate::media::video_create(app, headers, v, &kind).await),
+        },
         Err(r) => *r,
     }
+}
+
+async fn embeddings(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    match parse_body(&app, Format::Chat, &headers, &body) {
+        Ok(v) => outcome(crate::embeddings::embeddings(app, headers, v).await),
+        Err(r) => *r,
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlaygroundBody {
+    model: String,
+    prompt: String,
+}
+
+/// The dashboard's playground: one prompt to one model, streamed back as Chat
+/// Completions. It goes through routing like any request and shows on the Usage page
+/// as the client `dashboard`.
+pub async fn playground(State(app): State<Arc<App>>, axum::Json(b): axum::Json<PlaygroundBody>) -> Response {
+    let mut headers = HeaderMap::new();
+    let scope = crate::affinity::scope_for_key(Some("fusebox-dashboard-playground"));
+    if let (Ok(scope), Ok(client)) = (HeaderValue::from_str(&scope), HeaderValue::from_str("dashboard")) {
+        headers.insert(crate::affinity::SCOPE_HEADER, scope);
+        headers.insert(crate::usage::capture::CLIENT_HEADER, client);
+    }
+    headers.insert(header::USER_AGENT, HeaderValue::from_static("fusebox-playground"));
+    let body = json!({
+        "model": b.model.trim(),
+        "stream": true,
+        "stream_options": { "include_usage": true },
+        "messages": [{ "role": "user", "content": b.prompt }],
+    });
+    let call = Call {
+        format: Format::Chat,
+        body,
+        headers,
+        stream: true,
+        transport: "http",
+        path_model: None,
+        session: None,
+        session_source: None,
+        routing_selection: None,
+    };
+    reply(Format::Chat, proxy::execute(app, call).await, false)
 }
 
 async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Response {
@@ -230,7 +323,10 @@ async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, heade
 
 async fn compact(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Responses, &headers, &body) {
-        Ok(v) => outcome(crate::media::compact(app, headers, v).await),
+        Ok(v) => match model_denied(&app, &headers, &v, "") {
+            Some(r) => r,
+            None => outcome(crate::media::compact(app, headers, v).await),
+        },
         Err(r) => *r,
     }
 }
@@ -375,15 +471,25 @@ async fn gemini(
     reply(Format::Gemini, proxy::execute(app, call).await, json_array)
 }
 
+/// Model ids clients can ask for: every account's, plus model groups (as `fusebox`'s).
+fn listed_models(app: &App) -> Vec<(String, &'static str)> {
+    let mut list: Vec<(String, &'static str)> =
+        app.pool.models().into_iter().map(|(id, provider)| (id, provider.as_str())).collect();
+    for name in app.cfg().model_groups.keys() {
+        if !list.iter().any(|(id, _)| id == name) {
+            list.push((name.clone(), "fusebox"));
+        }
+    }
+    list
+}
+
 async fn models(State(app): State<Arc<App>>) -> Response {
     let created = app.started.timestamp();
-    let data: Vec<Value> = app
-        .pool
-        .models()
+    let data: Vec<Value> = listed_models(&app)
         .into_iter()
         .map(|(id, provider)| {
             json!({
-                "id": id, "object": "model", "created": created, "owned_by": provider.as_str(),
+                "id": id, "object": "model", "created": created, "owned_by": provider,
                 "type": "model", "display_name": id, "created_at": app.started.to_rfc3339(),
             })
         })
@@ -395,9 +501,7 @@ async fn models(State(app): State<Arc<App>>) -> Response {
 }
 
 async fn gemini_models(State(app): State<Arc<App>>) -> Response {
-    let models: Vec<Value> = app
-        .pool
-        .models()
+    let models: Vec<Value> = listed_models(&app)
         .into_iter()
         .map(|(id, _)| {
             json!({
@@ -493,6 +597,8 @@ async fn ui_asset(Path(file): Path<String>) -> Response {
         "app.js" => (APP_JS, "text/javascript; charset=utf-8"),
         "usage.js" => (include_str!("../ui/usage.js"), "text/javascript; charset=utf-8"),
         "config.js" => (include_str!("../ui/config.js"), "text/javascript; charset=utf-8"),
+        "i18n.js" => (include_str!("../ui/i18n.js"), "text/javascript; charset=utf-8"),
+        "i18n-zh.js" => (include_str!("../ui/i18n-zh.js"), "text/javascript; charset=utf-8"),
         "style.css" => (STYLE, "text/css; charset=utf-8"),
         "icon.svg" => (ICON, "image/svg+xml"),
         _ => return StatusCode::NOT_FOUND.into_response(),

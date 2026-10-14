@@ -427,10 +427,15 @@ impl Parser {
 }
 
 impl StreamParser for Parser {
-    fn feed(&mut self, ev: &SseEvent, out: &mut Vec<Event>) {
-        if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-            // Cloud Code (Antigravity) wraps every chunk in {"response": ...}.
-            self.chunk(&crate::antigravity::unwrap(v), out);
+    fn feed_value(&mut self, _ev: &SseEvent, v: Option<&Value>, out: &mut Vec<Event>) {
+        let Some(v) = v else { return };
+        // Cloud Code (Antigravity) wraps every chunk in {"response": ...}.
+        match v {
+            Value::Object(o) if o.get("response").is_some_and(Value::is_object) && !o.contains_key("candidates") => {
+                self.chunk(&o["response"], out)
+            }
+            Value::Array(_) => self.chunk(&crate::antigravity::unwrap(v.clone()), out),
+            _ => self.chunk(v, out),
         }
     }
 }

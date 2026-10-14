@@ -8,7 +8,7 @@ The prior uncommitted work was preserved on local `main` as `4a81fe3`. Implement
 
 Primary implementation areas are `src/usage/` (contracts, capture, journal, pricing, imports, collectors, API and tests), the existing proxy/WS/media lifecycle and authentication/config modules, `ui/usage.js` plus embedded dashboard navigation/styles, `tests/`, and `scripts/`. The single executable remains self-contained; bundled SQLite and timezone data add no database server or runtime requirement. The verified Linux release executable is 17,613,672 bytes.
 
-See [setup and operations](usage-costs.md) for tested server/import/collector commands and [orchestration record](usage-implementation.md) for all worker requests and effective-setting limitations. The built server entry point is:
+See [setup and operations](../docs/usage-costs.md) for tested server/import/collector commands and [orchestration record](usage-implementation.md) for all worker requests and effective-setting limitations. The built server entry point is:
 
 ```sh
 ./target/release/fusebox --config /absolute/path/to/config.yaml serve

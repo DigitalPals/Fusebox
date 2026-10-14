@@ -301,6 +301,9 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/banked-resets", get(banked_resets).post(apply_banked_reset))
         .route("/accounts/{id}/quota/refresh", post(refresh_quota))
         .route("/accounts/{id}/activity", get(account_activity))
+        .route("/accounts/{id}/priority", post(set_priority))
+        .route("/clients/usage", get(client_usage))
+        .route("/playground", post(crate::server::playground))
         .route("/routes", get(routes))
         .route("/keys", post(add_key))
         .route("/vertex", post(import_vertex))
@@ -317,7 +320,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .layer(middleware::from_fn_with_state(app, auth))
 }
 
-async fn auth(
+pub(crate) async fn auth(
     State(app): State<Arc<App>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
@@ -337,6 +340,9 @@ async fn auth(
     let local = loopback && !proxied(req.headers());
     if key.is_empty() {
         if local {
+            if let Some(problem) = foreign_page(&req) {
+                return err(StatusCode::FORBIDDEN, problem);
+            }
             return next.run(req).await;
         }
         return err(
@@ -361,10 +367,103 @@ async fn auth(
         .uri()
         .query()
         .and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned()));
-    if bearer.or(query).is_some_and(|k| management_key_matches(&k, &key)) {
+    let ip = addr.ip().to_canonical();
+    if let Some(wait) = app.key_guesses.blocked(ip) {
+        let mut resp = err(StatusCode::TOO_MANY_REQUESTS, format!("too many wrong keys; try again in {wait}s"));
+        resp.headers_mut().insert("retry-after", wait.into());
+        return resp;
+    }
+    let provided = bearer.or(query);
+    if provided.as_deref().is_some_and(|k| management_key_matches(k, &key)) {
+        app.key_guesses.forget(ip);
         return next.run(req).await;
     }
+    // A missing key is a dashboard that hasn't asked for one yet, not a guess.
+    if provided.as_deref().is_some_and(|k| !k.is_empty()) {
+        app.key_guesses.wrong(ip);
+    }
     err(StatusCode::UNAUTHORIZED, "management key required")
+}
+
+/// Wrong management keys per address. After five, the address is locked out, for twice
+/// as long with each further wrong key: from 30 seconds up to 15 minutes.
+#[derive(Default)]
+pub struct Guesses(parking_lot::Mutex<Option<std::collections::HashMap<std::net::IpAddr, (u32, Instant)>>>);
+
+impl Guesses {
+    const FREE: u32 = 5;
+
+    fn blocked(&self, ip: std::net::IpAddr) -> Option<u64> {
+        let map = self.0.lock();
+        let (count, at) = *map.as_ref()?.get(&ip)?;
+        let lock = Self::lockout(count)?;
+        let left = lock.saturating_sub(at.elapsed());
+        (!left.is_zero()).then(|| left.as_secs().max(1))
+    }
+
+    fn lockout(count: u32) -> Option<Duration> {
+        let over = count.checked_sub(Self::FREE)?;
+        Some(Duration::from_secs(30u64.saturating_mul(1 << over.min(5)).min(900)))
+    }
+
+    fn wrong(&self, ip: std::net::IpAddr) {
+        let mut map = self.0.lock();
+        let map = map.get_or_insert_with(Default::default);
+        // Forget addresses that have been quiet for an hour, so the map stays small.
+        map.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(3600));
+        let entry = map.entry(ip).or_insert((0, Instant::now()));
+        *entry = (entry.0 + 1, Instant::now());
+        if entry.0 > Self::FREE {
+            tracing::warn!(address = %ip, attempts = entry.0, "wrong management keys; address locked out for a while");
+        }
+    }
+
+    fn forget(&self, ip: std::net::IpAddr) {
+        if let Some(map) = self.0.lock().as_mut() {
+            map.remove(&ip);
+        }
+    }
+}
+
+/// Fusebox trusts this machine's own address where no key is set (the dashboard, a proxy
+/// without client keys). A web page must not borrow that trust: one on another site can
+/// send requests here, and one whose name now points at 127.0.0.1 (DNS rebinding) is
+/// treated by the browser as same-origin. Browsers name both: the page's host is in
+/// `Host` or `Origin`. Local tools and pages on this machine are unaffected.
+pub(crate) fn foreign_page(req: &Request) -> Option<&'static str> {
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()));
+    // A page rebound to 127.0.0.1 connects directly. Through a reverse proxy (tailscale
+    // serve, say), the host is the proxy's own name, so only the page's origin counts.
+    if !proxied(req.headers()) && host.is_some_and(|h| !loopback_host(h)) {
+        return Some("open Fusebox at http://127.0.0.1 or http://localhost, or set a key to reach it by another name");
+    }
+    let origin = req.headers().get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok());
+    if let Some(origin) = origin
+        && url::Url::parse(origin).ok().and_then(|u| u.host_str().map(loopback_host)) != Some(true)
+    {
+        return Some("web pages on other sites can't use Fusebox without a key");
+    }
+    None
+}
+
+/// `localhost`, `*.localhost`, `127.x.x.x` or `[::1]`, with or without a port.
+pub(crate) fn loopback_host(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default().to_string()
+    } else {
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.parse::<u16>().is_ok())
+            .map_or(host.as_str(), |(h, _)| h)
+            .to_string()
+    };
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
 /// A reverse proxy on the same host (tailscale serve, nginx, Caddy) connects from
@@ -535,11 +634,18 @@ async fn routes(State(app): State<Arc<App>>) -> Json<Value> {
             (id, serde_json::to_value(steps).unwrap_or_default())
         })
         .collect();
+    let groups: serde_json::Map<String, Value> = cfg
+        .model_groups
+        .iter()
+        .map(|(name, g)| (name.clone(), json!({ "models": g.models, "balance": g.balance })))
+        .collect();
     Json(json!({
         "routing": cfg.routing,
         "session_affinity": cfg.session_affinity,
         "request_retry": cfg.request_retry.max(1),
         "models": models,
+        "groups": groups,
+        "background_model": cfg.background_model,
         "removed_models": app.models.removed(),
     }))
 }
@@ -855,16 +961,23 @@ fn edit_config(app: &Arc<App>, edit: impl FnOnce(&mut serde_yaml::Value)) -> Res
 
 async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     let text = std::fs::read_to_string(&app.cfg_path).unwrap_or_default();
-    Json(json!({ "text": text, "path": app.cfg_path.display().to_string() }))
+    let revision = crate::config_editor::revision(&text);
+    Json(json!({ "text": text, "revision": revision, "path": app.cfg_path.display().to_string() }))
 }
 
 #[derive(Deserialize)]
 struct ConfigBody {
     text: String,
+    /// The revision the edit started from; the save is refused if the file moved on.
+    revision: String,
 }
 
 async fn put_config(State(app): State<Arc<App>>, Json(b): Json<ConfigBody>) -> Response {
     let _guard = app.config_write.lock();
+    let current = std::fs::read_to_string(&app.cfg_path).unwrap_or_default();
+    if b.revision != crate::config_editor::revision(&current) {
+        return err(StatusCode::CONFLICT, "The config changed since you opened it. Reload the file before saving.");
+    }
     let cfg = match Config::parse(&b.text) {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
@@ -874,7 +987,8 @@ async fn put_config(State(app): State<Arc<App>>, Json(b): Json<ConfigBody>) -> R
     }
     let restart = !crate::config_editor::restart_fields(&app.startup_config, &cfg).is_empty();
     app.set_config(cfg);
-    Json(json!({ "ok": true, "restart_required": restart })).into_response()
+    let revision = crate::config_editor::revision(&b.text);
+    Json(json!({ "ok": true, "restart_required": restart, "revision": revision })).into_response()
 }
 
 fn settings_response(app: &Arc<App>, text: &str) -> anyhow::Result<Value> {
@@ -907,6 +1021,9 @@ async fn get_settings(State(app): State<Arc<App>>) -> Response {
 struct SettingsBody {
     revision: String,
     changes: serde_json::Map<String, Value>,
+    /// Work out the new file and return it next to the current one, without saving.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 async fn patch_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBody>) -> Response {
@@ -925,6 +1042,9 @@ async fn patch_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBo
         Ok(result) => result,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
     };
+    if body.dry_run {
+        return Json(json!({ "before": text, "after": out, "rewritten": rewritten })).into_response();
+    }
     let mut response = match settings_response(&app, &out) {
         Ok(body) => body,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
@@ -1044,9 +1164,116 @@ async fn live(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response {
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     _ => {}
                 },
+                // Going away: the dashboard reconnects to the next run by itself.
+                _ = app.shutdown.cancelled() => {
+                    let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::AWAY,
+                        reason: "Fusebox is restarting".into(),
+                    }))).await;
+                    break;
+                }
             }
         }
     })
+}
+
+#[derive(Deserialize)]
+struct PriorityBody {
+    priority: i32,
+}
+
+/// Higher priorities take new sessions first. A sign-in keeps it in its credential file;
+/// an API key in its config entry (a compatible provider's applies to all its keys).
+async fn set_priority(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<PriorityBody>) -> Response {
+    let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
+    if let Some(path) = &acct.path {
+        app.suppress_reload();
+        let value = (b.priority != 0).then(|| json!(b.priority));
+        if let Err(e) = crate::accounts::set_file_field(path, "priority", value) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the priority: {e}"));
+        }
+        app.reload_accounts();
+        return ok();
+    }
+    let _guard = app.config_write.lock();
+    let text = match std::fs::read_to_string(&app.cfg_path) {
+        Ok(text) => text,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not read config: {e}")),
+    };
+    let values = match crate::config_editor::values(&text) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+    let fields = [
+        ("claude-api-key", "claude"),
+        ("codex-api-key", "codex"),
+        ("gemini-api-key", "gemini"),
+        ("vertex-api-key", "vertex"),
+        ("kimi-api-key", "kimi"),
+        ("xai-api-key", "xai"),
+        ("meta-api-key", "meta"),
+    ];
+    let mut change = None;
+    for (field, provider) in fields {
+        let mut list = values[field].as_array().cloned().unwrap_or_default();
+        if let Some(entry) = list
+            .iter_mut()
+            .find(|e| e["api-key"].as_str().is_some_and(|k| crate::accounts::key_account_id(provider, k) == id))
+        {
+            set_entry_priority(entry, b.priority);
+            change = Some((field, list));
+            break;
+        }
+    }
+    if change.is_none() {
+        let mut list = values["openai-compatibility"].as_array().cloned().unwrap_or_default();
+        if let Some(entry) = list.iter_mut().find(|e| {
+            let name = e["name"].as_str().unwrap_or_default();
+            id == format!("compat-{name}:nokey")
+                || e["api-keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .any(|k| crate::accounts::key_account_id(&format!("compat-{name}"), k) == id)
+        }) {
+            set_entry_priority(entry, b.priority);
+            change = Some(("openai-compatibility", list));
+        }
+    }
+    let Some((field, list)) = change else { return err(StatusCode::NOT_FOUND, "that key isn't in config.yaml") };
+    let changes = serde_json::Map::from_iter([(field.to_string(), Value::Array(list))]);
+    let (out, cfg, rewritten) = match crate::config_editor::apply(&text, &changes) {
+        Ok(result) => result,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+    if rewritten {
+        keep_original(&app, &text);
+    }
+    if let Err(e) = std::fs::write(&app.cfg_path, &out) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save config: {e}"));
+    }
+    app.set_config(cfg);
+    ok()
+}
+
+/// Normal priority (0) is no `priority` line at all, as in a file that never set one.
+fn set_entry_priority(entry: &mut Value, priority: i32) {
+    if let Some(o) = entry.as_object_mut() {
+        if priority == 0 {
+            o.remove("priority");
+        } else {
+            o.insert("priority".into(), json!(priority));
+        }
+    }
+}
+
+/// What each named client used today and this month, beside its limits.
+async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
+    let cfg = app.cfg();
+    let clients: serde_json::Map<String, Value> =
+        cfg.named_clients.iter().map(|c| (c.id.clone(), json!(app.clients.spend(&c.id)))).collect();
+    Json(json!({ "clients": clients, "estimates": app.usage.is_some() }))
 }
 
 #[cfg(test)]
@@ -1242,6 +1469,7 @@ mod tests {
             Json(SettingsBody {
                 revision: version.clone(),
                 changes: json!({"port": 70000}).as_object().unwrap().clone(),
+                dry_run: false,
             }),
         )
         .await;
@@ -1252,6 +1480,7 @@ mod tests {
             Json(SettingsBody {
                 revision: version.clone(),
                 changes: json!({"port": 9000}).as_object().unwrap().clone(),
+                dry_run: false,
             }),
         )
         .await;
@@ -1261,7 +1490,11 @@ mod tests {
         assert!(saved.contains("# port note"));
         let response = patch_settings(
             State(app.clone()),
-            Json(SettingsBody { revision: version, changes: json!({"request-retry": 4}).as_object().unwrap().clone() }),
+            Json(SettingsBody {
+                revision: version,
+                changes: json!({"request-retry": 4}).as_object().unwrap().clone(),
+                dry_run: false,
+            }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -1271,6 +1504,7 @@ mod tests {
             Json(SettingsBody {
                 revision: crate::config_editor::revision(&saved),
                 changes: json!({"request-retry": 4}).as_object().unwrap().clone(),
+                dry_run: false,
             }),
         )
         .await;

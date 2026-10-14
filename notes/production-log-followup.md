@@ -18,4 +18,4 @@ Client cancellations are separate from provider/service failures. A disconnected
 
 The request journal carries sanitized diagnostic categories, transport, timing and attempt information so a failure remains investigable after the dashboard's 300-request ring rolls over. Do not enable full request-body debugging to diagnose production failures; prompts and credentials do not belong in the journal. Native usage remains the durable accounting record and exposes dropped observations and unclean shutdowns separately.
 
-The observed context sizes warrant a controlled benchmark, not automatic prompt rewriting. See [context efficiency](context-efficiency.md) for comparing explicit caller-provided compacted requests without changing the production request path.
+The observed context sizes warrant a controlled benchmark, not automatic prompt rewriting. See [context efficiency](../docs/context-efficiency.md) for comparing explicit caller-provided compacted requests without changing the production request path.

@@ -10,12 +10,17 @@ mod device;
 mod devin;
 mod diagnostics;
 mod discovery;
+mod embeddings;
+#[cfg(test)]
+mod feature_tests;
 mod files;
 mod formats;
 mod ir;
 mod media;
+mod metrics;
 mod mgmt;
 mod oauth;
+mod policy;
 mod proxy;
 mod push;
 mod quota;
@@ -47,7 +52,7 @@ use crate::state::App;
 #[derive(Parser)]
 #[command(
     name = "fusebox",
-    version,
+    version = metrics::VERSION,
     about = "OpenAI / Claude / Gemini compatible proxy for your Claude, ChatGPT, Gemini, Antigravity, Grok, Kimi, Meta, Devin and Vertex accounts"
 )]
 struct Cli {
@@ -95,6 +100,16 @@ async fn main() -> Result<()> {
     // CLIProxyAPI's Go-style flags (-config, -claude-login, ...) work too.
     let cli = Cli::parse_from(compat::translate_args(std::env::args().collect()));
     let command = match cli.cmd {
+        Some(Cmd::Usage { command: usage::imports::UsageCommand::Backup { to, database } }) => {
+            let database = match database {
+                Some(d) => d,
+                None => {
+                    let path = config_path(cli.config, |n| std::env::var(n).ok());
+                    usage::database_path(&Config::load(&path)?, &path)
+                }
+            };
+            return tokio::task::spawn_blocking(move || usage::store::backup(&database, &to)).await?;
+        }
         Some(Cmd::Usage { command }) => return usage::imports::run_command(command).await,
         Some(Cmd::Collector { command }) => return usage::collector::run_command(command).await,
         other => other,
@@ -104,7 +119,7 @@ async fn main() -> Result<()> {
         return check(&path);
     }
     let cfg = Config::load(&path)?;
-    init_logging(cfg.debug);
+    init_logging(cfg.debug, cfg.log_format);
     if cfg.legacy_auth_dir {
         tracing::info!(
             "using sign-ins from {} because {} doesn't exist; set auth-dir in config.yaml to choose",
@@ -134,19 +149,31 @@ fn log_filter(value: Option<&str>, debug: bool) -> (tracing_subscriber::filter::
     }
 }
 
-fn init_logging(debug: bool) {
+/// Text for people, or one JSON object per line for log collectors (`log-format: json`
+/// or `FUSEBOX_LOG_FORMAT=json`).
+fn init_logging(debug: bool, format: config::LogFormat) {
     use std::io::IsTerminal;
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     let value = std::env::var("RUST_LOG").ok();
     let (targets, understood) = log_filter(value.as_deref(), debug);
-    let layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_ansi(std::io::stdout().is_terminal())
-        .compact()
-        .with_filter(targets);
-    tracing_subscriber::registry().with(layer).init();
+    let json = match std::env::var("FUSEBOX_LOG_FORMAT").ok().as_deref().map(str::trim) {
+        Some(f) if f.eq_ignore_ascii_case("json") => true,
+        Some(f) if f.eq_ignore_ascii_case("text") => false,
+        _ => format == config::LogFormat::Json,
+    };
+    if json {
+        let layer = tracing_subscriber::fmt::layer().json().with_target(false).with_filter(targets);
+        tracing_subscriber::registry().with(layer).init();
+    } else {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(std::io::stdout().is_terminal())
+            .compact()
+            .with_filter(targets);
+        tracing_subscriber::registry().with(layer).init();
+    }
     if !understood {
         tracing::warn!("RUST_LOG takes target=level directives such as fusebox=debug; using the default instead");
     }
@@ -190,6 +217,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
         tokio::spawn(antigravity::version_updater(app.clone())),
         tokio::spawn(quota::poller(app.clone())),
         tokio::spawn(push::watcher(app.clone())),
+        tokio::spawn(policy::refresher(app.clone())),
         tokio::spawn(watch(app.clone())),
     ];
 
@@ -201,7 +229,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     };
     let accounts = app.pool.all();
     println!();
-    println!("  \x1b[1mFusebox\x1b[0m {}", env!("CARGO_PKG_VERSION"));
+    println!("  \x1b[1mFusebox\x1b[0m {}", metrics::VERSION);
     println!("  dashboard  {shown}");
     println!("  openai     {shown}/v1");
     println!("  anthropic  {shown}");
@@ -217,12 +245,23 @@ async fn serve(app: Arc<App>) -> Result<()> {
     let service = server::router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
     // Streamed answers are many small writes; without TCP_NODELAY, Nagle's algorithm
     // holds each one back until the client acknowledges the previous one.
+    // On Ctrl-C or SIGTERM, stop taking connections, tell open sockets (the dashboard,
+    // Codex) to close, and give requests in flight up to DRAIN to finish. Then the
+    // sessions and the usage database are saved, well inside systemd's or Docker's
+    // stop timeout.
+    let stopping = app.shutdown.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutting down; finishing requests in flight");
+        stopping.cancel();
+    });
     let result = if let Some(tls) = tls {
         let handle = axum_server::Handle::new();
         let stop = handle.clone();
+        let stopping = app.shutdown.clone();
         tokio::spawn(async move {
-            shutdown_signal().await;
-            stop.graceful_shutdown(Some(Duration::from_secs(10)));
+            stopping.cancelled().await;
+            stop.graceful_shutdown(Some(DRAIN));
         });
         axum_server::from_tcp_rustls(listener.into_std()?, tls)?
             .map(|acceptor| acceptor.acceptor(axum_server::accept::NoDelayAcceptor::new()))
@@ -236,7 +275,16 @@ async fn serve(app: Arc<App>) -> Result<()> {
                 tracing::debug!("could not set TCP_NODELAY on a client connection: {e}");
             }
         });
-        axum::serve(listener, service).with_graceful_shutdown(shutdown_signal()).await
+        let stopping = app.shutdown.clone();
+        let server = axum::serve(listener, service).with_graceful_shutdown(async move { stopping.cancelled().await });
+        let stopping = app.shutdown.clone();
+        tokio::select! {
+            result = server => result,
+            _ = async move { stopping.cancelled().await; tokio::time::sleep(DRAIN).await } => {
+                tracing::warn!("stopping with requests still open after {}s", DRAIN.as_secs());
+                Ok(())
+            }
+        }
     };
     if let Some(task) = import_task {
         task.abort();
@@ -250,12 +298,32 @@ async fn serve(app: Arc<App>) -> Result<()> {
     // request. Let those bounded operations publish and persist before exiting.
     app.refresh_tasks.shutdown().await;
     app.sessions.save_async().await;
+    save_cooldowns(&app);
     if let Some(store) = &app.usage
         && store.shutdown().await.is_err()
     {
         tracing::error!("usage shutdown flush failed");
     }
     result.context("serving requests")
+}
+
+/// How long requests in flight get to finish once Fusebox is asked to stop.
+const DRAIN: Duration = Duration::from_secs(10);
+
+/// Keeps cooldowns across restarts; written only when they changed.
+fn save_cooldowns(app: &App) {
+    static LAST: parking_lot::Mutex<Option<accounts::Cooldowns>> = parking_lot::Mutex::new(None);
+    let now = app.pool.cooldowns();
+    let mut last = LAST.lock();
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    let path = app.cfg().auth_dir().join(accounts::COOLDOWNS_FILE);
+    if let Err(e) = now.save(&path) {
+        tracing::warn!("could not save cooldowns: {e:#}");
+        return;
+    }
+    *last = Some(now);
 }
 
 /// Ctrl-C, or SIGTERM from `docker stop` / systemd.
@@ -296,6 +364,7 @@ async fn watch(app: Arc<App>) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         app.sessions.flush(app.cfg().session_affinity_idle_seconds);
+        save_cooldowns(&app);
         let t = mtime(&app.cfg_path);
         if t != cfg_time {
             cfg_time = t;

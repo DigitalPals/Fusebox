@@ -76,6 +76,12 @@ const HOP: &[&str] = &[
     "sec-websocket-protocol",
 ];
 
+/// Whether a client header may be copied upstream. Fusebox's own headers (session ids,
+/// the client scope, usage tags) are for Fusebox alone, whatever their spelling.
+fn forwardable(name: &str) -> bool {
+    !HOP.contains(&name) && !name.starts_with("x-fusebox-") && !name.starts_with("x-cliproxy-")
+}
+
 fn header(h: &HeaderMap, name: &str) -> Option<String> {
     h.get(name).and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -147,7 +153,7 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
         // Claude Code already speaks the right dialect: forward it untouched.
         for (k, v) in t.client_headers {
             let name = k.as_str();
-            if HOP.contains(&name) || name == "anthropic-beta" {
+            if !forwardable(name) || name == "anthropic-beta" {
                 continue;
             }
             if let Ok(v) = v.to_str() {

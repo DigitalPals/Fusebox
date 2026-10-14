@@ -412,6 +412,8 @@ pub struct Account {
     pub excluded: Vec<String>,
     /// OAuth model renames (config `oauth-model-alias` + the file's `model_aliases`).
     pub aliases: Vec<OAuthAlias>,
+    /// Higher goes first; lower priorities only take over (the file's or key's `priority`).
+    pub priority: i32,
 }
 
 /// `gemini-3-8-flash` -> `gemini-3.8-flash`, `gpt-6-1-sol` -> `gpt-6.1-sol`
@@ -635,6 +637,7 @@ impl Account {
             "last_used": st.last_used.map(|t| t.to_rfc3339()),
             "expires_at": expires,
             "counters": st.counters,
+            "priority": self.priority,
             "quota": st.quota,
             "banked_resets": st.banked_resets,
             "models": self.public_models(),
@@ -737,36 +740,44 @@ pub fn write_oauth_file(path: &Path, provider: Provider, o: &OAuth, extra: &[(&s
     for (k, v) in extra {
         map.insert((*k).into(), v.clone());
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(tmp, path)
+    write_credential(path, &map)
+}
+
+/// Credential files are replaced atomically and are never readable by others, not
+/// even while they are being written.
+fn write_credential(path: &Path, map: &Map<String, Value>) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(map)?;
+    crate::files::write_private_via(path, &path.with_extension("json.tmp"), &bytes).map_err(std::io::Error::other)
+}
+
+/// Sets or removes one top-level field of a credential file, keeping everything else.
+pub fn set_file_field(path: &Path, key: &str, value: Option<Value>) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut map: Map<String, Value> = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+    match value {
+        Some(v) => map.insert(key.into(), v),
+        None => map.remove(key),
+    };
+    write_credential(path, &map)
 }
 
 pub fn set_file_disabled(path: &Path, disabled: bool) -> std::io::Result<()> {
-    let text = std::fs::read_to_string(path)?;
-    let mut map: Map<String, Value> = serde_json::from_str(&text).map_err(std::io::Error::other)?;
-    if disabled {
-        map.insert("disabled".into(), true.into());
-    } else {
-        map.remove("disabled");
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(&Value::Object(map))?)
+    set_file_field(path, "disabled", disabled.then_some(Value::Bool(true)))
 }
 
+/// `sk-ant…f3e2`: whole characters, so keys that aren't ASCII can't split one.
 fn mask(key: &str) -> String {
-    let k = key.trim();
+    let k: Vec<char> = key.trim().chars().collect();
+    let take = |r: std::ops::Range<usize>| k[r].iter().collect::<String>();
     if k.len() <= 10 {
-        return format!("{}…", k.get(..3).unwrap_or(""));
+        return format!("{}…", take(0..k.len().min(3)));
     }
-    format!("{}…{}", &k[..6], &k[k.len() - 4..])
+    format!("{}…{}", take(0..6), take(k.len() - 4..k.len()))
+}
+
+/// The account id an API key gets (`claude:1a2b3c4d5e`), for finding it again.
+pub fn key_account_id(prefix: &str, key: &str) -> String {
+    key_id(prefix, key)
 }
 
 fn key_id(prefix: &str, key: &str) -> String {
@@ -796,6 +807,9 @@ struct Spec {
     excluded: Vec<String>,
     aliases: Vec<OAuthAlias>,
     extra: Vec<String>,
+    priority: i32,
+    /// Why this account can't be used as it is (a credential file's invalid proxy).
+    problem: Option<String>,
 }
 
 /// Config sections keyed by provider name (`claude`, `codex`, `aistudio`, ...).
@@ -843,10 +857,19 @@ fn collect(cfg: &Config) -> Vec<Spec> {
             excluded.extend(list);
         }
         let prefix = nonempty(&map.get("prefix").and_then(Value::as_str).map(String::from));
+        let proxy_url = map.get("proxy_url").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+        let problem = proxy_url.as_deref().and_then(|p| crate::config::check_proxy_url(p).err()).map(|e| {
+            tracing::error!("{name}: invalid proxy_url, so the account is off until it is fixed: {e}");
+            format!("proxy_url in {name} is invalid: {e}")
+        });
+        let priority =
+            map.get("priority").and_then(Value::as_i64).map(|p| p.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         specs.push(Spec {
             prefix,
             excluded,
             aliases,
+            priority: priority.unwrap_or(0),
+            problem,
             extra: for_provider(&cfg.extra_models, provider),
             id: format!("file:{name}"),
             provider,
@@ -859,7 +882,7 @@ fn collect(cfg: &Config) -> Vec<Spec> {
             group: None,
             models: vec![],
             headers: BTreeMap::new(),
-            proxy_url: map.get("proxy_url").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from),
+            proxy_url,
             cred: Credential::OAuth(oauth),
             disabled,
             device_id,
@@ -892,6 +915,8 @@ fn collect(cfg: &Config) -> Vec<Spec> {
                 excluded: e.excluded_models.clone(),
                 aliases: vec![],
                 extra: for_provider(&cfg.extra_models, provider),
+                priority: e.priority,
+                problem: None,
             });
         }
     }
@@ -913,6 +938,8 @@ fn collect(cfg: &Config) -> Vec<Spec> {
                 excluded: c.excluded_models.clone(),
                 aliases: vec![],
                 extra: vec![],
+                priority: c.priority,
+                problem: None,
             });
         }
         // Keyless local endpoints (Ollama, LM Studio, ...)
@@ -933,6 +960,8 @@ fn collect(cfg: &Config) -> Vec<Spec> {
                 excluded: c.excluded_models.clone(),
                 aliases: vec![],
                 extra: vec![],
+                priority: c.priority,
+                problem: None,
             });
         }
     }
@@ -1039,10 +1068,14 @@ impl Pool {
                     && prev.prefix == s.prefix
                     && prev.excluded == s.excluded
                     && prev.aliases == s.aliases
-                    && prev.extra == s.extra;
+                    && prev.extra == s.extra
+                    && prev.priority == s.priority;
                 if same_shape {
                     let mut st = prev.state.lock();
-                    st.disabled = s.disabled;
+                    st.disabled = s.disabled || s.problem.is_some();
+                    if s.problem.is_some() {
+                        st.last_error = s.problem.clone();
+                    }
                     if identity_changed {
                         st.quota_epoch += 1;
                         st.quota_refreshing = false;
@@ -1073,7 +1106,10 @@ impl Pool {
                     }
                 })
                 .unwrap_or_default();
-            state.disabled = s.disabled;
+            state.disabled = s.disabled || s.problem.is_some();
+            if s.problem.is_some() {
+                state.last_error = s.problem.clone();
+            }
             let cred = old.get(&s.id).map(|prev| prev.cred.clone()).unwrap_or_else(|| Arc::new(RwLock::new(s.cred)));
             let refresh_lock = old.get(&s.id).map(|prev| prev.refresh_lock.clone()).unwrap_or_default();
             let pending_oauth_save = old.get(&s.id).map(|prev| prev.pending_oauth_save.clone()).unwrap_or_default();
@@ -1097,6 +1133,7 @@ impl Pool {
                 prefix: s.prefix,
                 excluded: s.excluded,
                 aliases: s.aliases,
+                priority: s.priority,
             }));
         }
         // Another program (CLIProxyAPI itself) may be rewriting a credential file
@@ -1261,6 +1298,9 @@ impl Pool {
         {
             return Pick::Ok((*a).clone(), m.clone());
         }
+        // Higher priorities go first; lower ones only take over when none of them is ready.
+        let top = candidates.iter().map(|(a, _)| a.priority).max().unwrap_or(0);
+        candidates.retain(|(a, _)| a.priority == top);
         // Prefer the model vendor for new assignments, while preserving existing overflow pins.
         if candidates.iter().any(|(a, _)| a.first_party(model)) {
             candidates.retain(|(a, _)| a.first_party(model));
@@ -1354,6 +1394,10 @@ impl Pool {
                 ready.push((a, upstream));
             }
         }
+        // Accounts below the highest ready priority only take over, like aggregators.
+        let top = ready.iter().map(|(a, _)| a.priority).max().unwrap_or(0);
+        let (ready, mut lower): (Vec<_>, Vec<_>) = ready.into_iter().partition(|(a, _)| a.priority == top);
+        lower.sort_by_key(|(a, _)| std::cmp::Reverse(a.priority));
         let vendor = ready.iter().any(|(a, _)| a.first_party(model));
         let (first, overflow): (Vec<_>, Vec<_>) = ready.into_iter().partition(|(a, _)| !vendor || a.first_party(model));
         let mut steps = Vec::new();
@@ -1392,7 +1436,7 @@ impl Pool {
                 steps.push(step);
             }
         }
-        for (a, up) in overflow {
+        for (a, up) in overflow.into_iter().chain(lower) {
             let mut step = RouteStep::new(a, up, "ready", None);
             step.fallback = true;
             steps.push(step);
@@ -1400,6 +1444,69 @@ impl Pool {
         rest.sort_by_key(|s| (s.state == "disabled", s.until));
         steps.extend(rest);
         steps
+    }
+}
+
+/// Where cooldowns are kept between runs, in the auth directory.
+pub const COOLDOWNS_FILE: &str = ".cooldowns.state";
+
+/// Rate-limit cooldowns and confirmed quota exhaustion per account and model, so a
+/// restart doesn't send requests straight back to an account that is sitting out.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct Cooldowns(BTreeMap<String, AccountCooldowns>);
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, serde::Deserialize)]
+struct AccountCooldowns {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rate: BTreeMap<String, DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    quota: BTreeMap<String, DateTime<Utc>>,
+}
+
+impl Cooldowns {
+    pub fn load(path: &Path) -> Self {
+        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        crate::files::write_private(path, &serde_json::to_vec(self)?)
+    }
+}
+
+impl Pool {
+    /// Every cooldown that hasn't run out yet.
+    pub fn cooldowns(&self) -> Cooldowns {
+        let now = Utc::now();
+        let live = |m: &HashMap<String, DateTime<Utc>>| -> BTreeMap<String, DateTime<Utc>> {
+            m.iter().filter(|(_, t)| **t > now).map(|(k, t)| (k.clone(), *t)).collect()
+        };
+        let mut out = BTreeMap::new();
+        for a in self.accounts.read().iter() {
+            let st = a.state.lock();
+            let entry = AccountCooldowns { rate: live(&st.cooldowns), quota: live(&st.quota_cooldowns) };
+            if !entry.rate.is_empty() || !entry.quota.is_empty() {
+                out.insert(a.id.clone(), entry);
+            }
+        }
+        Cooldowns(out)
+    }
+
+    /// Puts saved cooldowns back, keeping whichever of two deadlines is later.
+    pub fn restore_cooldowns(&self, saved: &Cooldowns) {
+        let now = Utc::now();
+        let merge = |into: &mut HashMap<String, DateTime<Utc>>, from: &BTreeMap<String, DateTime<Utc>>| {
+            for (model, until) in from.iter().filter(|(_, t)| **t > now) {
+                let slot = into.entry(model.clone()).or_insert(*until);
+                *slot = (*slot).max(*until);
+            }
+        };
+        for a in self.accounts.read().iter() {
+            if let Some(c) = saved.0.get(&a.id) {
+                let mut st = a.state.lock();
+                merge(&mut st.cooldowns, &c.rate);
+                merge(&mut st.quota_cooldowns, &c.quota);
+            }
+        }
     }
 }
 
@@ -1862,6 +1969,7 @@ claude-api-key:
             prefix: None,
             excluded: vec![],
             aliases,
+            priority: 0,
         };
         let renamed = acct(vec![a(false)]);
         assert_eq!(renamed.resolve("opus").as_deref(), Some("claude-opus-5-5"));

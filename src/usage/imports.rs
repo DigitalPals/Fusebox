@@ -28,6 +28,14 @@ pub(crate) const OUTBOX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub enum UsageCommand {
+    /// Copy the usage database to a new file, safely while Fusebox runs. Without
+    /// --database, the one the config file uses.
+    Backup {
+        /// The new file to write (it must not exist yet).
+        to: PathBuf,
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
     /// Report candidate homes; do not read history without enabled roots.
     Status {
         #[arg(long)]
@@ -110,7 +118,9 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         | UsageCommand::Scan { database, .. }
         | UsageCommand::Backfill { database, .. }
         | UsageCommand::Reprice { database } => database,
-        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } => unreachable!(),
+        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } | UsageCommand::Backup { .. } => {
+            unreachable!()
+        }
     };
     let database = database.clone();
     let store = tokio::task::spawn_blocking(move || Store::open_existing(&database, 128)).await??;
@@ -121,7 +131,9 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         UsageCommand::Scan { source, .. } => scan(&store, source).await,
         UsageCommand::Backfill { source, .. } => backfill(&store, source).await,
         UsageCommand::Reprice { .. } => reprice(&store).await,
-        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } => unreachable!(),
+        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } | UsageCommand::Backup { .. } => {
+            unreachable!()
+        }
     };
     let shutdown = store.shutdown().await;
     let result = result?;

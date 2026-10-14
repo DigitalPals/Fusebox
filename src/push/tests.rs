@@ -46,7 +46,7 @@ fn used_up(id: &str) -> AccountView {
     a
 }
 
-fn run(push: &Push, accounts: &[AccountView], settings: Notifications) -> Vec<String> {
+fn run(push: &Push, accounts: &[AccountView], settings: &Notifications) -> Vec<String> {
     let current = faults::faults(accounts, Utc::now());
     push.track(&current, accounts, settings).into_iter().map(|f| f.title).collect()
 }
@@ -57,20 +57,20 @@ fn a_fault_is_sent_once_after_two_checks_and_survives_a_restart() {
     let push = Push::load(&temp.0);
     let on = Notifications::default();
     let broken = [signed_out("a"), account("b")];
-    assert!(run(&push, &broken, on).is_empty(), "one sighting is not enough");
-    assert_eq!(run(&push, &broken, on), ["Claude sign-in expired"]);
-    assert!(run(&push, &broken, on).is_empty(), "already sent");
+    assert!(run(&push, &broken, &on).is_empty(), "one sighting is not enough");
+    assert_eq!(run(&push, &broken, &on), ["Claude sign-in expired"]);
+    assert!(run(&push, &broken, &on).is_empty(), "already sent");
 
     let push = Push::load(&temp.0);
-    assert!(run(&push, &broken, on).is_empty());
-    assert!(run(&push, &broken, on).is_empty(), "a restart doesn't send it again");
+    assert!(run(&push, &broken, &on).is_empty());
+    assert!(run(&push, &broken, &on).is_empty(), "a restart doesn't send it again");
 
     let fixed = [account("a"), account("b")];
-    assert!(run(&push, &fixed, on).is_empty());
-    assert!(run(&push, &fixed, on).is_empty());
+    assert!(run(&push, &fixed, &on).is_empty());
+    assert!(run(&push, &fixed, &on).is_empty());
     assert!(push.stored.lock().notified.is_empty(), "cleared after two checks without it");
-    assert!(run(&push, &broken, on).is_empty());
-    assert_eq!(run(&push, &broken, on), ["Claude sign-in expired"], "it can trip again");
+    assert!(run(&push, &broken, &on).is_empty());
+    assert_eq!(run(&push, &broken, &on), ["Claude sign-in expired"], "it can trip again");
 }
 
 #[test]
@@ -79,10 +79,10 @@ fn settings_choose_what_is_sent() {
     let push = Push::load(&temp.0);
     let off = Notifications { sign_in_expired: false, ..Default::default() };
     let broken = [signed_out("a"), account("b")];
-    run(&push, &broken, off);
-    assert!(run(&push, &broken, off).is_empty());
+    run(&push, &broken, &off);
+    assert!(run(&push, &broken, &off).is_empty());
     // Turning it on later doesn't send a fault from before.
-    assert!(run(&push, &broken, Notifications::default()).is_empty());
+    assert!(run(&push, &broken, &Notifications::default()).is_empty());
 }
 
 #[test]
@@ -91,18 +91,18 @@ fn a_provider_running_out_stands_in_for_its_accounts_and_says_when_it_is_back() 
     let push = Push::load(&temp.0);
     let all = Notifications { account_used_up: true, ..Default::default() };
     let out = [used_up("a"), used_up("b")];
-    run(&push, &out, all);
-    assert_eq!(run(&push, &out, all), ["Every Claude account is used up"]);
+    run(&push, &out, &all);
+    assert_eq!(run(&push, &out, &all), ["Every Claude account is used up"]);
 
     let one_back = [used_up("a"), account("b")];
-    assert!(run(&push, &one_back, all).is_empty());
-    assert_eq!(run(&push, &one_back, all), ["Claude is back"]);
+    assert!(run(&push, &one_back, &all).is_empty());
+    assert_eq!(run(&push, &one_back, &all), ["Claude is back"]);
 
     // One account running out is its own notification when others still work.
     let temp = Temp::new();
     let push = Push::load(&temp.0);
-    run(&push, &one_back, all);
-    assert_eq!(run(&push, &one_back, all), ["a@example.com: usage limit used up"]);
+    run(&push, &one_back, &all);
+    assert_eq!(run(&push, &one_back, &all), ["a@example.com: usage limit used up"]);
 }
 
 #[test]
@@ -111,8 +111,8 @@ fn faults_present_when_notifications_are_turned_on_are_not_sent() {
     let push = Push::load(&temp.0);
     let broken = [signed_out("a"), account("b")];
     push.seed(&faults::faults(&broken, Utc::now()));
-    run(&push, &broken, Notifications::default());
-    assert!(run(&push, &broken, Notifications::default()).is_empty());
+    run(&push, &broken, &Notifications::default());
+    assert!(run(&push, &broken, &Notifications::default()).is_empty());
 }
 
 struct Received {

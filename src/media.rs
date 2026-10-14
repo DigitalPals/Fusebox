@@ -22,14 +22,14 @@ use crate::sse::SseDecoder;
 use crate::state::App;
 use crate::upstream::{self, Target};
 
-const DEFAULT_IMAGE_MODEL: &str = "gpt-image-2";
-const DEFAULT_VIDEO_MODEL: &str = "grok-imagine-video-1.5";
+pub(crate) const DEFAULT_IMAGE_MODEL: &str = "gpt-image-2";
+pub(crate) const DEFAULT_VIDEO_MODEL: &str = "grok-imagine-video-1.5";
 /// Codex runs the image tool from a small chat model.
 const CODEX_IMAGE_HOST_MODEL: &str = "gpt-5.4-mini";
 
 pub type Outcome = Result<Value, (u16, Value)>;
 
-fn fail(status: u16, msg: impl Into<String>) -> (u16, Value) {
+pub(crate) fn fail(status: u16, msg: impl Into<String>) -> (u16, Value) {
     (status, formats::error_body(Format::Chat, status, &msg.into()))
 }
 
@@ -99,7 +99,12 @@ fn creds(acct: &Account) -> (String, bool) {
 }
 
 /// Base URL + auth headers for an OpenAI-shaped upstream, borrowed from the chat request builder.
-fn openai_base(app: &App, acct: &Account, headers: &HeaderMap, model: &str) -> (String, Vec<(String, String)>) {
+pub(crate) fn openai_base(
+    app: &App,
+    acct: &Account,
+    headers: &HeaderMap,
+    model: &str,
+) -> (String, Vec<(String, String)>) {
     let cfg = app.cfg();
     let t = Target {
         acct,
@@ -118,7 +123,7 @@ fn openai_base(app: &App, acct: &Account, headers: &HeaderMap, model: &str) -> (
     (base, headers)
 }
 
-async fn send(
+pub(crate) async fn send(
     app: &App,
     acct: &Account,
     url: &str,
@@ -153,7 +158,7 @@ async fn send(
     Ok(resp)
 }
 
-async fn read_json(resp: reqwest::Response) -> Outcome {
+pub(crate) async fn read_json(resp: reqwest::Response) -> Outcome {
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if status >= 400 {

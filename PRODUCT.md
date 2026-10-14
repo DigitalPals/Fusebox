@@ -27,7 +27,11 @@ A lean rewrite of CLIProxyAPI (Go): one binary, no runtime, an embedded dashboar
 
 ## Capabilities and Constraints
 
-- Providers: Claude (OAuth + key), Codex/ChatGPT (OAuth + key), Gemini (key), Vertex AI (service account + key), Antigravity (OAuth), Grok/xAI (device code + key), Kimi (device code + key), Meta (device code + key), Devin (OAuth), any OpenAI-compatible endpoint. Images through `/v1/images/*`, xAI video through `/v1/videos/*`.
+- Providers: Claude (OAuth + key), Codex/ChatGPT (OAuth + key), Gemini (key), Vertex AI (service account + key), Antigravity (OAuth), Grok/xAI (device code + key), Kimi (device code + key), Meta (device code + key), Devin (OAuth), any OpenAI-compatible endpoint. Images through `/v1/images/*`, xAI video through `/v1/videos/*`, embeddings through `/v1/embeddings` (API keys only).
+- Routing extras: model groups (fallback chains or spread), a background model for Claude Code's Haiku calls, account priority, failover before the first token, cooldowns that survive restarts.
+- Named clients can carry limits: models, programs, requests a minute, tokens a day, estimated dollars a month, an end date.
+- Notifications reach installed apps by web push and chat by webhooks (Discord, Slack, Teams, Telegram, ntfy, generic JSON).
+- Operations: `/readyz`, Prometheus `/metrics`, JSON logs, `fusebox usage backup`, a nonroot Docker image.
 - Dashboard is vanilla HTML/CSS/JS embedded in the binary; no build step, no external requests (no CDNs, no hosted fonts: IBM Plex Sans, IBM Plex Sans Condensed and DM Mono are self-hosted from the binary).
 - Management API is localhost-only unless `management-key` is set.
 - Live statistics are in-memory. Historical Usage & Costs uses embedded SQLite; local native history imports and metadata-only multi-machine collectors require explicit opt-in.
@@ -38,7 +42,7 @@ A lean rewrite of CLIProxyAPI (Go): one binary, no runtime, an embedded dashboar
 - Mark: `assets/icon.svg` (the bracketed fuse, 48×56). Wordmark: `assets/fusebox-wordmark.svg` (plus `assets/fusebox-wordmark-light.svg` for light backgrounds). Favicons: `ui/icon.svg` and `ui/favicon.ico`.
 - Brand colour: amber `#F3B52F`, the fuse. Only for the active tab, the live load bar, link hover and the phone tab indicator; never for fills or body text.
 - Dashboard: a warm near-black operator panel (see DESIGN.md).
-- Copy in English.
+- Copy in English; the dashboard also reads in Simplified Chinese (`ui/i18n.js` translates the rendered text, so the code stays in English).
 
 ## Evidence on Hand
 

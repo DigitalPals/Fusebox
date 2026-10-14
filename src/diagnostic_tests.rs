@@ -188,7 +188,7 @@ async fn broken_http_body_records_sanitized_source_chain() {
         socket.shutdown().await.unwrap();
     });
     let response = reqwest::get(format!("http://{address}/private?token=secret")).await.unwrap();
-    let mut stream = passthrough_stream(response, Format::Responses, tracker(&app), false);
+    let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), Format::Responses, tracker(&app), false);
     while stream.next().await.is_some() {}
     peer.await.unwrap();
     let logs = app.stats.recent.lock();

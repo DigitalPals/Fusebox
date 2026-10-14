@@ -99,7 +99,11 @@ pub fn values(text: &str) -> Result<Value> {
     let mut values = serde_json::to_value(&cfg)?;
     let obj = values.as_object_mut().unwrap();
     obj.insert("tls".into(), serde_json::to_value(&cfg.tls)?);
-    obj.insert("notifications".into(), serde_json::to_value(cfg.notifications)?);
+    let mut notifications = serde_json::to_value(&cfg.notifications)?;
+    notifications["webhooks"] = json!(cfg.notifications.webhooks);
+    obj.insert("notifications".into(), notifications);
+    obj.insert("model-groups".into(), json!(cfg.model_groups));
+    obj.insert("background-model".into(), json!(cfg.background_model));
     obj.insert("management-allow-remote".into(), json!(cfg.management_allow_remote));
     obj.insert("force-model-prefix".into(), json!(cfg.force_model_prefix));
     obj.insert("oauth-model-alias".into(), json!(cfg.oauth_model_alias));
@@ -395,6 +399,13 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
                 delta(target, previous.get(k).unwrap_or(&Value::Null), &val)?;
             }
         }
+        // A field the edit left out goes, so the entry falls back to its default.
+        let kept = entry.as_object().unwrap();
+        if let (Some(old_fields), Some(mapping)) = (previous.as_object(), raw.as_mapping_mut()) {
+            for k in old_fields.keys().filter(|k| !k.starts_with('_') && !kept.contains_key(*k)) {
+                mapping.remove(Yaml::String(k.clone()));
+            }
+        }
     }
     let mut removed: Vec<_> =
         old.iter().filter_map(|e| e.get("_id")).filter(|id| !seen.contains(&id.to_string())).collect();
@@ -424,21 +435,12 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
     Ok(())
 }
 
-fn check_url(value: &str, proxy: bool, label: &str) -> Result<()> {
+fn check_url(value: &str, label: &str) -> Result<()> {
     if value.is_empty() {
         return Ok(());
     }
     let url = url::Url::parse(value).with_context(|| format!("{label}: enter a complete URL"))?;
-    ensure!(
-        url.host_str().is_some()
-            && if proxy {
-                matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
-            } else {
-                matches!(url.scheme(), "http" | "https")
-            },
-        "{label}: use {}",
-        if proxy { "an HTTP, HTTPS or SOCKS5 URL" } else { "an HTTP or HTTPS URL" }
-    );
+    ensure!(url.host_str().is_some() && matches!(url.scheme(), "http" | "https"), "{label}: use an HTTP or HTTPS URL");
     Ok(())
 }
 
@@ -482,9 +484,25 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                 ensure!(value.is_boolean(), "{field}: use a boolean")
             }
             "notifications" => ensure!(
-                value.as_object().is_some_and(|o| o.values().all(Value::is_boolean)),
-                "Notifications: use on or off for each event"
+                value.as_object().is_some_and(|o| o.iter().all(|(k, v)| if k == "webhooks" {
+                    v.as_array().is_some_and(|hooks| hooks.iter().all(Value::is_string))
+                } else {
+                    v.is_boolean()
+                })),
+                "Notifications: use on or off for each event, and a list of webhook URLs"
             ),
+            "first-token-timeout-seconds" => ensure!(
+                value.as_u64().is_some_and(|n| n <= 3600),
+                "First-token timeout must be between 0 (off) and 3600 seconds"
+            ),
+            "log-format" => {
+                ensure!(matches!(value.as_str(), Some("text" | "json")), "Log format must be text or json")
+            }
+            "background-model" => ensure!(
+                value.is_null() || value.as_str().is_some_and(|s| !s.trim().is_empty()),
+                "Background model: name a model, or leave it empty"
+            ),
+            "model-groups" => ensure!(value.is_object(), "Model groups: a name for each list of models"),
             _ => {}
         }
     }
@@ -495,7 +513,7 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
     }
     let cfg = Config::parse(&serde_yaml::to_string(&merged)?)?;
     if changes.contains_key("proxy-url") {
-        check_url(&cfg.proxy_url, true, "Upstream proxy")?;
+        crate::config::check_proxy_url(&cfg.proxy_url).map_err(|e| anyhow::anyhow!("Upstream proxy: {e}"))?;
     }
     if changes.contains_key("tls") && cfg.tls.enable {
         ensure!(!cfg.tls.cert.trim().is_empty(), "HTTPS: certificate path is required");
@@ -525,10 +543,11 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                 );
             }
             if let Some(url) = entry["base-url"].as_str() {
-                check_url(url, false, "Provider base URL")?;
+                check_url(url, "Provider base URL")?;
             }
+            // `direct` and `none` mean no proxy at all, as in CLIProxyAPI.
             if let Some(url) = entry["proxy-url"].as_str() {
-                check_url(url, true, "Provider proxy")?;
+                crate::config::check_proxy_url(url).map_err(|e| anyhow::anyhow!("Provider proxy: {e}"))?;
             }
             for model in entry["models"].as_array().into_iter().flatten() {
                 ensure!(model["name"].as_str().is_some_and(|s| !s.trim().is_empty()), "Model name cannot be empty");
@@ -750,6 +769,9 @@ pub fn restart_fields(startup: &Config, current: &Config) -> Vec<&'static str> {
     }
     if startup.debug != current.debug {
         fields.push("debug logging");
+    }
+    if startup.log_format != current.log_format {
+        fields.push("log format");
     }
     fields
 }

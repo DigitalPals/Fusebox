@@ -56,7 +56,9 @@ const UsageTools = (() => {
     const ranked = [...totals.keys()].filter((k) => totals.get(k) > 0 || volumes.get(k) > 0).sort((a, b) => totals.get(b) - totals.get(a) || volumes.get(b) - volumes.get(a) || a.localeCompare(b));
     const shown = ranked.length > 6 ? ranked.slice(0, 5) : ranked;
     const keys = shown.concat(ranked.length > shown.length ? [OTHER] : []);
-    const colors = keys.map((k, i) => (k === OTHER ? '#57534b' : `oklch(0.74 0.09 ${HUES[i]})`));
+    // A light page needs darker tones for the same contrast.
+    const light = typeof document !== 'undefined' && document.documentElement.dataset.shade === 'light';
+    const colors = keys.map((k, i) => (k === OTHER ? (light ? '#a8a397' : '#57534b') : `oklch(${light ? 0.6 : 0.74} 0.09 ${HUES[i]})`));
     const index = new Map(days.map((d, i) => [d, i]));
     const series = days.map((date) => ({ date, parts: keys.map(() => 0), groups: keys.map(() => ({ calls: 0, cost: 0, priced: false, unpriced: 0 })), total: 0, calls: 0, cost: 0, priced: false, unpriced: 0 }));
     for (const r of trend || []) {

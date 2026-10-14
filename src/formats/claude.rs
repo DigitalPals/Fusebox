@@ -511,8 +511,8 @@ fn status_of_error(kind: &str) -> u16 {
 }
 
 impl StreamParser for Parser {
-    fn feed(&mut self, ev: &SseEvent, out: &mut Vec<Event>) {
-        let Ok(v) = serde_json::from_str::<Value>(&ev.data) else { return };
+    fn feed_value(&mut self, ev: &SseEvent, v: Option<&Value>, out: &mut Vec<Event>) {
+        let Some(v) = v else { return };
         let kind = v["type"].as_str().or(ev.event.as_deref()).unwrap_or_default();
         match kind {
             "message_start" => {

@@ -34,6 +34,30 @@ Fusebox checks every 30 seconds, using the rules behind the dashboard's faults b
 
 Rate limits are never sent; they come and go too quickly. The app's icon shows the number of faults the dashboard shows.
 
+## Chat and webhooks
+
+The same notifications can go to chat. Under **Config, Notifications**, paste the URL a service gives you into **Chat and webhooks** and press **Add**; **Send test** sends a test message at once, saved or not. The events chosen below apply to devices and webhooks alike, and the list is saved in `config.yaml`:
+
+```yaml
+notifications:
+  webhooks:
+    - https://discord.com/api/webhooks/123/abc
+    - https://api.telegram.org/bot123:abc/sendMessage?chat_id=-1001234567890
+```
+
+The URL says how a message is sent:
+
+| URL | Sent as |
+| --- | --- |
+| `discord.com/api/webhooks/…` | A Discord embed |
+| `hooks.slack.com/…` | Slack text |
+| `*.webhook.office.com`, `*.logic.azure.com`, Power Automate | A Teams Adaptive Card (Workflows) |
+| `api.telegram.org/bot<token>/sendMessage?chat_id=<chat>` | A Telegram message |
+| a host named `ntfy` (`ntfy.sh/<topic>`, `ntfy.example.com/<topic>`) | An ntfy notification with title, tags and priority |
+| anything else | JSON with `text` (which Mattermost, Google Chat and Rocket.Chat show as it is) plus `title`, `body`, `event`, `kind`, `level`, `provider`, `account`, `label` and `until` |
+
+`event` is `sign_in_expired`, `provider_exhausted`, `account_used_up`, `account_errors`, `recovered` or `test`. A destination is named by its kind and host only, in the dashboard and in logs; the rest of the URL is usually its secret, so keep `config.yaml` private. Webhooks are sent once per fault, like push notifications, and a failed delivery is logged, not retried.
+
 ## Reading faults from other tools
 
 Desktop widgets and scripts can read the same faults through the management API, with the management key as a bearer token, like every other `/api` route:
@@ -66,6 +90,8 @@ The same socket's `load` event says what each busy account is doing: `in_flight`
 Notifications go from Fusebox to your browser's push service (Google for Chrome and Edge, Mozilla for Firefox, Apple for Safari), which delivers them to the device. The message is end-to-end encrypted ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)); the push service sees only when a message is sent and how large it is. Nothing is sent unless a device has turned notifications on.
 
 Fusebox keeps its push key (VAPID), the subscribed devices and the faults it has sent in `.web-push.state` in the credentials directory (`auth-dir`), readable only by its owner. Deleting the file signs every device out of notifications; they turn them on again from the dashboard.
+
+Webhook messages go straight to the URLs you add, as plain HTTPS requests that service can read.
 
 ## Troubleshooting
 

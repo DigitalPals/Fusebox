@@ -2,8 +2,11 @@
 # directory and ports, so an existing docker-compose.yml keeps working.
 
 FROM rust:1-bookworm AS build
+# The commit, for `--version` (the build context has no .git).
+ARG FUSEBOX_COMMIT=""
+ENV FUSEBOX_COMMIT=${FUSEBOX_COMMIT}
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
 COPY ui ui
 # On x86-64, Rust links with lld: pack relative relocations (Debian 12's glibc
@@ -21,7 +24,25 @@ RUN mkdir -p /out/CLIProxyAPI /out/root/.cli-proxy-api \
  && cp target/release/fusebox /out/fusebox \
  && ln -s /usr/local/bin/fusebox /out/CLIProxyAPI/CLIProxyAPI
 
-FROM gcr.io/distroless/cc-debian12
+# Runs as an unprivileged user (uid 65532) instead of root: `--target nonroot`, published
+# as the `-nonroot` tags. Its config is /home/nonroot/config.yaml and its sign-ins are in
+# /home/nonroot/.fusebox; mounted files must be readable and writable by uid 65532.
+FROM gcr.io/distroless/cc-debian12:nonroot AS nonroot
+LABEL org.opencontainers.image.title="Fusebox" \
+      org.opencontainers.image.source="https://github.com/DigitalPals/Fusebox" \
+      org.opencontainers.image.description="All your AI subscriptions as one fast API, running as an unprivileged user." \
+      org.opencontainers.image.licenses="Unlicense"
+COPY --from=build /out/fusebox /usr/local/bin/fusebox
+ENV HOME=/home/nonroot \
+    FUSEBOX_DEFAULT_HOST=0.0.0.0 \
+    FUSEBOX_CONFIG=/home/nonroot/config.yaml
+WORKDIR /home/nonroot
+USER nonroot
+EXPOSE 8317 54545 1455 51121
+CMD ["/usr/local/bin/fusebox"]
+
+# The default image keeps CLIProxyAPI's layout (root, /CLIProxyAPI), so it drops in.
+FROM gcr.io/distroless/cc-debian12 AS default
 LABEL org.opencontainers.image.title="Fusebox" \
       org.opencontainers.image.source="https://github.com/DigitalPals/Fusebox" \
       org.opencontainers.image.description="All your AI subscriptions as one fast API. Drop-in for CLIProxyAPI." \

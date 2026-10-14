@@ -64,6 +64,8 @@ pub struct Tracker {
     analytics: Option<crate::usage::capture::RequestUsage>,
     downstream: crate::diagnostics::Downstream,
     logical_final: bool,
+    /// The client key's identity (a named client's id), for its limits.
+    client_id: Option<String>,
 }
 
 impl Tracker {
@@ -74,6 +76,7 @@ impl Tracker {
             analytics: Some(crate::usage::capture::RequestUsage::new(app.usage.clone(), model)),
             downstream: crate::diagnostics::Downstream::current(),
             logical_final: true,
+            client_id: None,
             started: Instant::now(),
             acct: None,
             stream_usage: Usage::default(),
@@ -127,6 +130,8 @@ impl Tracker {
     /// Names the client program from its User-Agent, for the dashboard.
     pub fn client_app(&mut self, headers: &HeaderMap) {
         self.log.client_app = client_app(headers);
+        self.client_id =
+            headers.get(crate::usage::capture::CLIENT_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
         if let Some(a) = &mut self.analytics {
             a.client(headers);
         }
@@ -278,6 +283,9 @@ impl Tracker {
         self.log.input_tokens = input;
         self.log.output_tokens = output;
         self.log.cache_tokens = cache;
+        if let Some(id) = &self.client_id {
+            self.app.clients.add(id, crate::policy::counted_tokens(input, output));
+        }
         self.log.error = error.map(|e| e.chars().take(400).collect());
         if let Some(a) = &self.acct {
             if let Some(message) = &self.log.error
@@ -398,7 +406,8 @@ fn soft_failure(
         (secs <= 10_000).then(|| std::time::Duration::from_millis(secs))
     };
     match status {
-        500 | 502 | 503 | 504 | 529 => Some(std::time::Duration::ZERO),
+        // Not 504: the provider may still be generating, so it is answered, not repeated.
+        500 | 502 | 503 | 529 => Some(std::time::Duration::ZERO),
         429 => {
             if body.contains("QUOTA_EXHAUSTED") {
                 return None;
@@ -553,6 +562,20 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     if crate::clients::observe(&call.headers) {
         app.models.save_clients();
     }
+    let cfg = app.cfg();
+    let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
+    let (base, _) = ir::split_model_suffix(&raw);
+    if let Err(d) = crate::policy::check_model(&app, &call.headers, &base) {
+        return error_reply(call.format, d.status, &d.message);
+    }
+    // Claude Code asks its Haiku model for quick background work (titles, summaries,
+    // checks); `background-model` sends those calls elsewhere.
+    if let Some(background) = cfg.background_model.as_deref()
+        && base.to_ascii_lowercase().contains("haiku")
+        && crate::upstream::is_claude_code(&call.headers)
+    {
+        set_model(&mut call, background);
+    }
     if let Some(identity) = crate::affinity::session_identity(&call.headers, &call.body) {
         call.session = Some(identity.key);
         call.session_source = Some(identity.source);
@@ -593,7 +616,7 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     let lease = session.as_deref().map(|s| app.sessions.hold(s, app.cfg().session_affinity_idle_seconds));
     let end_session = crate::affinity::ends_session(&headers);
     let full = capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default();
-    match execute_inner(app.clone(), call).await {
+    match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
                 use crate::formats::StreamParser;
@@ -637,6 +660,83 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     }
 }
 
+/// Points a call at another model, keeping a reasoning suffix the client added.
+fn set_model(call: &mut Call, model: &str) {
+    let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
+    let (base, _) = ir::split_model_suffix(&raw);
+    let suffix = raw.trim().strip_prefix(base.as_str()).unwrap_or_default();
+    let (_, own) = ir::split_model_suffix(model);
+    let model = if own.is_some() { model.to_string() } else { format!("{model}{suffix}") };
+    if call.path_model.is_some() {
+        call.path_model = Some(model.clone());
+    }
+    if call.body.is_object() && (call.path_model.is_none() || call.body.get("model").is_some()) {
+        call.body["model"] = model.into();
+    }
+}
+
+/// Whether the next model of a group should take over from an answer like this one:
+/// no account, rate limits, used-up quota or an upstream failure, not a bad request.
+fn group_moves_on(reply: &Reply) -> bool {
+    matches!(reply, Reply::Error(status, _) if matches!(status, 401 | 403 | 404 | 408 | 429) || *status >= 500)
+}
+
+static GROUP_TURN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A model group's models in the order this call tries them. In order by default; with
+/// `balance`, new sessions start at different models (a session always the same one,
+/// so its prompt cache keeps working) and the rest follow.
+fn group_order<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>) -> Vec<&'a str> {
+    let n = group.models.len();
+    let start = if !group.balance || n == 0 {
+        0
+    } else if let Some(s) = session {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(s.as_bytes());
+        u64::from_le_bytes(h[..8].try_into().unwrap()) as usize % n
+    } else {
+        GROUP_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % n
+    };
+    (0..n).map(|i| group.models[(start + i) % n].as_str()).collect()
+}
+
+#[cfg(test)]
+pub fn group_order_for_tests(group: &crate::config::ModelGroup, session: Option<&str>) -> Vec<String> {
+    group_order(group, session).into_iter().map(String::from).collect()
+}
+
+/// Runs a call, or for a model group, each of its models until one answers.
+async fn execute_models(app: Arc<App>, call: Call) -> Reply {
+    let cfg = app.cfg();
+    let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
+    let (base, _) = ir::split_model_suffix(&raw);
+    let Some(group) = cfg.model_groups.get(&base) else { return execute_inner(app, call).await };
+    let order = group_order(group, call.session.as_deref());
+    let mut last = None;
+    for (i, model) in order.iter().enumerate() {
+        let mut attempt = Call {
+            format: call.format,
+            body: call.body.clone(),
+            headers: call.headers.clone(),
+            stream: call.stream,
+            transport: call.transport,
+            path_model: call.path_model.clone(),
+            session: call.session.clone(),
+            session_source: call.session_source,
+            routing_selection: if i == 0 { call.routing_selection.clone() } else { None },
+        };
+        set_model(&mut attempt, model);
+        let reply = execute_inner(app.clone(), attempt).await;
+        if i + 1 < order.len() && group_moves_on(&reply) {
+            tracing::info!(group = %base, model = %model, "model group: trying the next model");
+            last = Some(reply);
+            continue;
+        }
+        return reply;
+    }
+    last.unwrap_or_else(|| error_reply(call.format, 404, &format!("model group {base} lists no models")))
+}
+
 async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
     let cfg = app.cfg();
     let raw_model =
@@ -659,7 +759,10 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
     let mut pending_selection = call.routing_selection;
     // Same-account retries for blips (capacity errors, soft rate limits).
     let mut soft_tries: HashMap<String, u32> = HashMap::new();
-    let attempts = cfg.request_retry.max(1) as usize;
+    let attempts = (cfg.request_retry as usize).clamp(1, MAX_ACCOUNTS);
+    let started = std::time::Instant::now();
+    let first_token =
+        (cfg.first_token_timeout_seconds > 0).then(|| std::time::Duration::from_secs(cfg.first_token_timeout_seconds));
     let inferred = call.session_source == Some(crate::affinity::INFERRED_SOURCE);
     // A per-request random id would split the provider's cache rather than route to it.
     let cache_key = call
@@ -669,6 +772,10 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
         .map(crate::affinity::prompt_cache_key);
 
     while tried.len() < attempts {
+        // Past the budget, the error so far is the answer rather than another wait.
+        if last_error.is_some() && started.elapsed() > RETRY_BUDGET {
+            break;
+        }
         let pin = retry_same.take();
         // A retry on a temporary detour must stay on that account without
         // replacing the session's long-lived assignment to its original account.
@@ -873,7 +980,25 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
             rb = rb.header(k.as_str(), v.as_str());
         }
         let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
-        let resp = match rb.body(payload).send().await {
+        let send = rb.body(payload).send();
+        // A stream's headers come before its first token; an upstream that hasn't even
+        // sent those by the first-token deadline has stalled.
+        let sent = match first_token.filter(|_| upstream_stream) {
+            Some(limit) => tokio::time::timeout(limit, send).await.ok(),
+            None => Some(send.await),
+        };
+        let Some(sent) = sent else {
+            let msg = stalled_message(first_token);
+            tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
+            tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                "upstream sent nothing before the first-token deadline; trying another account");
+            acct.cool(Some(&model), Utc::now() + Duration::minutes(2), &msg);
+            app.broadcast("accounts", Value::Null);
+            tried.push(acct.id.clone());
+            last_error = Some((504, formats::error_body(call.format, 504, &msg)));
+            continue;
+        };
+        let resp = match sent {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("upstream connection failed: {e}");
@@ -882,9 +1007,11 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
                 tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                     failure_kind = failure.kind, error_causes = ?failure.causes, "upstream connection failed");
                 acct.state.lock().last_error = Some(msg.clone());
-                // A dropped connection is usually a blip on the provider's side: one more try.
+                // A connection that never opened is a blip worth one more try on the same
+                // account. Once the request went out, the provider may have run it, so it
+                // moves on rather than running it twice on one account.
                 let n = soft_tries.entry(acct.id.clone()).or_default();
-                if *n < 1 {
+                if *n < 1 && e.is_connect() {
                     *n += 1;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     retry_same = Some(acct.id.clone());
@@ -968,7 +1095,8 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
                     acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}"));
                 }
                 401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
-                400 | 404 | 413 | 422 => {
+                // A gateway timeout may still be generating upstream: answer, don't repeat.
+                400 | 404 | 413 | 422 | 504 => {
                     acct.state.lock().last_error = Some(format!("{status}: {msg}"));
                     tracker.finish(status, &Usage::default(), Some(msg));
                     return Reply::Error(status, client_body);
@@ -982,23 +1110,74 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
             continue;
         }
 
-        acct.record_ok();
         // The ChatGPT backend streams without any Content-Type, so a stream we
         // asked for counts as one unless it says it's JSON.
         let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
         let is_sse = ctype.contains("event-stream") || (upstream_stream && !ctype.contains("json"));
+        let mut resp = Some(resp);
+        // A stream is held back until it shows content, so an overload or rate limit
+        // that arrives inside a 200 still goes to another account (see `bootstrap`).
+        let mut body: Option<ByteStream> = None;
+        if is_sse && !devin {
+            let stream: ByteStream = Box::pin(resp.take().expect("response").bytes_stream());
+            match bootstrap(stream, native, first_token).await {
+                Boot::Ready(stream) => body = Some(stream),
+                Boot::Failed { status, message, held } => {
+                    tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                        status, "upstream failed before its first token; trying another account");
+                    // What it reported before failing still counts for this attempt.
+                    let tap = tracker.usage_tap();
+                    let mut dec = SseDecoder::default();
+                    let mut events: Vec<_> = held.iter().flat_map(|chunk| dec.push(chunk)).collect();
+                    events.extend(dec.finish());
+                    for sse in &events {
+                        observe_sse(&acct, &model, tap.as_ref(), sse);
+                    }
+                    if let Some(c) = &tap {
+                        c.headers(&HeaderMap::new(), status);
+                    }
+                    if status == 429 && quota_exhausted(&acct, &model, status, &message) {
+                        mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
+                    } else if status == 429 {
+                        acct.cool(Some(&model), Utc::now() + Duration::seconds(30), &format!("429: {message}"));
+                    } else {
+                        acct.state.lock().last_error = Some(format!("{status}: {message}"));
+                    }
+                    app.broadcast("accounts", Value::Null);
+                    tried.push(acct.id.clone());
+                    last_error = Some((status, formats::error_body(call.format, status, &message)));
+                    continue;
+                }
+                Boot::Stalled => {
+                    let msg = stalled_message(first_token);
+                    tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
+                    tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                        "upstream stream stayed silent past the first-token deadline; trying another account");
+                    if let Some(c) = tracker.usage_tap() {
+                        c.headers(&HeaderMap::new(), 504);
+                    }
+                    acct.cool(Some(&model), Utc::now() + Duration::minutes(2), &msg);
+                    app.broadcast("accounts", Value::Null);
+                    tried.push(acct.id.clone());
+                    last_error = Some((504, formats::error_body(call.format, 504, &msg)));
+                    continue;
+                }
+            }
+        }
+        acct.record_ok();
         let account = acct.label.clone();
         let req = Arc::new(parsed.clone().unwrap_or_default());
 
         let unwrap = provider == Provider::Antigravity;
         if passthrough {
-            if call.stream && is_sse {
-                return Reply::Stream { frames: passthrough_stream(resp, native, tracker, unwrap), account };
-            }
-            if is_sse {
+            if let Some(body) = body {
+                if call.stream {
+                    return Reply::Stream { frames: passthrough_stream(body, native, tracker, unwrap), account };
+                }
                 // Codex only streams: rebuild the final response object.
-                return collect_passthrough(Box::pin(resp.bytes_stream()), native, tracker, call.format).await;
+                return collect_passthrough(body, native, tracker, call.format).await;
             }
+            let resp = resp.take().expect("response");
             let text = match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {
@@ -1036,9 +1215,11 @@ async fn execute_inner(app: Arc<App>, call: Call) -> Reply {
         }
 
         let events = if devin {
-            crate::devin::event_stream(resp, names)
+            crate::devin::event_stream(resp.take().expect("response"), names)
+        } else if let Some(body) = body {
+            sse_events(body, native, names, acct.clone(), model.clone(), tracker.usage_tap())
         } else {
-            event_stream(resp, native, is_sse, names, acct.clone(), model.clone(), tracker.usage_tap())
+            full_events(resp.take().expect("response"), native, names, acct.clone(), model.clone(), tracker.usage_tap())
         };
         let client_model = model.clone();
         if call.stream {
@@ -1121,58 +1302,142 @@ fn checked_full_events(format: Format, body: &Value) -> Vec<Event> {
     events
 }
 
-/// Decodes the upstream body into IR events.
-fn event_stream(
+/// At most this many accounts answer one request, whatever `request-retry` says.
+const MAX_ACCOUNTS: usize = 10;
+/// After this long, a failed request stops starting new attempts and answers instead.
+const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long a stream that already sent events is held back waiting for its content.
+/// Rate limits and overloads inside a 200 arrive at once; past this, it streams as is.
+const BOOT_HOLD: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(5) };
+
+fn stalled_message(limit: Option<std::time::Duration>) -> String {
+    format!("upstream sent nothing within {}s", limit.map_or(0, |d| d.as_secs()))
+}
+
+/// What the first moments of a streamed answer showed.
+enum Boot {
+    /// The stream, with everything read so far put back in front.
+    Ready(ByteStream),
+    /// It failed before the client saw anything, so another account can answer.
+    /// `held` is what it sent first, for the usage it reported.
+    Failed { status: u16, message: String, held: Vec<bytes::Bytes> },
+    /// Not a single event before the first-token deadline.
+    Stalled,
+}
+
+/// Holds a stream back until its first content (text, reasoning or a tool call), its
+/// end or an error, so a rate limit or overload that arrives inside a 200 response
+/// can go to another account before the client sees anything. The first event must
+/// come within `first_event`; after it, content gets `BOOT_HOLD` before the stream is
+/// let through as it is.
+async fn bootstrap(mut body: ByteStream, native: Format, first_event: Option<std::time::Duration>) -> Boot {
+    let start = tokio::time::Instant::now();
+    let stall_at = first_event.map(|d| start + d);
+    let mut release_at = stall_at.is_none().then(|| start + BOOT_HOLD);
+    let mut held: Vec<bytes::Bytes> = Vec::new();
+    let mut dec = SseDecoder::default();
+    let mut parser = formats::parser(native);
+    let mut events = Vec::new();
+    let ready = |held: Vec<bytes::Bytes>, rest: ByteStream| -> Boot {
+        Boot::Ready(Box::pin(futures::stream::iter(held.into_iter().map(Ok)).chain(rest)))
+    };
+    loop {
+        let Some(deadline) = release_at.or(stall_at) else { return ready(held, body) };
+        let next = match tokio::time::timeout_at(deadline, body.next()).await {
+            Ok(next) => next,
+            Err(_) if release_at.is_none() => return Boot::Stalled,
+            Err(_) => return ready(held, body),
+        };
+        let chunk = match next {
+            Some(Ok(chunk)) => chunk,
+            // The connection failed or ended before any content: nothing reached the client.
+            Some(Err(e)) => return Boot::Failed { status: 502, message: format!("upstream stream error: {e}"), held },
+            None => return Boot::Failed { status: 502, message: PREMATURE_END.into(), held },
+        };
+        held.push(chunk.clone());
+        for sse in dec.push(&chunk) {
+            release_at.get_or_insert_with(|| tokio::time::Instant::now() + BOOT_HOLD);
+            let parsed = serde_json::from_str::<Value>(&sse.data).ok();
+            parser.feed_value(&sse, parsed.as_ref(), &mut events);
+        }
+        for ev in events.drain(..) {
+            match ev {
+                Event::Error { status, message } if matches!(status, 429 | 500 | 502 | 503 | 504 | 529) => {
+                    return Boot::Failed { status, message, held };
+                }
+                Event::Error { .. } | Event::Finish(_) => return ready(held, body),
+                ev if is_content(&ev) => return ready(held, body),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Decodes a complete (non-streamed) upstream body into IR events.
+fn full_events(
     resp: reqwest::Response,
     native: Format,
-    is_sse: bool,
     names: HashMap<String, String>,
     acct: Arc<Account>,
     model: String,
     usage_tap: Option<crate::usage::capture::Capture>,
 ) -> EventStream {
-    let rename = move |ev: Event| match ev {
+    let rename = renamer(names);
+    Box::pin(async_stream::stream! {
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                if let Some(c) = &usage_tap { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
+                yield Event::Error { status: 502, message: format!("upstream response read failed: {e}") };
+                return;
+            }
+        };
+        let evs = match serde_json::from_str::<Value>(&text) {
+            Ok(v) => {
+                observe_quota_value(&acct, &model, &v);
+                if let Some(c) = &usage_tap { c.wire(&v); }
+                checked_full_events(native, &v)
+            }
+            // Mislabelled stream: decode it as SSE after all.
+            Err(_) => {
+                let mut dec = SseDecoder::default();
+                let mut parser = formats::parser(native);
+                let mut out = Vec::new();
+                for sse in dec.push(text.as_bytes()).into_iter().chain(dec.finish()) {
+                    let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                    parser.feed_value(&sse, parsed.as_ref(), &mut out);
+                }
+                out
+            }
+        };
+        for ev in evs {
+            yield rename(ev);
+        }
+    })
+}
+
+fn renamer(names: HashMap<String, String>) -> impl Fn(Event) -> Event + Send {
+    move |ev: Event| match ev {
         Event::ToolStart { key, id, name } => {
             let name = names.get(&name).cloned().unwrap_or(name);
             Event::ToolStart { key, id, name }
         }
         other => other,
-    };
-    if !is_sse {
-        return Box::pin(async_stream::stream! {
-            let text = match resp.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    if let Some(c) = &usage_tap { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
-                    yield Event::Error { status: 502, message: format!("upstream response read failed: {e}") };
-                    return;
-                }
-            };
-            let evs = match serde_json::from_str::<Value>(&text) {
-                Ok(v) => {
-                    observe_quota_value(&acct, &model, &v);
-                    if let Some(c) = &usage_tap { c.wire(&v); }
-                    checked_full_events(native, &v)
-                }
-                // Mislabelled stream: decode it as SSE after all.
-                Err(_) => {
-                    let mut dec = SseDecoder::default();
-                    let mut parser = formats::parser(native);
-                    let mut out = Vec::new();
-                    for sse in dec.push(text.as_bytes()).into_iter().chain(dec.finish()) {
-                        observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
-                        parser.feed(&sse, &mut out);
-                    }
-                    out
-                }
-            };
-            for ev in evs {
-                yield rename(ev);
-            }
-        });
     }
+}
+
+/// Decodes an upstream event stream into IR events.
+fn sse_events(
+    mut body: ByteStream,
+    native: Format,
+    names: HashMap<String, String>,
+    acct: Arc<Account>,
+    model: String,
+    usage_tap: Option<crate::usage::capture::Capture>,
+) -> EventStream {
+    let rename = renamer(names);
     Box::pin(async_stream::stream! {
-        let mut body = resp.bytes_stream();
         let mut dec = SseDecoder::default();
         let mut parser = formats::parser(native);
         let mut out = Vec::new();
@@ -1181,8 +1446,8 @@ fn event_stream(
             match body.next().await {
                 Some(Ok(chunk)) => {
                     for sse in dec.push(&chunk) {
-                        observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
-                        parser.feed(&sse, &mut out);
+                        let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                        parser.feed_value(&sse, parsed.as_ref(), &mut out);
                     }
                 }
                 Some(Err(e)) => {
@@ -1194,8 +1459,8 @@ fn event_stream(
                 }
                 None => {
                     for sse in dec.finish() {
-                        observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
-                        parser.feed(&sse, &mut out);
+                        let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                        parser.feed_value(&sse, parsed.as_ref(), &mut out);
                     }
                     for ev in out.drain(..) { yield rename(ev); }
                     return;
@@ -1209,19 +1474,19 @@ fn event_stream(
     })
 }
 
-/// Quota and usage both read the event's JSON; parse it once for the two of them.
+/// Quota, usage and the stream parser all read the event's JSON: parse it once, here.
 fn observe_sse(
     acct: &Account,
     model: &str,
     usage_tap: Option<&crate::usage::capture::Capture>,
     sse: &crate::sse::SseEvent,
-) {
-    if let Ok(v) = serde_json::from_str::<Value>(&sse.data) {
-        observe_quota_value(acct, model, &v);
-        if let Some(c) = usage_tap {
-            c.wire(&v);
-        }
+) -> Option<Value> {
+    let v = serde_json::from_str::<Value>(&sse.data).ok()?;
+    observe_quota_value(acct, model, &v);
+    if let Some(c) = usage_tap {
+        c.wire(&v);
     }
+    Some(v)
 }
 
 fn is_content(ev: &Event) -> bool {
@@ -1270,9 +1535,8 @@ async fn collect(events: EventStream, format: Format, model: &str, req: &Request
 }
 
 /// Forwards upstream SSE events untouched while tapping usage.
-fn passthrough_stream(resp: reqwest::Response, native: Format, mut tracker: Tracker, unwrap: bool) -> FrameStream {
+fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker, unwrap: bool) -> FrameStream {
     Box::pin(async_stream::stream! {
-        let mut body = resp.bytes_stream();
         let mut dec = SseDecoder::default();
         let mut parser = formats::parser(native);
         let mut evs = Vec::new();
@@ -1304,7 +1568,7 @@ fn passthrough_stream(resp: reqwest::Response, native: Format, mut tracker: Trac
                     tracker.observe_quota_value(v);
                     tracker.observe_wire(v);
                 }
-                parser.feed(&sse, &mut evs);
+                parser.feed_value(&sse, parsed.as_ref(), &mut evs);
                 for ev in evs.drain(..) {
                     tracker.observe_stream_event(&ev);
                 }

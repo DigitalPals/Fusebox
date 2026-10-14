@@ -224,7 +224,12 @@ pub fn observe_codex_event(acct: &Account, v: &Value, epoch: u64) {
                 .as_i64()
                 .and_then(ts)
                 .or_else(|| w["reset_after_seconds"].as_i64().map(|s| Utc::now() + chrono::Duration::seconds(s)));
-            Some(Window { name: label(minutes * 60), used: w["used_percent"].as_f64()?, resets_at: reset, model: None })
+            Some(Window {
+                name: label(minutes * 60),
+                used: w["used_percent"].as_f64()?.clamp(0.0, 100.0),
+                resets_at: reset,
+                model: None,
+            })
         })
         .collect();
     let mut st = acct.state.lock();

@@ -12,7 +12,7 @@ const CONFIG_DESCRIPTIONS = {
   connections: 'How Fusebox reaches the providers.',
   providers: 'API keys used alongside your signed-in accounts.',
   models: 'Rules for signed-in accounts. API key model rules are set under Providers.',
-  notifications: 'Push notifications on your phone or computer when something trips. The events apply to every device.',
+  notifications: 'Push notifications on your phone or computer, and messages in chat, when something trips. The events apply to all of them.',
   diagnostics: 'Logging, and settings in the file that Fusebox ignores.',
   yaml: 'The whole config.yaml, including settings the other sections don\u2019t cover. Changes are checked before they are applied.',
 };
@@ -21,7 +21,8 @@ const CONFIG_KEY_SECTION = {
   host: 'server', port: 'server', 'auth-dir': 'server', tls: 'server',
   'api-keys': 'access', 'management-key': 'access', 'management-allow-remote': 'access',
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
-  'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing',
+  'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
+  'model-groups': 'routing', 'background-model': 'routing', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
   'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', notifications: 'notifications', debug: 'diagnostics',
 };
@@ -151,6 +152,7 @@ function configHeaders(path) {
 
 // Shared client keys are set under Access; named clients are added and removed here, saved at once.
 function configClientsHTML() {
+  loadClientUsage();
   const keys = S.overview.client_keys;
   const named = (configGet(['named-clients']) || []).length;
   const access = '<button type="button" class="linkbtn" data-config-act="section" data-section="access">Access</button>';
@@ -167,7 +169,7 @@ function configClientsHTML() {
 
 // Named clients: a key per tool, so the Usage page can tell them apart. Other tools
 // (Whombat, for one) add their own through the same settings API.
-const namedIdle = () => ({ adding: false, label: '', error: '', confirm: null, created: null, shown: {} });
+const namedIdle = () => ({ adding: false, label: '', error: '', confirm: null, created: null, shown: {}, limits: null, limitsError: '' });
 
 // "Whombat · Cybex BV" → "whombat-cybex-bv": lowercase letters, digits and dashes, at most 40, not taken.
 function namedClientId(label, taken) {
@@ -193,11 +195,14 @@ function namedClientsHTML() {
     const key = S.private ? secret(client.key) : shown ? client.key : configMask(client.key);
     const confirming = n.confirm === client.id;
     const last = list.length === 1 && !shared; // removing it turns client keys off
-    return `<div class="named-row"><span class="cell2"><span>${name}</span>${S.private ? '' : `<span class="mono">${id}</span>`}</span>
+    const limits = namedLimitsText(client);
+    const editing = n.limits === client.id;
+    return `<div class="named-row"><span class="cell2"><span>${name}</span>${S.private ? '' : `<span class="mono">${id}</span>`}${limits ? `<span class="meta named-limits">${esc(limits)}</span>` : ''}</span>
       <span class="named-key"><span class="mono">${esc(key)}</span>
         ${S.private ? '' : `<button type="button" class="btn sm ghost" data-config-act="named-reveal" data-id="${id}" aria-label="${shown ? 'Hide' : 'Show'} the key for ${name}">${shown ? 'Hide' : 'Show'}</button>`}
         ${copyBtn(client.key, `Copy the key for ${name}`, 'Key copied')}</span>
-      ${confirming ? '' : `<button type="button" class="btn sm danger" data-config-act="named-remove" data-id="${id}" aria-label="Remove ${name}"${off}>Remove</button>`}</div>
+      ${confirming || editing ? '<span></span>' : `<span class="named-btns"><button type="button" class="btn sm" data-config-act="limits-edit" data-id="${id}" aria-label="Limits for ${name}"${off}>Limits</button><button type="button" class="btn sm danger" data-config-act="named-remove" data-id="${id}" aria-label="Remove ${name}"${off}>Remove</button></span>`}</div>
+      ${editing ? namedLimitsForm(client) : ''}
       ${confirming ? `<div class="named-confirm${last ? ' keyless' : ''}" role="alert"><span>Remove ${name}? Tools using its key stop working.${last ? ' Fusebox will accept requests without a key again.' : ''}</span>
         <div class="named-actions"><button type="button" class="btn sm ghost" data-config-act="named-keep" data-id="${id}"${off}>Keep</button><button type="button" class="btn sm danger" data-config-act="named-confirm" data-id="${id}"${off}>${c.busy ? 'Removing…' : 'Remove'}</button></div></div>` : ''}`;
   };
@@ -215,6 +220,106 @@ function namedClientsHTML() {
       <div class="named-actions"><button type="button" class="btn sm ghost" data-config-act="named-done">Done</button></div></div>` : ''}
     ${n.adding ? form : ''}
     ${list.length ? `<div class="named-list">${list.map(row).join('')}</div>` : '<p class="cfg-empty">No named clients yet.</p>'}`;
+}
+
+// Limits a named client's key can have; each is optional and works on its own.
+const LIMITS = [
+  ['models', 'Models', 'claude-*, gpt-6-astra', 'list', 'Patterns with * wildcards. Empty allows every model.'],
+  ['user-agents', 'Programs', 'claude-cli/*, codex*', 'list', 'User-Agent patterns its requests must match. Empty allows any.'],
+  ['requests-per-minute', 'Requests a minute', '60', 'int', ''],
+  ['tokens-per-day', 'Tokens a day', '5000000', 'int', 'Input and output; cache reads don’t count.'],
+  ['usd-per-month', 'Dollars a month', '100', 'num', 'Estimated at API list prices.'],
+  ['expires', 'Last day', '', 'date', 'The key stops working after this day.'],
+];
+
+// "60 a minute · 1.2M of 5M tokens today · $3.10 of $100 this month · until 31 Dec 2026".
+function namedLimitsText(client) {
+  const u = S.config.clientUsage?.clients?.[client.id];
+  const parts = [];
+  if (client['requests-per-minute']) parts.push(`${fmt(client['requests-per-minute'])} a minute`);
+  if (client['tokens-per-day']) parts.push(`${u ? `${fmt(u.tokens_today)} of ` : ''}${fmt(client['tokens-per-day'])} tokens today`);
+  if (client['usd-per-month']) parts.push(`${u ? `$${u.usd_month.toFixed(2)} of ` : ''}$${client['usd-per-month']} this month`);
+  if (client.expires) {
+    const day = new Date(`${client.expires}T00:00:00`);
+    const text = day.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    parts.push(day < new Date(new Date().toDateString()) ? `expired ${text}` : `until ${text}`);
+  }
+  if (client.models?.length) parts.push(client.models.join(', '));
+  if (client['user-agents']?.length) parts.push(`from ${client['user-agents'].join(', ')}`);
+  return parts.join(' · ');
+}
+
+function namedLimitsForm(client) {
+  const n = S.config.named;
+  const off = S.config.busy ? ' disabled' : '';
+  const value = (key, kind) => (kind === 'list' ? (client[key] || []).join(', ') : client[key] ?? '');
+  return `<form class="named-limits-form" id="limits-form" data-id="${esc(client.id)}" novalidate>
+    <div class="cfg-grid">${LIMITS.map(([key, label, placeholder, kind, help]) => `<div class="field${kind === 'list' ? ' wide' : ''}">
+      <label for="limit-${key}">${esc(label)}</label>
+      <input id="limit-${key}" name="${key}" type="${kind === 'date' ? 'date' : kind === 'list' ? 'text' : 'number'}" ${kind === 'int' ? 'min="1" step="1"' : kind === 'num' ? 'min="0.01" step="0.01"' : ''}
+        value="${esc(String(value(key, kind)))}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"${off}>
+      ${help ? `<small>${esc(help)}</small>` : ''}</div>`).join('')}</div>
+    ${n.limitsError ? `<p class="cfg-error" role="alert">${esc(n.limitsError)}</p>` : ''}
+    <div class="named-actions"><button type="submit" class="btn primary"${off}>${S.config.busy ? 'Saving…' : 'Save limits'}</button><button type="button" class="btn ghost" data-config-act="limits-cancel" data-id="${esc(client.id)}"${off}>Cancel</button></div></form>`;
+}
+
+function limitsAction(act, id) {
+  const n = S.config.named;
+  if (act === 'limits-edit') {
+    if (namedBlocked()) return;
+    Object.assign(n, { limits: id, limitsError: '', confirm: null, created: null });
+    render();
+    return $('#limit-models')?.focus();
+  }
+  if (act === 'limits-cancel') {
+    Object.assign(n, { limits: null, limitsError: '' });
+    render();
+    return $(`[data-config-act="limits-edit"][data-id="${CSS.escape(id)}"]`)?.focus();
+  }
+}
+
+async function saveLimits(form) {
+  const n = S.config.named;
+  const list = configGet(['named-clients']) || [];
+  const client = list.find((x) => x.id === form.dataset.id);
+  if (!client || S.config.busy || namedBlocked()) return;
+  const updated = { id: client.id, label: client.label, key: client.key };
+  for (const [key, label, , kind] of LIMITS) {
+    const raw = form.elements[key].value.trim();
+    if (!raw) continue;
+    if (kind === 'list') updated[key] = raw.split(',').map((p) => p.trim()).filter(Boolean);
+    else if (kind === 'date') updated[key] = raw;
+    else {
+      const num = Number(raw);
+      if (!(num > 0) || (kind === 'int' && !Number.isInteger(num))) {
+        n.limitsError = `${label}: enter ${kind === 'int' ? 'a whole number' : 'an amount'} above 0, or leave it empty.`;
+        render();
+        return form.ownerDocument.getElementById(`limit-${key}`)?.focus();
+      }
+      updated[key] = num;
+    }
+  }
+  await saveNamedClients(list.map((x) => (x === client ? updated : configClone(x))), `Saved the limits for ${namedName(client)}.`,
+    () => Object.assign(n, { limits: null, limitsError: '' }));
+  loadClientUsage(true);
+}
+
+document.addEventListener('submit', (e) => {
+  if (e.target.id !== 'limits-form') return;
+  e.preventDefault();
+  saveLimits(e.target);
+});
+
+// What named clients used today and this month, for their limits; refreshed now and then.
+async function loadClientUsage(force = false) {
+  const c = S.config;
+  const limited = (configGet(['named-clients']) || []).some((x) => x['tokens-per-day'] || x['usd-per-month']);
+  if (!limited || (!force && c.clientUsageAt && Date.now() - c.clientUsageAt < 15000)) return;
+  c.clientUsageAt = Date.now();
+  try {
+    c.clientUsage = await api('/clients/usage');
+    if (S.route === 'config' && c.section === 'clients' && !c.named.limits) patch('named-clients', namedClientsHTML);
+  } catch { /* the limits still show without their usage */ }
 }
 
 // Other sections' unsaved edits would be lost when this saves, so one kind of edit at a time.
@@ -330,14 +435,89 @@ function configRoutingHTML() {
     ${strategy === 'smart-quota' ? configField(['five-hour-reserve-percent'], '5-hour reserve for existing sessions (%)', { type: 'number', min: 0, max: 100, required: true,
       help: `Below this level (or 5% weekly quota left), prefer other accounts for ${what} while this account has an in-flight request or a session used in the last five minutes. Idle accounts can admit a session to drain remaining quota. If every account needs its reserve, usable quota remains available. Default: 30%. Set 0 to turn off the 5-hour reserve.` }) : ''}
     ${configField(['request-retry'], 'Account attempts', { type: 'number', min: 0, max: 4294967295, required: true,
-      help: 'Maximum accounts to try before a request fails. Zero still tries one account.' })}
+      help: 'Maximum accounts to try before a request fails, up to 10. Zero still tries one account.' })}
+    ${configField(['first-token-timeout-seconds'], 'Wait for a stream to start (seconds)', { type: 'number', min: 0, max: 3600, required: true,
+      help: 'A stream that sends nothing this long moves to the next account, as do errors that arrive before its first word. 0 turns this off.' })}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['session-affinity'], 'Keep sessions on one account', 'A coding session stays on the account it started on, so its prompt cache keeps working. It moves when that subscription runs out or the account is disabled; while an account is busy, its requests briefly use another.')}
     ${configField(['session-affinity-idle-seconds'], 'Forget idle sessions after (seconds)', { type: 'number', min: 60, required: true, disabled: !affinity, help: '86400 is one day.' })}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['force-model-prefix'], 'Require model prefixes', 'Unprefixed requests only use accounts without a prefix. Use prefix/model to select a prefixed account.')}
+    <div class="cfg-divider wide"></div>
+    ${configGroupsHTML()}
+    ${configField(['background-model'], 'Background model', { nullable: true, wide: true, placeholder: 'What Claude Code asks for',
+      help: 'Claude Code asks its Haiku model for titles, summaries and quick checks. Name another model or group to send those calls there.' })}
   </div>`;
 }
+
+// Model groups: one name for several models. A group is a list (tried in order) or,
+// when its new sessions are spread across the models, { models, balance: true }.
+const groupModels = (g) => (Array.isArray(g) ? g : g?.models || []);
+const groupBalanced = (g) => !Array.isArray(g) && !!g?.balance;
+
+function configGroupsHTML() {
+  const groups = configGet(['model-groups']) || {};
+  const rows = Object.entries(groups).map(([name, g], i) => {
+    const on = groupBalanced(g);
+    return `<div class="cfg-row group-row">
+      <div class="field"><label class="sr-only" for="group-name-${i}">Group ${i + 1} name</label>
+        <input id="group-name-${i}" type="text" value="${esc(name)}" data-group-name="${esc(name)}" placeholder="smart" required autocomplete="off" spellcheck="false"></div>
+      <span class="arrow" aria-hidden="true">→</span>
+      <div class="field"><label class="sr-only" for="group-models-${i}">Models in group ${i + 1}</label>
+        <input id="group-models-${i}" type="text" value="${esc(groupModels(g).join(', '))}" data-group-models="${esc(name)}" placeholder="claude-opus-5-5, gpt-6-astra" required autocomplete="off" spellcheck="false"></div>
+      <button type="button" class="fork" role="switch" aria-checked="${on}" data-config-act="group-balance" data-name="${esc(name)}" title="Spread new sessions across the models instead of trying them in order"><span class="switch sm" aria-hidden="true"${on ? ' data-on="true"' : ''}></span>Spread</button>
+      <button type="button" class="btn danger" data-config-act="group-remove" data-name="${esc(name)}" aria-label="Remove group ${esc(name)}">Remove</button></div>`;
+  });
+  return `<div class="cfg-list wide">${configListHead('Model groups', 'One model name for several models. Each model takes over when the one before it can’t answer, or, with Spread, new sessions start on different models.', 'Add group', 'data-config-act="group-add"')}
+    ${rows.join('') || '<p class="cfg-empty">No model groups.</p>'}</div>`;
+}
+
+function groupAction(act, name) {
+  const groups = configGet(['model-groups']) || {};
+  if (act === 'group-add') {
+    let n = Object.keys(groups).length + 1;
+    while (Object.hasOwn(groups, `group-${n}`)) n++;
+    configSet(['model-groups'], { ...groups, [`group-${n}`]: [] });
+  } else if (act === 'group-remove') {
+    configSet(['model-groups'], Object.fromEntries(Object.entries(groups).filter(([k]) => k !== name)));
+  } else if (act === 'group-balance') {
+    const g = groups[name];
+    configSet(['model-groups'], { ...groups, [name]: groupBalanced(g) ? groupModels(g) : { models: groupModels(g), balance: true } });
+  }
+  S.config.msg = null;
+  render();
+  if (act === 'group-add') $$('[data-group-name]').pop()?.select();
+  else if (act === 'group-balance') $(`[data-config-act="group-balance"][data-name="${CSS.escape(name)}"]`)?.focus();
+}
+
+// Typing in a group's row edits it in place, keeping the order of groups.
+document.addEventListener('input', (e) => {
+  const groups = configGet(['model-groups']) || {};
+  const models = e.target.closest('[data-group-models]');
+  if (models) {
+    const name = models.dataset.groupModels;
+    const list = models.value.split(',').map((m) => m.trim()).filter(Boolean);
+    configSet(['model-groups'], { ...groups, [name]: groupBalanced(groups[name]) ? { models: list, balance: true } : list });
+    S.config.msg = null; configUpdateFoot();
+    return;
+  }
+  const input = e.target.closest('[data-group-name]');
+  if (!input) return;
+  const old = input.dataset.groupName;
+  const name = input.value.trim();
+  if (!name || /\s/.test(name) || (name !== old && Object.hasOwn(groups, name))) {
+    input.setCustomValidity('Use a unique name without spaces.');
+    return;
+  }
+  input.setCustomValidity('');
+  if (name === old) return;
+  configSet(['model-groups'], Object.fromEntries(Object.entries(groups).map(([k, v]) => [k === old ? name : k, v])));
+  const row = input.closest('.group-row');
+  input.dataset.groupName = name;
+  row.querySelector('[data-group-models]').dataset.groupModels = name;
+  for (const b of row.querySelectorAll('[data-name]')) b.dataset.name = name;
+  S.config.msg = null; configUpdateFoot();
+});
 
 function configConnectionsHTML() {
   return `<div class="cfg-grid">${configField(['proxy-url'], 'Upstream proxy', { wide: true,
@@ -348,15 +528,89 @@ function configConnectionsHTML() {
     ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}</div>`;
 }
 
-// This device's subscription (app.js) acts at once; the events are saved to the file.
+// This device's subscription (app.js) acts at once; the events and webhooks are saved to the file.
 function configNotificationsHTML() {
   return `<div class="cfg-grid">${pushDeviceHTML()}
+    <div class="cfg-divider wide"></div>
+    ${configWebhooksHTML()}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['notifications', 'sign-in-expired'], 'Sign-in expired', 'A signed-in account needs signing in again before it can take requests.')}
     ${configSwitch(['notifications', 'provider-exhausted'], 'Provider out of capacity', 'Every account of a provider is used up or unavailable, and again when one is back.')}
     ${configSwitch(['notifications', 'account-used-up'], 'Account limit used up', 'One account used up its 5-hour or weekly limit while others carry on.')}
     ${configSwitch(['notifications', 'account-errors'], 'Account errors', 'An account reports an error, or three or more of its requests fail within an hour.')}</div>`;
 }
+
+// Where a webhook URL delivers, as the server decides it (src/push/webhooks.rs).
+function webhookKind(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const host = u.hostname.toLowerCase();
+  const under = (d) => host === d || host.endsWith(`.${d}`);
+  if ((under('discord.com') || under('discordapp.com')) && u.pathname.startsWith('/api/webhooks/')) return 'Discord';
+  if (host === 'hooks.slack.com') return 'Slack';
+  if (['webhook.office.com', 'logic.azure.com', 'powerplatform.com', 'powerautomate.com'].some(under)) return 'Teams';
+  if (host === 'api.telegram.org') return 'Telegram';
+  if (host.split('.').includes('ntfy')) return 'ntfy';
+  return 'Webhook';
+}
+const webhookHost = (url) => { try { return new URL(url).host; } catch { return ''; } };
+
+// Chat and webhook destinations: shown by kind and host only (the rest is the secret).
+function configWebhooksHTML() {
+  const hooks = configGet(['notifications', 'webhooks']) || [];
+  const w = S.config.webhooks;
+  const kind = webhookKind(w.draft.trim());
+  const rows = hooks.map((url, i) => {
+    const result = w.results[url];
+    return `<div class="hook-row"><span class="cell2"><span>${esc(webhookKind(url) || 'Webhook')}</span><span class="mono meta">${esc(webhookHost(url))}</span></span>
+      <span class="hook-result ${result?.ok ? 'ok' : result ? 'err' : ''}" role="status">${esc(result ? result.text : '')}</span>
+      <span class="named-btns"><button type="button" class="btn sm" data-config-act="hook-test" data-index="${i}"${w.testing === url ? ' disabled' : ''}>${w.testing === url ? 'Sending…' : 'Send test'}</button>
+      <button type="button" class="btn sm danger" data-config-act="remove" data-path="${configPath(['notifications', 'webhooks', i])}" aria-label="Remove the ${esc(webhookKind(url) || 'webhook')} destination">Remove</button></span></div>`;
+  }).join('');
+  return `<div class="cfg-list wide">${configListHead('Chat and webhooks', 'The same notifications in Discord, Slack, Teams, Telegram, ntfy, or anything that takes a JSON POST. Paste the URL the service gives you; for Telegram, the sendMessage URL with ?chat_id=.')}
+    ${rows || '<p class="cfg-empty">No chat or webhook destinations.</p>'}
+    <div class="hook-add"><div class="field"><label class="sr-only" for="hook-draft">Webhook URL</label>
+      <input id="hook-draft" type="${S.private ? 'password' : 'url'}" value="${esc(w.draft)}" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false" aria-describedby="hook-draft-note">
+      <small id="hook-draft-note" class="${w.error ? 'cfg-error' : ''}">${esc(w.error || (kind ? `Sends as ${kind}.` : ''))}</small></div>
+      <button type="button" class="btn" data-config-act="hook-add">Add</button></div></div>`;
+}
+
+function webhookAction(act, index) {
+  const c = S.config;
+  const w = c.webhooks;
+  if (act === 'hook-add') {
+    const url = w.draft.trim();
+    let ok = false;
+    try { const u = new URL(url); ok = ['https:', 'http:'].includes(u.protocol) && !!u.hostname; } catch {}
+    if (!ok) { w.error = 'Paste the full https:// URL the service gave you.'; render(); return $('#hook-draft')?.focus(); }
+    const hooks = configGet(['notifications', 'webhooks']) || [];
+    if (!hooks.includes(url)) configSet(['notifications', 'webhooks'], [...hooks, url]);
+    Object.assign(w, { draft: '', error: '' });
+    c.msg = null; render();
+    return $('#hook-draft')?.focus();
+  }
+  if (act === 'hook-test') {
+    const url = (configGet(['notifications', 'webhooks']) || [])[Number(index)];
+    if (!url) return;
+    w.testing = url; render();
+    api('/push/webhooks/test', { method: 'POST', body: JSON.stringify({ url }) })
+      .then(() => { w.results[url] = { ok: true, text: 'Sent' }; })
+      .catch((e) => { w.results[url] = { ok: false, text: e.message }; })
+      .finally(() => { w.testing = null; if (S.route === 'config' && c.section === 'notifications') render(); });
+  }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'hook-draft') return;
+  const w = S.config.webhooks;
+  w.draft = e.target.value; w.error = '';
+  const note = $('#hook-draft-note');
+  const kind = webhookKind(w.draft.trim());
+  if (note) { note.className = ''; note.textContent = kind ? `Sends as ${kind}.` : ''; }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'hook-draft' && e.key === 'Enter') { e.preventDefault(); webhookAction('hook-add'); }
+});
 
 // Provider ids here are config groups; the logo sprite knows them as account providers.
 const configLogo = (provider, name, size = 16) => logo(provider === 'compat' ? 'openai-compat' : provider, name, 'api-key', size);
@@ -414,6 +668,8 @@ function configModelsHTML() {
 function configDiagnosticsHTML() {
   return `${configSwitch(['debug'], 'Debug logging', 'Write detailed server logs for troubleshooting.', true)}
     <div class="cfg-divider"></div>
+    ${configChoice(['log-format'], 'Log format', [['text', 'Text'], ['json', 'JSON']], 'JSON writes one object per line, for log collectors. Needs a restart.')}
+    <div class="cfg-divider"></div>
     <div class="cfg-list">${configListHead('Compatibility notices', S.config.ignored.length ? 'These settings are kept in the file but have no effect in Fusebox.' : 'No ignored CLIProxyAPI features were detected.')}
     ${S.config.ignored.length ? `<ul class="cfg-notices">${S.config.ignored.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>` : ''}</div>`;
 }
@@ -444,21 +700,111 @@ async function loadRawConfig() {
   r.loading = true;
   try {
     const res = await api('/config');
-    Object.assign(r, { text: res.text, saved: res.text });
+    Object.assign(r, { text: res.text, saved: res.text, revision: res.revision });
   } catch (e) { S.config.msg = { kind: 'err', text: e.message }; }
   r.loading = false;
   if (S.route === 'config' && S.config.section === 'yaml') render();
 }
 
+// ------------------------------------------------------------ review before saving
+
+// Lines of `before` and `after` as unchanged (' '), removed ('-') and added ('+').
+function lineDiff(before, after) {
+  const x = before.split('\n');
+  const y = after.split('\n');
+  let start = 0;
+  while (start < x.length && start < y.length && x[start] === y[start]) start++;
+  let ex = x.length;
+  let ey = y.length;
+  while (ex > start && ey > start && x[ex - 1] === y[ey - 1]) { ex--; ey--; }
+  const a = x.slice(start, ex);
+  const b = y.slice(start, ey);
+  const mid = [];
+  if (a.length * b.length > 4e6) {
+    a.forEach((t) => mid.push(['-', t]));
+    b.forEach((t) => mid.push(['+', t]));
+  } else {
+    // Longest common subsequence, from the end, then walked from the start.
+    const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+    for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+    let i = 0;
+    let j = 0;
+    while (i < a.length || j < b.length) {
+      if (i < a.length && j < b.length && a[i] === b[j]) { mid.push([' ', a[i]]); i++; j++; }
+      else if (i < a.length && (j === b.length || lcs[i + 1][j] >= lcs[i][j + 1])) mid.push(['-', a[i++]]);
+      else mid.push(['+', b[j++]]);
+    }
+  }
+  return [...x.slice(0, start).map((t) => [' ', t]), ...mid, ...x.slice(ex).map((t) => [' ', t])];
+}
+
+// Changed lines with three lines around them; longer unchanged runs fold away.
+function diffHTML(ops) {
+  const near = ops.map((_, i) => ops.slice(Math.max(0, i - 3), i + 4).some(([t]) => t !== ' '));
+  const out = [];
+  for (let i = 0; i < ops.length; i++) {
+    if (near[i]) { const [t, text] = ops[i]; out.push(`<span class="dl ${t === '+' ? 'add' : t === '-' ? 'del' : ''}"><b aria-hidden="true">${t}</b>${esc(text) || ' '}</span>`); continue; }
+    let j = i;
+    while (j < ops.length && !near[j]) j++;
+    out.push(`<span class="dl fold">⋯ ${plural(j - i, 'unchanged line')}</span>`);
+    i = j - 1;
+  }
+  return out.join('');
+}
+
+function openReview(before, after, run) {
+  const ops = lineDiff(before, after);
+  S.config.review = { ops, run, added: ops.filter(([t]) => t === '+').length, removed: ops.filter(([t]) => t === '-').length };
+  render();
+  $('[data-config-act="review-save"]')?.focus();
+}
+
+function closeReview() {
+  S.config.review = null;
+  render();
+  $('[data-config-act="save"]')?.focus();
+}
+
+async function confirmReview() {
+  const review = S.config.review;
+  if (!review) return;
+  S.config.review = null;
+  await review.run();
+}
+
+function configReviewHTML() {
+  const r = S.config.review;
+  if (!r) return '';
+  const summary = r.added || r.removed ? [r.added && plural(r.added, 'line') + ' added', r.removed && plural(r.removed, 'line') + ' removed'].filter(Boolean).join(', ') : 'No change to the file';
+  return `<div class="scrim" data-config-act="review-cancel"></div>
+    <div class="review" role="dialog" aria-modal="true" aria-labelledby="review-title">
+      <div class="review-head"><h2 id="review-title">Save these changes to config.yaml?</h2><span class="meta">${esc(summary)}</span></div>
+      <pre class="diff">${S.private ? '<span class="dl fold">Hidden while emails and keys are hidden.</span>' : diffHTML(r.ops)}</pre>
+      <div class="review-foot"><button type="button" class="btn ghost" data-config-act="review-cancel">Keep editing</button><button type="button" class="btn primary" data-config-act="review-save">Save</button></div>
+    </div>`;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (S.config.review && e.key === 'Escape') { e.preventDefault(); closeReview(); }
+});
+
 async function saveRawConfig() {
   const c = S.config;
   if (c.busy || !rawDirty()) return;
+  openReview(c.raw.saved, c.raw.text, writeRawConfig);
+}
+
+async function writeRawConfig() {
+  const c = S.config;
   const ta = $('#cfg-yaml');
   const pos = ta ? [ta.selectionStart, ta.scrollTop] : null;
   c.busy = true; c.msg = null; render();
   try {
-    const res = await api('/config', { method: 'PUT', body: JSON.stringify({ text: c.raw.text }) });
+    const res = await api('/config', { method: 'PUT', body: JSON.stringify({ text: c.raw.text, revision: c.raw.revision }) });
     c.raw.saved = c.raw.text;
+    c.raw.revision = res.revision;
     acceptConfig(await api('/config/settings'));
     c.msg = { kind: 'ok', text: res.restart_required ? 'Saved. Some changes need a server restart.' : 'Saved and applied.' };
     refreshAccounts();
@@ -535,14 +881,15 @@ function configHTML() {
     <div class="cfg-chips" role="group" aria-label="Config sections">${CONFIG_SECTIONS.map(([id, label]) => `<button type="button" data-config-act="section" data-section="${id}" ${c.section === id ? 'aria-current="page"' : ''}>${label}<span class="cfg-dot${dirty.has(id) ? ' on' : ''}" aria-label="${dirty.has(id) ? 'Unsaved changes' : ''}"></span></button>`).join('')}</div>
     <div class="cfg-layout"><nav class="cfg-nav" aria-label="Config sections">${CONFIG_SECTIONS.map(([id, label]) => `<button type="button" data-config-act="section" data-section="${id}" ${c.section === id ? 'aria-current="page"' : ''}><span>${label}</span><span class="cfg-dot${dirty.has(id) ? ' on' : ''}"${dirty.has(id) ? ' title="Unsaved changes"' : ''}></span></button>`).join('')}</nav>
     ${content}</div>
-    <div class="${configFootClass()}" id="config-foot" aria-live="polite">${configFootHTML()}</div>`;
+    <div class="${configFootClass()}" id="config-foot" aria-live="polite">${configFootHTML()}</div>
+    ${configReviewHTML()}`;
 }
 
 function acceptConfig(result) {
   const c = S.config;
   Object.assign(c, { values: result.values, saved: configClone(result.values), defaults: result.defaults, revision: result.revision,
     path: result.path, ignored: result.ignored || [], restart_fields: result.restart_fields || [], errors: {}, secrets: {}, reloadConfirm: false,
-    raw: { text: null, saved: null, loading: false }, named: { ...c.named, confirm: null } });
+    raw: { text: null, saved: null, revision: '', loading: false }, named: { ...c.named, confirm: null } });
 }
 
 async function loadConfig() {
@@ -595,9 +942,17 @@ function configValidate() {
   if ('request-retry' in changed && (!Number.isInteger(v['request-retry']) || v['request-retry'] < 0 || v['request-retry'] > 4294967295)) invalid(['request-retry'], 'Enter a nonnegative whole number.');
   if ('five-hour-reserve-percent' in changed && (!Number.isInteger(v['five-hour-reserve-percent']) || v['five-hour-reserve-percent'] < 0 || v['five-hour-reserve-percent'] > 100)) invalid(['five-hour-reserve-percent'], 'Enter a whole percentage between 0 and 100.');
   if ('session-affinity-idle-seconds' in changed && (!Number.isInteger(v['session-affinity-idle-seconds']) || v['session-affinity-idle-seconds'] < 60)) invalid(['session-affinity-idle-seconds'], 'Enter at least 60 seconds.');
+  if ('first-token-timeout-seconds' in changed && (!Number.isInteger(v['first-token-timeout-seconds']) || v['first-token-timeout-seconds'] < 0 || v['first-token-timeout-seconds'] > 3600)) invalid(['first-token-timeout-seconds'], 'Enter 0 to 3600 seconds.');
+  if ('model-groups' in changed) {
+    for (const [name, g] of Object.entries(v['model-groups'] || {})) {
+      if (!name || /\s/.test(name) || !groupModels(g).length) { invalid(['model-groups'], `Give the group ${name || 'without a name'} a name without spaces and at least one model.`); break; }
+    }
+  }
   const checkURL = (path, proxy = false, required = false) => {
     const value = configGet(path);
     if (!value) { if (required) invalid(path, 'Enter a base URL.'); return; }
+    // CLIProxyAPI's spelling for "no proxy, not even the default one".
+    if (proxy && ['direct', 'none'].includes(value.trim())) return;
     try { const u = new URL(value); if (!u.hostname || !(proxy ? ['http:', 'https:', 'socks5:', 'socks5h:'] : ['http:', 'https:']).includes(u.protocol)) throw new Error(); }
     catch { invalid(path, proxy ? 'Use a complete HTTP, HTTPS or SOCKS5 URL.' : 'Use a complete HTTP or HTTPS URL.'); }
   };
@@ -642,7 +997,7 @@ function configValidate() {
       if (provider) { c.section = 'providers'; c.provider = provider[0];
         for (let i = 0; i < v[provider[2]].length; i++) { c.opens[`${provider[2]}:${i}`] = true; c.opens[`${provider[2]}:${i}:advanced`] = true; }
       } else if (path[0] === 'api-keys') c.section = 'access';
-      else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent'].includes(path[0])) c.section = 'routing';
+      else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent', 'first-token-timeout-seconds', 'model-groups', 'background-model'].includes(path[0])) c.section = 'routing';
       else if (path[0] === 'proxy-url') c.section = 'connections';
       else c.section = 'server';
     }
@@ -668,8 +1023,20 @@ function configSavedText(result, text = 'Saved and applied.') {
 async function saveConfig() {
   const c = S.config;
   if (c.section === 'yaml') return saveRawConfig();
-  if (c.busy || !configDirty() || !configValidate()) return;
+  if (c.busy || c.review || !configDirty() || !configValidate()) return;
   const changes = configChanges();
+  c.busy = true; c.msg = null; render();
+  try {
+    const preview = await api('/config/settings', { method: 'PATCH', body: JSON.stringify({ revision: c.revision, changes, dry_run: true }) });
+    c.busy = false;
+    openReview(preview.before, preview.after, () => commitConfig(changes));
+  } catch (e) {
+    c.busy = false; c.msg = { kind: 'err', text: e.message }; render();
+  }
+}
+
+async function commitConfig(changes) {
+  const c = S.config;
   const oldKey = c.saved['management-key'];
   const newKey = c.values['management-key'];
   c.busy = true; c.msg = null; render();
@@ -774,6 +1141,11 @@ document.addEventListener('click', (e) => {
   if (act === 'save') return saveConfig();
   if (act === 'discard') return discardConfig();
   if (act.startsWith('named-')) return namedAction(act, button.dataset.id);
+  if (act.startsWith('group-')) return groupAction(act, button.dataset.name);
+  if (act.startsWith('hook-')) return webhookAction(act, button.dataset.index);
+  if (act.startsWith('limits-')) return limitsAction(act, button.dataset.id);
+  if (act === 'review-save') return confirmReview();
+  if (act === 'review-cancel') return closeReview();
   if (act === 'reload') {
     if (configDirty() || rawDirty()) { c.reloadConfirm = true; render(); return; }
     return loadConfig();

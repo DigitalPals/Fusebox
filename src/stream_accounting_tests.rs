@@ -116,7 +116,7 @@ async fn passthrough_completion_keeps_status_and_usage_before_eof() {
     for format in [Format::Responses, Format::Claude, Format::Chat, Format::Gemini] {
         let (app, tracker) = tracker(format);
         let (response, _server) = response(completed_messages(format), format == Format::Chat, true).await;
-        let mut stream = passthrough_stream(response, format, tracker, false);
+        let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), format, tracker, false);
         loop {
             let frame = stream.next().await.unwrap();
             if terminal(format, &frame) {
@@ -155,7 +155,7 @@ async fn interrupted_passthrough_keeps_received_usage_and_stays_cancelled() {
         "input_tokens":20,"output_tokens":1,"cache_read_input_tokens":80,"cache_creation_input_tokens":5
     }}})];
     let (response, _server) = response(messages, false, true).await;
-    let mut stream = passthrough_stream(response, Format::Claude, tracker, false);
+    let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), Format::Claude, tracker, false);
     stream.next().await.unwrap();
     drop(stream);
     assert_eq!(recorded(&app, 499, 25, 1, 80).error.as_deref(), Some("client disconnected"));
@@ -189,7 +189,7 @@ async fn upstream_errors_keep_their_status_and_usage_when_dropped() {
         )
         .await;
         let mut stream = if passthrough {
-            passthrough_stream(response, Format::Claude, tracker, false)
+            passthrough_stream(Box::pin(response.bytes_stream()), Format::Claude, tracker, false)
         } else {
             let events = futures::stream::iter([
                 Event::Usage(Usage { input: 20, cache_read: 80, ..Default::default() }),
@@ -215,7 +215,7 @@ async fn upstream_errors_keep_their_status_and_usage_when_dropped() {
 async fn draining_a_completed_stream_records_usage_once() {
     let (app, tracker) = tracker(Format::Responses);
     let (response, _server) = response(completed_messages(Format::Responses), false, false).await;
-    let mut stream = passthrough_stream(response, Format::Responses, tracker, false);
+    let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), Format::Responses, tracker, false);
     while stream.next().await.is_some() {}
     drop(stream);
     assert!(recorded(&app, 200, 20, 4, 80).error.is_none());
@@ -246,7 +246,8 @@ async fn premature_eof_and_done_are_errors_in_every_passthrough_format() {
             }
             let (app, tracker) = tracker(format);
             let (response, _server) = response(partial_messages(format), done, false).await;
-            let frames: Vec<_> = passthrough_stream(response, format, tracker, false).collect().await;
+            let frames: Vec<_> =
+                passthrough_stream(Box::pin(response.bytes_stream()), format, tracker, false).collect().await;
             let failure = frames.iter().position(failed_frame).expect("missing downstream error");
             if done {
                 let end = frames.iter().position(|f| f.data == "[DONE]").unwrap();
@@ -263,7 +264,7 @@ async fn claude_message_stop_without_stop_reason_cannot_hide_a_truncated_turn() 
     let mut messages = partial_messages(Format::Claude);
     messages.push(json!({"type":"message_stop"}));
     let (response, _server) = response(messages, false, true).await;
-    let mut stream = passthrough_stream(response, Format::Claude, tracker, false);
+    let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), Format::Claude, tracker, false);
     loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
         assert!(!terminal(Format::Claude, &frame), "a client would stop before seeing the error");
@@ -355,7 +356,8 @@ async fn passthrough_body_read_failure_emits_a_downstream_error() {
     }));
     let response = reqwest::get(url).await.unwrap();
     let (app, tracker) = tracker(Format::Responses);
-    let frames: Vec<_> = passthrough_stream(response, Format::Responses, tracker, false).collect().await;
+    let frames: Vec<_> =
+        passthrough_stream(Box::pin(response.bytes_stream()), Format::Responses, tracker, false).collect().await;
     assert!(frames.iter().any(failed_frame));
     assert!(recorded(&app, 502, 0, 0, 0).error.unwrap().contains("upstream stream error"));
 }

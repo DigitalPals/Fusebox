@@ -29,6 +29,9 @@ pub struct Config {
     /// How many different accounts to try before giving up on a request.
     #[serde(deserialize_with = "lenient_u32")]
     pub request_retry: u32,
+    /// Seconds a streamed answer may stay silent before its first event; the request
+    /// then moves to the next account. 0 turns the check off.
+    pub first_token_timeout_seconds: u64,
     /// How new sessions choose an account.
     pub routing: Routing,
     /// Smart routing reserves this 5-hour remaining percentage for active/recent sessions.
@@ -46,6 +49,8 @@ pub struct Config {
     /// spending them from the dashboard. Off by default: it uses unofficial endpoints.
     pub banked_resets: bool,
     pub debug: bool,
+    /// `text` (default) or `json` log lines. Needs a restart.
+    pub log_format: LogFormat,
     /// Serve HTTPS with this certificate.
     #[serde(skip_serializing_if = "Tls::is_off")]
     pub tls: Tls,
@@ -65,6 +70,13 @@ pub struct Config {
     /// Each is dropped once a release lists it or the provider's model list includes it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_models: BTreeMap<String, Vec<String>>,
+    /// One name for several models (`smart: [claude-opus-5-5, gpt-6-astra]`): tried in
+    /// order, or spread across new sessions with `balance: true`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_groups: BTreeMap<String, ModelGroup>,
+    /// Claude Code's quick background calls (its Haiku model) go to this model instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_model: Option<String>,
     /// CLIProxyAPI settings found in the file that have no effect here.
     #[serde(skip)]
     pub ignored: Vec<String>,
@@ -81,6 +93,55 @@ pub struct Config {
     pub xai_api_key: Vec<KeyEntry>,
     pub meta_api_key: Vec<KeyEntry>,
     pub openai_compatibility: Vec<CompatEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+/// The models behind a group name, and whether new sessions are spread across them
+/// (`balance`) or each model only takes over when the one before it can't answer.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModelGroup {
+    pub models: Vec<String>,
+    pub balance: bool,
+}
+
+impl Serialize for ModelGroup {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if !self.balance {
+            return self.models.serialize(s);
+        }
+        let mut map = s.serialize_map(Some(2))?;
+        map.serialize_entry("models", &self.models)?;
+        map.serialize_entry("balance", &true)?;
+        map.end()
+    }
+}
+
+/// `smart: [a, b]`, or `fast: { models: [a, b], balance: true }`.
+impl<'de> Deserialize<'de> for ModelGroup {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Form {
+            List(Vec<String>),
+            Map {
+                models: Vec<String>,
+                #[serde(default)]
+                balance: bool,
+            },
+        }
+        Ok(match Form::deserialize(d)? {
+            Form::List(models) => ModelGroup { models, balance: false },
+            Form::Map { models, balance } => ModelGroup { models, balance },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
@@ -127,12 +188,29 @@ fn percentage<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     Ok(n)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct NamedClient {
     pub id: String,
     pub label: String,
     pub key: String,
+    /// Model patterns this client may use (`*` wildcards); empty allows every model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// User-Agent patterns its requests must match (`claude-cli/*`); empty allows any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+    /// Input, cache-write and output tokens per day (cache reads are not counted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_day: Option<u64>,
+    /// Estimated spend per month at API list prices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd_per_month: Option<f64>,
+    /// The last day the key works (`2026-12-31`), in the server's time zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<chrono::NaiveDate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -149,7 +227,7 @@ impl Tls {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Notifications {
     /// A signed-in account needs signing in again.
@@ -160,11 +238,21 @@ pub struct Notifications {
     pub account_used_up: bool,
     /// An account error, or three or more failed requests in an hour.
     pub account_errors: bool,
+    /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
+    /// Telegram, ntfy, or any URL that takes JSON).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<String>,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { sign_in_expired: true, provider_exhausted: true, account_used_up: false, account_errors: false }
+        Self {
+            sign_in_expired: true,
+            provider_exhausted: true,
+            account_used_up: false,
+            account_errors: false,
+            webhooks: vec![],
+        }
     }
 }
 
@@ -207,6 +295,13 @@ pub struct KeyEntry {
     /// Model patterns this key must not serve (`*` wildcards).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub excluded_models: Vec<String>,
+    /// Higher goes first: accounts below the highest ready priority only take over.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub priority: i32,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -226,6 +321,8 @@ pub struct CompatEntry {
     pub excluded_models: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub priority: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -257,6 +354,7 @@ impl Default for Config {
             management_allow_remote: None,
             proxy_url: String::new(),
             request_retry: 3,
+            first_token_timeout_seconds: 120,
             routing: Routing::LeastUsed,
             five_hour_reserve_percent: 30,
             session_affinity: true,
@@ -265,12 +363,15 @@ impl Default for Config {
             claude_cloak: true,
             banked_resets: false,
             debug: false,
+            log_format: LogFormat::Text,
             tls: Tls::default(),
             notifications: Notifications::default(),
             force_model_prefix: false,
             oauth_model_alias: BTreeMap::new(),
             oauth_excluded_models: BTreeMap::new(),
             extra_models: BTreeMap::new(),
+            model_groups: BTreeMap::new(),
+            background_model: None,
             ignored: vec![],
             legacy_auth_dir: false,
             claude_api_key: vec![],
@@ -303,6 +404,7 @@ management-key: ""
 
 proxy-url: ""               # optional upstream proxy, e.g. socks5://127.0.0.1:1080
 request-retry: 3            # accounts to try before failing a request
+first-token-timeout-seconds: 120 # a stream silent this long moves to the next account (0 = off)
 routing: least-used         # new sessions: least-used | smart-quota | round-robin | fill-first
 five-hour-reserve-percent: 30 # smart-quota: keep this 5-hour share for sessions already on an account
 session-affinity: true      # keep a session on its subscription until quota is exhausted
@@ -326,17 +428,31 @@ usage:
 #   provider-exhausted: true   # every account of a provider is out, and when one is back
 #   account-used-up: false     # one account used up its 5-hour or weekly limit
 #   account-errors: false      # account errors and runs of failed requests
+#   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
+#     - https://discord.com/api/webhooks/...
 
 # Models released after this Fusebox version, served until it knows them. The dashboard's
 # "Add model" writes here; an entry is removed once Fusebox or the provider lists the model.
 # extra-models:
 #   claude: [claude-opus-6]
 
+# One name for several models. Each takes over when the one before it can't answer;
+# with balance: true, new sessions are spread across them instead.
+# model-groups:
+#   smart: [claude-opus-5-5, gpt-6-astra]
+#   fast: { models: [claude-sonnet-5-5, gemini-3.8-flash], balance: true }
+# background-model: gemini-3.8-flash  # Claude Code's quick Haiku calls (titles, summaries)
+
 # Optional named inference credentials; existing api-keys continue to work.
 named-clients: []
 #  - id: desktop
 #    label: Work desktop
 #    key: choose-a-distinct-random-key
+#    models: [claude-*, gpt-*]           # optional limits, each on its own
+#    requests-per-minute: 60
+#    tokens-per-day: 5000000             # input + output; cache reads don't count
+#    usd-per-month: 100                  # estimated at API list prices
+#    expires: 2026-12-31
 
 # API keys (optional). Accounts (Claude, Codex, Antigravity, Kimi, xAI, Meta, Devin, Vertex)
 # are added with `fusebox login <provider>` or from the dashboard.
@@ -373,6 +489,33 @@ openai-compatibility: []
 #      - name: "moonshotai/kimi-k3"
 #        alias: "kimi-k3"
 "#;
+
+/// An upstream proxy URL with a scheme Fusebox can use. A proxy that can't be used must
+/// never quietly turn into a direct connection, so anything else is refused.
+pub fn check_proxy_url(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() || value == "direct" || value == "none" {
+        return Ok(());
+    }
+    let url = url::Url::parse(value).map_err(|_| format!("{value} is not a URL; write it as scheme://host:port"))?;
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") {
+        return Err(format!("{value}: use an http://, https://, socks5:// or socks5h:// address"));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("{value} has no host"));
+    }
+    reqwest::Proxy::all(value).map(|_| ()).map_err(|e| format!("{value}: {e}"))
+}
+
+/// Webhook destinations are plain HTTPS (or HTTP, for a local relay) URLs.
+pub fn check_webhook_url(value: &str) -> Result<(), String> {
+    let shown = crate::push::webhook_name(value);
+    let url = url::Url::parse(value.trim()).map_err(|_| format!("{shown} is not a URL"))?;
+    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("{shown}: use an https:// address"));
+    }
+    Ok(())
+}
 
 /// The first of `names` that is set, so renamed variables keep their old spelling.
 pub fn first_env(names: &[&str], get: impl Fn(&str) -> Option<String>) -> Option<String> {
@@ -473,6 +616,57 @@ impl Config {
             anyhow::ensure!(ids.insert(id), "named-clients: the id {id} is used twice");
             crate::usage::types::valid_label(&client.id).map_err(anyhow::Error::msg)?;
             crate::usage::types::valid_label(&client.label).map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                client.models.iter().chain(&client.user_agents).all(|p| !p.trim().is_empty()),
+                "named-clients: {id} has an empty model or user-agent pattern"
+            );
+            anyhow::ensure!(
+                client.requests_per_minute != Some(0) && client.tokens_per_day != Some(0),
+                "named-clients: {id}: a limit of 0 blocks every request; remove the limit or raise it"
+            );
+            anyhow::ensure!(
+                client.usd_per_month.is_none_or(|usd| usd.is_finite() && usd > 0.0),
+                "named-clients: {id}: usd-per-month must be more than 0"
+            );
+        }
+        let proxies = std::iter::once(("proxy-url", Some(cfg.proxy_url.as_str())))
+            .chain(
+                [
+                    &cfg.claude_api_key,
+                    &cfg.codex_api_key,
+                    &cfg.gemini_api_key,
+                    &cfg.vertex_api_key,
+                    &cfg.kimi_api_key,
+                    &cfg.xai_api_key,
+                    &cfg.meta_api_key,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|k| ("an API key's proxy-url", k.proxy_url.as_deref())),
+            )
+            .chain(cfg.openai_compatibility.iter().map(|c| ("openai-compatibility proxy-url", c.proxy_url.as_deref())));
+        for (what, url) in proxies {
+            if let Some(url) = url {
+                check_proxy_url(url).map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+            }
+        }
+        for hook in &cfg.notifications.webhooks {
+            check_webhook_url(hook).map_err(|e| anyhow::anyhow!("notifications.webhooks: {e}"))?;
+        }
+        for (name, group) in &cfg.model_groups {
+            anyhow::ensure!(
+                !name.trim().is_empty() && !name.contains(char::is_whitespace),
+                "model-groups: \"{name}\" can't be a model name"
+            );
+            anyhow::ensure!(!group.models.is_empty(), "model-groups: {name} lists no models");
+            // Members are always models, never other groups: a group named like a real
+            // model (to give it fallbacks) can still be listed by another group.
+            for model in &group.models {
+                anyhow::ensure!(!model.trim().is_empty(), "model-groups: {name} has an empty model");
+            }
+        }
+        if let Some(model) = &cfg.background_model {
+            anyhow::ensure!(!model.trim().is_empty(), "background-model is empty; remove it or name a model");
         }
         Ok(cfg)
     }

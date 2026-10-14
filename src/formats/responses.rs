@@ -434,8 +434,8 @@ fn failure_of(response: &Value) -> Event {
 }
 
 impl StreamParser for Parser {
-    fn feed(&mut self, ev: &SseEvent, out: &mut Vec<Event>) {
-        let Ok(v) = serde_json::from_str::<Value>(&ev.data) else { return };
+    fn feed_value(&mut self, ev: &SseEvent, v: Option<&Value>, out: &mut Vec<Event>) {
+        let Some(v) = v else { return };
         let kind = v["type"].as_str().or(ev.event.as_deref()).unwrap_or_default();
         let idx = v["output_index"].as_u64().unwrap_or(0) as usize;
         match kind {
@@ -538,7 +538,7 @@ impl StreamParser for Parser {
                 out.push(failure_of(r));
             }
             "error" => {
-                let e = if v["error"].is_object() { &v["error"] } else { &v };
+                let e = if v["error"].is_object() { &v["error"] } else { v };
                 out.push(Event::Error {
                     status: v["status"].as_u64().map(|s| s as u16).unwrap_or_else(|| {
                         status_of_code(e["code"].as_str().or(e["type"].as_str()).unwrap_or_default())

@@ -7,6 +7,9 @@
 
 mod crypto;
 mod faults;
+mod webhooks;
+
+pub use webhooks::webhook_name;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -52,6 +55,10 @@ struct Stored {
     /// Faults that were sent (or seen when notifications were turned on).
     #[serde(default)]
     notified: BTreeSet<String>,
+    /// Whether some device or webhook was listening at the last check. When the first
+    /// one appears, faults already present count as sent, so it doesn't get a burst.
+    #[serde(default)]
+    active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,13 +167,28 @@ impl Push {
     fn seed(&self, current: &[Fault]) {
         let mut stored = self.stored.lock();
         stored.notified = current.iter().filter(|f| f.event != Event::Quiet).map(|f| f.key.clone()).collect();
+        stored.active = true;
         self.save(&stored);
         *self.tracker.lock() = Tracker::default();
     }
 
+    /// Nothing listens any more: forget the counting, so the next listener starts fresh.
+    fn deactivate(&self) {
+        *self.tracker.lock() = Tracker::default();
+        let mut stored = self.stored.lock();
+        if stored.active {
+            stored.active = false;
+            self.save(&stored);
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.stored.lock().active
+    }
+
     /// Takes one check's faults and returns what to send: faults seen twice in a row
     /// that were not sent yet, and providers that are back after running out.
-    fn track(&self, current: &[Fault], accounts: &[AccountView], settings: Notifications) -> Vec<Fault> {
+    fn track(&self, current: &[Fault], accounts: &[AccountView], settings: &Notifications) -> Vec<Fault> {
         let mut tracker = self.tracker.lock();
         let mut stored = self.stored.lock();
         let present: HashSet<&str> =
@@ -221,7 +243,7 @@ impl Push {
     }
 }
 
-fn enabled(settings: Notifications, event: Event) -> bool {
+fn enabled(settings: &Notifications, event: Event) -> bool {
     match event {
         Event::SignIn => settings.sign_in_expired,
         Event::ProviderExhausted => settings.provider_exhausted,
@@ -244,15 +266,22 @@ pub async fn watcher(app: Arc<App>) {
 }
 
 async fn check(app: &App) {
-    if app.push.subscriptions().is_empty() {
-        *app.push.tracker.lock() = Tracker::default();
+    let cfg = app.cfg();
+    let hooks = &cfg.notifications.webhooks;
+    if app.push.subscriptions().is_empty() && hooks.is_empty() {
+        app.push.deactivate();
         return;
     }
     let accounts = views(app);
     let current = faults::faults(&accounts, Utc::now());
-    let send = app.push.track(&current, &accounts, app.cfg().notifications);
+    if !app.push.active() {
+        app.push.seed(&current);
+        return;
+    }
+    let send = app.push.track(&current, &accounts, &cfg.notifications);
     for fault in send {
         notify(app, &fault, current.len()).await;
+        webhooks::deliver_all(app, hooks, &fault).await;
     }
 }
 
@@ -376,6 +405,30 @@ pub fn router() -> Router<Arc<App>> {
         .route("/push/subscriptions", post(subscribe))
         .route("/push/subscriptions/{id}", delete(unsubscribe))
         .route("/push/test", post(test))
+        .route("/push/webhooks/test", post(test_webhook))
+}
+
+#[derive(Deserialize)]
+struct WebhookTest {
+    url: String,
+}
+
+/// Sends a test message to a webhook, saved or not yet, and says how it went.
+async fn test_webhook(State(app): State<Arc<App>>, Json(req): Json<WebhookTest>) -> Response {
+    if let Err(e) = crate::config::check_webhook_url(&req.url) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    let fault = Fault {
+        key: "test".into(),
+        title: "Fusebox notifications are on".into(),
+        body: "This channel will hear when a sign-in expires or a provider runs out.".into(),
+        ..Default::default()
+    };
+    let msg = webhooks::Message { fault: &fault, recovered: false, test: true };
+    match webhooks::send(&app, &req.url, &msg).await {
+        Ok(()) => Json(json!({ "ok": true, "name": webhooks::webhook_name(&req.url) })).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {

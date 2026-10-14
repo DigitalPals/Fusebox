@@ -288,6 +288,8 @@ pub fn recovered(accounts: &[AccountView], provider: &str) -> Option<Fault> {
         title: format!("{} is back", back.group_name),
         body: format!("{} can take requests again.", back.label),
         path: back.path(),
+        kind: "recovered",
+        level: "ok",
         ..Default::default()
     })
 }

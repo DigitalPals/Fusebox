@@ -31,28 +31,46 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The default image (root, CLIProxyAPI's layout), then the nonroot one; the
+      # second reuses the first's build stage from the cache.
       - id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: default
+          build-args: FUSEBOX_COMMIT=${{ github.sha }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
-      - name: Export digest
+      - id: nonroot
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: nonroot
+          build-args: FUSEBOX_COMMIT=${{ github.sha }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+      - name: Export digests
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          mkdir -p /tmp/digests/default /tmp/digests/nonroot
+          for flavor in default nonroot; do
+            if [ "$flavor" = default ]; then digest="${{ steps.build.outputs.digest }}"; else digest="${{ steps.nonroot.outputs.digest }}"; fi
+            touch "/tmp/digests/$flavor/${digest#sha256:}"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: digest-${{ strategy.job-index }}
-          path: /tmp/digests/*
+          path: /tmp/digests/
           retention-days: 1
 
   publish:
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flavor: [default, nonroot]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -70,12 +88,15 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           # type=semver also adds latest, for stable versions only (not vX.Y.Z-rc.N).
+          # The nonroot image gets the same tags with -nonroot (latest-nonroot, ...).
+          flavor: |
+            suffix=${{ matrix.flavor == 'nonroot' && '-nonroot' || '' }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=edge,branch=main
       - name: Create the multi-arch manifest
-        working-directory: /tmp/digests
+        working-directory: /tmp/digests/${{ matrix.flavor }}
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \

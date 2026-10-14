@@ -1,6 +1,6 @@
 //! Durable metadata-only usage journal and deterministic, conservative accounting.
 use super::{pricing::Catalogue, types::Observation};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params, types::Value as SqlValue};
@@ -635,6 +635,42 @@ pub(super) fn rebuild_entries(conn: &Connection, key: &str, source: &str) -> Res
 }
 /// Retry unpriced observations affected by corrected date/region semantics.
 /// Rows that already carry a price are never touched; safe to repeat.
+/// Copies the usage database to `to`, a new private file, with SQLite's online backup:
+/// safe while Fusebox is writing, and checked before it is called done.
+pub fn backup(database: &Path, to: &Path) -> Result<()> {
+    ensure!(database.is_file(), "there is no usage database at {}", database.display());
+    {
+        // Created first and private, so the copy is never readable by others.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(to).with_context(|| format!("{} exists or can't be created; choose a new file", to.display()))?;
+    }
+    let result = (|| -> Result<()> {
+        let source = Connection::open(database)?;
+        source.busy_timeout(std::time::Duration::from_secs(10))?;
+        let mut copy = Connection::open(to)?;
+        rusqlite::backup::Backup::new(&source, &mut copy)?.run_to_completion(
+            256,
+            std::time::Duration::from_millis(20),
+            None,
+        )?;
+        let check: String = copy.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        ensure!(check == "ok", "the copy failed its integrity check: {check}");
+        let rows: i64 = copy.query_row("SELECT COUNT(*) FROM usage_observations", [], |r| r.get(0)).unwrap_or(0);
+        println!("Backed up {} ({rows} observations) to {}", database.display(), to.display());
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    result
+}
+
 pub fn reprice(conn: &mut Connection) -> Result<u64> {
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;

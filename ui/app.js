@@ -72,8 +72,34 @@ const S = {
   push: { loaded: false, loading: false, status: null, endpoint: null, busy: false, msg: null }, // Config, Notifications
   config: { values: null, saved: null, defaults: {}, revision: '', path: '', ignored: [], restart_fields: [],
     msg: null, busy: false, loading: false, section: 'clients', provider: 'claude', oauthProvider: 'claude',
-    errors: {}, opens: {}, secrets: {}, reloadConfirm: false, reveal: false, raw: { text: null, saved: null, loading: false }, named: namedIdle() },
+    errors: {}, opens: {}, secrets: {}, reloadConfirm: false, reveal: false, raw: { text: null, saved: null, revision: '', loading: false }, named: namedIdle(),
+    webhooks: { draft: '', error: '', testing: null, results: {} }, review: null, clientUsage: null, clientUsageAt: 0 },
+  play: null, // { model, prompt, out, busy, meta, error, abort } while the playground is open
+  theme: store.get('theme') || 'system', // 'system' | 'light' | 'dark'
 };
+
+// ---------------------------------------------------------------- theme
+
+// Light or dark follows the system unless the palette picks one, per browser.
+// `data-shade` says which one shows, for code that draws its own colours.
+const LIGHT = matchMedia('(prefers-color-scheme: light)');
+const THEMES = { system: 'Match system', light: 'Light', dark: 'Dark' };
+function applyTheme() {
+  const root = document.documentElement;
+  if (S.theme === 'light' || S.theme === 'dark') root.dataset.theme = S.theme; else delete root.dataset.theme;
+  const shade = root.dataset.theme || (LIGHT.matches ? 'light' : 'dark');
+  root.dataset.shade = shade;
+  $('meta[name="theme-color"]')?.setAttribute('content', shade === 'light' ? '#f6f4ef' : '#0b0b0a');
+}
+function cycleTheme() {
+  S.theme = { system: 'light', light: 'dark' }[S.theme] || 'system';
+  if (S.theme === 'system') store.del('theme'); else store.set('theme', S.theme);
+  applyTheme();
+  if (S.route === 'usage') usageRender();
+  toast(`Theme: ${THEMES[S.theme]}`);
+}
+LIGHT.addEventListener('change', () => { applyTheme(); if (S.route === 'usage') usageRender(); });
+applyTheme();
 
 const PROVIDER = {
   claude: 'Claude', codex: 'Codex', gemini: 'Gemini', vertex: 'Vertex AI', antigravity: 'Antigravity',
@@ -498,13 +524,14 @@ function refreshViews() {
     patch('recent', recentHTML);
   } else if (S.route === 'accounts') {
     if (S.sub) patch('det-root', detailBodyHTML);
-    else { patch('acct-head', accountHeadHTML); patch('acct-filters', acctFiltersHTML); patch('acct-list', accountListHTML); }
+    else { patch('acct-head', accountHeadHTML); patch('acct-filters', acctFiltersHTML); patch('acct-timeline', resetTimelineHTML); patch('acct-list', accountListHTML); }
   } else if (S.route === 'usage') {
     usageRender();
   } else if (S.route === 'models') {
     patch('models-head', modelsHeadHTML);
     if (!S.addModel) patch('models-panel', modelsPanelHTML);
     patch('models-root', modelsBodyHTML);
+    patch('models-groups', groupsCardHTML);
   }
   renderDrawer();
 }
@@ -715,13 +742,52 @@ function windowOf(a, short) {
 const windowLabel = (w, short) => (short ? (w ? w.name.toUpperCase() : '5H') : w && w.name === 'day' ? 'DAY' : 'WK');
 const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : 'Weekly');
 
-// 20 segments of 5%, lit for the displayed share, coloured by how much is used.
+// A window's length from its name ("5h", "day", "week"), in seconds.
+function windowSeconds(w) {
+  const h = /^(\d+)h$/.exec(w?.name || '');
+  if (h) return Number(h[1]) * 3600;
+  return { day: 86400, week: 7 * 86400 }[w?.name] || null;
+}
+
+// How far through its window we are, 0 to 1, when the window says when it resets.
+function windowElapsed(w, now = Date.now()) {
+  const len = windowSeconds(w);
+  if (!len || !w?.resets_at) return null;
+  const left = (Date.parse(w.resets_at) - now) / 1000;
+  return left >= 0 && left <= len ? 1 - left / len : null;
+}
+
+// Percent of the window used per hour so far, once a little of the window has passed.
+function burnRate(w, now = Date.now()) {
+  const q = quotaOf(w, now);
+  const t = windowElapsed(w, now);
+  if (!q || t == null || t < 0.02) return null;
+  return q.used / ((t * windowSeconds(w)) / 3600);
+}
+
+// When the window runs out at the pace used so far, if that is before it resets.
+// Before a quarter of the window has passed, or with little used, the pace is too
+// unsettled to say.
+function runsOutAt(w, now = Date.now()) {
+  const q = quotaOf(w, now);
+  const t = windowElapsed(w, now);
+  if (!q || q.exhausted || t == null || t < 0.25 || q.used < 20) return null;
+  const perMs = q.used / (t * windowSeconds(w) * 1000);
+  const at = now + (100 - q.used) / perMs;
+  return at < Date.parse(w.resets_at) ? at : null;
+}
+
+// 20 segments of 5%, lit for the displayed share, coloured by how much is used. A thin
+// mark shows even pace: where usage would be now if spread evenly over the window.
 function segsHTML(w, label, cls = '') {
   const q = quotaOf(w);
   if (!q) return `<span class="segs ${cls}" role="img" aria-label="${esc(label)}: not reported">${'<i></i>'.repeat(20)}</span>`;
   const v = quotaView(q);
   const lit = Math.round(v.value / 5);
-  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}"${w.resets_at ? ` data-quota-reset="${esc(w.resets_at)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < lit ? '<i class="on"></i>' : '<i></i>')).join('')}</span>`;
+  const t = windowElapsed(w);
+  const pace = t == null ? '' : `<b class="pace" style="left:${(v.mode === 'used' ? t : 1 - t) * 100}%" aria-hidden="true"></b>`;
+  const paceText = t == null ? '' : ` · even pace ${Math.round(t * 100)}% used by now`;
+  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}${paceText}"${w.resets_at ? ` data-quota-reset="${esc(w.resets_at)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < lit ? '<i class="on"></i>' : '<i></i>')).join('')}${pace}</span>`;
 }
 
 function pctHTML(w) {
@@ -730,13 +796,21 @@ function pctHTML(w) {
   return `<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span>`;
 }
 
-// One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover.
+// One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover. When the
+// pace so far would use the window up before it resets, the row says when instead.
 function meterRowHTML(a, short) {
   const w = windowOf(a, short);
   const label = windowLabel(w, short);
-  const reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
-  const title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
-  return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst"${title}>${reset}</span></div>`;
+  const out = w && runsOutAt(w);
+  const rate = w && burnRate(w);
+  const pace = rate == null ? '' : ` · using ${rate < 1 ? rate.toFixed(1) : Math.round(rate)}% an hour`;
+  let reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
+  let title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}${pace}"` : '';
+  if (out) {
+    reset = `out ${liveLeft(new Date(out).toISOString(), true)}`;
+    title = ` title="At this pace${pace ? ` (${esc(pace.slice(3))})` : ''} the ${esc(windowTitle(w).toLowerCase())} window runs out ${esc(fullResetTime(new Date(out).toISOString()))}, before it resets ${esc(fullResetTime(w.resets_at))}"`;
+  }
+  return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst${out ? ' out' : ''}"${title}>${reset}</span></div>`;
 }
 const metersHTML = (a) => `<div class="meters">${meterRowHTML(a, true)}${meterRowHTML(a, false)}</div>`;
 
@@ -756,6 +830,8 @@ function windowHTML(a, short, size) {
   let note = 'Not reported yet';
   if (w && w.resets_at) note = `${q && q.exhausted ? 'Back' : 'Resets'} ${esc(when(w.resets_at))} · in ${liveLeft(w.resets_at)}`;
   else if (q) note = 'No reset time reported';
+  const out = w && runsOutAt(w);
+  if (out) note += ` · <span class="warn">at this pace, used up ${esc(when(new Date(out).toISOString()))}</span>`;
   const big = size === 'xl';
   return `<div class="window"><div class="window-top"><span>${title}${big ? ' window' : ''}</span>${q ? `<span class="pct ${q.cls}${big ? ' big' : ''}" style="width:auto">${quotaPercent(q[S.quotaDisplay])}</span>` : '<span class="dim">–</span>'}</div>
     ${segsHTML(w, `${title} window`, size === 'xl' ? 'xl' : 'lg')}<span class="note">${note}</span></div>`;
@@ -966,7 +1042,34 @@ function snippet(kind) {
   const any = (S.models[0] || {}).id || 'claude-sonnet-5-5';
   const k = (s) => `<span class="k">${esc(s)}</span>`;
   const v = (s) => `<span class="v">${esc(s)}</span>`;
+  const claude = pick('claude-', 'claude-sonnet-5-5');
+  const gpt = pick('gpt-', 'gpt-6-astra');
+  // The text with the endpoint, key and model ids marked, and the key hidden when private.
+  const marked = (text, models) => [origin, token, ...models].reduce((html, value) => html.split(esc(value)).join(v(value === token ? shown : value)), esc(text));
+  const keyEnv = key || named ? '\nexport FUSEBOX_KEY=your-key' : '';
+  const plain = (text, models, note) => ({ text, html: marked(text, models), note });
   switch (kind) {
+    case 'opencode':
+      return plain(`// opencode.json\n{\n  "$schema": "https://opencode.ai/config.json",\n  "provider": {\n    "fusebox": {\n      "npm": "@ai-sdk/openai-compatible",\n      "name": "Fusebox",\n      "options": { "baseURL": "${origin}/v1", "apiKey": "${token}" },\n      "models": { "${claude}": {}, "${gpt}": {} }\n    }\n  },\n  "model": "fusebox/${claude}"\n}`,
+        [claude, gpt], 'List any models your accounts serve under models; pick one with /models.');
+    case 'gemini':
+      return plain(`export GOOGLE_GEMINI_BASE_URL=${origin}\nexport GEMINI_API_KEY=${token}\ngemini -m ${pick('gemini-', 'gemini-3.8-flash')}`,
+        [pick('gemini-', 'gemini-3.8-flash')], 'Gemini CLI speaks the Gemini API; any model works, Fusebox translates.');
+    case 'aider':
+      return plain(`export OPENAI_API_BASE=${origin}/v1\nexport OPENAI_API_KEY=${token}\naider --model openai/${claude}`,
+        [claude], 'The openai/ prefix tells Aider to use the OpenAI API; the rest is the model id.');
+    case 'continue':
+      return plain(`# ~/.continue/config.yaml\nname: Fusebox\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Fusebox\n    provider: openai\n    model: ${claude}\n    apiBase: ${origin}/v1\n    apiKey: ${token}`,
+        [claude], 'Add one entry per model you want in the picker.');
+    case 'zed':
+      return plain(`// settings.json\n"language_models": {\n  "openai_compatible": {\n    "Fusebox": {\n      "api_url": "${origin}/v1",\n      "available_models": [{ "name": "${claude}", "max_tokens": 200000 }]\n    }\n  }\n}`,
+        [claude], `Then enter the key in the Agent panel's settings for Fusebox.${key || named ? '' : ' No key is required, so any value works.'}`);
+    case 'cline':
+      return plain(`API Provider   OpenAI Compatible\nBase URL       ${origin}/v1\nAPI Key        ${token}\nModel ID       ${claude}`,
+        [claude], 'The same settings work in Cline, Roo Code and Kilo Code.');
+    case 'cursor':
+      return plain(`Settings → Models → API Keys\nOpenAI API Key            ${token}\nOverride OpenAI Base URL  https://your-fusebox-host/v1`,
+        [], 'Cursor sends custom-endpoint requests from its own servers, so Fusebox must be reachable over public HTTPS (a tunnel works); localhost does not.');
     case 'codex':
       return {
         text: `# ~/.codex/config.toml\nmodel = "${pick('gpt-', 'gpt-6-astra')}"\nmodel_provider = "fusebox"\n\n[model_providers.fusebox]\nname = "Fusebox"\nbase_url = "${origin}/v1"\nwire_api = "responses"${key || named ? '\nenv_key = "FUSEBOX_KEY"' : ''}`,
@@ -1032,11 +1135,16 @@ function mainlineHTML() {
     <p class="ml-later">After the first request this moves to <a class="linkbtn" href="#/config/clients">Config, Clients</a>.</p>`;
 }
 
+const SNIPPET_TABS = [['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['sdk', 'OpenAI SDK'], ['curl', 'curl']];
+const SNIPPET_MORE = [['gemini', 'Gemini CLI'], ['aider', 'Aider'], ['continue', 'Continue'], ['zed', 'Zed'], ['cline', 'Cline & Roo Code'], ['cursor', 'Cursor']];
+
 function setupHTML() {
-  const tabs = [['claude', 'Claude Code'], ['codex', 'Codex'], ['sdk', 'OpenAI SDK'], ['curl', 'curl']];
   const sn = snippet(S.snippet);
+  const more = SNIPPET_MORE.some(([id]) => id === S.snippet);
   return `<div class="snip-head">
-      <div class="snip-tabs" role="group" aria-label="Client">${tabs.map(([id, label]) => `<button type="button" data-act="snippet" data-id="${id}" aria-pressed="${S.snippet === id}">${label}</button>`).join('')}</div>
+      <div class="snip-tabs" role="group" aria-label="Client">${SNIPPET_TABS.map(([id, label]) => `<button type="button" data-act="snippet" data-id="${id}" aria-pressed="${S.snippet === id}">${label}</button>`).join('')}
+        <label class="sr-only" for="snip-more">More tools</label>
+        <select id="snip-more" class="snip-more${more ? ' on' : ''}"><option value="">More tools</option>${SNIPPET_MORE.map(([id, label]) => `<option value="${id}"${S.snippet === id ? ' selected' : ''}>${label}</option>`).join('')}</select></div>
       <span class="grow"></span>
       <button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(sn.text)}" data-toast="Snippet copied" aria-label="Copy snippet" title="Copy snippet">${ICON.copy}</button>
     </div>
@@ -1300,7 +1408,11 @@ function paletteItems(q) {
   act('apikey', 'Add API key', 'Anthropic, OpenAI, Gemini, OpenRouter…');
   act('quota', S.quotaDisplay === 'remaining' ? 'Show quota used' : 'Show quota remaining', 'Flip every meter', 'U');
   act('privacy', S.private ? 'Show emails and keys' : 'Hide emails and keys', 'For screenshots and screen sharing', '.');
-  act('client', 'Set up a client', 'Claude Code, Codex, SDKs, curl');
+  act('client', 'Set up a client', 'Claude Code, Codex, OpenCode, SDKs, curl and more');
+  act('play', 'Try a model', 'Send a prompt and see which account answers');
+  act('theme', `Theme: ${THEMES[S.theme]}`, 'Switch between light, dark and the system’s');
+  const lang = window.fuseboxLanguage;
+  if (lang) act('language', lang.current === 'zh' ? 'Language: 中文' : 'Language: English', lang.current === 'zh' ? 'Switch to English' : '切换到中文');
   act('copyurl', 'Copy endpoint URL', location.origin);
   for (const a of accounts.filter((x) => !x.disabled && Object.keys(x.cooldowns || {}).length).slice(0, 3)) {
     items.push({ group: 'Actions', kind: 'act', ref: 'clear', id: a.id, label: 'Clear cooldowns', hint: `${acctLabel(a)} · ${provName(a)}` });
@@ -1385,6 +1497,11 @@ function runPalette(i) {
       location.hash = '#/config/clients';
       return;
     case 'copyurl': return copyText(location.origin).then(() => toast('Endpoint copied'));
+    case 'theme': return cycleTheme();
+    case 'language': return window.fuseboxLanguage?.set(window.fuseboxLanguage.current === 'zh' ? 'en' : 'zh');
+    case 'play':
+      if (S.route !== 'models') location.hash = '#/models';
+      return setTimeout(() => { if (!S.play) $('[data-act="open-play"]')?.click(); else $('#play-prompt')?.focus(); }, 50);
     case 'clear': return accountAction('reset', it.id).then(() => toast('Cooldowns cleared'));
   }
 }
@@ -1449,7 +1566,44 @@ function accountsHTML() {
   return `<div id="acct-head">${accountHeadHTML()}</div>
     <div id="acct-panel">${panelHTML()}</div>
     <div id="acct-filters">${acctFiltersHTML()}</div>
+    <div id="acct-timeline">${resetTimelineHTML()}</div>
     <div id="acct-list">${accountListHTML()}</div>`;
+}
+
+// Every subscription's next weekly reset on one seven-day line, so it is clear whose
+// allowance renews next. Shown with two or more subscriptions that report one.
+function resetTimelineHTML() {
+  if (!['all', 'subs'].includes(S.acctFilter)) return '';
+  const now = Date.now();
+  const span = 7 * 864e5;
+  const items = (S.accounts || []).filter((a) => !a.disabled && metered(a)).map((a) => {
+    const w = windowOf(a, false);
+    const at = w?.resets_at ? Date.parse(w.resets_at) : NaN;
+    return at > now && at <= now + span ? { a, w, at, q: quotaOf(w) } : null;
+  }).filter(Boolean).sort((x, y) => x.at - y.at);
+  if (items.length < 2) return '';
+  const pos = (t) => ((t - now) / span) * 100;
+  // Resets close together take the next lane, so their marks don't overlap.
+  const lanes = [];
+  for (const it of items) {
+    let lane = lanes.findIndex((last) => pos(it.at) - last > (mob() ? 9 : 4));
+    if (lane < 0) { lane = lanes.length; lanes.push(-Infinity); }
+    if (lane > 2) lane = 2;
+    lanes[lane] = pos(it.at);
+    it.lane = lane;
+  }
+  const days = [];
+  const day = new Date(now);
+  day.setHours(24, 0, 0, 0);
+  for (let t = day.getTime(); t < now + span; t += 864e5) days.push(t);
+  const used = (it) => (it.q ? `${quotaPercent(it.q.used)} used` : 'usage not reported');
+  return `<section class="card timeline" aria-label="Weekly resets in the next seven days">
+    <div class="card-head"><span class="label">Weekly resets · next 7 days</span><span class="meta" style="font-size:12px">Next: ${esc(acctLabel(items[0].a))} ${esc(when(items[0].w.resets_at))}</span></div>
+    <div class="tl-track" style="height:${22 + Math.min(lanes.length, 3) * 22}px">
+      ${days.map((t) => `<span class="tl-day" style="left:${pos(t)}%">${esc(weekday(new Date(t).toISOString()))}</span>`).join('')}
+      ${items.map((it) => `<button type="button" class="tl-mark ${it.q?.cls || ''}" style="left:${pos(it.at)}%;top:${it.lane * 22}px" data-act="open-acc" data-id="${esc(it.a.id)}"
+        aria-label="${esc(`${acctLabel(it.a)}, ${provName(it.a)}: ${used(it)}, resets ${fullResetTime(it.w.resets_at)}`)}" title="${esc(`${acctLabel(it.a)} · ${used(it)} · resets ${fullResetTime(it.w.resets_at)}`)}">${acctLogo(it.a, 14)}</button>`).join('')}
+    </div></section>`;
 }
 
 function accountHeadHTML() {
@@ -1579,7 +1733,7 @@ function detailBodyHTML() {
         : '<div class="tr" style="display:block;padding:12px 0 14px;color:var(--fg-3)">No models cooling down. A rate limit pauses only that model on this account.</div>'}</section>` : '';
   const load = `<section class="card pad load" style="flex:none" aria-label="Load in the last 60 minutes" id="det-load">${detLoadHTML()}</section>`;
   const reqs = `<div id="det-reqs" style="display:contents">${detRequestsHTML()}</div>`;
-  const signin = detSigninHTML(a);
+  const signin = `${detPriorityHTML(a)}${detSigninHTML(a)}`;
   const sessions = `<section class="card" style="padding:${mob() ? '12px 14px 4px' : '18px 20px 8px'}" aria-label="Pinned sessions" id="det-sess">${detSessionsHTML()}</section>`;
   if (mob()) {
     return `${head}${limits}${cools}${load}${reqs}${sessions}${signin}
@@ -1632,6 +1786,31 @@ function storedIn(a) {
   if (a.file) return `${home(S.overview.auth_dir)}/${S.private ? who(a.file) : a.file}`;
   if (a.provider === 'openai-compat') return `config.yaml › openai-compatibility › ${a.group || ''}`;
   return `config.yaml › ${a.provider === 'codex' ? 'codex' : a.provider}-api-key`;
+}
+
+// Which accounts take new sessions first. Higher priorities go first; the rest only take
+// over when those can't (the file's or key's `priority`).
+function detPriorityHTML(a) {
+  const p = a.priority || 0;
+  const pick = p > 0 ? 'first' : p < 0 ? 'last' : 'normal';
+  const options = [['first', 'First', 10], ['normal', 'Normal', 0], ['last', 'Last', -10]];
+  const help = { first: 'Takes new sessions before accounts set to Normal or Last.', normal: 'Takes new sessions by the routing strategy, with the other Normal accounts.', last: 'Takes new sessions only when no other account can.' }[pick];
+  return `<section class="card" style="padding:${mob() ? '12px 14px' : '18px 20px'}" aria-label="Priority">
+    <div class="card-head"><span class="label">New sessions</span>
+      <div class="seg" role="group" aria-label="Priority for new sessions">${options.map(([k, label, value]) => `<button type="button" data-act="priority" data-id="${esc(a.id)}" data-value="${value}" aria-pressed="${pick === k}">${label}</button>`).join('')}</div></div>
+    <span class="meta" style="display:block;font-size:12.5px;margin-top:8px">${esc(help)}</span></section>`;
+}
+
+async function setPriority(id, priority) {
+  const a = accountById(id);
+  if (!a || (a.priority || 0) === priority) return;
+  try {
+    await api(`/accounts/${encodeURIComponent(id)}/priority`, { method: 'POST', body: JSON.stringify({ priority }) });
+    a.priority = priority;
+    refreshViews();
+    toast(priority > 0 ? 'Takes new sessions first' : priority < 0 ? 'Takes new sessions last' : 'Back to normal priority');
+    refreshAccounts();
+  } catch (e) { toast(e.message); }
 }
 
 function detSigninHTML(a) {
@@ -2206,11 +2385,113 @@ function routeStepText(step, a) {
 
 function modelsHTML() {
   const search = `<div class="searchbox"${mob() ? ' style="flex:none;height:44px;padding:0 12px"' : ' style="flex:0 1 280px"'}>${ICON.search}<label class="sr-only" for="model-filter">Find a model</label><input id="model-filter" type="text" placeholder="Find a model" value="${esc(S.modelFilter)}" autocomplete="off" spellcheck="false"${mob() ? ' style="font-size:14px"' : ''}>${S.modelFilter && !mob() ? '<button class="clear" type="button" data-act="clear-model-filter" aria-label="Clear">×</button>' : ''}</div>`;
-  if (mob()) return `${search}<div id="models-head">${modelsHeadHTML()}</div><div id="models-panel" style="display:contents">${modelsPanelHTML()}</div><div id="models-root" style="display:contents">${modelsBodyHTML()}</div>`;
+  const play = `<button class="btn" type="button" data-act="open-play" aria-expanded="${!!S.play}">Try a model</button>`;
+  const panels = `<div id="models-panel" style="display:contents">${modelsPanelHTML()}</div><div id="models-play" style="display:contents">${playHTML()}</div>`;
+  if (mob()) return `${search}<div id="models-head">${modelsHeadHTML()}</div>${panels}<div id="models-root" style="display:contents">${modelsBodyHTML()}</div><div id="models-groups" style="display:contents">${groupsCardHTML()}</div><div class="acct-actions">${play}</div>`;
   const add = `<button class="btn" type="button" id="add-model-btn" data-act="add-model" aria-expanded="${!!S.addModel}">Add model</button>`;
-  return `<div class="page-head"><div><h1 class="h-page">Models</h1><p class="meta" id="models-count">${modelsCountText()}</p></div><span class="grow"></span>${add}${search}</div>
-    <div id="models-head">${modelsHeadHTML()}</div><div id="models-panel" style="display:contents">${modelsPanelHTML()}</div><div id="models-root">${modelsBodyHTML()}</div>`;
+  return `<div class="page-head"><div><h1 class="h-page">Models</h1><p class="meta" id="models-count">${modelsCountText()}</p></div><span class="grow"></span>${play}${add}${search}</div>
+    <div id="models-head">${modelsHeadHTML()}</div>${panels}<div id="models-root">${modelsBodyHTML()}</div><div id="models-groups">${groupsCardHTML()}</div>`;
 }
+
+// Model groups from config: each name, how it uses its models, and where Claude Code's
+// background calls go.
+function groupsCardHTML() {
+  const groups = Object.entries(S.routes?.groups || {});
+  const background = S.routes?.background_model;
+  if (!groups.length && !background) return '';
+  const line = (name, how, models, sep) => `<div class="group-line">${name}<span class="meta">${how}</span><span class="chipset">${models.map((m) => `<span class="idchip static">${esc(m)}</span>`).join(`<span class="sep-mark" aria-hidden="true">${sep}</span>`)}</span></div>`;
+  return `<section class="card groups" aria-label="Model groups">
+    <div class="card-head"><span class="label">Model groups</span><a class="link" href="#/config/routing">Change in Config →</a></div>
+    ${groups.map(([name, g]) => line(`<button class="idchip" type="button" data-act="copy-model" data-id="${esc(name)}" title="Copy ${esc(name)}">${esc(name)}</button>`, g.balance ? 'spreads sessions across' : 'tries in order', g.models, g.balance ? '·' : '→')).join('')}
+    ${background ? line('<span class="idchip static">Claude Code background calls</span>', 'go to', [background], '') : ''}</section>`;
+}
+
+// The playground: one prompt to one model, through routing like any request, streamed.
+function playHTML() {
+  const P = S.play;
+  if (!P) return '';
+  const ids = [...Object.keys(S.routes?.groups || {}), ...S.models.map((m) => m.id)];
+  return `<section class="card pad play" aria-label="Try a model">
+    <div class="card-head"><span class="label">Try a model</span><button class="icon-btn" type="button" data-act="close-play" aria-label="Close the playground">×</button></div>
+    <form id="play-form" class="play-form">
+      <div class="field"><label for="play-model">Model</label><input id="play-model" list="play-models" value="${esc(P.model)}" required autocomplete="off" spellcheck="false" placeholder="claude-sonnet-5-5">
+        <datalist id="play-models">${ids.map((id) => `<option value="${esc(id)}">`).join('')}</datalist></div>
+      <div class="field"><label for="play-prompt">Prompt</label><textarea id="play-prompt" rows="3" required>${esc(P.prompt)}</textarea></div>
+      <div class="play-actions"><button class="btn primary" type="submit"${P.busy ? ' disabled' : ''}>${P.busy ? 'Sending…' : 'Send'}</button>
+        ${P.busy ? '<button class="btn ghost" type="button" data-act="stop-play">Stop</button>' : ''}
+        <span class="meta" id="play-meta" role="status">${esc(P.meta || 'Shows on the Usage page as the client dashboard.')}</span></div>
+    </form>
+    <pre class="play-out${P.error ? ' err' : ''}" id="play-out"${P.out || P.error ? '' : ' hidden'}>${esc(P.error || P.out)}</pre></section>`;
+}
+
+async function runPlay(form) {
+  const P = S.play;
+  if (!P || P.busy) return;
+  P.model = form.querySelector('#play-model').value.trim();
+  P.prompt = form.querySelector('#play-prompt').value;
+  if (!P.model || !P.prompt.trim()) return;
+  Object.assign(P, { busy: true, out: '', error: '', meta: '', abort: new AbortController() });
+  patch('models-play', playHTML);
+  const started = performance.now();
+  let first = null;
+  let usage = null;
+  let account = null;
+  try {
+    const headers = { 'content-type': 'application/json' };
+    if (S.key) headers.authorization = `Bearer ${S.key}`;
+    const res = await fetch('/api/playground', { method: 'POST', headers, body: JSON.stringify({ model: P.model, prompt: P.prompt }), signal: P.abort.signal });
+    account = res.headers.get('x-fusebox-account');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error?.message || data.error || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        for (const line of block.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          let v;
+          try { v = JSON.parse(data); } catch { continue; }
+          if (v.error) throw new Error(v.error.message || 'The request failed');
+          const delta = v.choices?.[0]?.delta || {};
+          if ((delta.content || delta.reasoning_content) && first == null) first = performance.now() - started;
+          if (delta.content) {
+            P.out += delta.content;
+            const out = $('#play-out');
+            if (out) { out.hidden = false; out.textContent = P.out; }
+          }
+          if (v.usage) usage = v.usage;
+        }
+      }
+    }
+    P.meta = [account && `Answered by ${who(account)}`, first != null && `first token ${ms(Math.round(first))}`, `total ${ms(Math.round(performance.now() - started))}`,
+      usage && `${fmt(usage.prompt_tokens || 0)} in · ${fmt(usage.completion_tokens || 0)} out`].filter(Boolean).join(' · ');
+  } catch (e) {
+    if (e.name === 'AbortError') P.meta = 'Stopped.';
+    else P.error = e.message;
+  }
+  Object.assign(P, { busy: false, abort: null });
+  if (S.play === P) patch('models-play', playHTML);
+}
+
+document.addEventListener('submit', (e) => {
+  if (e.target.id !== 'play-form') return;
+  e.preventDefault();
+  runPlay(e.target);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'play-prompt' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runPlay(e.target.form); }
+});
 
 const MODEL_EXAMPLE = {
   claude: 'claude-opus-6', codex: 'gpt-7', gemini: 'gemini-4-pro', vertex: 'gemini-4-pro', antigravity: 'gemini-4-pro',
@@ -2746,6 +3027,19 @@ document.addEventListener('click', (e) => {
       patchModelsPanel();
       return $('#models-panel input[name="model"]')?.focus();
     case 'check-models': return checkModels(el);
+    case 'open-play':
+      if (S.play) { S.play.abort?.abort(); S.play = null; patch('models-play', playHTML); return; }
+      S.play = { model: S.models.find((m) => m.id.startsWith('claude-'))?.id || S.models[0]?.id || '', prompt: 'Say hello in one sentence.', out: '', error: '', meta: '', busy: false, abort: null };
+      patch('models-play', playHTML);
+      for (const b of $$('[data-act="open-play"]')) b.setAttribute('aria-expanded', 'true');
+      return $('#play-prompt')?.focus();
+    case 'close-play':
+      S.play?.abort?.abort();
+      S.play = null;
+      patch('models-play', playHTML);
+      for (const b of $$('[data-act="open-play"]')) b.setAttribute('aria-expanded', 'false');
+      return $('[data-act="open-play"]')?.focus();
+    case 'stop-play': S.play?.abort?.abort(); return;
     case 'remove-model': return removeModel(id, el.dataset.provider);
     case 'dismiss-removed':
       store.set('removedSeen', (S.routes?.removed_models || []).map((r) => r.at).sort().pop() || new Date().toISOString());
@@ -2770,7 +3064,9 @@ document.addEventListener('click', (e) => {
     case 'acct-filter':
       S.acctFilter = id;
       patch('acct-filters', acctFiltersHTML);
+      patch('acct-timeline', resetTimelineHTML);
       return patch('acct-list', accountListHTML);
+    case 'priority': return setPriority(id, Number(el.dataset.value));
     case 'filter-session':
       e.stopPropagation();
       S.reqSess = id;
@@ -2880,6 +3176,12 @@ document.addEventListener('input', (e) => {
       for (const b of $$('[data-act="add-model-provider"]')) b.setAttribute('aria-pressed', String(b.dataset.id === guess));
       e.target.placeholder = MODEL_EXAMPLE[guess] || '';
     }
+  } else if (e.target.id === 'snip-more') {
+    if (!e.target.value) return;
+    S.snippet = e.target.value;
+    store.set('snippet', S.snippet);
+    patch('client-setup', setupHTML);
+    $('#snip-more')?.focus();
   } else if (e.target.id === 'model-filter') {
     S.modelFilter = e.target.value;
     patch('models-root', modelsBodyHTML);

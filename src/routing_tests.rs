@@ -757,11 +757,15 @@ async fn temporary_failures_detour_and_the_session_returns_to_its_subscription()
 }
 
 #[tokio::test]
-async fn quota_headers_and_stream_errors_trigger_migration_on_the_next_call() {
+async fn quota_headers_and_stream_errors_trigger_migration() {
+    // A used-up limit reported inside a 200 stream, before any content, moves this very
+    // request to the next account; one reported in headers moves the next request.
     for mode in [4, 5] {
         let fixture = Fixture::new(Routing::RoundRobin, false).await;
         fixture.mock.mode.store(mode, Ordering::Relaxed);
-        assert_eq!(fixture.request(Some("task"), prompt()).await.0, if mode == 4 { 429 } else { 200 });
+        let (status, body) = fixture.request(Some("task"), prompt()).await;
+        assert_eq!(status, 200, "mode {mode}");
+        assert_eq!(answer(&body), if mode == 4 { "b" } else { "a" }, "mode {mode}");
         fixture.mock.mode.store(0, Ordering::Relaxed);
         assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "b");
     }

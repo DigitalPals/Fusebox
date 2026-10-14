@@ -92,7 +92,7 @@ The original release is retained for rollback. Public TLS, authenticated dashboa
 access and every deployed UI asset were verified after commit.
 
 Evidence: [sanitized production receipt](usage-loading-production.json),
-[API contract](usage-ui-contract.md), and private deployment/benchmark artifacts
+[API contract](../docs/usage-ui-contract.md), and private deployment/benchmark artifacts
 under `target/usage-speed-20261007/` and the matching production incoming directory.
 
 ## Subsequent summary retirement

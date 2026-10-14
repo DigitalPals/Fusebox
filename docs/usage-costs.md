@@ -168,13 +168,13 @@ The server usage database is a versioned SQLite file using WAL mode, full synchr
 
 Proxy observations go through a bounded background writer so disk latency does not hold up a response. Queue acceptance is not yet a durable commit: a crash can lose queued events and the current uncommitted batch. A full queue increments the current writer's dropped count; a malformed observation increments rejected; a failed insert batch increments dropped and writer errors. Health reports the current session plus best-effort persisted counters from earlier writer sessions. A previous unclosed session can indicate a crash, forced stop, or concurrent process sharing the database. Counters can lag because health snapshots are persisted between commands and on an idle timer, and disk failure can prevent their update. A storage gap remains visible as degraded health rather than an implicit zero. Imports and collector ingestion wait for durable transaction acknowledgment; their data and checkpoints/outbox updates commit together so retries are safe.
 
-Back up the database through SQLite's backup API while Fusebox is running. This command produces a consistent standalone snapshot, including committed data in the WAL:
+Back up the database through SQLite's backup API while Fusebox is running. `fusebox usage backup` does that for the database your config file uses (or the one `--database` names), writes a new private file, and checks its integrity before saying it's done:
 
 ```sh
-sqlite3 ./usage.sqlite3 '.backup ./usage.sqlite3.backup'
+fusebox --config config.yaml usage backup ./usage-backup.sqlite3
 ```
 
-For a custom path, replace both paths with the configured database location. Avoid copying only the main `.sqlite3` file while the service is running: recent committed rows may still be in `usage.sqlite3-wal`. For a filesystem backup, stop Fusebox cleanly first and preserve the database and any WAL/SHM files together. Keep backups as private as the database; although the database omits prompt content and credentials, it can contain account/client labels, models, timestamps, and activity patterns.
+`sqlite3 ./usage.sqlite3 '.backup ./usage.sqlite3.backup'` produces the same consistent snapshot, including committed data in the WAL; for a custom path, replace both paths with the configured database location. Avoid copying only the main `.sqlite3` file while the service is running: recent committed rows may still be in `usage.sqlite3-wal`. For a filesystem backup, stop Fusebox cleanly first and preserve the database and any WAL/SHM files together. Keep backups as private as the database; although the database omits prompt content and credentials, it can contain account/client labels, models, timestamps, and activity patterns.
 
 On a normal server shutdown, Fusebox stops the import poller, closes usage observation ingress, drains queued writer commands, marks its writer session clean after acknowledgment, and closes the usage database. A shutdown flush failure is logged. A forced kill or power loss cannot run this sequence; the prior session remains unclosed and uncommitted observations may be missing.
 
@@ -188,4 +188,4 @@ See [`usage-ui-contract.md`](usage-ui-contract.md) for the response and dashboar
 
 Collector/client filters select named clients or `collector:<server-id>` identities. Source records include retained revisions and copies; selected accounting entries remain globally deduplicated. A filtered collector can have raw records whose preferred accounting evidence belongs to another collector or a local import. The page explains this exclusion and retains the matching detail records.
 
-The T3 Code comparison, calculation examples, implementation decisions, and production evidence are in [the usage research report](t3code-usage-research.md).
+The T3 Code comparison, calculation examples, implementation decisions, and production evidence are in [the usage research report](../notes/t3code-usage-research.md).

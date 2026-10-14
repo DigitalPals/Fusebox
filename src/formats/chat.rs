@@ -339,7 +339,7 @@ fn usage_of(u: &Value) -> Option<Usage> {
 }
 
 impl StreamParser for Parser {
-    fn feed(&mut self, ev: &SseEvent, out: &mut Vec<Event>) {
+    fn feed_value(&mut self, ev: &SseEvent, v: Option<&Value>, out: &mut Vec<Event>) {
         if ev.data.trim() == "[DONE]" {
             if !self.finished && !self.errored {
                 self.errored = true;
@@ -347,7 +347,7 @@ impl StreamParser for Parser {
             }
             return;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&ev.data) else { return };
+        let Some(v) = v else { return };
         if let Some(err) = v.get("error") {
             self.errored = true;
             out.push(Event::Error {

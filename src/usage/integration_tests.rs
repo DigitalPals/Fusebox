@@ -89,6 +89,7 @@ fn config(dir: &Directory, url: &str, native: bool) -> Config {
             id: "desktop".into(),
             label: "Desktop <safe>".into(),
             key: "synthetic-inference".into(),
+            ..Default::default()
         }],
         proxy_url: "direct".into(),
         codex_websockets: native,
@@ -282,7 +283,10 @@ async fn cancelled_interrupted_and_missing_usage_remain_explicit() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "case {case}");
+        // A stream that ends before any content is a failed attempt, not a 200 that
+        // breaks off: with no other account to try, the client hears 502.
+        let expected = if case == "interrupted" { StatusCode::BAD_GATEWAY } else { StatusCode::OK };
+        assert_eq!(response.status(), expected, "case {case}");
         if case == "cancel" {
             let mut stream = response.bytes_stream();
             assert!(stream.next().await.unwrap().is_ok());
