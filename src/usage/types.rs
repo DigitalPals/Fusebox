@@ -161,6 +161,7 @@ impl Observation {
                         | "image_tokens"
                         | "tool_tokens"
                         | "per_request_usage"
+                        | "estimated_input_tokens"
                 ) || *v > MAX_TOKENS
             })
         {

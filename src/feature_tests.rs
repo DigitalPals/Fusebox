@@ -560,6 +560,7 @@ async fn google_embedding_contracts_preserve_encoding_batch_limits_and_order() {
     ] {
         let s = setup(|cfg, url| {
             cfg.codex_api_key.clear();
+            cfg.usage.database = Some(format!("{}/usage.sqlite3", cfg.auth_dir));
             let entry = KeyEntry { api_key: "google".into(), base_url: Some(url.into()), ..Default::default() };
             if vertex {
                 cfg.vertex_api_key = vec![entry];
@@ -586,23 +587,34 @@ async fn google_embedding_contracts_preserve_encoding_batch_limits_and_order() {
                 .unwrap();
             assert_eq!(bytes, [i as f32, 0.5].into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>());
         }
-        let calls = s.mock.embedding_calls.lock();
-        let sizes: Vec<usize> = calls
-            .iter()
-            .map(|(_, v)| v[if vertex { "instances" } else { "requests" }].as_array().unwrap().len())
-            .collect();
-        assert_eq!(sizes, chunks);
-        if vertex {
-            assert_eq!(body["usage"]["total_tokens"], count * 3);
-            assert!(
-                calls
-                    .iter()
-                    .all(|(_, v)| v["parameters"]["autoTruncate"] == false
+        {
+            let calls = s.mock.embedding_calls.lock();
+            let sizes: Vec<usize> = calls
+                .iter()
+                .map(|(_, v)| v[if vertex { "instances" } else { "requests" }].as_array().unwrap().len())
+                .collect();
+            assert_eq!(sizes, chunks);
+            if vertex {
+                assert_eq!(body["usage"]["total_tokens"], count * 3);
+                assert!(
+                    calls.iter().all(|(_, v)| v["parameters"]["autoTruncate"] == false
                         && v["parameters"]["outputDimensionality"] == 2)
-            );
-        } else {
-            assert!(calls[0].1["requests"].as_array().unwrap().iter().all(|v| v["outputDimensionality"] == 2));
+                );
+            } else {
+                assert!(calls[0].1["requests"].as_array().unwrap().iter().all(|v| v["outputDimensionality"] == 2));
+            }
         }
+        let store = s.app.usage.as_ref().unwrap();
+        store.flush().await.unwrap();
+        assert_eq!(store.health()["state"], "healthy");
+        let (rows, input, models, estimates): (i64, i64, i64, i64) = store.call(move |conn| {
+            Ok(conn.query_row("SELECT COUNT(*),SUM(input),SUM(model=?1),SUM(json_extract(payload,'$.numeric_metadata.estimated_input_tokens') IS NOT NULL) FROM usage_observations", [model], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?)
+        }).await.unwrap();
+        assert_eq!(rows as usize, chunks.len());
+        assert_eq!(models, rows);
+        assert_eq!(input as usize, count * if vertex { 3 } else { 1 });
+        assert_eq!(estimates, if vertex { 0 } else { rows });
+        store.shutdown().await.unwrap();
     }
 }
 
