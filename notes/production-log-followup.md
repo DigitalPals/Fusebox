@@ -6,7 +6,7 @@ Use Fusebox's native **Usage** page and durable usage database for new observati
 
 ## Retiring the obsolete collector
 
-On the production host, run `python3 scripts/retire-legacy-usage-keeper.py` for a read-only check. The script reads the existing management credential internally, verifies TLS, and requires a healthy native writer with a committed observation in the past five minutes. It does not generate an inference request.
+On the production host, run `python3 scripts/retire-legacy-usage-keeper.py --base-url https://<host>:8317` for a read-only check. The script reads the existing management credential internally, verifies TLS, and requires a healthy native writer with a committed observation in the past five minutes. It does not generate an inference request.
 
 With `--apply`, it first takes a private SQLite backup, including committed WAL contents, and verifies its integrity. It then disables and stops only `cpa-usage-keeper.service`. The original database, configuration, executable and historical data remain. A private JSON receipt records the backup digest, record count, native capture health and service state. The backup directory defaults to `/var/lib/cliproxy-rust-update/legacy-usage-backups`; arguments allow other installations to supply their paths and verified HTTPS endpoint.
 

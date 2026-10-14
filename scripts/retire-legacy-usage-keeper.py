@@ -140,7 +140,7 @@ def service_state(action):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--base-url", default="https://10.10.0.235:8317")
+    parser.add_argument("--base-url", required=True, help="the proxy as reached from this host, e.g. https://<host>:8317")
     parser.add_argument("--ca-file", default="/etc/cli-proxy-api/tls/server.crt")
     parser.add_argument("--management-env", default="/etc/cpa-usage-keeper/keeper.env")
     parser.add_argument("--database", default="/var/lib/cpa-usage-keeper/data/app.db")

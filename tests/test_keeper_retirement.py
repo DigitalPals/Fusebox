@@ -33,7 +33,7 @@ class KeeperRetirement(unittest.TestCase):
             retirement.require_recent_proxy_capture({"items": []}, now)
 
     def test_native_capture_is_rechecked_after_backup_before_disabling_service(self):
-        with mock.patch("sys.argv", ["retire", "--apply"]), \
+        with mock.patch("sys.argv", ["retire", "--apply", "--base-url", "https://proxy.invalid:8317"]), \
                 mock.patch.object(retirement.os, "geteuid", return_value=0), \
                 mock.patch.object(retirement.os, "umask"), \
                 mock.patch.object(retirement, "native_status", side_effect=[{"state": "healthy"}, RuntimeError("stale capture")]), \
