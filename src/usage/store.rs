@@ -633,8 +633,6 @@ pub(super) fn rebuild_entries(conn: &Connection, key: &str, source: &str) -> Res
     conn.prepare_cached(&format!("INSERT OR REPLACE INTO usage_source_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND source=?2 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"))?.execute(params![key,source])?;
     Ok(())
 }
-/// Retry unpriced observations affected by corrected date/region semantics.
-/// Rows that already carry a price are never touched; safe to repeat.
 /// Copies the usage database to `to`, a new private file, with SQLite's online backup:
 /// safe while Fusebox is writing, and checked before it is called done.
 pub fn backup(database: &Path, to: &Path) -> Result<()> {
@@ -671,6 +669,8 @@ pub fn backup(database: &Path, to: &Path) -> Result<()> {
     result
 }
 
+/// Retry unpriced observations affected by corrected date/region semantics.
+/// Rows that already carry a price are never touched; safe to repeat.
 pub fn reprice(conn: &mut Connection) -> Result<u64> {
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
