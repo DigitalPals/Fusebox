@@ -41,6 +41,9 @@ pub struct Config {
     pub session_affinity: bool,
     /// Forget inactive sessions after this many seconds (default one day).
     pub session_affinity_idle_seconds: u64,
+    /// Derived cache-key scope and handling of incompatible explicit cache hints.
+    pub prompt_cache: crate::cache::Config,
+    pub request_limits: crate::admission::Config,
     /// Keep an upstream websocket open to Codex when clients connect over websocket.
     pub codex_websockets: bool,
     /// Rewrite non-Claude-Code requests on Claude OAuth accounts so they look like Claude Code.
@@ -359,6 +362,8 @@ impl Default for Config {
             five_hour_reserve_percent: 30,
             session_affinity: true,
             session_affinity_idle_seconds: 86_400,
+            prompt_cache: Default::default(),
+            request_limits: Default::default(),
             codex_websockets: true,
             claude_cloak: true,
             banked_resets: false,
@@ -409,6 +414,15 @@ routing: least-used         # new sessions: least-used | smart-quota | round-rob
 five-hour-reserve-percent: 30 # smart-quota: keep this 5-hour share for sessions already on an account
 session-affinity: true      # keep a session on its subscription until quota is exhausted
 session-affinity-idle-seconds: 86400 # expire assignments after a day without requests
+prompt-cache:
+  scope: session           # session | client | workspace (x-fusebox-cache-workspace)
+  namespace: ""            # optional shared prompt/tool version
+  on-incompatible: drop    # drop (preserve intent) | automatic | reject
+request-limits:
+  text-body-bytes: 268435456
+  media-body-bytes: 268435456
+  max-in-flight: 0 # 0 is unlimited; HTTP POST requests through stream completion
+  max-in-flight-body-bytes: 0 # aggregate decoded body bytes; 0 is unlimited
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
@@ -591,6 +605,8 @@ impl Config {
         let explicit = doc.get("auth-dir").is_some_and(|v| !v.is_null());
         let mut cfg: Config = serde_yaml::from_value(doc).context("invalid config")?;
         cfg.ignored = ignored;
+        cfg.prompt_cache.validate().map_err(anyhow::Error::msg)?;
+        cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
         // An explicit auth-dir always wins; otherwise keep using an existing legacy directory.
         if !explicit && default_auth_dir() == LEGACY_AUTH_DIR {
             cfg.auth_dir = LEGACY_AUTH_DIR.into();

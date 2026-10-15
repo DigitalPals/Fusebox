@@ -18,6 +18,20 @@ const code = [
   section('function reqItemHTML(r) {', '// A live arrival goes on top'),
 ].join('\n');
 
+test('cache details show requested and effective policy safely on desktop and mobile', () => {
+  const d = dashboard();
+  d.record(200, 'complete', 10);
+  d.S.requests[0].cache_policy = { requested: 'explicit', applied: 'automatic', key_scope: 'workspace', downgrade_reason: '<script>bad()</script>' };
+  for (const render of ['reqItemHTML', 'reqMobileHTML']) {
+    const html = d.run(`${render}(S.requests[0])`);
+    assert.match(html, /Requested.*Explicit boundaries.*Applied.*Automatic.*Workspace/);
+    assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>/);
+  }
+  delete d.S.requests[0].cache_policy;
+  assert.doesNotMatch(d.run('reqItemHTML(S.requests[0])'), /Prompt cache/);
+});
+
 function dashboard() {
   const S = {
     requests: [], fresh: new Map(), activity: {}, route: 'none', openReq: 1,

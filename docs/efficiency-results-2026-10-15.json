@@ -1,0 +1,344 @@
+{
+  "base_commit": "bb86ecaba0d4556365c124db938038a1b1b84b2d",
+  "working_source_sha256": "56e6fe4ebedc2164c7271d2c02658f23f9da0aeddeadbe7a978960944a8a6c55",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "build_flags": [
+    "release",
+    "fat LTO",
+    "opt-level 3",
+    "codegen-units 1",
+    "strip",
+    "RELR",
+    "ICF"
+  ],
+  "binaries": {
+    "baseline": {
+      "bytes": 16606928,
+      "sha256": "de187a9008b94428dcec7d3ce6ca190bc0025d58b557b64e36087412e6675458"
+    },
+    "implemented": {
+      "bytes": 15783216,
+      "sha256": "23a728d2edf31758d967fce6c5773bdf56580a60a75f23a5ea3acc67ce22ff64"
+    }
+  },
+  "bytes_saved": 823712,
+  "percent_smaller": 4.960050407877965,
+  "date": "2026-10-15",
+  "platform": "Linux x86-64, Debian 13 native; Docker Debian 12",
+  "sse": {
+    "method": "production decoder, rustc 1.96.1 -O, nine-run medians; sequential baseline then implemented; synthetic input only",
+    "baseline": [
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "1024",
+        "median_ms": "122.930189"
+      },
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "16384",
+        "median_ms": "13.385928"
+      },
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "65536",
+        "median_ms": "3.006633"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "1024",
+        "median_ms": "1942.147154"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "16384",
+        "median_ms": "123.168999"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "65536",
+        "median_ms": "36.069486"
+      },
+      {
+        "case": "small_events",
+        "bytes": "275780",
+        "chunk_bytes": "16384",
+        "median_ms": "0.253170"
+      }
+    ],
+    "implemented": [
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "1024",
+        "median_ms": "0.605519"
+      },
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "16384",
+        "median_ms": "0.542475"
+      },
+      {
+        "case": "long_line",
+        "bytes": "1048584",
+        "chunk_bytes": "65536",
+        "median_ms": "0.456636"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "1024",
+        "median_ms": "1.949577"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "16384",
+        "median_ms": "1.874936"
+      },
+      {
+        "case": "long_line",
+        "bytes": "4194312",
+        "chunk_bytes": "65536",
+        "median_ms": "1.809246"
+      },
+      {
+        "case": "small_events",
+        "bytes": "275780",
+        "chunk_bytes": "16384",
+        "median_ms": "0.256876"
+      }
+    ]
+  },
+  "runtime": {
+    "order": [
+      "baseline",
+      "implemented",
+      "implemented",
+      "baseline"
+    ],
+    "method": "scripts/usage-benchmark.py, 10000 imported records, 200 requests/sample, three samples/mode per run; sequential loopback provider with 20 warmups, no external provider calls",
+    "runs": [
+      {
+        "variant": "baseline",
+        "round": 1,
+        "http_samples": {
+          "analytics_off": {
+            "mean_ms_each_sample": [
+              0.7883872394450009,
+              0.7303297845646739,
+              0.7212014147080481
+            ],
+            "median_ms": 0.7303297845646739
+          },
+          "analytics_on": {
+            "mean_ms_each_sample": [
+              0.7440522289834917,
+              0.6763114756904542,
+              0.7343180652242154
+            ],
+            "median_ms": 0.7343180652242154
+          }
+        },
+        "import": {
+          "seconds": 0.7538709531072527,
+          "scan_calls": 5,
+          "observations": 10000
+        },
+        "dashboard_query": {
+          "endpoint": "/api/usage/dashboard",
+          "samples": 10,
+          "median_ms": 9.278115001507103,
+          "max_ms": 14.054672792553902
+        },
+        "dropped": 0,
+        "rejected": 0,
+        "writer_errors": 0
+      },
+      {
+        "variant": "implemented",
+        "round": 1,
+        "http_samples": {
+          "analytics_off": {
+            "mean_ms_each_sample": [
+              0.7786034548189491,
+              0.7902222499251366,
+              0.7789174350909889
+            ],
+            "median_ms": 0.7789174350909889
+          },
+          "analytics_on": {
+            "mean_ms_each_sample": [
+              0.8097690006252378,
+              0.7573332753963768,
+              0.711893494008109
+            ],
+            "median_ms": 0.7573332753963768
+          }
+        },
+        "import": {
+          "seconds": 0.7599122051615268,
+          "scan_calls": 5,
+          "observations": 10000
+        },
+        "dashboard_query": {
+          "endpoint": "/api/usage/dashboard",
+          "samples": 10,
+          "median_ms": 9.37937805429101,
+          "max_ms": 9.540664963424206
+        },
+        "dropped": 0,
+        "rejected": 0,
+        "writer_errors": 0
+      },
+      {
+        "variant": "implemented",
+        "round": 2,
+        "http_samples": {
+          "analytics_off": {
+            "mean_ms_each_sample": [
+              0.7532508892472833,
+              0.705157135380432,
+              0.7079752697609365
+            ],
+            "median_ms": 0.7079752697609365
+          },
+          "analytics_on": {
+            "mean_ms_each_sample": [
+              0.7782515790313482,
+              0.7097114191856235,
+              0.7130693597719073
+            ],
+            "median_ms": 0.7130693597719073
+          }
+        },
+        "import": {
+          "seconds": 0.7578482471872121,
+          "scan_calls": 5,
+          "observations": 10000
+        },
+        "dashboard_query": {
+          "endpoint": "/api/usage/dashboard",
+          "samples": 10,
+          "median_ms": 9.275019983761013,
+          "max_ms": 9.72206681035459
+        },
+        "dropped": 0,
+        "rejected": 0,
+        "writer_errors": 0
+      },
+      {
+        "variant": "baseline",
+        "round": 2,
+        "http_samples": {
+          "analytics_off": {
+            "mean_ms_each_sample": [
+              0.7149271492380649,
+              0.770684169838205,
+              0.7264028850477189
+            ],
+            "median_ms": 0.7264028850477189
+          },
+          "analytics_on": {
+            "mean_ms_each_sample": [
+              0.694557320093736,
+              0.7354523194953799,
+              0.7939361245371401
+            ],
+            "median_ms": 0.7354523194953799
+          }
+        },
+        "import": {
+          "seconds": 0.7553755340632051,
+          "scan_calls": 5,
+          "observations": 10000
+        },
+        "dashboard_query": {
+          "endpoint": "/api/usage/dashboard",
+          "samples": 10,
+          "median_ms": 10.406749439425766,
+          "max_ms": 12.137743877246976
+        },
+        "dropped": 0,
+        "rejected": 0,
+        "writer_errors": 0
+      }
+    ]
+  },
+  "dev_smoke": {
+    "health": "ok",
+    "assets": [
+      {
+        "path": "/",
+        "identity_bytes": 43734,
+        "gzip_bytes": 15573
+      },
+      {
+        "path": "/ui/app.js",
+        "identity_bytes": 195804,
+        "gzip_bytes": 56310
+      },
+      {
+        "path": "/ui/config.js",
+        "identity_bytes": 81660,
+        "gzip_bytes": 23094
+      },
+      {
+        "path": "/ui/i18n-zh.js",
+        "identity_bytes": 77766,
+        "gzip_bytes": 26182
+      },
+      {
+        "path": "/manifest.webmanifest",
+        "identity_bytes": 1239,
+        "gzip_bytes": 452
+      },
+      {
+        "path": "/sw.js",
+        "identity_bytes": 4119,
+        "gzip_bytes": 2064
+      }
+    ],
+    "new_config_defaults": "ok"
+  },
+  "docker_smoke": {
+    "version": "fusebox 0.4.0 (bb86eca)",
+    "health": "ok",
+    "gzip_dashboard": "ok",
+    "models": "ok"
+  },
+  "docker_binary": {
+    "bytes": 15539544,
+    "sha256": "949278d4d0d53f7f86571bc5d2f39e1aeeda3acda388843015ee6c0aef579f05",
+    "highest_glibc_symbol": "2.34",
+    "effective_glibc_minimum": "2.36 (RELR)",
+    "compiler": "rust:1-bookworm image; separate from the matching native rustc 1.96.1 comparison"
+  },
+  "docker_build": {
+    "dependency_compilation_seconds": 27.63,
+    "initial_application_compilation_seconds": 93.27,
+    "changed_source_and_ui_application_compilation_seconds": 94.78,
+    "changed_source_and_ui_dependency_layer": "CACHED",
+    "registry_warm": true
+  },
+  "validation": {
+    "rust_tests": 461,
+    "dashboard_tests": 50,
+    "python_tests": 30,
+    "real_process_acceptance_checks": 12,
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "native_release": "passed",
+    "docker_build_and_smoke": "passed",
+    "dev_service_restart": "passed",
+    "browser_desktop_and_mobile": "passed",
+    "other_architectures_executed": false,
+    "provider_cache_hit_improvement_measured": false
+  }
+}

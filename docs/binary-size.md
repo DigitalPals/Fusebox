@@ -1,5 +1,10 @@
 # Release binary size
 
+For the latest matching-source baseline and efficiency implementation, see the
+[15 October results](efficiency-2026-10-15.md): the native release shrank from
+16,606,928 to 15,783,216 bytes (4.96%) with opt-level 3 and panic unwinding retained.
+The measurements below document earlier optimization passes.
+
 The production executable measured on 2026-10-07 was 17,653,576 bytes
 (17.65 MB, 16.84 MiB), SHA-256
 `266da33eec9595c700df0afb927d29f6e7ff9c213356ee826dfb03e1a571f760`.

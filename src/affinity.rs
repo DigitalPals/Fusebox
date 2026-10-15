@@ -249,7 +249,7 @@ struct Binding {
 
 struct Conversation {
     session: String,
-    input: Vec<Value>,
+    input: Arc<Vec<Value>>,
     bytes: usize,
     last_seen: i64,
 }
@@ -684,13 +684,17 @@ impl Sessions {
 
     pub fn previous(&self, headers: &HeaderMap, id: &str, session: Option<&str>) -> Option<(String, Vec<Value>)> {
         let key = digest(&[&client_scope(headers), "response", id]);
-        let mut registry = self.registry.lock();
-        let previous = registry.responses.get_mut(&key)?;
-        if session.is_some_and(|s| s != previous.session) {
-            return None;
-        }
-        previous.last_seen = Utc::now().timestamp();
-        Some((previous.session.clone(), previous.input.clone()))
+        let (session, input) = {
+            let mut registry = self.registry.lock();
+            let previous = registry.responses.get_mut(&key)?;
+            if session.is_some_and(|s| s != previous.session) {
+                return None;
+            }
+            previous.last_seen = Utc::now().timestamp();
+            (previous.session.clone(), previous.input.clone())
+        };
+        // Large histories are copied without holding the global routing lock.
+        Some((session, (*input).clone()))
     }
 
     pub fn remember(&self, headers: &HeaderMap, session: &str, response: &Value, full_input: &[Value]) {
@@ -700,12 +704,12 @@ impl Sessions {
         let Some(output) = response["output"].as_array() else {
             return;
         };
-        let mut input = full_input.to_vec();
-        input.extend(output.iter().cloned());
-        let bytes = serde_json::to_vec(&input).map(|v| v.len()).unwrap_or(MAX_RESPONSE_BYTES + 1);
-        if bytes > MAX_RESPONSE_BYTES {
+        let Some(bytes) = history_size(full_input, output, MAX_RESPONSE_BYTES) else {
             return;
-        }
+        };
+        let mut input = Vec::with_capacity(full_input.len() + output.len());
+        input.extend(full_input.iter().chain(output).cloned());
+        let input = Arc::new(input);
         let key = digest(&[&client_scope(headers), "response", id]);
         let mut registry = self.registry.lock();
         if let Some(old) = registry.responses.remove(&key) {
@@ -725,6 +729,41 @@ impl Sessions {
             .responses
             .insert(key, Conversation { session: session.into(), input, bytes, last_seen: Utc::now().timestamp() });
     }
+}
+
+/// Count the exact serialized array size, stopping at the entry limit before
+/// copying the history or allocating a second, serialized conversation.
+fn history_size(input: &[Value], output: &[Value], limit: usize) -> Option<usize> {
+    struct History<'a>(&'a [Value], &'a [Value]);
+    impl Serialize for History<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(Some(self.0.len() + self.1.len()))?;
+            for value in self.0.iter().chain(self.1) {
+                seq.serialize_element(value)?;
+            }
+            seq.end()
+        }
+    }
+    struct Counter {
+        bytes: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.limit.saturating_sub(self.bytes) {
+                return Err(std::io::Error::other("history exceeds entry limit"));
+            }
+            self.bytes += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { bytes: 0, limit };
+    serde_json::to_writer(&mut counter, &History(input, output)).ok()?;
+    Some(counter.bytes)
 }
 
 /// Some Codex backends omit output from the final event after streaming it.
@@ -1400,6 +1439,22 @@ mod tests {
         assert!(sessions.previous(&headers, "r1", Some("another-task")).is_none());
         headers.insert("authorization", "Bearer second".parse().unwrap());
         assert!(sessions.previous(&headers, "r1", None).is_none());
+    }
+
+    #[test]
+    fn history_limits_count_escaped_json_exactly_without_retaining_oversized_entries() {
+        let input = [json!({"text":"quotes: \" and control: \n and unicode: 🦀"})];
+        let output = [json!({"type":"message", "content":[]})];
+        let combined: Vec<_> = input.iter().chain(&output).cloned().collect();
+        let size = serde_json::to_vec(&combined).unwrap().len();
+        assert_eq!(history_size(&input, &output, size), Some(size));
+        assert_eq!(history_size(&input, &output, size - 1), None);
+        assert_eq!(history_size(&[], &[], 2), Some(2));
+        let sessions = Sessions::memory();
+        let large = [json!("x".repeat(MAX_RESPONSE_BYTES))];
+        sessions.remember(&HeaderMap::new(), "session", &json!({"id":"large", "output":[]}), &large);
+        assert!(sessions.previous(&HeaderMap::new(), "large", None).is_none());
+        assert_eq!(sessions.registry.lock().history_bytes, 0);
     }
 
     #[test]

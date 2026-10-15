@@ -2219,6 +2219,16 @@ function errLineText(r) {
   return r.status >= 400 ? String(hideEmails(r.error)) : '';
 }
 
+function cachePolicyHTML(r) {
+  const p = r.cache_policy;
+  if (!p) return '';
+  const labels = { provider_default: 'Provider default', prewarm: 'Prewarm', automatic: 'Automatic', explicit: 'Explicit boundaries',
+    explicit_no_breakpoints: 'Explicit without boundaries', none: 'No cache controls', rejected: 'Rejected',
+    caller: 'Caller key', session: 'Session', client: 'Client', workspace: 'Workspace',
+    session_fallback: 'Session fallback', not_sent: 'No cache key sent' };
+  return `<div class="why-text"><span class="label">Prompt cache</span><p><span>Requested</span>: ${esc(labels[p.requested] || p.requested)} · <span>Applied</span>: ${esc(labels[p.applied] || p.applied)} · ${esc(labels[p.key_scope] || p.key_scope)}</p>${p.downgrade_reason ? `<p>${esc(p.downgrade_reason)}</p>` : ''}</div>`;
+}
+
 function reqItemHTML(r) {
   const open = S.openReq === r.id;
   const err = errLineText(r);
@@ -2240,6 +2250,7 @@ function reqItemHTML(r) {
         <div class="why-tok"><span>Tokens</span><span class="mono">${requestTokensHTML(r)}</span></div>
       </div>
       <div class="why-text"><span class="label">Why this account</span><p>${esc(whySentence(r))}</p></div>
+      ${cachePolicyHTML(r)}
       <div class="why-acts">${accountOf(r) ? `<button class="btn sm" type="button" data-act="open-acc" data-id="${esc(accountOf(r).id)}">Open account</button>` : ''}${r.session_id ? `<button class="btn sm" type="button" data-act="filter-session" data-id="${esc(r.session_id)}">Only this session</button>` : ''}</div>
     </div>` : ''}
   </div>`;
@@ -2259,6 +2270,7 @@ function reqMobileHTML(r) {
     ${err ? `<span class="errline${r.status === 499 ? ' dim' : ''}" style="font-size:11.5px${r.status === 499 ? ';color:var(--fg-3)' : ''}">${esc(err)}</span>` : ''}
     ${open ? `<div class="m-why"><p>${esc(whySentence(r))}</p><span class="meta" style="font-size:12px">${esc(client)} · <span class="mono">${esc(endpoint)}</span></span>
       <span class="meta" style="font-size:12px">First token ${ms(r.ttft_ms)} · ${requestTokensHTML(r)}</span>
+      ${cachePolicyHTML(r)}
       <div class="acts">${acct ? `<button class="btn" type="button" data-act="open-acc" data-id="${esc(acct.id)}">Open account</button>` : ''}${r.session_id ? `<button class="btn" type="button" data-act="filter-session" data-id="${esc(r.session_id)}">Session ${esc(r.session_id.slice(0, 8))}</button>` : ''}</div></div>` : ''}
   </div>`;
 }

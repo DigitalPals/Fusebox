@@ -1,0 +1,4 @@
+[env]
+# Fusebox uses JSON, WAL, backups and progress hooks, but no full-text or spatial
+# virtual tables. Keep bundled SQLite's other defaults on every build target.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE"

@@ -108,7 +108,9 @@ pub fn failure_kind(status: u16, message: Option<&str>) -> Option<&'static str> 
         return Some("downstream_disconnect");
     }
     let message = message.unwrap_or_default();
-    Some(if message == "upstream ended before completing the response" {
+    Some(if message == "request capacity exhausted; retry later" {
+        "request_rejected"
+    } else if message == "upstream ended before completing the response" {
         "upstream_incomplete"
     } else if message.starts_with("upstream stream error:") || message.starts_with("upstream response read failed:") {
         "upstream_body_read"
@@ -178,6 +180,10 @@ pub fn record(
                 reported_input_total = ?capture.and_then(|o| o.numeric_metadata.get("input_total").copied()),
                 session_source = log.session_source.unwrap_or("none"), routing_strategy = ?log.routing_strategy,
                 routing_reason = log.routing_reason.unwrap_or("unassigned"), routing_warning = log.routing_warning.unwrap_or("none"),
+                cache_requested = log.cache_policy.as_ref().map(|p| p.requested).unwrap_or("unknown"),
+                cache_applied = log.cache_policy.as_ref().map(|p| p.applied).unwrap_or("unknown"),
+                cache_key_scope = log.cache_policy.as_ref().map(|p| p.key_scope).unwrap_or("not_sent"),
+                cache_hint_downgrade = ?log.cache_policy.as_ref().and_then(|p| p.downgrade_reason.as_deref()),
                 "request completed");
         };
     }

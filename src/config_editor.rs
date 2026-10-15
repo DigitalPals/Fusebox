@@ -479,6 +479,16 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
             "session-affinity-idle-seconds" => {
                 ensure!(value.as_u64().is_some_and(|n| n >= 60), "Forget idle sessions after at least 60 seconds")
             }
+            "prompt-cache" => {
+                let config: crate::cache::Config = serde_json::from_value(value.clone())
+                    .context("Prompt cache: choose valid scope and incompatible-hint handling")?;
+                config.validate().map_err(anyhow::Error::msg)?;
+            }
+            "request-limits" => {
+                let limits: crate::admission::Config =
+                    serde_json::from_value(value.clone()).context("Invalid request-limits")?;
+                limits.validate().map_err(anyhow::Error::msg)?;
+            }
             "codex-websockets" | "claude-cloak" | "banked-resets" | "session-affinity" | "force-model-prefix"
             | "debug" => {
                 ensure!(value.is_boolean(), "{field}: use a boolean")
@@ -855,6 +865,33 @@ mod tests {
         assert!(!cfg.session_affinity);
         assert_eq!(yaml(&out).unwrap()["routing"]["session-affinity"].as_bool(), Some(false));
         assert!(apply("", json!({"session-affinity-idle-seconds": 5}).as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn cache_and_admission_settings_round_trip_and_reject_invalid_options() {
+        let changes = json!({
+            "prompt-cache": {"scope":"workspace", "namespace":"tools-v2", "on-incompatible":"reject"},
+            "request-limits": {"text-body-bytes":1048576,"media-body-bytes":268435456,"max-in-flight":8,"max-in-flight-body-bytes":33554432}
+        });
+        for source in ["# keep this\nport: 8317\n", "config-version: 8\nrouting:\n  strategy: fill-first\n"] {
+            let (out, cfg) = edit(source, changes.clone());
+            assert_eq!(cfg.prompt_cache.scope, crate::cache::Scope::Workspace);
+            assert_eq!(cfg.prompt_cache.on_incompatible, crate::cache::Incompatible::Reject);
+            assert_eq!(cfg.request_limits.max_in_flight, 8);
+            assert_eq!(values(&out).unwrap()["prompt-cache"], changes["prompt-cache"]);
+            assert!(cfg.ignored.is_empty());
+        }
+        for invalid in [
+            json!({"prompt-cache":{"scope":"public"}}),
+            json!({"prompt-cache":{"namespace":"x".repeat(257)}}),
+            json!({"prompt-cache":{"unknown":true}}),
+            json!({"request-limits":{"text-body-bytes":0}}),
+            json!({"request-limits":{"media-body-bytes":268435457}}),
+            json!({"request-limits":{"max-in-flight":-1}}),
+        ] {
+            assert!(apply("", invalid.as_object().unwrap()).is_err());
+            assert!(Config::parse(&serde_yaml::to_string(&invalid).unwrap()).is_err());
+        }
     }
 
     #[test]

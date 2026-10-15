@@ -1,0 +1,134 @@
+{
+  "date": "2026-10-15",
+  "deployment": {
+    "backup_sha256": "297ca3f87786471d066ac0583f03f1d098ca6213e7498fda12fd72fe887bc375",
+    "billing_calls": 0,
+    "database": "/var/lib/cli-proxy-api/usage/usage.sqlite3",
+    "gate_released": true,
+    "outcome": "deployed",
+    "rollback_version": "0.4.0+gui.8cba6279c9bd",
+    "transaction": "ada49af47ebe48229e297cd0935db713",
+    "version": "0.4.0+gui.32c54c271e0c"
+  },
+  "release": {
+    "source_commit": "bb86ecaba0d4556365c124db938038a1b1b84b2d",
+    "source_working_tree": true,
+    "source_sha256": "32c54c271e0caea33bc4c1eb0c0095e9fc153af1618bd5a71bfc08ef708fa5aa",
+    "version": "0.4.0+gui.32c54c271e0c",
+    "binary_sha256": "a2c1bc049e5b6effbb6cdeeae66329918a3faf403bcdd31bfcb9cfb83eb19688",
+    "binary_bytes": 15783216,
+    "archive_sha256": "1059f1d4475eb509a5ccd1539b6c4c9a1f20c162742e04f6548b8205439b9865"
+  },
+  "postflight": {
+    "account_count": 4,
+    "automatic_restarts": 0,
+    "backup_sha256": "297ca3f87786471d066ac0583f03f1d098ca6213e7498fda12fd72fe887bc375",
+    "billing_calls": 0,
+    "binary_sha256": "a2c1bc049e5b6effbb6cdeeae66329918a3faf403bcdd31bfcb9cfb83eb19688",
+    "configuration_unchanged": true,
+    "gate_held": false,
+    "models_listed": 23,
+    "ok": true,
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 4
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "rollback_version": "0.4.0+gui.8cba6279c9bd",
+    "service_active": true,
+    "usage_after": {
+      "observations": 272742,
+      "quick_check": "ok",
+      "schema_sha256": "5b5401d692fd9a23cb5814d40d17830517028407f9edb1ac3908b45388f12023",
+      "schema_version": 3
+    },
+    "usage_backup_sha256": "c74be82cffb4901448934290be5cefbbb76783373f0abad5233b31557cfa7132",
+    "usage_before": {
+      "observations": 272739,
+      "quick_check": "ok",
+      "schema_sha256": "5b5401d692fd9a23cb5814d40d17830517028407f9edb1ac3908b45388f12023",
+      "schema_version": 3
+    },
+    "usage_health": {
+      "accepted": 3,
+      "dropped": 0,
+      "prior_unclosed_sessions": 0,
+      "queue_depth": 0,
+      "rejected": 0,
+      "state": "healthy",
+      "writer_errors": 0,
+      "written": 3
+    },
+    "version": "0.4.0+gui.32c54c271e0c"
+  },
+  "sessions": {
+    "current_assignments": 16,
+    "expired_assignments": 0,
+    "preserved_assignments": 16,
+    "snapshot_assignments": 16
+  },
+  "gate_unchanged": true,
+  "public_https": {
+    "base_url": "https://10.10.0.235:8317",
+    "version": "0.4.0+gui.32c54c271e0c",
+    "tls_verified": true,
+    "assets": {
+      "/": {
+        "identity": 43734,
+        "gzip": 15573
+      },
+      "/ui/app.js": {
+        "identity": 195804,
+        "gzip": 56310
+      },
+      "/ui/style.css": {
+        "identity": 93797,
+        "gzip": 16763
+      },
+      "/ui/usage.js": {
+        "identity": 64804,
+        "gzip": 18881
+      },
+      "/ui/config.js": {
+        "identity": 81660,
+        "gzip": 23094
+      },
+      "/ui/i18n.js": {
+        "identity": 4662,
+        "gzip": 1948
+      },
+      "/ui/i18n-zh.js": {
+        "identity": 77766,
+        "gzip": 26182
+      },
+      "/ui/icon.svg": {
+        "identity": 314,
+        "gzip": 251
+      },
+      "/sw.js": {
+        "identity": 4119,
+        "gzip": 2064
+      },
+      "/manifest.webmanifest": {
+        "identity": 1239,
+        "gzip": 452
+      }
+    },
+    "health": "ok",
+    "readiness": {
+      "status": "ready",
+      "accounts": {
+        "ready": 4,
+        "total": 4
+      },
+      "usage": "healthy"
+    },
+    "identity_asset_bytes": 567899,
+    "gzip_asset_bytes": 161518
+  },
+  "candidate_usage_acceptance_passed": 12,
+  "rollout_helper_tests_passed": 11
+}

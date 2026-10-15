@@ -42,6 +42,7 @@ pub struct App {
     pub shutdown: tokio_util::sync::CancellationToken,
     /// Named clients' request rates and spend, for their limits.
     pub clients: crate::policy::Clients,
+    pub admission: Arc<crate::admission::Admission>,
     /// Wrong management keys per address, for the lockout.
     pub key_guesses: crate::mgmt::Guesses,
 }
@@ -105,6 +106,7 @@ impl App {
             quiet_until: AtomicI64::new(0),
             shutdown: Default::default(),
             clients,
+            admission: Default::default(),
             key_guesses: Default::default(),
         })
     }
@@ -323,6 +325,8 @@ pub struct RequestLog {
     pub routing_reason: Option<&'static str>,
     pub routing_warning: Option<&'static str>,
     pub routing_attempts: Vec<RoutingAttempt>,
+    /// Requested and effective cache controls; contains no prompt text or keys.
+    pub cache_policy: Option<crate::cache::Policy>,
     pub status: u16,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
@@ -494,6 +498,7 @@ mod tests {
             routing_reason: None,
             routing_warning: None,
             routing_attempts: vec![],
+            cache_policy: None,
             status: 200,
             latency_ms: 0,
             ttft_ms: None,

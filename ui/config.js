@@ -22,7 +22,7 @@ const CONFIG_KEY_SECTION = {
   'api-keys': 'access', 'management-key': 'access', 'management-allow-remote': 'access',
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
-  'model-groups': 'routing', 'background-model': 'routing', 'log-format': 'diagnostics',
+  'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
   'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', notifications: 'notifications', debug: 'diagnostics',
 };
@@ -441,6 +441,11 @@ function configRoutingHTML() {
     <div class="cfg-divider wide"></div>
     ${configSwitch(['session-affinity'], 'Keep sessions on one account', 'A coding session stays on the account it started on, so its prompt cache keeps working. It moves when that subscription runs out or the account is disabled; while an account is busy, its requests briefly use another.')}
     ${configField(['session-affinity-idle-seconds'], 'Forget idle sessions after (seconds)', { type: 'number', min: 60, required: true, disabled: !affinity, help: '86400 is one day.' })}
+    ${configChoice(['prompt-cache', 'scope'], 'Prompt cache key scope', [['session', 'Session'], ['client', 'Client'], ['workspace', 'Workspace']],
+      'Session keeps the existing cache key. Client shares a key across that client’s sessions. Workspace uses the x-fusebox-cache-workspace header, falling back to session when absent. Account selection still follows the session; caller cache keys always win.')}
+    ${configField(['prompt-cache', 'namespace'], 'Prompt version', { help: 'Optional cache namespace for a shared prompt or tool schema version. Changing it starts a new derived cache key.' })}
+    ${configChoice(['prompt-cache', 'on-incompatible'], 'Incompatible cache hints', [['drop', 'Drop hints'], ['automatic', 'Use provider defaults'], ['reject', 'Reject request']],
+      'Drop keeps the current behavior. Provider defaults enables automatic Claude caching after explicit boundaries are lost in translation. Explicit mode without boundaries remains uncached. Reject returns an error before contacting the provider.')}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['force-model-prefix'], 'Require model prefixes', 'Unprefixed requests only use accounts without a prefix. Use prefix/model to select a prefixed account.')}
     <div class="cfg-divider wide"></div>
@@ -525,7 +530,12 @@ function configConnectionsHTML() {
     <div class="cfg-divider wide"></div>
     ${configSwitch(['codex-websockets'], 'Native Codex websockets', 'Keep a native upstream websocket connection for clients using Codex over websockets.')}
     ${configSwitch(['claude-cloak'], 'Claude Code compatibility', 'Make requests through Claude OAuth accounts resemble Claude Code requests for other clients.')}
-    ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}</div>`;
+    ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}
+    <div class="cfg-divider wide"></div>
+    ${configField(['request-limits', 'text-body-bytes'], 'Text request limit (bytes)', { type: 'number', min: 1, max: 268435456, required: true, help: 'Maximum encoded and decoded body size for text, embedding and token-count requests. Default: 256 MiB.' })}
+    ${configField(['request-limits', 'media-body-bytes'], 'Media request limit (bytes)', { type: 'number', min: 1, max: 268435456, required: true, help: 'Maximum encoded and decoded body size for image and video requests, including multipart uploads. Default: 256 MiB.' })}
+    ${configField(['request-limits', 'max-in-flight'], 'Concurrent HTTP requests', { type: 'number', min: 0, required: true, help: 'Includes reading the body, provider work and the response stream. Excess requests return 503. Zero is unlimited; WebSockets are separate.' })}
+    ${configField(['request-limits', 'max-in-flight-body-bytes'], 'Combined request bodies (bytes)', { type: 'number', min: 0, required: true, help: 'Maximum decoded body bytes across active HTTP requests. Zero is unlimited. Parsed JSON and responses use additional memory.' })}</div>`;
 }
 
 // This device's subscription (app.js) acts at once; the events and webhooks are saved to the file.

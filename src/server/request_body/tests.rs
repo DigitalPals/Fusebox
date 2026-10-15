@@ -56,6 +56,73 @@ impl Drop for Fixture {
     }
 }
 
+#[tokio::test]
+async fn configurable_route_limits_bound_compressed_and_identity_bodies() {
+    for encoding in [None, Some("gzip"), Some("zstd")] {
+        let fixture = Fixture::new();
+        let mut cfg = (*fixture.app.cfg()).clone();
+        cfg.request_limits.text_body_bytes = 64;
+        cfg.request_limits.media_body_bytes = 1024;
+        fixture.app.set_config(cfg);
+        let body = serde_json::to_vec(&json!({"prompt":"x".repeat(128)})).unwrap();
+        let encoded = encode(encoding.unwrap_or("identity"), &body);
+        let (status, _) = request(fixture.app.clone(), "/v1/responses", encoding, encoded.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        fixture.assert_rejection(413);
+        let (status, _) = request(fixture.app.clone(), "/v1/images/generations", encoding, encoded).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "media body should reach account lookup");
+    }
+}
+
+#[tokio::test]
+async fn aggregate_body_budget_rejects_before_upstream_and_releases_on_failure() {
+    let fixture = Fixture::new();
+    let mut cfg = (*fixture.app.cfg()).clone();
+    cfg.request_limits.max_in_flight_body_bytes = 16;
+    fixture.app.set_config(cfg);
+    let occupied = fixture.app.admission.acquire(&fixture.app.cfg().request_limits).unwrap();
+    occupied.reserve(15).unwrap();
+    let (status, _) = request(fixture.app.clone(), "/v1/responses", None, b"{}".to_vec()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    fixture.assert_rejection(503);
+    drop(occupied);
+    // A failed body read and an invalid request both release their reservation.
+    let (status, _) = request(fixture.app.clone(), "/v1/responses", Some("gzip"), b"corrupt".to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = request(fixture.app.clone(), "/v1/responses", None, b"{}".to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let available = fixture.app.admission.acquire(&fixture.app.cfg().request_limits).unwrap();
+    available.reserve(16).unwrap();
+}
+
+#[tokio::test]
+async fn admission_covers_response_stream_lifetime_and_cancellation() {
+    let fixture = Fixture::new();
+    let mut cfg = (*fixture.app.cfg()).clone();
+    cfg.request_limits.max_in_flight = 1;
+    cfg.request_limits.max_in_flight_body_bytes = 2;
+    fixture.app.set_config(cfg);
+    let router = Router::new()
+        .route(
+            "/v1/responses",
+            post(|| async { Body::from_stream(futures::stream::pending::<Result<Bytes, std::io::Error>>()) }),
+        )
+        .layer(axum::middleware::from_fn_with_state(fixture.app.clone(), decoded_body))
+        .layer(axum::middleware::from_fn_with_state(fixture.app.clone(), encoded_body));
+    let req = || Request::builder().method("POST").uri("/v1/responses").body(Body::from("{}")).unwrap();
+    let first = router.clone().oneshot(req()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = router.clone().oneshot(req()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(second.headers()[header::RETRY_AFTER], "1");
+    drop(first); // Cancel without ever polling its stream.
+    let third = router.oneshot(req()).await.unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+    drop(third);
+    let available = fixture.app.admission.acquire(&fixture.app.cfg().request_limits).unwrap();
+    available.reserve(2).unwrap();
+}
+
 /// Build a gzip, zstd, or uncompressed fixture body.
 fn encode(encoding: &str, body: &[u8]) -> Vec<u8> {
     match encoding {

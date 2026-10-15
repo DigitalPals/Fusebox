@@ -1,14 +1,31 @@
 # Drop-in for CLIProxyAPI's image: same working directory, config path, auth
 # directory and ports, so an existing docker-compose.yml keeps working.
 
-FROM rust:1-bookworm AS build
-# The commit, for `--version` (the build context has no .git).
-ARG FUSEBOX_COMMIT=""
-ENV FUSEBOX_COMMIT=${FUSEBOX_COMMIT}
+FROM rust:1-bookworm AS dependencies
 WORKDIR /src
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo .cargo
+# Cache compiled dependencies by toolchain, manifests, and SQLite settings.
+# A minimal root builds both runtime and build dependencies without UI/source.
+RUN mkdir src \
+ && printf 'fn main() {}\n' > src/main.rs \
+ && printf 'fn main() {}\n' > build.rs
+RUN case "$(uname -m)" in \
+      x86_64) cargo rustc --release --locked --bin fusebox -- \
+        -C link-arg=-Wl,-z,pack-relative-relocs -C link-arg=-Wl,--icf=all ;; \
+      *) cargo build --release --locked ;; \
+    esac \
+ && rm -rf target/release/fusebox target/release/fusebox.d \
+      target/release/deps/fusebox-* target/release/build/fusebox-* \
+      target/release/.fingerprint/fusebox-*
+
+FROM dependencies AS build
+COPY build.rs ./
 COPY src src
 COPY ui ui
+# Stamp the commit after dependency compilation (the context has no .git).
+ARG FUSEBOX_COMMIT=""
+ENV FUSEBOX_COMMIT=${FUSEBOX_COMMIT}
 # On x86-64, Rust links with lld: pack relative relocations (Debian 12's glibc
 # supports RELR) and fold identical functions. Other architectures keep their
 # usual linker settings.

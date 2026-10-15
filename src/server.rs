@@ -19,6 +19,7 @@ use crate::ir::Format;
 use crate::proxy::{self, Call, FrameStream, Reply};
 use crate::state::App;
 
+mod assets;
 mod request_body;
 
 pub fn router(app: Arc<App>) -> Router {
@@ -586,33 +587,14 @@ fn json_array_body(mut frames: FrameStream) -> Body {
 
 // ------------------------------------------------------------------------- ui
 
-const INDEX: &str = include_str!("../ui/index.html");
-const LOGOS: &str = include_str!("../ui/logos.svg");
-const APP_JS: &str = include_str!("../ui/app.js");
-const STYLE: &str = include_str!("../ui/style.css");
-const ICON: &str = include_str!("../ui/icon.svg");
 const FAVICON: &[u8] = include_bytes!("../ui/favicon.ico");
 
-// The logo sprite is inlined so its gradients resolve from every <use>.
-static PAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| INDEX.replace("<!-- logos -->", LOGOS));
-
-async fn ui_index() -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], PAGE.as_str())
-        .into_response()
+async fn ui_index(headers: HeaderMap) -> Response {
+    assets::serve("/", &headers)
 }
 
-async fn ui_asset(Path(file): Path<String>) -> Response {
-    let (body, ctype) = match file.as_str() {
-        "app.js" => (APP_JS, "text/javascript; charset=utf-8"),
-        "usage.js" => (include_str!("../ui/usage.js"), "text/javascript; charset=utf-8"),
-        "config.js" => (include_str!("../ui/config.js"), "text/javascript; charset=utf-8"),
-        "i18n.js" => (include_str!("../ui/i18n.js"), "text/javascript; charset=utf-8"),
-        "i18n-zh.js" => (include_str!("../ui/i18n-zh.js"), "text/javascript; charset=utf-8"),
-        "style.css" => (STYLE, "text/css; charset=utf-8"),
-        "icon.svg" => (ICON, "image/svg+xml"),
-        _ => return StatusCode::NOT_FOUND.into_response(),
-    };
-    ([(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-cache")], body).into_response()
+async fn ui_asset(Path(file): Path<String>, headers: HeaderMap) -> Response {
+    assets::serve(&file, &headers)
 }
 
 // Self-hosted fonts (latin subset, SIL OFL 1.1; licences in ui/fonts). Their names
@@ -638,8 +620,6 @@ async fn ui_font(Path(file): Path<String>) -> Response {
 
 // Installing the dashboard as an app: the manifest, its icons, and the service worker,
 // served from the root so its scope covers the dashboard at `/`.
-const MANIFEST: &str = include_str!("../ui/manifest.webmanifest");
-const SERVICE_WORKER: &str = include_str!("../ui/sw.js");
 const ICONS: &[(&str, &[u8])] = &[
     ("icon-192.png", include_bytes!("../ui/icons/icon-192.png")),
     ("icon-512.png", include_bytes!("../ui/icons/icon-512.png")),
@@ -647,14 +627,12 @@ const ICONS: &[(&str, &[u8])] = &[
     ("apple-touch-icon.png", include_bytes!("../ui/icons/apple-touch-icon.png")),
 ];
 
-async fn manifest() -> Response {
-    ([(header::CONTENT_TYPE, "application/manifest+json"), (header::CACHE_CONTROL, "no-cache")], MANIFEST)
-        .into_response()
+async fn manifest(headers: HeaderMap) -> Response {
+    assets::serve("manifest.webmanifest", &headers)
 }
 
-async fn service_worker() -> Response {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], SERVICE_WORKER)
-        .into_response()
+async fn service_worker(headers: HeaderMap) -> Response {
+    assets::serve("sw.js", &headers)
 }
 
 async fn ui_icon(Path(file): Path<String>) -> Response {

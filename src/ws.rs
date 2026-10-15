@@ -601,6 +601,8 @@ async fn native_turn(
     if acct.provider != Provider::Codex || !acct.is_oauth() || acct.proxy_url.is_some() {
         return Native::Fallback;
     }
+    let (cache_key, cache_scope) =
+        crate::cache::key(headers, body, sess.key.as_deref(), sess.source, &cfg.prompt_cache);
     let reuse = sess.upstream.as_ref().is_some_and(|(a, _)| a.id == acct.id);
     if !reuse {
         sess.close_upstream("account_changed").await;
@@ -610,7 +612,7 @@ async fn native_turn(
         let mut upstream_headers = headers.clone();
         if !upstream_headers.contains_key("session_id")
             && !upstream_headers.contains_key("session-id")
-            && let Some(key) = body["prompt_cache_key"].as_str()
+            && let Some(key) = body["prompt_cache_key"].as_str().or(cache_key.as_deref())
             && let Ok(value) = key.parse()
         {
             upstream_headers.insert("session_id", value);
@@ -628,6 +630,11 @@ async fn native_turn(
     }
     let (acct, mut up) = sess.upstream.take().unwrap();
     let mut payload = body.clone();
+    if payload["prompt_cache_key"].is_null()
+        && let Some(key) = cache_key
+    {
+        payload["prompt_cache_key"] = key.into();
+    }
     if let Some(prev) = body["previous_response_id"].as_str()
         && !sess.upstream_responses.contains(prev)
     {
@@ -654,6 +661,7 @@ async fn native_turn(
     tracker.client_app(headers);
     tracker.session(sess.key.as_deref(), sess.source, &cfg);
     tracker.selected(&selected);
+    tracker.cache_policy(crate::cache::Policy::new(body, &payload, Format::Responses, cache_scope, None));
     let payload = payload.to_string();
     let deadline = send_deadline(payload.len());
     if let Err(failure) =

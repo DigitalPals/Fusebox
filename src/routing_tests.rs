@@ -1503,6 +1503,75 @@ async fn soft_retries_preserve_the_temporary_detour_account() {
 }
 
 #[tokio::test]
+async fn shared_cache_scope_matches_http_and_native_websockets_without_changing_affinity() {
+    let fixture = Fixture::new(Routing::RoundRobin, true).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.prompt_cache.scope = crate::cache::Scope::Client;
+    fixture.app.set_config(cfg.clone());
+    assert_eq!(fixture.request(Some("http-task"), prompt()).await.0, 200);
+    let mut socket = fixture.socket("ws-task").await;
+    turn(&mut socket, prompt()).await;
+    let calls = fixture.mock.calls.lock().clone();
+    assert_eq!(calls[0].1["prompt_cache_key"], calls[1].1["prompt_cache_key"]);
+    assert_ne!(calls[0].0, calls[1].0, "separate sessions must still select accounts independently");
+    let logs = fixture.logs(2).await;
+    assert!(logs.iter().all(|log| log.cache_policy.as_ref().unwrap().key_scope == "client"));
+    let mut explicit = prompt();
+    explicit["prompt_cache_key"] = "caller-choice".into();
+    turn(&mut socket, explicit).await;
+    assert_eq!(fixture.mock.calls.lock().last().unwrap().1["prompt_cache_key"], "caller-choice");
+    assert_eq!(fixture.logs(3).await[2].cache_policy.as_ref().unwrap().key_scope, "caller");
+    socket.close(None).await.unwrap();
+
+    cfg.prompt_cache.scope = crate::cache::Scope::Workspace;
+    fixture.app.set_config(cfg);
+    for session in ["workspace-one", "workspace-two"] {
+        fixture.request_with(&[("thread-id", session), ("x-fusebox-cache-workspace", "repo")], prompt()).await;
+    }
+    let calls = fixture.mock.calls.lock();
+    assert_eq!(calls[3].1["prompt_cache_key"], calls[4].1["prompt_cache_key"]);
+    assert_ne!(calls[0].1["prompt_cache_key"], calls[3].1["prompt_cache_key"]);
+}
+
+#[tokio::test]
+async fn incompatible_cache_policy_is_observable_and_automatic_is_opt_in() {
+    use crate::cache::Incompatible;
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.clear();
+    cfg.claude_api_key =
+        vec![KeyEntry { api_key: "a".into(), base_url: Some(fixture.provider.url.clone()), ..Default::default() }];
+    let explicit = json!({"model":"claude-sonnet-4-6", "input":[{"role":"user", "content":[{"type":"input_text", "text":"stable", "prompt_cache_breakpoint":{"mode":"explicit"}}]}], "prompt_cache_options":{"mode":"explicit"}});
+    for (i, handling) in [Incompatible::Drop, Incompatible::Automatic, Incompatible::Reject].into_iter().enumerate() {
+        cfg.prompt_cache.on_incompatible = handling;
+        fixture.app.set_config(cfg.clone());
+        let (status, response) = fixture.request(Some("cache-task"), explicit.clone()).await;
+        assert_eq!(status, if handling == Incompatible::Reject { 400 } else { 200 }, "{response}");
+        let logs = fixture.logs(i + 1).await;
+        let policy = logs[i].cache_policy.as_ref().unwrap();
+        assert_eq!(policy.requested, "explicit");
+        assert_eq!(
+            policy.applied,
+            match handling {
+                Incompatible::Drop => "none",
+                Incompatible::Automatic => "automatic",
+                Incompatible::Reject => "rejected",
+            }
+        );
+        assert!(policy.downgrade_reason.as_ref().unwrap().contains("cannot be translated"));
+    }
+    assert_eq!(fixture.mock.calls.lock().len(), 2);
+    assert!(fixture.mock.calls.lock()[0].1["cache_control"].is_null());
+    assert_eq!(fixture.mock.calls.lock()[1].1["cache_control"], json!({"type":"ephemeral"}));
+    cfg.prompt_cache.on_incompatible = Incompatible::Automatic;
+    fixture.app.set_config(cfg);
+    let mut no_markers = explicit;
+    no_markers["input"][0]["content"][0].as_object_mut().unwrap().remove("prompt_cache_breakpoint");
+    assert_eq!(fixture.request(Some("cache-task"), no_markers).await.0, 200);
+    assert!(fixture.mock.calls.lock().last().unwrap().1["cache_control"].is_null());
+}
+
+#[tokio::test]
 async fn claude_budget_errors_are_400_and_small_valid_caps_reach_upstream_unchanged() {
     let fixture = Fixture::new(Routing::RoundRobin, false).await;
     let mut cfg = fixture.cfg.clone();

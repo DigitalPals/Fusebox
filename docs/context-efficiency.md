@@ -131,6 +131,27 @@ cancelled; interruption before/between requests may only emit a cancellation err
 
 ## Preserve quality and account for caching
 
+Keep stable instructions and tool definitions at the front of the prompt and
+append changing conversation content after a supported cache boundary. Exact
+prefix content, model, account, minimum size and provider lifetime still matter.
+A shared routing key does not make different prompts equivalent or guarantee a hit.
+
+Fusebox's `prompt-cache` settings are described in the [README](../README.md).
+Session scope remains the default. For independent sessions using the same large
+prefix, opt into `client` or `workspace` scope and use `namespace` to identify the
+prompt/tool schema version. Caller-supplied keys override derivation. Keep account
+affinity enabled, and verify the account in request diagnostics; separate sessions
+can still be assigned to different accounts. Shared scopes are isolated by the
+authenticated client key; unauthenticated traffic shares a client scope.
+
+Request details and structured completion logs expose requested/applied controls,
+key scope and translation downgrades. They describe the prepared request rather
+than an upstream cache hit. `drop` retains existing hint behavior; `automatic`
+opts into Claude automatic caching after lost boundaries; `reject` helps find
+incompatible requests before provider contact. Inspect provider cached-input and
+cache-write usage alongside these diagnostics. Compare cold and warmed runs on
+the same model/account/prefix before selecting a shared scope for a workload.
+
 Before compacting, define what a successful answer must retain: the current task,
 constraints, decisions, unresolved questions, tool results needed for the next
 step, identifiers, and relevant code/errors. Remove redundant material in the

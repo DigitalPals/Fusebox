@@ -411,6 +411,31 @@ Requests translated to Anthropic use its automatic prompt caching when the calle
 
 OpenAI routes its prompt cache by a `prompt_cache_key`, which Codex always sends. Requests to ChatGPT accounts or to OpenAI's own API that arrive without one, including Claude-format requests translated for a GPT model, get a key derived from their session. xAI receives the same key as its conversation id. A key the client sends is passed on unchanged, and API keys with a custom `base-url` never get one added.
 
+The Requests page and structured completion logs show the requested and applied cache controls, derived key scope, and any translation downgrade. These describe what Fusebox sent; provider usage determines whether a cache was actually used. Defaults preserve the behavior above. Optional controls are available under Routing in the dashboard or in YAML:
+
+```yaml
+prompt-cache:
+  scope: session          # session | client | workspace
+  namespace: ""           # optional prompt/tool schema version, at most 256 bytes
+  on-incompatible: drop   # drop | automatic | reject
+```
+
+`client` shares a derived key across sessions authenticated by the same client key. `workspace` also includes the `x-fusebox-cache-workspace` header (1–1024 bytes after trimming); absent or invalid headers fall back to session scope. Unauthenticated requests share one client scope. A nonempty namespace versions derived keys in any scope. Shared scopes do not alter account affinity, so cache reuse still depends on the selected account and provider. Caller-supplied keys always take precedence, and workspace names and raw cache keys are excluded from policy diagnostics. Native Codex WebSockets use the same derivation as HTTP.
+
+`drop` discards incompatible hints while preserving compatible fields and the caller's explicit caching intent. `automatic` opts into automatic caching on the Claude provider when translation loses explicit boundaries. Explicit mode without boundaries remains uncached; TTLs are not translated. `reject` returns `400` before sending a request with incompatible hints. Unsupported prewarming remains an error in every mode. See [context efficiency](docs/context-efficiency.md) for measuring cache reuse and latency with stable prefixes.
+
+HTTP POST body limits apply to both encoded and decoded bytes. The defaults retain 256 MiB per request. Optional admission limits cover body collection, provider work and response streaming, returning `503` with `Retry-After: 1` when full:
+
+```yaml
+request-limits:
+  text-body-bytes: 268435456
+  media-body-bytes: 268435456
+  max-in-flight: 0
+  max-in-flight-body-bytes: 0
+```
+
+Body limits must be 1–268435456 bytes. `media-body-bytes` applies to `/v1/images/*` and `/v1/videos/*`; other API POST routes, including multimodal Gemini calls, use `text-body-bytes`. Zero disables each aggregate limit. The byte budget counts decoded request bodies through response completion and releases reservations on errors or cancellation. It bounds body bytes, not total RSS: parsed JSON, histories and responses need additional memory. Admission is fail-fast and process-wide; WebSockets and management routes are separate. These settings reload for new requests without a restart and are available under Connections in the dashboard.
+
 Output limits are preserved during translation. Manual Claude thinking needs an output limit greater than 1,024 tokens; incompatible requests receive a `400` instead of silently increasing the limit. Gemini reasoning suffixes use the same mapping for native and translated requests.
 
 Token-count responses include `x-fusebox-token-count-estimated: false` when Claude supplies a count, or `true` for the local fallback. The fallback estimates text and tool schemas and uses fixed allowances for media; it does not count base64 data as text. Media dimensions, document length and audio/video duration can change the real count, so use provider usage for accounting.
@@ -585,7 +610,7 @@ cargo clippy --all-targets
 cargo run -- --config dev.yaml
 ```
 
-The dashboard lives in `ui/` and is embedded with `include_str!`, so rebuild after editing it.
+The dashboard lives in `ui/`. Its text assets are compressed and embedded at build time, so rebuild after editing them.
 
 ### Client versions
 

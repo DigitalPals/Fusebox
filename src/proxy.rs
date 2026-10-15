@@ -96,6 +96,7 @@ impl Tracker {
                 routing_reason: None,
                 routing_warning: None,
                 routing_attempts: Vec::new(),
+                cache_policy: None,
                 status: 0,
                 latency_ms: 0,
                 ttft_ms: None,
@@ -180,6 +181,10 @@ impl Tracker {
         if let Some(c) = self.usage_tap() {
             c.model(&selected.model);
         }
+    }
+
+    pub fn cache_policy(&mut self, policy: crate::cache::Policy) {
+        self.log.cache_policy = Some(policy);
     }
 
     pub(crate) fn usage_tap(&self) -> Option<crate::usage::capture::Capture> {
@@ -518,6 +523,17 @@ fn apply_native_reasoning(format: Format, body: &mut Value, r: &Reasoning, model
 }
 
 /// OpenAI and Gemini limit tool names to 64 characters.
+fn has_long_tool_names(req: &Request) -> bool {
+    req.tools.iter().any(|tool| tool.name.len() > 64)
+        || req.custom_tools.iter().any(|name| name.len() > 64)
+        || matches!(&req.tool_choice, ir::ToolChoice::Tool(name) if name.len() > 64)
+        || req
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .any(|part| matches!(part, ir::Part::ToolCall { name, .. } if name.len() > 64))
+}
+
 fn shorten_tool_names(req: &mut Request) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut short = |name: &mut String| {
@@ -620,17 +636,17 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
                 let mut events = Vec::new();
                 let _lease = lease;
                 while let Some(frame) = frames.next().await {
-                    if capture.is_some() {
-                        parser.feed(&crate::sse::SseEvent { event: frame.event.as_ref().map(|e| e.to_string()), data: frame.data.clone() }, &mut events);
-                        for event in events.drain(..) { aggregate.push(&event); }
-                    }
                     if let Some(session) = &capture
-                        && let Ok(v) = serde_json::from_str::<Value>(&frame.data)
-                        && matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete"))
+                        && let Ok(mut value) = serde_json::from_str::<Value>(&frame.data)
                     {
-                        let mut response = v["response"].clone();
-                        crate::affinity::complete_output(&mut response, &aggregate);
-                        app.sessions.remember(&headers, session, &response, &full);
+                        let sse = crate::sse::SseEvent { event: frame.event.as_ref().map(|e| e.to_string()), data: String::new() };
+                        parser.feed_value(&sse, Some(&value), &mut events);
+                        for event in events.drain(..) { aggregate.push(&event); }
+                        if matches!(value["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.done")) {
+                            let mut response = value["response"].take();
+                            crate::affinity::complete_output(&mut response, &aggregate);
+                            app.sessions.remember(&headers, session, &response, &full);
+                        }
                     }
                     yield frame;
                 }
@@ -753,7 +769,7 @@ pub fn group_order_for_tests(group: &crate::config::ModelGroup, session: Option<
 }
 
 /// Runs a call, or for a model group, each of its models until one answers.
-async fn execute_models(app: Arc<App>, call: Call) -> Reply {
+async fn execute_models(app: Arc<App>, mut call: Call) -> Reply {
     let cfg = app.cfg();
     let mut budget = RetryBudget::new(cfg.request_retry);
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
@@ -764,7 +780,7 @@ async fn execute_models(app: Arc<App>, call: Call) -> Reply {
     for (i, model) in order.iter().enumerate() {
         let mut attempt = Call {
             format: call.format,
-            body: call.body.clone(),
+            body: if i + 1 == order.len() { call.body.take() } else { call.body.clone() },
             headers: call.headers.clone(),
             stream: call.stream,
             transport: call.transport,
@@ -800,6 +816,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     tracker.session(call.session.as_deref(), call.session_source, &cfg);
 
     let mut parsed: Option<Request> = None;
+    let mut shortened: Option<(Request, HashMap<String, String>)> = None;
     let mut tried: Vec<String> = Vec::new();
     let mut refreshed: Vec<String> = Vec::new();
     let mut last_error: Option<(u16, Value)> = None;
@@ -812,11 +829,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         (cfg.first_token_timeout_seconds > 0).then(|| std::time::Duration::from_secs(cfg.first_token_timeout_seconds));
     let inferred = call.session_source == Some(crate::affinity::INFERRED_SOURCE);
     // A per-request random id would split the provider's cache rather than route to it.
-    let cache_key = call
-        .session
-        .as_deref()
-        .filter(|_| call.session_source != Some("generated_response"))
-        .map(crate::affinity::prompt_cache_key);
+    let (cache_key, cache_scope) =
+        crate::cache::key(&call.headers, &call.body, call.session.as_deref(), call.session_source, &cfg.prompt_cache);
 
     while tried.len() < attempts {
         // Past the budget, the error so far is the answer rather than another wait.
@@ -944,10 +958,13 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             b
         } else {
             if parsed.is_none() {
-                let mut body = call.body.clone();
-                if call.format == Format::Gemini {
+                let body = if call.format == Format::Gemini {
+                    let mut body = call.body.clone();
                     body["model"] = model.clone().into();
-                }
+                    std::borrow::Cow::Owned(body)
+                } else {
+                    std::borrow::Cow::Borrowed(&call.body)
+                };
                 match formats::parse_request(call.format, &body) {
                     Ok(mut r) => {
                         if suffix.is_some() {
@@ -961,22 +978,30 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     }
                 }
             }
-            let mut req = parsed.clone().unwrap();
-            if native != Format::Claude {
-                names = shorten_tool_names(&mut req);
-            }
+            let original = parsed.as_ref().unwrap();
+            let req = if native != Format::Claude && has_long_tool_names(original) {
+                let (req, mapping) = shortened.get_or_insert_with(|| {
+                    let mut req = original.clone();
+                    let mapping = shorten_tool_names(&mut req);
+                    (req, mapping)
+                });
+                names = mapping.clone();
+                &*req
+            } else {
+                original
+            };
             if native == Format::Claude
                 && !devin
-                && let Err(message) = formats::claude::validate_thinking_budget(&req, &upstream_model)
+                && let Err(message) = formats::claude::validate_thinking_budget(req, &upstream_model)
             {
                 tracker.finish(400, &Usage::default(), Some(message.clone()));
                 return error_reply(call.format, 400, &message);
             }
             match native {
-                _ if devin => crate::devin::build_request(&req, &upstream_model),
-                Format::Claude => formats::claude::build_request(&req, &upstream_model),
+                _ if devin => crate::devin::build_request(req, &upstream_model),
+                Format::Claude => formats::claude::build_request(req, &upstream_model),
                 Format::Responses => formats::responses::build_request(
-                    &req,
+                    req,
                     &upstream_model,
                     &formats::responses::BuildOpts {
                         chatgpt_backend: provider == Provider::Codex && acct.is_oauth(),
@@ -984,14 +1009,45 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                         default_reasoning: provider == Provider::Codex,
                     },
                 ),
-                Format::Gemini => formats::gemini::build_request(&req, &upstream_model),
-                Format::Chat => formats::chat::build_request(&req, &upstream_model),
+                Format::Gemini => formats::gemini::build_request(req, &upstream_model),
+                Format::Chat => formats::chat::build_request(req, &upstream_model),
             }
         };
-        if !passthrough && let Err(message) = formats::preserve_cache_hints(call.format, native, &call.body, &mut body)
-        {
-            tracker.finish(400, &Usage::default(), Some(message.clone()));
-            return error_reply(call.format, 400, &message);
+        let cache_downgrade = if passthrough {
+            None
+        } else {
+            match formats::preserve_cache_hints(call.format, native, &call.body, &mut body) {
+                Ok(downgrade) => downgrade,
+                Err(message) => {
+                    let mut policy =
+                        crate::cache::Policy::new(&call.body, &body, native, cache_scope, Some(message.clone()));
+                    policy.applied = "rejected";
+                    policy.key_scope = "not_sent";
+                    tracker.cache_policy(policy);
+                    tracker.finish(400, &Usage::default(), Some(message.clone()));
+                    return error_reply(call.format, 400, &message);
+                }
+            }
+        };
+        if let Some(reason) = &cache_downgrade {
+            if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject {
+                let mut policy =
+                    crate::cache::Policy::new(&call.body, &body, native, cache_scope, cache_downgrade.clone());
+                policy.applied = "rejected";
+                policy.key_scope = "not_sent";
+                tracker.cache_policy(policy);
+                tracker.finish(400, &Usage::default(), Some(reason.clone()));
+                return error_reply(call.format, 400, reason);
+            }
+            if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
+                && provider == Provider::Claude
+                && crate::cache::has_markers(&call.body)
+                && !crate::cache::has_markers(&body)
+            {
+                // The caller explicitly opted into provider defaults after a lost
+                // boundary. Explicit mode without any markers retains its intent.
+                body["cache_control"] = json!({"type":"ephemeral"});
+            }
         }
         if native == Format::Claude
             && !devin
@@ -1020,6 +1076,12 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             },
             body,
         );
+        let mut cache_policy =
+            crate::cache::Policy::new(&call.body, &prepared.body, native, cache_scope, cache_downgrade);
+        if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
+            cache_policy.key_scope = cache_scope;
+        }
+        tracker.cache_policy(cache_policy);
         if cfg.debug {
             tracing::debug!(provider = provider.as_str(), "upstream request prepared");
         }
@@ -1220,7 +1282,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         }
         acct.record_ok();
         let account = acct.label.clone();
-        let req = Arc::new(parsed.clone().unwrap_or_default());
+        let req = Arc::new(parsed.take().unwrap_or_default());
 
         let unwrap = provider == Provider::Antigravity;
         if passthrough {
@@ -1554,9 +1616,9 @@ fn render_stream(
     req: Arc<Request>,
     mut tracker: Tracker,
 ) -> FrameStream {
+    let mut renderer = formats::renderer(format, &model, &req);
     Box::pin(async_stream::stream! {
         let mut events = require_completion(events);
-        let mut renderer = formats::renderer(format, &model, &req);
         let mut frames = Vec::new();
         while let Some(ev) = events.next().await {
             tracker.observe_stream_event(&ev);
@@ -1670,7 +1732,7 @@ async fn collect_passthrough(mut body: ByteStream, native: Format, mut tracker: 
             tracker.observe_quota_value(v);
             tracker.observe_wire(v);
         }
-        parser.feed(&sse, &mut evs);
+        parser.feed_value(&sse, parsed.as_ref(), &mut evs);
         evs.drain(..).for_each(|e| agg.push(&e));
         if let Some(mut v) = parsed
             && matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.done"))

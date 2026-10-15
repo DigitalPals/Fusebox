@@ -9,8 +9,11 @@ pub struct SseEvent {
 #[derive(Default)]
 pub struct SseDecoder {
     buf: Vec<u8>,
+    /// Bytes already checked for a newline in the unfinished line.
+    scanned: usize,
     event: Option<String>,
-    data: Vec<String>,
+    data: String,
+    has_data: bool,
 }
 
 impl SseDecoder {
@@ -18,16 +21,18 @@ impl SseDecoder {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
         let mut start = 0;
-        while let Some(pos) = self.buf[start..].iter().position(|&b| b == b'\n') {
-            let end = start + pos;
+        while let Some(pos) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') {
+            let end = self.scanned + pos;
             let mut line = &self.buf[start..end];
             if line.last() == Some(&b'\r') {
                 line = &line[..line.len() - 1];
             }
-            let line = String::from_utf8_lossy(line).into_owned();
+            let line = String::from_utf8_lossy(line);
             start = end + 1;
-            self.line(&line, &mut out);
+            self.scanned = start;
+            Self::line(&mut self.event, &mut self.data, &mut self.has_data, &line, &mut out);
         }
+        self.scanned = self.buf.len() - start;
         self.buf.drain(..start);
         out
     }
@@ -36,16 +41,18 @@ impl SseDecoder {
     pub fn finish(&mut self) -> Vec<SseEvent> {
         let mut out = Vec::new();
         if !self.buf.is_empty() {
-            let line = String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned();
-            self.line(line.trim_end_matches('\r'), &mut out);
+            let line = String::from_utf8_lossy(&self.buf);
+            Self::line(&mut self.event, &mut self.data, &mut self.has_data, line.trim_end_matches('\r'), &mut out);
+            self.buf.clear();
         }
-        self.dispatch(&mut out);
+        self.scanned = 0;
+        Self::dispatch(&mut self.event, &mut self.data, &mut self.has_data, &mut out);
         out
     }
 
-    fn line(&mut self, line: &str, out: &mut Vec<SseEvent>) {
+    fn line(event: &mut Option<String>, data: &mut String, has_data: &mut bool, line: &str, out: &mut Vec<SseEvent>) {
         if line.is_empty() {
-            self.dispatch(out);
+            Self::dispatch(event, data, has_data, out);
             return;
         }
         if line.starts_with(':') {
@@ -56,19 +63,25 @@ impl SseDecoder {
             None => (line, ""),
         };
         match field {
-            "event" => self.event = Some(value.to_string()),
-            "data" => self.data.push(value.to_string()),
+            "event" => *event = Some(value.to_string()),
+            "data" => {
+                if *has_data {
+                    data.push('\n');
+                }
+                data.push_str(value);
+                *has_data = true;
+            }
             _ => {}
         }
     }
 
-    fn dispatch(&mut self, out: &mut Vec<SseEvent>) {
-        if self.data.is_empty() {
-            self.event = None;
+    fn dispatch(event: &mut Option<String>, data: &mut String, has_data: &mut bool, out: &mut Vec<SseEvent>) {
+        if !*has_data {
+            *event = None;
             return;
         }
-        out.push(SseEvent { event: self.event.take(), data: self.data.join("\n") });
-        self.data.clear();
+        out.push(SseEvent { event: event.take(), data: std::mem::take(data) });
+        *has_data = false;
     }
 }
 
@@ -102,5 +115,39 @@ mod tests {
         let evs = d.finish();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].data, "tail");
+    }
+
+    #[test]
+    fn every_fragment_boundary_preserves_multiline_unicode_and_empty_data() {
+        let wire = ": keepalive\r\nevent: ignored\r\n\r\nevent: answer\r\ndata: café 🦀\r\ndata:\r\ndata:  spaced\r\n\r\ndata:\n\ndata: tail";
+        for chunk_size in 1..=wire.len() {
+            let mut decoder = SseDecoder::default();
+            let mut events = Vec::new();
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                events.extend(decoder.push(chunk));
+            }
+            events.extend(decoder.finish());
+            assert_eq!(events.len(), 3, "chunk size {chunk_size}");
+            assert_eq!(events[0].event.as_deref(), Some("answer"));
+            assert_eq!(events[0].data, "café 🦀\n\n spaced");
+            assert_eq!(events[1].event, None);
+            assert_eq!(events[1].data, "");
+            assert_eq!(events[2].data, "tail");
+            assert!(decoder.finish().is_empty());
+            assert_eq!(decoder.push(b"data: reused\n\n")[0].data, "reused");
+        }
+    }
+
+    #[test]
+    fn large_fragmented_event_and_lossy_utf8_preserve_data() {
+        let data = "x".repeat(4 << 20);
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.push(b"data: ").is_empty());
+        for chunk in data.as_bytes().chunks(1024) {
+            assert!(decoder.push(chunk).is_empty());
+        }
+        let events = decoder.push(b"\n\ndata: \xff\n\n");
+        assert_eq!(events[0].data, data);
+        assert_eq!(events[1].data, "\u{fffd}");
     }
 }

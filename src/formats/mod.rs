@@ -76,7 +76,7 @@ pub fn preserve_cache_hints(
     target: Format,
     original: &Value,
     translated: &mut Value,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if target != Format::Responses && original["prompt_cache_options"]["prewarm"] == true {
         return Err("Prompt cache prewarming is only supported by the Responses API".into());
     }
@@ -93,8 +93,15 @@ pub fn preserve_cache_hints(
                 }
             }
         }
+        return Ok(Some(reason));
     }
-    Ok(())
+    if source == Format::Claude && target != Format::Claude && crate::cache::has_claude_controls(original) {
+        return Ok(Some(
+            "Anthropic cache controls and TTLs cannot be preserved on this provider; use its native cache controls"
+                .into(),
+        ));
+    }
+    Ok(None)
 }
 
 fn strip_breakpoints(body: &mut Value) {
@@ -118,6 +125,12 @@ fn carry_cache_hints(source: Format, target: Format, original: &Value, translate
         if breakpoints > 0 || original["prompt_cache_options"]["mode"] == "explicit" {
             return Err(
                 "Explicit OpenAI prompt caching cannot be translated to this provider; use its native cache controls"
+                    .into(),
+            );
+        }
+        if original["prompt_cache_options"].as_object().is_some_and(|options| !options.is_empty()) {
+            return Err(
+                "OpenAI prompt cache options cannot be preserved on this provider; use its native cache controls"
                     .into(),
             );
         }

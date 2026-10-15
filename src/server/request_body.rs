@@ -8,14 +8,14 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use http_body_util::{LengthLimitError, Limited};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use super::{body_error, format_for_path};
 use crate::state::App;
 
-pub(super) const MAX_BODY_SIZE: usize = 256 << 20;
+pub(super) use crate::admission::MAX_BODY_SIZE;
 
 /// Validate POST encodings and bound compressed input after client authentication.
 ///
@@ -40,7 +40,46 @@ pub(super) async fn encoded_body(State(app): State<Arc<App>>, mut req: Request, 
     if let Some(encoding) = encoding {
         req.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_str(&encoding).unwrap());
     }
-    next.run(decode_body(limit_encoded_body(req, MAX_BODY_SIZE))).await
+    let cfg = app.cfg();
+    let permit = if cfg.request_limits.max_in_flight == 0 && cfg.request_limits.max_in_flight_body_bytes == 0 {
+        None
+    } else {
+        match app.admission.acquire(&cfg.request_limits) {
+            Ok(permit) => Some(permit),
+            Err(_) => return capacity_error(&app, &req),
+        }
+    };
+    let limit = cfg.request_limits.body_limit(req.uri().path());
+    if let Some(permit) = &permit {
+        req.extensions_mut().insert(permit.clone());
+    }
+    req.extensions_mut().insert(BodyLimit(limit));
+    let response = next.run(decode_body(limit_encoded_body(req, limit))).await;
+    let Some(permit) = permit else { return response };
+    // Keep admission through the stream, including client cancellation. Taking
+    // the response headers alone must not release a large active request.
+    let (parts, body) = response.into_parts();
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await { yield chunk; }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+#[derive(Clone, Copy)]
+struct BodyLimit(usize);
+
+fn capacity_error(app: &Arc<App>, req: &Request) -> Response {
+    let mut response = body_error(
+        app,
+        format_for_path(req.uri().path()),
+        req.headers(),
+        503,
+        "request capacity exhausted; retry later",
+    );
+    response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 /// Collect decoded POST bodies within the output limit before handlers run.
@@ -52,10 +91,27 @@ pub(super) async fn decoded_body(State(app): State<Arc<App>>, req: Request, next
         return next.run(req).await;
     }
     let format = format_for_path(req.uri().path());
+    let limit = req.extensions().get::<BodyLimit>().map_or(MAX_BODY_SIZE, |limit| limit.0);
+    let permit = req.extensions().get::<Arc<crate::admission::Permit>>().cloned();
     let (parts, body) = req.into_parts();
-    match read_body(body, MAX_BODY_SIZE).await {
+    let body = if let Some(permit) = permit {
+        Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let chunk = chunk.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            permit.reserve(chunk.len()).map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(chunk)
+        }))
+    } else {
+        body
+    };
+    match read_body(body, limit).await {
         Ok(bytes) => next.run(Request::from_parts(parts, Body::from(bytes))).await,
-        Err((status, message)) => body_error(&app, format, &parts.headers, status, message),
+        Err((status, message)) => {
+            let mut response = body_error(&app, format, &parts.headers, status, message);
+            if status == 503 {
+                response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            }
+            response
+        }
     }
 }
 
@@ -98,7 +154,10 @@ async fn read_body(body: Body, limit: usize) -> Result<Bytes, (u16, &'static str
         let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
         while let Some(error) = source {
             if error.is::<LengthLimitError>() {
-                return (413, "request body exceeds 256 MiB limit");
+                return (413, "request body exceeds configured size limit");
+            }
+            if error.is::<crate::admission::Full>() {
+                return (503, "request capacity exhausted; retry later");
             }
             source = error.source();
         }
