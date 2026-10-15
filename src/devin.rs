@@ -23,7 +23,7 @@ const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const APP_BASE: &str = "https://app.devin.ai";
 const API_BASE: &str = "https://api.devin.ai";
 const CLIENT_NAME: &str = "chisel";
-pub(crate) const CLIENT_VERSION: &str = "3000.11.3";
+pub(crate) const CLIENT_VERSION: &str = "3000.11.92";
 const FINGERPRINT_LEN: usize = 732;
 const DEFAULT_MAX_TOKENS: u64 = 64_000;
 const TOKEN_PREFIX: &str = "devin-session-token$";
@@ -263,13 +263,14 @@ fn os_name() -> &'static str {
 
 fn metadata(token: &str, seed: &str) -> Vec<u8> {
     let mut m = Vec::new();
-    put_str(&mut m, 1, CLIENT_NAME);
+    put_str(&mut m, 1, "devin-cli");
     put_str(&mut m, 2, CLIENT_VERSION);
     put_str(&mut m, 3, token);
     put_str(&mut m, 4, "en");
     put_str(&mut m, 5, os_name());
     put_str(&mut m, 7, CLIENT_VERSION);
     put_str(&mut m, 12, CLIENT_NAME);
+    put_str(&mut m, 28, CLIENT_NAME);
     put_str(&mut m, 31, &fingerprint(seed));
     m
 }
@@ -389,7 +390,7 @@ fn encode(spec: &Value, token: &str, seed: &str) -> Vec<u8> {
         put_str(&mut r, 2, sys);
     }
     let prompts = spec["prompts"].as_array().cloned().unwrap_or_default();
-    for p in &prompts {
+    for (index, p) in prompts.iter().enumerate() {
         let mut b = Vec::new();
         put_str(&mut b, 1, &uuid::Uuid::new_v4().to_string());
         put_uint(&mut b, 2, p["source"].as_u64().unwrap_or(1));
@@ -405,6 +406,10 @@ fn encode(spec: &Value, token: &str, seed: &str) -> Vec<u8> {
         }
         if let Some(id) = p["tool_call_id"].as_str() {
             put_str(&mut b, 7, id);
+        }
+        // 3000.11.92 marks the current user turn, not earlier history or tool results.
+        if index + 1 == prompts.len() && p["source"] == 1 {
+            put_bytes(&mut b, 8, &[0x08, 0x01]);
         }
         for img in p["images"].as_array().into_iter().flatten() {
             let mut ib = Vec::new();
@@ -452,6 +457,7 @@ fn encode(spec: &Value, token: &str, seed: &str) -> Vec<u8> {
     put_str(&mut r, 16, &session);
     put_uint(&mut r, 20, 1);
     put_str(&mut r, 21, spec["model_uid"].as_str().unwrap_or("swe-2-high"));
+    put_str(&mut r, 22, &uuid::Uuid::new_v4().to_string());
     r
 }
 
@@ -760,6 +766,70 @@ pub async fn complete_login(app: &App, input: &str, verifier: &str) -> Result<Si
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bytes_field(b: &[u8], number: u32) -> Option<&[u8]> {
+        fields(b).into_iter().find_map(|(n, f)| match f {
+            Field::Bytes(value) if n == number => Some(value),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn request_metadata_matches_devin_cli_3000_11_92() {
+        let body = encode(&json!({}), "tok", "seed");
+        let metadata = bytes_field(&body, 1).unwrap();
+        // Captured from the checksum-verified official Linux release.
+        for (number, expected) in [
+            (1, "devin-cli"),
+            (2, "3000.11.92"),
+            (3, "tok"),
+            (4, "en"),
+            (5, os_name()),
+            (7, "3000.11.92"),
+            (12, "chisel"),
+            (28, "chisel"),
+        ] {
+            assert_eq!(bytes_field(metadata, number), Some(expected.as_bytes()), "metadata field {number}");
+        }
+    }
+
+    #[test]
+    fn each_request_has_a_fresh_generation_id() {
+        let first = encode(&json!({}), "tok", "seed");
+        let second = encode(&json!({}), "tok", "seed");
+        let id = |b: &[u8]| {
+            uuid::Uuid::parse_str(std::str::from_utf8(bytes_field(b, 22).expect("generation ID")).unwrap()).unwrap()
+        };
+        assert_eq!(id(&first).get_version_num(), 4);
+        assert_ne!(id(&first), id(&second));
+    }
+
+    #[test]
+    fn only_the_current_user_prompt_gets_the_new_turn_marker() {
+        let body = encode(
+            &json!({"prompts": [
+                {"source": 1, "content": "earlier"},
+                {"source": 2, "content": "answer"},
+                {"source": 1, "content": "now"}
+            ]}),
+            "tok",
+            "seed",
+        );
+        let prompts: Vec<_> = fields(&body)
+            .into_iter()
+            .filter_map(|(n, f)| match f {
+                Field::Bytes(b) if n == 3 => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bytes_field(prompts[0], 8), None);
+        assert_eq!(bytes_field(prompts[1], 8), None);
+        assert_eq!(bytes_field(prompts[2], 8), Some(&b"\x08\x01"[..]));
+        for source in [2, 4] {
+            let body = encode(&json!({"prompts": [{"source": source, "content": "result"}]}), "tok", "seed");
+            assert_eq!(bytes_field(bytes_field(&body, 3).unwrap(), 8), None);
+        }
+    }
 
     #[test]
     fn model_uids_follow_devin_levels() {

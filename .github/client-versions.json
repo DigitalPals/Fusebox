@@ -36,7 +36,7 @@
     {
       "id": "devin-cli",
       "name": "Devin CLI",
-      "version": "3000.11.3",
+      "version": "3000.11.92",
       "source": { "kind": "json", "url": "https://static.devin.ai/cli/current/manifest.json", "path": "version" },
       "where": "src/devin.rs: CLIENT_VERSION"
     },
