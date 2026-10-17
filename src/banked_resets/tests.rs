@@ -34,6 +34,7 @@ fn claude_usage() -> Value {
 }
 struct Mock {
     inventory: Inventory,
+    usage: Value,
     outcomes: Mutex<VecDeque<Outcome>>,
     calls: Mutex<Vec<String>>,
     reads: AtomicUsize,
@@ -43,6 +44,7 @@ impl Mock {
     fn new(outcomes: &[Outcome]) -> Self {
         Self {
             inventory: provider::claude(&claude_usage(), Utc::now()).unwrap(),
+            usage: json!({"five_hour":{"utilization":0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}}),
             outcomes: Mutex::new(outcomes.iter().copied().collect()),
             calls: Mutex::new(vec![]),
             reads: AtomicUsize::new(0),
@@ -54,10 +56,7 @@ impl Api for Mock {
     async fn read(&self) -> Result<(Inventory, Value)> {
         let n = self.reads.fetch_add(1, Ordering::Relaxed);
         ensure!(n < self.fail_after, "Mock read unavailable");
-        Ok((
-            self.inventory.clone(),
-            json!({"five_hour":{"utilization":0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}}),
-        ))
+        Ok((self.inventory.clone(), self.usage.clone()))
     }
     async fn identity(&self) -> Result<String> {
         Ok("organization-1".into())
@@ -85,7 +84,326 @@ fn action(request: &str, kind: &str) -> Action {
     Action { action: kind.into(), request_id: request.into(), grant_id: "grant-1".into(), confirmed: true }
 }
 async fn run(app: &Arc<App>, acct: &Arc<Account>, mock: &Mock, ledger: &mut Ledger, action: Action) -> Result<View> {
-    execute(app, acct, mock, "organization-1", "account-1", ledger, action).await
+    execute(app, acct, mock, "organization-1", "account-1", ledger, Request::Manual(action)).await
+}
+
+fn expiring_usage(weekly: f64, short: f64, hours: i64) -> Value {
+    let now = Utc::now();
+    json!({
+        "five_hour":{"utilization":short,"resets_at":now + chrono::Duration::hours(4)},
+        "seven_day":{"utilization":weekly,"resets_at":now + chrono::Duration::days(7)},
+        "cedar_ember":{"eligible":true,"at_limit":true,"grants":[{
+            "id":"grant-1","label":"Expiring grant","resets_total":2,"resets_left":2,"usable_now":true,
+            "clears":["five_hour","seven_day"],"ends_at":now + chrono::Duration::hours(hours)
+        }]}
+    })
+}
+
+fn reset_view(inventory: Inventory) -> View {
+    View {
+        checked_at: Utc::now(),
+        inventory: Some(inventory),
+        error: None,
+        quote: None,
+        operation: None,
+        retryable: false,
+    }
+}
+
+fn automatic_fixture(weekly: f64, short: f64, hours: i64) -> (Temp, Arc<App>, Arc<Account>, Mock) {
+    let (temp, app, acct) = fixture(Provider::Claude, 1);
+    let mut cfg = (*app.cfg()).clone();
+    cfg.routing = crate::config::Routing::SmartQuota;
+    cfg.banked_reset_policy.auto_redeem = true;
+    app.set_config(cfg);
+    let mut mock = Mock::new(&[Outcome::Applied]);
+    mock.usage = expiring_usage(weekly, short, hours);
+    mock.inventory = provider::claude(&mock.usage, Utc::now()).unwrap();
+    {
+        let mut st = acct.state.lock();
+        crate::quota::usage(&mut st, Provider::Claude, &mock.usage);
+        st.banked_resets = Some(reset_view(mock.inventory.clone()));
+    }
+    (temp, app, acct, mock)
+}
+
+#[test]
+fn automatic_policy_uses_weekly_consumption_and_real_expiry_value() {
+    let (_temp, app, acct, _) = automatic_fixture(3.0, 0.0, 120);
+    let cfg = app.cfg();
+    let due = |usage: Value| {
+        let inv = provider::claude(&usage, Utc::now()).unwrap();
+        let mut fresh = crate::accounts::AccountState::default();
+        crate::quota::usage(&mut fresh, Provider::Claude, &usage);
+        automation::decision(&cfg, &fresh.quota, &inv, Utc::now()).is_some()
+    };
+    assert!(!due(expiring_usage(94.0, 100.0, 120)), "a short limit must not waste a weekly reset days early");
+    assert!(due(expiring_usage(95.0, 100.0, 120)));
+    assert!(due(expiring_usage(20.0, 0.0, 5)), "rescue a partly used weekly allowance before expiry");
+    assert!(!due(expiring_usage(19.0, 0.0, 5)));
+    assert!(!due(expiring_usage(0.0, 0.0, 1)), "never consume a reset that restores nothing");
+    assert!(!due(expiring_usage(3.0, 100.0, 5)), "short allowance renews before the credit expires");
+    assert!(due(expiring_usage(3.0, 100.0, 2)), "short allowance cannot renew before credit expiry");
+    assert!(!due(expiring_usage(100.0, 100.0, 200)), "outside the configured expiry window");
+    assert!(!due(expiring_usage(100.0, 100.0, -1)));
+    let mut usage = expiring_usage(100.0, 100.0, 120);
+    usage["seven_day"]["resets_at"] = json!(Utc::now() + chrono::Duration::minutes(5));
+    assert!(!due(usage), "wait for a weekly allowance that is about to renew naturally");
+    let mut usage = expiring_usage(3.0, 95.0, 120);
+    usage["cedar_ember"]["grants"][0]["clears"] = json!(["five_hour"]);
+    assert!(due(usage), "a short-only reset can replenish its own depleted window");
+    let mut usage = expiring_usage(100.0, 100.0, 120);
+    usage["cedar_ember"]["grants"][0]["paused"] = json!(true);
+    assert!(!due(usage));
+    let mut usage = expiring_usage(100.0, 100.0, 120);
+    usage["cedar_ember"]["grants"][0]["ends_at"] = Value::Null;
+    assert!(!due(usage), "an unknown expiry cannot authorize expiry-based spending");
+    assert!(plan(&acct, &cfg).unwrap().auto_redeem);
+}
+
+#[tokio::test]
+async fn automatic_redemption_rechecks_usage_and_persists_duplicate_protection() {
+    let (temp, app, acct, mut mock) = automatic_fixture(95.0, 0.0, 120);
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    // Cached usage says 95%, but authoritative preflight says 3%.
+    mock.usage["seven_day"]["utilization"] = json!(3);
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert!(mock.calls.lock().is_empty());
+    assert!(ledger.journal.operations.is_empty());
+    mock.usage["seven_day"]["utilization"] = json!(95);
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.as_ref().unwrap().status, "applied");
+    assert!(result.operation.as_ref().unwrap().automatic);
+    assert_eq!(mock.calls.lock().len(), 1);
+    // Even after the recent-spend delay, stale provider inventory must not spend the same credit again.
+    for op in ledger.journal.operations.values_mut() {
+        op.updated_at -= chrono::Duration::hours(2);
+    }
+    ledger.save().unwrap();
+    drop(ledger);
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1);
+    let mut additional = mock.inventory.grants[0].clone();
+    additional.id = "unrelated-grant".into();
+    additional.expires_at = additional.expires_at.map(|e| e + chrono::Duration::days(1));
+    mock.inventory.grants.push(additional);
+    mock.inventory.available = Some(4);
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1, "unrelated inventory changes cannot authorize a duplicate credit");
+}
+
+#[tokio::test]
+async fn automatic_unknown_outcome_blocks_after_restart_and_opt_out_prevents_spending() {
+    let (temp, app, acct, mock) = automatic_fixture(98.0, 0.0, 120);
+    let mut cfg = (*app.cfg()).clone();
+    cfg.banked_reset_policy.auto_redeem = false;
+    app.set_config(cfg.clone());
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert!(mock.calls.lock().is_empty());
+    cfg.banked_reset_policy.auto_redeem = true;
+    app.set_config(cfg);
+    *mock.outcomes.lock() = VecDeque::from([Outcome::Unknown]);
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "unknown");
+    drop(ledger);
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_codex_reset_requires_shared_quota_and_keeps_model_limits() {
+    let (temp, app, acct) = fixture(Provider::Codex, 1);
+    let mut cfg = (*app.cfg()).clone();
+    cfg.routing = crate::config::Routing::SmartQuota;
+    cfg.banked_reset_policy.auto_redeem = true;
+    app.set_config(cfg);
+    let now = Utc::now();
+    let mut mock = Mock::new(&[Outcome::Applied]);
+    mock.usage = json!({"rate_limit":{
+        "primary_window":{"used_percent":100,"limit_window_seconds":18000,"reset_at":(now + chrono::Duration::hours(4)).timestamp()},
+        "secondary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":(now + chrono::Duration::days(7)).timestamp()}
+    }});
+    let details = json!({"available_count":1,"credits":[{
+        "id":"codex-credit","status":"available","reset_type":"codex_rate_limits",
+        "expires_at":now + chrono::Duration::days(5)
+    }]});
+    mock.inventory = provider::codex(&mock.usage, &details, now).unwrap();
+    let model_limit = crate::quota::Window {
+        name: "week special".into(),
+        used: 100.0,
+        resets_at: Some(now + chrono::Duration::days(7)),
+        model: Some("special".into()),
+    };
+    {
+        let mut st = acct.state.lock();
+        crate::quota::usage(&mut st, Provider::Codex, &mock.usage);
+        st.quota.windows.push(model_limit.clone());
+        assert!(automation::decision(&app.cfg(), &st.quota, &mock.inventory, now).is_none());
+    }
+    let mut ledger = Ledger::open(&temp.0, "codex:account-1").unwrap();
+    assert!(execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert!(mock.calls.lock().is_empty(), "a short or model limit cannot spend a shared weekly credit");
+    mock.usage["rate_limit"]["secondary_window"]["used_percent"] = json!(96);
+    let result = execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "applied");
+    assert_eq!(mock.calls.lock().len(), 1);
+    assert!(acct.state.lock().quota.windows.contains(&model_limit));
+    assert!(ledger.journal.latest().unwrap().grant_id.is_empty(), "Codex chooses the credit on the provider side");
+}
+
+#[test]
+fn expiry_routing_matches_production_order_and_preserves_session_reserves() {
+    use crate::accounts::Pick;
+    use crate::quota::Window;
+    use std::collections::HashMap;
+    let temp = Temp::new();
+    for name in ["cybex", "itpals", "digitalbrain"] {
+        std::fs::write(temp.0.join(format!("{name}.json")), json!({
+            "type":"claude","account_id":name,"email":format!("{name}@test.invalid"),"access_token":"test-only","expired":"2099-01-01T00:00:00Z"
+        }).to_string()).unwrap();
+    }
+    let mut cfg = crate::config::Config {
+        auth_dir: temp.0.to_string_lossy().into(),
+        banked_resets: true,
+        routing: crate::config::Routing::SmartQuota,
+        ..Default::default()
+    };
+    let app = App::new(cfg.clone(), temp.0.join("config.yaml"));
+    let accounts = app.pool.all();
+    let find = |name: &str| accounts.iter().find(|a| a.label.contains(name)).unwrap().clone();
+    let (cybex, itpals, digitalbrain) = (find("cybex"), find("itpals"), find("digitalbrain"));
+    let now = Utc::now();
+    for (a, days, short, weekly) in [(&cybex, 4, 86.0, 35.0), (&itpals, 5, 0.0, 4.0), (&digitalbrain, 6, 0.0, 3.0)] {
+        crate::quota::authoritative(
+            &mut a.state.lock(),
+            vec![
+                Window {
+                    name: "5h".into(),
+                    used: short,
+                    resets_at: Some(now + chrono::Duration::hours(4)),
+                    model: None,
+                },
+                Window {
+                    name: "week".into(),
+                    used: weekly,
+                    resets_at: Some(now + chrono::Duration::days(days)),
+                    model: None,
+                },
+            ],
+            None,
+        );
+    }
+    digitalbrain.state.lock().banked_resets =
+        Some(reset_view(provider::claude(&expiring_usage(3.0, 0.0, 122), now).unwrap()));
+    let load = HashMap::from([(cybex.id.clone(), 1)]);
+    let pick = |cfg: &crate::config::Config| match app.pool.pick("claude-opus-5-5", &[], cfg, None, None, &load) {
+        Pick::Ok(a, _) => a.id.clone(),
+        _ => panic!("expected an available account"),
+    };
+    assert_eq!(pick(&cfg), digitalbrain.id);
+    let order = app.pool.route_order("claude-opus-5-5", &cfg, None, &load);
+    assert_eq!(order.iter().map(|s| &s.account).collect::<Vec<_>>(), [&digitalbrain.id, &itpals.id, &cybex.id]);
+    assert!(order[0].banked_reset_expires_at.is_some());
+    cfg.banked_reset_policy.expiry_priority_hours = 24;
+    assert_eq!(pick(&cfg), itpals.id);
+    cfg.banked_reset_policy.expiry_priority_hours = 168;
+    let first = app.sessions.pick_with_reason(&app.pool, &cfg, "claude-opus-5-5", Some("ongoing"), &[], None).unwrap();
+    assert_eq!(first.account.id, digitalbrain.id);
+    assert_eq!(first.reason, "expiring_reset");
+    digitalbrain.state.lock().quota.windows[0].used = 80.0;
+    assert_eq!(
+        app.sessions
+            .pick_with_reason(&app.pool, &cfg, "claude-opus-5-5", Some("ongoing"), &[], None)
+            .unwrap()
+            .account
+            .id,
+        digitalbrain.id
+    );
+    assert_ne!(
+        app.sessions.pick_with_reason(&app.pool, &cfg, "claude-opus-5-5", Some("new"), &[], None).unwrap().account.id,
+        digitalbrain.id
+    );
+    digitalbrain.state.lock().quota.windows[0].used = 0.0;
+    digitalbrain.state.lock().banked_resets.as_mut().unwrap().checked_at -= chrono::Duration::hours(1);
+    assert_eq!(pick(&cfg), itpals.id, "stale inventory must not keep an account prioritized");
+}
+
+#[tokio::test]
+async fn automatic_worker_serializes_duplicate_credentials_and_refreshes_restored_quota() {
+    use axum::{
+        Router,
+        body::Body,
+        extract::State,
+        http::{Request as HttpRequest, StatusCode},
+        response::IntoResponse,
+        routing::any,
+    };
+    #[derive(Clone)]
+    struct Backend {
+        usage: Value,
+        posts: Arc<AtomicUsize>,
+        root: PathBuf,
+    }
+    async fn backend(State(b): State<Backend>, req: HttpRequest<Body>) -> axum::response::Response {
+        let path = req.uri().path_and_query().unwrap().as_str();
+        if path == "/api/oauth/profile" {
+            return axum::Json(
+                json!({"account":{"uuid":"account-1"},"organization":{"uuid":"11111111-1111-4111-8111-111111111111"}}),
+            )
+            .into_response();
+        }
+        if path == "/api/oauth/usage?cedar_ember=1&skip_spend=1" {
+            let mut usage = b.usage.clone();
+            if b.posts.load(Ordering::SeqCst) > 0 {
+                usage["five_hour"]["utilization"] = json!(0);
+                usage["seven_day"]["utilization"] = json!(0);
+                usage["cedar_ember"]["grants"][0]["resets_left"] = json!(1);
+            }
+            return axum::Json(usage).into_response();
+        }
+        if path == "/api/organizations/11111111-1111-4111-8111-111111111111/reset_rate_limits" {
+            assert_eq!(req.method(), axum::http::Method::POST);
+            let saved = ledger::last_operation(&b.root, Provider::Claude, "account-1").unwrap().unwrap();
+            assert_eq!(saved.status, "pending", "the durable intent must precede HTTP dispatch");
+            assert!(saved.automatic);
+            assert!(saved.auto_credit.is_some());
+            assert_eq!(b.posts.fetch_add(1, Ordering::SeqCst), 0, "one automatic spend across duplicate files");
+            return axum::Json(json!({"result":"reset"})).into_response();
+        }
+        StatusCode::NOT_FOUND.into_response()
+    }
+    let (temp, app, acct) = fixture(Provider::Claude, 2);
+    let b =
+        Backend { usage: expiring_usage(96.0, 100.0, 120), posts: Arc::new(AtomicUsize::new(0)), root: temp.0.clone() };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    *app.reset_test_origin.lock() = Some(format!("http://{}", listener.local_addr().unwrap()));
+    let server =
+        tokio::spawn(axum::serve(listener, Router::new().fallback(any(backend)).with_state(b.clone())).into_future());
+    refresh(&app, &acct).await.unwrap();
+    assert!(!automatic_check(&app, &acct).await, "automatic use is off by default");
+    let mut cfg = (*app.cfg()).clone();
+    cfg.routing = crate::config::Routing::SmartQuota;
+    cfg.banked_reset_policy.auto_redeem = true;
+    app.set_config(cfg);
+    let duplicate = app.pool.all().into_iter().find(|a| a.id != acct.id).unwrap();
+    let (one, two) = tokio::join!(automatic_check(&app, &acct), automatic_check(&app, &duplicate));
+    assert!(one || two);
+    assert_eq!(b.posts.load(Ordering::SeqCst), 1);
+    for account in app.pool.all() {
+        let st = account.state.lock();
+        assert_eq!(st.quota.weekly_remaining("claude-opus-5-5"), Some(100.0));
+        assert_eq!(st.quota.five_hour_remaining("claude-opus-5-5"), Some(100.0));
+        assert_eq!(st.banked_resets.as_ref().unwrap().inventory.as_ref().unwrap().available, Some(1));
+        assert!(!st.quota_refreshing);
+    }
+    assert!(!automatic_check(&app, &acct).await);
+    assert_eq!(b.posts.load(Ordering::SeqCst), 1);
+    server.abort();
 }
 
 #[test]
@@ -274,6 +592,8 @@ fn journal_is_durable_exclusive_and_fails_closed() {
         updated_at: Utc::now(),
         status: "pending".into(),
         message: "Pending".into(),
+        automatic: false,
+        auto_credit: None,
     };
     ledger.journal.operations.insert(id.clone(), o);
     ledger.save().unwrap();
@@ -544,7 +864,9 @@ async fn pending_entry_precedes_dispatch_and_failed_save_never_dispatches() {
     let durable = Durable { root: app.startup_config.auth_dir(), calls: AtomicUsize::new(0) };
     let mut ledger = Ledger::open(&durable.root, "claude:organization-1").unwrap();
     let id = quote(&app, &mock, &ledger);
-    execute(&app, &acct, &durable, "organization-1", "account-1", &mut ledger, action(&id, "redeem")).await.unwrap();
+    execute(&app, &acct, &durable, "organization-1", "account-1", &mut ledger, Request::Manual(action(&id, "redeem")))
+        .await
+        .unwrap();
     assert_eq!(durable.calls.load(Ordering::Relaxed), 1);
     #[cfg(unix)]
     {
@@ -552,8 +874,16 @@ async fn pending_entry_precedes_dispatch_and_failed_save_never_dispatches() {
         let id = quote(&app, &mock, &ledger);
         let dir = durable.root.join(".banked-resets");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result =
-            execute(&app, &acct, &durable, "organization-1", "account-1", &mut ledger, action(&id, "redeem")).await;
+        let result = execute(
+            &app,
+            &acct,
+            &durable,
+            "organization-1",
+            "account-1",
+            &mut ledger,
+            Request::Manual(action(&id, "redeem")),
+        )
+        .await;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
         assert_eq!(durable.calls.load(Ordering::Relaxed), 1);
@@ -588,6 +918,8 @@ fn views_do_not_disclose_tokens_or_provider_account_identity() {
             updated_at: Utc::now(),
             status: "unknown".into(),
             message: "Unknown".into(),
+            automatic: false,
+            auto_credit: None,
         },
     );
     let serialized = serde_json::to_string(&view(&ledger, None, None, None)).unwrap();
@@ -796,7 +1128,17 @@ async fn same_organization_cannot_retry_another_account_operation() {
     }
     for kind in ["retry", "resolve-used", "resolve-unused"] {
         assert!(
-            execute(&app, &other, &mock, "organization-1", "account-2", &mut ledger, action(&id, kind)).await.is_err()
+            execute(
+                &app,
+                &other,
+                &mock,
+                "organization-1",
+                "account-2",
+                &mut ledger,
+                Request::Manual(action(&id, kind))
+            )
+            .await
+            .is_err()
         );
     }
     assert_eq!(mock.calls.lock().len(), 1);

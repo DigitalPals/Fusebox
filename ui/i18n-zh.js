@@ -22,6 +22,15 @@
   window.FUSEBOX_I18N = window.FUSEBOX_I18N || {};
   window.FUSEBOX_I18N.zh = {
     strings: {
+      "Expiring reset": "即将到期的重置",
+      "Reset details": "重置详情",
+      "Prefer resets expiring within (hours)": "优先使用在以下时间内到期的重置（小时）",
+      "Automatically use expiring resets": "自动使用即将到期的重置",
+      "Prioritized for new work.": "新任务优先使用此账号。",
+      "This reset was requested automatically under your routing policy.": "此次重置由路由策略自动申请。",
+      "Manual use asks for confirmation. Automatic redemption is off for this account.": "手动使用需要确认。此账号未启用自动使用。",
+      "Automatic redemption is off. Use a reset manually before it expires.": "自动使用已关闭。请在到期前手动使用重置。",
+      "Automatic reset at 95% weekly use, or in the final 6 hours with at least 20% quota to restore. Short limits normally wait for their own renewal.": "每周用量达到 95% 时自动重置；或在到期前最后 6 小时，可恢复至少 20% 配额时使用。短时限额通常等待自然恢复。",
       "Prompt cache": "提示词缓存",
       "Prewarm": "预热",
       "Prompt cache key scope": "提示词缓存键范围",

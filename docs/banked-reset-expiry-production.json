@@ -1,0 +1,82 @@
+{
+  "checked_at": "2026-10-17T14:07:01.310766+00:00",
+  "production_url": "https://10.10.0.235:8317/",
+  "version": "0.5.1+gui.b2c191be55a1",
+  "source_commit": "6fcb67f99fe46247ed63c6ef592110ba33055ebc",
+  "source_sha256": "b2c191be55a1ea67d5f7cd86d91bb6a5561d6cce157ad16ba0f7dab1e90c0906",
+  "binary_sha256": "5bc2e764b05613839800c81cb5371373c88e66557c3b9f081a0e77483ef6fd60",
+  "routing": "smart-quota",
+  "policy": {
+    "auto-redeem": true,
+    "expiry-priority-hours": 168
+  },
+  "representative_model": "claude-opus-5-5",
+  "new_claude_session_order": [
+    "john@digitalbrain.nl",
+    "john@itpals.com",
+    "john@cybex.net"
+  ],
+  "digitalbrain_reset_expires_at": "2026-10-22T16:00:00Z",
+  "digitalbrain_available_resets": 1,
+  "reset_spent_during_deployment": false,
+  "sessions": {
+    "current_assignments": 257,
+    "expired_assignments": 0,
+    "preserved_assignments": 257,
+    "snapshot_assignments": 257
+  },
+  "account_count": 4,
+  "gate_unchanged": true,
+  "gate_held": false,
+  "public_tls_verified": true,
+  "usage_before": {
+    "observations": 286172,
+    "quick_check": "ok",
+    "schema_sha256": "5b5401d692fd9a23cb5814d40d17830517028407f9edb1ac3908b45388f12023",
+    "schema_version": 3
+  },
+  "usage_after": {
+    "observations": 286183,
+    "quick_check": "ok",
+    "schema_sha256": "5b5401d692fd9a23cb5814d40d17830517028407f9edb1ac3908b45388f12023",
+    "schema_version": 3
+  },
+  "usage_health": {
+    "accepted": 47,
+    "dropped": 0,
+    "prior_unclosed_sessions": 0,
+    "queue_depth": 0,
+    "rejected": 0,
+    "state": "healthy",
+    "writer_errors": 0,
+    "written": 47
+  },
+  "previous_config_sha256": "a3ccc17b92f7b289e779cecbada48a94885d4ac5ef4714d67af5603e00d5de27",
+  "config_sha256": "8ed4ac517421f4a14214ed93bb1f22f057c5b012a7bf3eb202efad4f4e188d4d",
+  "only_changed_setting": "banked-reset-policy",
+  "force_install_authorized": true,
+  "active_requests_at_restart": 3,
+  "checks": {
+    "rust_tests": 471,
+    "dashboard_tests": 53,
+    "python_tests": 30,
+    "rollout_helper_tests": 11,
+    "isolated_usage_checks": 12,
+    "dashboard_assets": 10,
+    "settings_activation_smoke": true,
+    "clippy": true,
+    "rustfmt": true
+  },
+  "development_service": {
+    "host": "thebeast",
+    "unit": "fusebox-reset-countdown-dev.service",
+    "rebuilt_and_restarted": true,
+    "health": "ok"
+  },
+  "rollback_version": "0.4.0+gui.32c54c271e0c",
+  "backup_sha256": "0da84e195b362afb7eecc01e40d3b2eb5b8e3067bfd8c0209b5dee3f5139277e",
+  "usage_backup_sha256": "b5aa11f3a468bbf4fea249fe1c6e2a0d1520daf0297c66e9bbc862a7504b0cfb",
+  "remote_receipts": "/opt/cli-proxy-api-rust/incoming/fusebox-reset-expiry-20261017/",
+  "rollback_note": "Retain the current auth/.banked-resets journal when rolling back after any new spend. The guarded binary deployment committed before automatic redemption was enabled.",
+  "background_poll_observed_after_enable": true
+}

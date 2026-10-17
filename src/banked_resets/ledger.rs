@@ -21,6 +21,11 @@ pub struct Operation {
     pub updated_at: DateTime<Utc>,
     pub status: String,
     pub message: String,
+    #[serde(default)]
+    pub automatic: bool,
+    /// Prevent a second automatic spend if provider inventory has not decreased.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_credit: Option<String>,
 }
 impl Operation {
     pub fn unsettled(&self) -> bool {
@@ -48,6 +53,15 @@ pub struct Ledger {
     _lock: File,
     path: PathBuf,
     pub journal: Journal,
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        // A concurrent fork may inherit the open file description until exec.
+        // Release our transaction explicitly rather than waiting for every
+        // inherited descriptor to close.
+        let _ = FileExt::unlock(&self._lock);
+    }
 }
 
 fn private_options() -> OpenOptions {

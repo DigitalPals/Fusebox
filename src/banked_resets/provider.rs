@@ -174,10 +174,10 @@ pub fn claude(v: &Value, now: DateTime<Utc>) -> Result<Inventory> {
             Some("Reset cooldown is active")
         } else if paused {
             Some("Grant is paused")
-        } else if !usable_now {
-            Some("Grant is not currently usable")
         } else if requires_limit && !limited {
             Some("Account must reach its limit first")
+        } else if !usable_now {
+            Some("Grant is not currently usable")
         } else if clears.is_empty() {
             Some("Reset scope is unsupported")
         } else {

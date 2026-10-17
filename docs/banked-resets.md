@@ -14,11 +14,38 @@ While off, nothing contacts these endpoints and no journal is created. While on,
 
 Overview and Accounts show “↻ 2 resets banked” under the status of native Codex and Claude OAuth subscriptions that have resets, and the account drawer and account page add a “Use 1 reset” button. Accounts with none, or whose reset status can't be read, show nothing; unresolved operations keep “↻ Review reset” so recovery remains accessible. Click it to open a modal with grant expiry, scopes, and current eligibility. Purchased monetary credits are separate.
 
-In the modal, select **Refresh** to fetch current provider usage, including after a reset made outside this proxy. Select **Use 1 reset**, review the account and grant, and confirm. Claude defaults to the provider's recommended usable grant, then the earliest expiry; you can choose another usable grant. Codex selects its grant on the provider side. Applying a reset is always manual. API keys, custom endpoints, and disabled accounts cannot redeem.
+In the modal, select **Refresh** to fetch current provider usage, including after a reset made outside this proxy. Select **Use 1 reset**, review the account and grant, and confirm. Claude defaults to the provider's recommended usable grant, then the earliest expiry; you can choose another usable grant. Codex selects its grant on the provider side. Manual use always asks for confirmation. Automatic use is separately opt-in below. API keys, custom endpoints, and disabled accounts cannot redeem.
 
 Codex manual reset availability follows the upstream management center: an available, unexpired credit permits confirmation even when the usage endpoint reports zero currently applicable credits. That counter does not block manual redemption. The provider decides whether to accept the confirmed request. Claude eligibility continues to follow each grant's provider rules.
 
 The server rechecks identity, eligibility, and the confirmation before dispatch. A confirmation expires after two minutes. Changes in inventory or a reset submitted from another tab invalidate older confirmations. Confirmed success is saved independently of the subsequent usage refresh: a refresh failure does not change a successful redemption into a failure. Quota windows affected by a confirmed reset are invalidated; unrelated model quotas, disabled state, authentication cooldowns, and overload cooldowns are preserved.
+
+## Expiry-aware smart balancing and automatic use
+
+With `routing: smart-quota` and banked resets enabled, new sessions prefer accounts with a valid reset expiring within seven days, before comparing ordinary weekly renewals. Expiries within an hour compete on quota and load. Account priorities, model compatibility, existing sessions and quota reserves still apply. Spent, expired, stale or unavailable resets lose their preference.
+
+Config, Routing exposes the expiry window and a separate **Automatically use expiring resets** switch. Automatic use is off by default:
+
+```yaml
+routing: smart-quota
+banked-resets: true
+banked-reset-policy:
+  expiry-priority-hours: 168 # 7 days; 0 disables the preference
+  auto-redeem: false        # explicit authorization to spend automatically
+```
+
+In a v8 layout, put `banked-reset-policy` under `routing`. The expiry preference accepts 0–8760 hours; automatic use needs a nonzero window. Turning off banked resets or choosing another routing strategy stops automatic spending.
+
+When enabled, the bounded background quota poller evaluates once a minute. Under the same journal lock used for manual redemption, it fetches fresh provider identity, inventory and usage. It only spends a currently usable, unexpired grant within the configured expiry window:
+
+- Normally, the affected weekly allowance must be at least 95% used. A short-only grant uses its own affected window instead.
+- In the final six hours, at least 20% of an affected window must be used, and that window must not renew naturally before the credit expires.
+- A weekly window renewing within ten minutes waits for its natural renewal. A short limit alone does not spend a weekly reset days before expiry.
+- Unknown expiry, missing usage, disabled accounts, stale/error inventory and unresolved operations prevent automatic spending. Claude uses the earliest usable grant; Codex selects its credit on the provider side.
+
+The dashboard shows the expiry preference, automatic policy and whether a saved operation was automatic. `/api/accounts` includes `banked_reset_plan`; `/api/routes` includes `banked_reset_expires_at` on affected ready candidates. New-session request records use `expiring_reset`. The preference is for real new work; it cannot guarantee quota is consumed when there is no demand.
+
+Automatic and manual redemption share durable intent before dispatch, scope invalidation and authoritative refresh. Uncertain spending requests are never retried automatically. Successful automatic spends retain a credit identity/count marker, so unchanged provider inventory cannot spend the same credit again after restart. A confirmed refusal backs off for one hour before a new evaluation; successful resets pause automation for ten minutes. Existing journals remain readable.
 
 ## Interrupted requests
 

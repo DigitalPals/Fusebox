@@ -996,6 +996,7 @@ struct SmartQuotaScore {
     five_hour_remaining: Option<f64>,
     weekly_remaining: Option<f64>,
     weekly_reset: Option<DateTime<Utc>>,
+    banked_reset_expiry: Option<DateTime<Utc>>,
     load: usize,
     weight: f64,
 }
@@ -1332,13 +1333,14 @@ impl Pool {
         match cfg.routing {
             Routing::FillFirst => 0,
             Routing::SmartQuota => {
-                let scores: Vec<_> = candidates.iter().map(|(a, up)| smart_score(a, up, session_load)).collect();
+                let scores: Vec<_> = candidates.iter().map(|(a, up)| smart_score(a, up, cfg, session_load)).collect();
                 let reserve = f64::from(cfg.five_hour_reserve_percent);
                 let needs_reserve = |s: &SmartQuotaScore| s.needs_reserve(reserve);
                 // This is an admission preference, not a cooldown: never refuse usable
                 // accounts merely because all of them need their reserve.
                 let protect = scores.iter().any(|s| !needs_reserve(s));
                 let eligible = |s: &SmartQuotaScore| !protect || !needs_reserve(s);
+                let banked = scores.iter().filter(|s| eligible(s)).filter_map(|s| s.banked_reset_expiry).min();
                 // Drain the earliest eligible week. If every account needs its reserve,
                 // fall back to quota/load rather than refusing available allowance.
                 // Missing five-hour data must not suppress known weekly reset priority.
@@ -1351,9 +1353,13 @@ impl Pool {
                 // cannot send new work to an account that renews days later.
                 let preferred = |s: &SmartQuotaScore| {
                     eligible(s)
-                        && earliest_reset.is_none_or(|first| {
-                            s.weekly_reset.is_some_and(|reset| reset <= first + chrono::Duration::hours(1))
-                        })
+                        && if let Some(first) = banked {
+                            s.banked_reset_expiry.is_some_and(|expiry| expiry <= first + chrono::Duration::hours(1))
+                        } else {
+                            earliest_reset.is_none_or(|first| {
+                                s.weekly_reset.is_some_and(|reset| reset <= first + chrono::Duration::hours(1))
+                            })
+                        }
                 };
                 let best = scores.iter().filter(|s| preferred(s)).map(|s| s.weight).fold(0.0, f64::max);
                 let tied: Vec<_> =
@@ -1408,12 +1414,14 @@ impl Pool {
                 // Accounts keeping a reserve come last, then the earliest weekly renewal;
                 // quota and load order the rest.
                 let reserve = f64::from(cfg.five_hour_reserve_percent);
-                let scores: Vec<_> = first.iter().map(|(a, up)| smart_score(a, up, session_load)).collect();
+                let scores: Vec<_> = first.iter().map(|(a, up)| smart_score(a, up, cfg, session_load)).collect();
                 let renewal = |s: &SmartQuotaScore| s.weekly_reset.unwrap_or(DateTime::<Utc>::MAX_UTC);
+                let banked = |s: &SmartQuotaScore| s.banked_reset_expiry.unwrap_or(DateTime::<Utc>::MAX_UTC);
                 order.sort_by(|&x, &y| {
                     let (a, b) = (&scores[x], &scores[y]);
                     a.needs_reserve(reserve)
                         .cmp(&b.needs_reserve(reserve))
+                        .then(banked(a).cmp(&banked(b)))
                         .then(renewal(a).cmp(&renewal(b)))
                         .then(b.weight.total_cmp(&a.weight))
                 });
@@ -1433,6 +1441,7 @@ impl Pool {
                 let (a, up) = &first[i];
                 let mut step = RouteStep::new(a, up.clone(), "ready", None);
                 step.next = i == next;
+                step.banked_reset_expires_at = crate::banked_resets::priority_expiry(a, up, cfg);
                 steps.push(step);
             }
         }
@@ -1523,11 +1532,21 @@ pub struct RouteStep {
     pub fallback: bool,
     /// The account the next new session would use.
     pub next: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banked_reset_expires_at: Option<DateTime<Utc>>,
 }
 
 impl RouteStep {
     fn new(a: &Account, upstream: String, state: &'static str, until: Option<DateTime<Utc>>) -> Self {
-        Self { account: a.id.clone(), upstream, state, until, fallback: false, next: false }
+        Self {
+            account: a.id.clone(),
+            upstream,
+            state,
+            until,
+            fallback: false,
+            next: false,
+            banked_reset_expires_at: None,
+        }
     }
 }
 
@@ -1536,7 +1555,8 @@ const SMART_WEEKLY_RESERVE: f64 = 5.0;
 
 /// Smart quota balancing: what reserves and reset priority need, plus the weight that
 /// breaks ties between accounts renewing within an hour of each other.
-fn smart_score(a: &Account, upstream: &str, session_load: &HashMap<String, usize>) -> SmartQuotaScore {
+fn smart_score(a: &Account, upstream: &str, cfg: &Config, session_load: &HashMap<String, usize>) -> SmartQuotaScore {
+    let banked_reset_expiry = crate::banked_resets::priority_expiry(a, upstream, cfg);
     let st = a.state.lock();
     let remaining = st.quota.five_hour_remaining(upstream);
     // A busy session is already represented by its in-flight request;
@@ -1551,6 +1571,7 @@ fn smart_score(a: &Account, upstream: &str, session_load: &HashMap<String, usize
         five_hour_remaining: remaining,
         weekly_remaining,
         weekly_reset: st.quota.weekly_reset(upstream),
+        banked_reset_expiry,
         load,
         weight: headroom * weekly / (1.0 + load as f64),
     }

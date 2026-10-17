@@ -563,11 +563,16 @@ impl Sessions {
         }
         registry.dirty = true;
         self.schedule_save();
+        let new_reason = if crate::banked_resets::priority_expiry(&acct, &upstream, cfg).is_some() {
+            "expiring_reset"
+        } else {
+            "new_session"
+        };
         Ok(Selected {
             account: acct,
             model: upstream,
             strategy: cfg.routing,
-            reason: if previous.is_some() { moving.unwrap_or("quota_exhausted") } else { "new_session" },
+            reason: if previous.is_some() { moving.unwrap_or("quota_exhausted") } else { new_reason },
             previous_account: previous.map(|binding| binding.account),
         })
     }

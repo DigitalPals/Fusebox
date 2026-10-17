@@ -535,6 +535,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "named_clients": cfg.named_clients.len(),
         "routing": cfg.routing,
         "banked_resets": cfg.banked_resets,
+        "banked_reset_policy": cfg.banked_reset_policy,
         "session_affinity": cfg.session_affinity,
         "request_retry": cfg.request_retry.max(1),
         "management_key": !cfg.management_key.is_empty(),
@@ -549,7 +550,19 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
 }
 
 async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(Value::Array(app.pool.all().iter().map(|a| a.snapshot()).collect()))
+    let cfg = app.cfg();
+    Json(Value::Array(
+        app.pool
+            .all()
+            .iter()
+            .map(|a| {
+                let mut snapshot = a.snapshot();
+                snapshot["banked_reset_plan"] =
+                    serde_json::to_value(crate::banked_resets::plan(a, &cfg)).unwrap_or_default();
+                snapshot
+            })
+            .collect(),
+    ))
 }
 
 async fn requests(State(app): State<Arc<App>>) -> Json<Value> {

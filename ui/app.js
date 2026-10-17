@@ -953,7 +953,7 @@ function barsHTML(series = S.overview.series) {
 
 const ROUTING_TEXT = {
   'least-used': ['go to the account with the most quota left', 'go to the most quota left'],
-  'smart-quota': ['drain the earliest weekly reset, reserving quota for active sessions', 'drain the earliest weekly reset'],
+  'smart-quota': ['use expiring banked resets first, then the earliest weekly renewal, reserving quota for active sessions', 'prefer expiring resets, then weekly renewals'],
   'round-robin': ['take turns across accounts', 'take turns across accounts'],
   'fill-first': ['go to the first available account', 'go to the first available account'],
 };
@@ -1156,6 +1156,7 @@ function setupHTML() {
 
 const ROUTING_LABEL = { 'least-used': 'Most quota remaining', 'smart-quota': 'Smart quota balancing', 'round-robin': 'Round robin', 'fill-first': 'Fill first' };
 const ROUTING_REASON = {
+  expiring_reset: 'Expiring reset',
   new_session: 'New session',
   session_reused: 'Same session',
   quota_exhausted: 'Moved: quota used up',
@@ -1184,7 +1185,7 @@ const SESSION_SOURCE = {
 };
 const STRATEGY_PICK = {
   'least-used': 'the account with the most quota left',
-  'smart-quota': 'the account whose weekly limit renews first',
+  'smart-quota': 'the account with an expiring banked reset, or the earliest weekly renewal',
   'round-robin': 'the next account in turn',
   'fill-first': 'the first available account',
 };
@@ -1198,6 +1199,7 @@ const isRerouted = (r) => MOVED.test(r.routing_reason || '');
 function whySentence(r) {
   const pick = STRATEGY_PICK[r.routing_strategy] || 'the routing strategy’s pick';
   const base = {
+    expiring_reset: 'This new session went to an account with a banked reset nearing expiry, to use its allowance before restoring it. The session stays on this account.',
     new_session: `First request of this session. It went to ${pick}, and the session stays there from now on.`,
     session_reused: 'Stayed on the account this session is pinned to, so its prompt cache keeps working.',
     temporary_detour: 'The session’s account was busy, so this one request used another. The session stays pinned to its account.',
@@ -1354,7 +1356,7 @@ function drawerHTML(a) {
       <div class="statline">${statusHTML(a)}<span class="dim">· last used ${liveAgo(a.last_used)}</span></div>
       ${st.cls === 'cooling' ? `<div class="notice warn"><div class="cell2"><span class="mono">${esc(modelScope(st.model))}</span><span class="small warn">${st.kind === 'quota' ? 'Usage limit used up' : 'Cooling down'} · back at ${esc(when(st.until))}, in ${liveLeft(st.until)}</span></div><button class="btn sm" type="button" data-act="reset" data-id="${esc(a.id)}">Clear cooldowns</button></div>` : ''}
       ${hasQuota ? `<div class="block" style="gap:14px"><span class="label">Limits · ${quotaWord()}</span>${windowHTML(a, true, 'lg')}${windowHTML(a, false, 'lg')}</div>` : ''}
-      ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">Clears a usage limit early. Always asks first.</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Use 1 reset</button></div>` : ''}
+      ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">${esc(bankedPolicyText(a))}</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Reset details</button></div>` : ''}
       ${a.last_error ? `<div class="block" style="gap:8px"><span class="label">Last error</span><div class="errbox">${esc(hideEmails(a.last_error))}</div></div>` : ''}
       <div class="block"><span class="label">Since start</span><div class="figs" id="drawer-since">${drawerSinceHTML()}</div></div>
       <div class="block" style="gap:6px"><span class="label">Sign-in</span><span class="fg2" style="font-size:13px">${esc(signinLine(a))}</span></div>
@@ -1750,7 +1752,7 @@ function detBankedHTML(a) {
   const count = !r?.error ? r?.inventory?.available : null;
   const review = ['pending', 'unknown'].includes(r?.operation?.status);
   if (!count && !review) return `<div class="banked"><span>↻ ${esc(bankedLabel(a))}</span><span class="grow"></span><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Details</button></div>`;
-  return `<div class="banked"><span${review ? ' class="warn"' : ''}>↻ ${review ? 'Reset needs review' : `${count} reset${count === 1 ? '' : 's'} banked`}</span><span class="grow">Clears a usage limit early. Always asks for confirmation.</span><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">${review ? 'Review' : 'Use 1 reset'}</button></div>`;
+  return `<div class="banked"><span${review ? ' class="warn"' : ''}>↻ ${review ? 'Reset needs review' : `${count} reset${count === 1 ? '' : 's'} banked`}</span><span class="grow">${esc(bankedPolicyText(a))}</span><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">${review ? 'Review' : 'Reset details'}</button></div>`;
 }
 
 function detLoadHTML() {
@@ -1995,6 +1997,11 @@ function bankedLabel(a) {
   const count = !r?.error ? r?.inventory?.available : null;
   return count == null ? 'Resets unavailable' : `${count} reset${count === 1 ? '' : 's'} banked`;
 }
+function bankedPolicyText(a) {
+  const plan = a.banked_reset_plan;
+  if (plan?.auto_redeem) return `${plan.prioritized ? 'Prioritized for new work. ' : ''}${plan.message}`;
+  return 'Manual use asks for confirmation. Automatic redemption is off for this account.';
+}
 // "↻ 2 resets banked" under an account's status: only resets you have, or one that needs a decision.
 function bankedLineHTML(a) {
   if (!hasBankedResets(a)) return '';
@@ -2005,8 +2012,9 @@ function bankedLineHTML(a) {
   const now = Date.now();
   const expiring = !review && !r?.error && (r?.inventory?.grants || []).some((g) =>
     g.remaining > 0 && Date.parse(g.expires_at) > now && Date.parse(g.expires_at) <= now + 24 * 60 * 60 * 1000);
-  const hint = expiring ? ' A reset expires within 24 hours.' : '';
-  return `<button type="button" class="resets-line${review || expiring ? ' warn' : ''}" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog" aria-controls="banked-reset-modal" aria-label="${esc(bankedLabel(a))} for ${esc(acctLabel(a))}.${hint}" title="View saved resets and expiry dates.${hint}">↻ ${esc(review ? 'Review reset' : bankedLabel(a))}</button>`;
+  const prioritized = !!a.banked_reset_plan?.prioritized;
+  const hint = prioritized ? ' Prioritized: a banked reset is nearing expiry.' : expiring ? ' A reset expires within 24 hours.' : '';
+  return `<button type="button" class="resets-line${review || expiring || prioritized ? ' warn' : ''}" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog" aria-controls="banked-reset-modal" aria-label="${esc(bankedLabel(a))} for ${esc(acctLabel(a))}.${hint}" title="View saved resets and expiry dates.${hint}">↻ ${esc(review ? 'Review reset' : bankedLabel(a))}${prioritized ? ' · prioritized' : ''}</button>`;
 }
 function resetButton(a, act, label, disabled = false, extra = '') {
   return `<button type="button" class="btn sm ${['banked-open', 'banked-confirm'].includes(act) ? 'primary' : ''}" data-act="${act}" data-id="${esc(a.id)}" ${disabled ? 'disabled' : ''} ${extra}>${label}</button>`;
@@ -2048,7 +2056,10 @@ function bankedResetsHTML(a) {
     const grants = (inv?.grants || []).map((g) => `<li><div class="reset-grant-head"><b>${esc(g.label || 'Subscription reset')}</b><span>${g.remaining} left</span></div><p class="sub">${esc(grantDetail(g))}</p>${g.reason ? `<p class="sub">${esc(g.reason)}</p>` : ''}</li>`).join('');
     const reason = a.disabled ? 'Enable this account to apply a reset.' : stale || expiryChanged ? 'Refresh to check availability.' : inv?.reason;
     const message = uncertain ? '<p class="warn">A reset may have been used. New resets are blocked until resolved.</p>' : op ? `<p class="${['applied', 'reconciled_used'].includes(op.status) ? 'ok' : 'sub'}" role="status">${esc(op.message)}</p>` : '';
-    content = `<p class="reset-count">${esc(bankedLabel(a))}${a.provider === 'claude' && inv?.applicable != null && inv.applicable !== inv.available && !r?.error ? `<span class="sub"> · ${inv.applicable} usable now</span>` : ''}</p>${grants ? `<ul class="reset-grants">${grants}</ul>` : ''}${reason && !r?.error ? `<p class="sub">${esc(reason)}</p>` : ''}${message}`;
+    const plan = a.banked_reset_plan;
+    const policy = plan ? `<p class="sub">${plan.prioritized ? 'Prioritized for new work. ' : ''}${esc(plan.message)}</p>` : '';
+    const automatic = op?.automatic ? '<p class="sub">This reset was requested automatically under your routing policy.</p>' : '';
+    content = `<p class="reset-count">${esc(bankedLabel(a))}${a.provider === 'claude' && inv?.applicable != null && inv.applicable !== inv.available && !r?.error ? `<span class="sub"> · ${inv.applicable} usable now</span>` : ''}</p>${grants ? `<ul class="reset-grants">${grants}</ul>` : ''}${policy}${reason && !r?.error ? `<p class="sub">${esc(reason)}</p>` : ''}${message}${automatic}`;
     controls = `${resetButton(a, 'banked-refresh', local.busy ? 'Checking…' : 'Refresh', local.busy)}${resetButton(a, 'banked-open', 'Use 1 reset', !usable, r?.checked_at ? `data-reset-deadline="${esc(new Date(Date.parse(r.checked_at) + 5 * 60 * 1000).toISOString())}"` : '')}`;
     if (uncertain) {
       const retryable = a.provider === 'claude' && r.retryable && Date.parse(op.retry_until) > Date.now();
@@ -2385,6 +2396,7 @@ function routeStepText(step, a) {
     return { txt: `Cooling · back ${when(until)}`, short: `Back ${hm(until)}`, cls: 'warn' };
   }
   if (st.cls === 'error') return st.signin ? { txt: 'Sign-in expired', short: 'Sign-in expired', cls: 'err' } : { txt: 'Error', short: 'Error', cls: 'err' };
+  if (step.banked_reset_expires_at) return { txt: `Reset expires ${when(step.banked_reset_expires_at)}`, short: 'Expiring reset', cls: 'warn' };
   const w = windowOf(a, true) || windowOf(a, false);
   const q = quotaOf(w);
   if (q) {

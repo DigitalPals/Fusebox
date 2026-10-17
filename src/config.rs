@@ -51,6 +51,8 @@ pub struct Config {
     /// Check Claude and ChatGPT subscriptions for banked rate-limit resets and allow
     /// spending them from the dashboard. Off by default: it uses unofficial endpoints.
     pub banked_resets: bool,
+    /// Expiry-aware smart routing and separately authorized automatic redemption.
+    pub banked_reset_policy: crate::banked_resets::Policy,
     pub debug: bool,
     /// `text` (default) or `json` log lines. Needs a restart.
     pub log_format: LogFormat,
@@ -367,6 +369,7 @@ impl Default for Config {
             codex_websockets: true,
             claude_cloak: true,
             banked_resets: false,
+            banked_reset_policy: Default::default(),
             debug: false,
             log_format: LogFormat::Text,
             tls: Tls::default(),
@@ -426,6 +429,9 @@ request-limits:
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
+banked-reset-policy:
+  expiry-priority-hours: 168 # smart-quota: prefer accounts with a reset expiring within 7 days; 0 disables
+  auto-redeem: false        # spend expiring resets automatically after substantial use (opt-in)
 debug: false
 
 # Persistent proxy usage; imports/collectors are opt-in. Storage changes need a restart.
@@ -607,6 +613,7 @@ impl Config {
         cfg.ignored = ignored;
         cfg.prompt_cache.validate().map_err(anyhow::Error::msg)?;
         cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
+        cfg.banked_reset_policy.validate().map_err(anyhow::Error::msg)?;
         // An explicit auth-dir always wins; otherwise keep using an existing legacy directory.
         if !explicit && default_auth_dir() == LEGACY_AUTH_DIR {
             cfg.auth_dir = LEGACY_AUTH_DIR.into();

@@ -20,7 +20,7 @@ const CONFIG_DESCRIPTIONS = {
 const CONFIG_KEY_SECTION = {
   host: 'server', port: 'server', 'auth-dir': 'server', tls: 'server',
   'api-keys': 'access', 'management-key': 'access', 'management-allow-remote': 'access',
-  routing: 'routing', 'five-hour-reserve-percent': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
+  routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
@@ -428,12 +428,15 @@ function configRoutingHTML() {
   return `<div class="cfg-grid">
     ${configCards(['routing'], 'Account selection', [
       ['least-used', 'Most quota remaining', `Send ${what} to the account with the most subscription quota remaining. Falls back to round robin when quota is unavailable.`],
-      ['smart-quota', 'Smart quota balancing', `Send ${what} to the earliest weekly reset. Below the reserves, prefer other accounts while sessions are active; idle accounts can use their remaining quota. Resets within an hour compete on quota and load.`],
+      ['smart-quota', 'Smart quota balancing', `Prefer accounts with banked resets nearing expiry, then the earliest weekly renewal. Below the reserves, prefer other accounts while sessions are active; idle accounts can use their remaining quota. Close deadlines compete on quota and load.`],
       ['round-robin', 'Round robin', `Rotate ${what} across available accounts.`],
       ['fill-first', 'Fill first', `Send ${what} to the first available account until it cannot serve them, then the next.`],
     ])}
     ${strategy === 'smart-quota' ? configField(['five-hour-reserve-percent'], '5-hour reserve for existing sessions (%)', { type: 'number', min: 0, max: 100, required: true,
       help: `Below this level (or 5% weekly quota left), prefer other accounts for ${what} while this account has an in-flight request or a session used in the last five minutes. Idle accounts can admit a session to drain remaining quota. If every account needs its reserve, usable quota remains available. Default: 30%. Set 0 to turn off the 5-hour reserve.` }) : ''}
+    ${strategy === 'smart-quota' ? configField(['banked-reset-policy', 'expiry-priority-hours'], 'Prefer resets expiring within (hours)', { type: 'number', min: 0, max: 8760, required: true,
+      help: 'Requires Banked resets under Connections. Prefer new work on an account whose saved reset expires within this time, while preserving active-session reserves. Default: 168 hours (7 days). 0 disables the preference.' }) : ''}
+    ${strategy === 'smart-quota' ? configSwitch(['banked-reset-policy', 'auto-redeem'], 'Automatically use expiring resets', 'Allows Fusebox to spend saved resets within the expiry preference window. It refreshes provider usage first, normally waits for 95% weekly use, and in the final 6 hours can restore at least 20% used quota. A short limit normally waits for its own renewal. Uncertain outcomes stop automatic spending. Off by default.') : ''}
     ${configField(['request-retry'], 'Account attempts', { type: 'number', min: 0, max: 4294967295, required: true,
       help: 'Maximum accounts to try before a request fails, up to 10. Zero still tries one account.' })}
     ${configField(['first-token-timeout-seconds'], 'Wait for a stream to start (seconds)', { type: 'number', min: 0, max: 3600, required: true,

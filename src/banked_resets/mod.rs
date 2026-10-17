@@ -1,4 +1,5 @@
-//! Manual banked reset redemption. Tokens and upstream identities never leave the server.
+//! Banked reset redemption. Tokens and upstream identities never leave the server.
+mod automation;
 mod ledger;
 mod provider;
 #[cfg(test)]
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 use crate::accounts::{Account, Credential, Provider};
 use crate::state::App;
+pub use automation::{Policy, automatic_check, plan, priority_expiry};
 use ledger::{Ledger, Operation};
 use provider::{Api, HttpProvider, Inventory, Outcome};
 
@@ -34,6 +36,7 @@ pub struct OperationView {
     pub status: String,
     pub message: String,
     pub retry_until: DateTime<Utc>,
+    pub automatic: bool,
 }
 impl From<&Operation> for OperationView {
     fn from(o: &Operation) -> Self {
@@ -44,6 +47,7 @@ impl From<&Operation> for OperationView {
             status: o.status.clone(),
             message: o.message.clone(),
             retry_until: o.created_at + chrono::Duration::minutes(10),
+            automatic: o.automatic,
         }
     }
 }
@@ -234,7 +238,12 @@ pub async fn apply(app: Arc<App>, acct: Arc<Account>, action: Action) -> Result<
     let api = api(&app, &acct).await?;
     let organization = api.identity().await?;
     let mut ledger = Ledger::open(&app.startup_config.auth_dir(), &scope(acct.provider, &organization))?;
-    execute(&app, &acct, &api, &organization, &api.account_id, &mut ledger, action).await
+    execute(&app, &acct, &api, &organization, &api.account_id, &mut ledger, Request::Manual(action)).await
+}
+
+enum Request {
+    Manual(Action),
+    Automatic,
 }
 
 async fn execute<P: Api + Sync>(
@@ -244,9 +253,21 @@ async fn execute<P: Api + Sync>(
     organization: &str,
     account: &str,
     ledger: &mut Ledger,
-    action: Action,
+    request: Request,
 ) -> Result<View> {
-    ensure!(action.confirmed, "Explicit confirmation is required");
+    let automatic = matches!(request, Request::Automatic);
+    let mut action = match request {
+        Request::Manual(action) => {
+            ensure!(action.confirmed, "Explicit confirmation is required");
+            action
+        }
+        Request::Automatic => Action {
+            action: "redeem".into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            grant_id: String::new(),
+            confirmed: false,
+        },
+    };
     let existing = ledger.journal.operations.get(&action.request_id).cloned();
     if let Some(operation) = &existing {
         ensure!(operation.account == account, "This reset belongs to a different subscription account");
@@ -280,19 +301,33 @@ async fn execute<P: Api + Sync>(
             "An earlier reset has an unknown outcome; resolve it before spending another"
         );
         ensure!(ledger.journal.operations.len() < 10000, "Reset journal is full; operator review required");
-        let (inventory, _) = api.read().await?;
-        let quotes = app.reset_quotes.lock();
-        let quote = quotes
-            .get(&action.request_id)
-            .ok_or_else(|| anyhow!("Confirmation expired; refresh resets and confirm again"))?;
-        ensure!(
-            quote.expires > Utc::now()
-                && quote.account == account
-                && quote.identity == scope(acct.provider, organization)
-                && quote.version == ledger.journal.operations.len()
-                && quote.fingerprint == fingerprint(&inventory),
-            "Reset availability changed; refresh resets and confirm again"
-        );
+        let (inventory, usage) = api.read().await?;
+        let auto_credit = if automatic {
+            check_current(app, acct, account, true)?;
+            let cfg = app.cfg();
+            ensure!(automation::enabled(&cfg), "Automatic reset redemption is disabled");
+            let mut fresh = crate::accounts::AccountState::default();
+            crate::quota::usage(&mut fresh, acct.provider, &usage);
+            let decision = automation::decision(&cfg, &fresh.quota, &inventory, Utc::now())
+                .ok_or_else(|| anyhow!("No automatic reset is due"))?;
+            automation::check_journal(&ledger.journal, &decision, Utc::now())?;
+            action.grant_id = if acct.provider == Provider::Claude { decision.grant_id.clone() } else { String::new() };
+            Some(decision.credit_key)
+        } else {
+            let quotes = app.reset_quotes.lock();
+            let quote = quotes
+                .get(&action.request_id)
+                .ok_or_else(|| anyhow!("Confirmation expired; refresh resets and confirm again"))?;
+            ensure!(
+                quote.expires > Utc::now()
+                    && quote.account == account
+                    && quote.identity == scope(acct.provider, organization)
+                    && quote.version == ledger.journal.operations.len()
+                    && quote.fingerprint == fingerprint(&inventory),
+                "Reset availability changed; refresh resets and confirm again"
+            );
+            None
+        };
         ensure!(inventory.eligible, "No reset can be applied right now");
         let clears = if acct.provider == Provider::Claude {
             let grant = inventory
@@ -316,9 +351,12 @@ async fn execute<P: Api + Sync>(
             updated_at: Utc::now(),
             status: "pending".into(),
             message: "Reset request in progress".into(),
+            automatic,
+            auto_credit,
         }
     };
     check_current(app, acct, account, !resolving)?;
+    ensure!(!automatic || automation::enabled(&app.cfg()), "Automatic reset redemption is disabled");
     if resolving {
         operation.status = if action.action == "resolve-used" { "reconciled_used" } else { "reconciled_unused" }.into();
         operation.message = if action.action == "resolve-used" {

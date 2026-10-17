@@ -159,6 +159,7 @@ fn setting_path(doc: &Yaml, field: &str) -> (Vec<Value>, bool) {
         "request-retry" => &["routing", "retry", "request-retry"],
         "force-model-prefix" => &["routing", "force-model-prefix"],
         "session-affinity" => &["routing", "session-affinity"],
+        "banked-reset-policy" => &["routing", "banked-reset-policy"],
         "five-hour-reserve-percent" => &["routing", "five-hour-reserve-percent"],
         "proxy-url" => &["requests", "proxy-url"],
         "oauth-model-alias" => &["oauth", "model-alias"],
@@ -488,6 +489,11 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                 let limits: crate::admission::Config =
                     serde_json::from_value(value.clone()).context("Invalid request-limits")?;
                 limits.validate().map_err(anyhow::Error::msg)?;
+            }
+            "banked-reset-policy" => {
+                let policy: crate::banked_resets::Policy =
+                    serde_json::from_value(value.clone()).context("Invalid banked-reset-policy")?;
+                policy.validate().map_err(anyhow::Error::msg)?;
             }
             "codex-websockets" | "claude-cloak" | "banked-resets" | "session-affinity" | "force-model-prefix"
             | "debug" => {
@@ -829,6 +835,34 @@ mod tests {
             assert_eq!(values(&out).unwrap()["routing"], "smart-quota");
             assert!(cfg.session_affinity);
         }
+    }
+
+    #[test]
+    fn banked_reset_policy_round_trips_and_validates_both_layouts() {
+        for source in ["routing: smart-quota\n", "config-version: 8\nrouting:\n  strategy: smart-quota\n"] {
+            let change = json!({"banked-reset-policy":{"expiry-priority-hours":120,"auto-redeem":true}});
+            let (out, cfg) = edit(source, change.clone());
+            assert_eq!(cfg.banked_reset_policy.expiry_priority_hours, 120);
+            assert!(cfg.banked_reset_policy.auto_redeem);
+            assert_eq!(values(&out).unwrap()["banked-reset-policy"], change["banked-reset-policy"]);
+            assert_eq!(Config::parse(&out).unwrap().banked_reset_policy, cfg.banked_reset_policy);
+            if source.contains("config-version") {
+                assert_eq!(yaml(&out).unwrap()["routing"]["banked-reset-policy"]["auto-redeem"], Yaml::Bool(true));
+            }
+        }
+        for invalid in [
+            json!({"expiry-priority-hours":0,"auto-redeem":true}),
+            json!({"expiry-priority-hours":8761}),
+            json!({"expiry-priority-hours":-1}),
+            json!({"expiry-priority-hours":1.5}),
+            json!({"auto-redeem":"true"}),
+            json!({"unknown":true}),
+        ] {
+            assert!(apply("", json!({"banked-reset-policy":invalid}).as_object().unwrap()).is_err());
+        }
+        let cfg = Config::parse("").unwrap();
+        assert_eq!(cfg.banked_reset_policy.expiry_priority_hours, 168);
+        assert!(!cfg.banked_reset_policy.auto_redeem);
     }
 
     #[test]

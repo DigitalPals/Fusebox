@@ -403,6 +403,7 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         let _ = crate::banked_resets::refresh(app, &acct).await;
         changed = true;
     }
+    changed |= crate::banked_resets::automatic_check(app, &acct).await;
     let stale = {
         let st = acct.state.lock();
         !st.disabled && st.quota.needs_refresh(Utc::now())
