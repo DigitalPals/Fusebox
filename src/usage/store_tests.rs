@@ -642,6 +642,8 @@ async fn shutdown_closes_the_writer_before_returning() {
     // The handle is still alive, yet its connection has closed: the last close
     // checkpointed the WAL into the database file and removed it.
     assert!(!std::path::Path::new(&wal).exists());
+    // Its lock is released too, so `usage compact` or `downgrade` can start at once.
+    assert!(compact::lock(&p, true).is_ok());
     assert!(store.call(|_| Ok(())).await.is_err());
     assert_eq!(store.health()["state"], "stopped");
     store.shutdown().await.unwrap();

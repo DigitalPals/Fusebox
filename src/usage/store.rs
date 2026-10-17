@@ -281,7 +281,6 @@ impl Store {
         std::thread::Builder::new()
             .name("fusebox-usage-db".into())
             .spawn(move || {
-                let _file_lock = file_lock;
                 let mut last_retention = Utc::now().timestamp_millis();
                 let refresh_stats = |conn: &Connection, compressing: bool| {
                     if let Ok(stats) = compact::stats(conn, &stats_path, compressing) {
@@ -377,8 +376,11 @@ impl Store {
                 // Refuse later commands, then close before replying. The last connection to
                 // close checkpoints the WAL into the database file, so a shut down store must
                 // not still be writing it when the caller reads, copies or reopens the file.
+                // The lock goes before the reply too: an offline command started as soon as
+                // shutdown returns must find the database free.
                 drop(rx);
                 let closed = conn.close().map_err(|(_, e)| format!("close usage database: {e}"));
+                drop(file_lock);
                 if let Some(reply) = stop {
                     let _ = reply.send(closed);
                 }
