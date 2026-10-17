@@ -242,3 +242,24 @@ async fn devices_subscribe_and_receive_encrypted_notifications() {
     server.abort();
     service.abort();
 }
+
+#[test]
+fn a_large_usage_database_or_a_full_disk_is_a_fault() {
+    use crate::usage::store::DatabaseStats;
+    let stats = |bytes: u64, free: u64| DatabaseStats {
+        bytes,
+        growth_bytes_per_day: 14_000_000,
+        disk_free_bytes: Some(free),
+        ..Default::default()
+    };
+    assert!(faults::storage(None, 2048).is_none());
+    assert!(faults::storage(Some(&stats(1 << 30, 100 << 30)), 2048).is_none());
+    let large = faults::storage(Some(&stats(3 << 30, 100 << 30)), 2048).unwrap();
+    assert_eq!((large.kind, large.level, large.path.as_str()), ("storage", "warn", "#/usage"));
+    assert!(large.detail.unwrap().contains("14 MB a day"));
+    assert!(faults::storage(Some(&stats(3 << 30, 100 << 30)), 0).is_none(), "0 turns the size warning off");
+    let full = faults::storage(Some(&stats(1 << 20, 500 << 20)), 0).unwrap();
+    assert_eq!(full.level, "err");
+    assert_eq!(faults::badge(std::slice::from_ref(&full)), 1);
+    assert_eq!(full.json()["badge"], true);
+}

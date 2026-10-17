@@ -510,11 +510,10 @@ fn capture(
     app: &App,
     headers: &HeaderMap,
     sess: &mut Session,
-    data: &str,
+    v: &Value,
     full: Option<&[Value]>,
     aggregate: &ir::Aggregate,
 ) {
-    let Ok(v) = serde_json::from_str::<Value>(data) else { return };
     let r = &v["response"];
     let Some(id) = r["id"].as_str() else { return };
     // Only the most recent responses need connection-local continuation state.
@@ -525,7 +524,7 @@ fn capture(
     if let (Some(key), Some(full)) = (&sess.key, full) {
         let mut response = r.clone();
         crate::affinity::complete_output(&mut response, aggregate);
-        app.sessions.remember(headers, key, &response, full);
+        app.sessions.remember(headers, key, &response, full.to_vec());
     }
 }
 
@@ -752,7 +751,8 @@ async fn native_turn(
         tracker.observe_wire(&v);
         let kind = v["type"].as_str().unwrap_or_default().to_string();
         crate::quota::observe_codex_event(&acct, &v, quota_epoch);
-        parser.feed(&SseEvent { event: None, data: text.clone() }, &mut evs);
+        // The message is already parsed; the parser reads the value, not the text.
+        parser.feed_value(&SseEvent { event: None, data: String::new() }, Some(&v), &mut evs);
         for ev in evs.drain(..) {
             aggregate.push(&ev);
             tracker.observe_stream_event(&ev);
@@ -798,7 +798,7 @@ async fn native_turn(
             }
         }
         if kind == "response.completed" || kind == "response.incomplete" {
-            capture(app, headers, sess, &text, full, &aggregate);
+            capture(app, headers, sess, &v, full, &aggregate);
         }
         terminal = matches!(kind.as_str(), "response.completed" | "response.incomplete" | "response.failed" | "error");
         forwarded = true;

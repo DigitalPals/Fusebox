@@ -4,6 +4,26 @@ use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
 
+/// True at most once per `every` for one kind of repeated warning, so a client
+/// that repeats the same mistake on every request logs it once, not per request.
+/// Later occurrences go to debug. Bounded: the table forgets when it gets large.
+pub fn warn_once(key: &str, every: std::time::Duration) -> bool {
+    use std::sync::{LazyLock, Mutex};
+    static SEEN: LazyLock<Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        LazyLock::new(Default::default);
+    let mut seen = SEEN.lock().unwrap();
+    if seen.len() > 256 {
+        seen.clear();
+    }
+    match seen.get(key) {
+        Some(at) if at.elapsed() < every => false,
+        _ => {
+            seen.insert(key.to_string(), std::time::Instant::now());
+            true
+        }
+    }
+}
+
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 

@@ -254,6 +254,8 @@ Everything is served from the binary at `/`, with no external requests.
 
 The **Models** tab groups every model id by family, shows aliases and model groups, and lists the order in which accounts would take a new session, with the next one marked. **Try a model** sends a prompt through routing like any request and shows which account answered and how fast.
 
+**Who used the quota.** Under each meter, an account's page shows which of your named clients and shared keys used the current window and the last one, in points of the window, plus what was used outside Fusebox (claude.ai, the desktop app). Its coding sessions show their share of the current windows. The Usage page lists each window in the range with every client by name: its share of the window's use, its requests and tokens, and the models it used. Requests, tokens and models are what Fusebox recorded; the points of the window are estimates: each rise in the provider's reported use is split over the attempts that finished since the previous rise, by their API list price ([how](docs/usage-costs.md#who-used-a-subscription-window)).
+
 Each quota meter has a thin mark where usage would be if spread evenly over the window. When the pace so far would use a window up before it resets, the meter says when (`out 1h 40m`). The Accounts page lines up every subscription's next weekly reset over seven days, and each account page sets whether it takes new sessions **First**, **Normal** or **Last**.
 
 Sharing a screenshot or your screen? The eye button in the top bar (or <kbd>.</kbd>) hides every email and API key on the page, and copy buttons still copy the real values.
@@ -270,7 +272,7 @@ Choose **Used** or **Remaining** beside the quota meters (or press <kbd>U</kbd>)
 
 ## Usage and costs
 
-The Usage page records proxy-reported tokens and can import metadata from opted-in Claude Code and Codex histories, including from a standalone collector on another machine. Source totals stay separate when histories may overlap. USD figures are local API list-price estimates; subscription quota meters remain separate and are never presented as API bills. See [Usage and costs](docs/usage-costs.md) for configuration, source coverage, privacy, import and collector setup, reconciliation limits, and SQLite backup and recovery.
+The Usage page records proxy-reported tokens and can import metadata from opted-in Claude Code and Codex histories, including from a standalone collector on another machine. Records are stored compressed and summarised in 15-minute rollups, so the database stays small and the page stays fast as history grows; `GET /api/usage/status` reports its size and daily growth. Releases before 0.6 can't open this layout: stop Fusebox and run `fusebox usage downgrade` before going back to one. Source totals stay separate when histories may overlap. USD figures are local API list-price estimates; subscription quota meters remain separate and are never presented as API bills. See [Usage and costs](docs/usage-costs.md) for configuration, source coverage, privacy, import and collector setup, reconciliation limits, and SQLite backup and recovery.
 
 Retiring an older Redis-based usage collector requires a compatible replacement and a database backup; see [production log follow-up](notes/production-log-followup.md). Fusebox's native usage capture replaces that ingestion path.
 
@@ -327,6 +329,8 @@ log-format: text              # or json, one object per line (needs a restart)
 model-groups:                 # one name, several models; see "Model groups" below
   smart: [claude-opus-5-5, gpt-6-astra]
 background-model: gemini-3.8-flash # Claude Code's quick Haiku calls go here
+# client-identities:          # claim a newer client release before Fusebox ships it (see Client versions)
+#   claude-code: 2.1.310
 
 claude-api-key:
   - api-key: "sk-ant-..."
@@ -616,7 +620,15 @@ The dashboard lives in `ui/`. Its text assets are compressed and embedded at bui
 
 Requests Fusebox builds for other clients look like one release of Claude Code, the Codex CLI, Grok Build, Muse Code, the Devin CLI and Antigravity. Those releases are listed in `.github/client-versions.json`, and `cargo test` checks the code says the same. Every morning the **Client versions** workflow compares them with each client's latest release and keeps one issue (label `client-version`) open per client that is behind, closing it once Fusebox catches up. To catch up, check what the new release sends, update the code to match, and bump the version in both places.
 
-Real Claude Code and Codex clients keep their own identity on the way through, and Fusebox's own small requests (usage, model lists) say they come from the newest Claude Code or Codex release your clients use.
+Real Claude Code and Codex clients keep their own identity on the way through. Everything Fusebox sends in their name, cloaked and translated requests as well as its own small requests (usage, model lists), claims the newest release it knows: the built-in one, a newer one your real clients sent through it, or one set in `client-identities`. Claude Code's runtime headers (its SDK and Node versions, OS and architecture) are learned the same way, so cloaked requests look like your own installation. A release that only bumps the version therefore needs no Fusebox release; one that changes what the client sends still does, and the identity tests catch that.
+
+```yaml
+client-identities:     # claim a newer release before Fusebox ships it
+  claude-code: 2.1.310
+  codex: 0.164.0       # also grok-build, devin-cli, antigravity
+```
+
+An entry older than the built-in release is ignored, so a forgotten one can't hold Fusebox back. `fusebox check` prints the release it claims for each client. Muse Code's identity includes a build hash, so it can't be set this way.
 
 See [release binary size](docs/binary-size.md) for compiler comparisons, measured
 savings, and Linux packed-relocation compatibility.

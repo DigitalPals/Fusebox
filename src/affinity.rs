@@ -262,9 +262,34 @@ struct Registry {
     dirty: bool,
     last_flush: i64,
     active: HashMap<String, usize>,
+    /// When the request path last pruned; it prunes at most every few seconds.
+    last_prune: i64,
+    /// Binding keys per owner, for releasing a lease without scanning every binding.
+    /// Rebuilt when invalidated or when the number of bindings changed.
+    by_session: HashMap<String, Vec<String>>,
+    indexed: Option<usize>,
 }
 
+/// How often the request path sweeps expired assignments. The binding a request
+/// looks up is always checked exactly; the sweep only frees memory.
+const PRUNE_EVERY_SECONDS: i64 = 5;
+
 impl Registry {
+    fn session_keys(&mut self, owner: &str) -> Vec<String> {
+        if self.indexed != Some(self.bindings.len()) {
+            self.by_session.clear();
+            for (key, b) in &self.bindings {
+                self.by_session.entry(b.session.clone()).or_default().push(key.clone());
+            }
+            self.indexed = Some(self.bindings.len());
+        }
+        self.by_session.get(owner).cloned().unwrap_or_default()
+    }
+
+    fn invalidate_index(&mut self) {
+        self.indexed = None;
+    }
+
     fn account_load(&self, cfg: &Config) -> HashMap<String, usize> {
         if !weighs_session_load(cfg) {
             return HashMap::new();
@@ -336,8 +361,13 @@ impl Drop for Lease {
                 registry.active.remove(&self.session);
             }
         }
-        for binding in registry.bindings.values_mut().filter(|b| b.session == self.session) {
-            binding.last_seen = Utc::now().timestamp();
+        let now = Utc::now().timestamp();
+        for key in registry.session_keys(&self.session) {
+            if let Some(binding) = registry.bindings.get_mut(&key)
+                && binding.session == self.session
+            {
+                binding.last_seen = now;
+            }
         }
         registry.dirty = true;
     }
@@ -393,6 +423,7 @@ impl Sessions {
         let owner = digest(&["owner", session]);
         let mut registry = self.registry.lock();
         registry.bindings.retain(|_, b| b.session != owner);
+        registry.invalidate_index();
         registry.responses.retain(|_, c| c.session != session);
         registry.history_bytes = registry.responses.values().map(|c| c.bytes).sum();
         registry.dirty = true;
@@ -403,7 +434,10 @@ impl Sessions {
         let mut registry = Registry::default();
         match std::fs::read(&path) {
             Ok(data) => match serde_json::from_slice(&data) {
-                Ok(bindings) => registry.bindings = bindings,
+                Ok(bindings) => {
+                    registry.bindings = bindings;
+                    registry.invalidate_index();
+                }
                 Err(e) => tracing::warn!(path = %path.display(), "session assignments could not be read: {e}"),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -473,7 +507,13 @@ impl Sessions {
         };
         let key = digest(&[session, &route_scope(pool, model, only)]);
         let mut registry = self.registry.lock();
-        Self::prune_locked(&mut registry, cfg.session_affinity_idle_seconds);
+        Self::prune_due(&mut registry, cfg.session_affinity_idle_seconds);
+        // The sweep runs every few seconds; this request's own assignment is checked now.
+        if registry.bindings.get(&key).is_some_and(|b| Self::expired(&registry, b, cfg.session_affinity_idle_seconds)) {
+            registry.bindings.remove(&key);
+            registry.dirty = true;
+            registry.invalidate_index();
+        }
         let mut excluded = exclude.to_vec();
         // Why an existing assignment has to move, if it does.
         let mut moving: Option<&'static str> = None;
@@ -532,6 +572,7 @@ impl Sessions {
             match oldest {
                 Some(oldest) => {
                     registry.bindings.remove(&oldest);
+                    registry.invalidate_index();
                 }
                 // Every assignment is in use: route this request on its own rather than fail it.
                 None => {
@@ -629,17 +670,41 @@ impl Sessions {
         pool.pick(model, exclude, cfg, pinned, only, &load)
     }
 
-    fn prune_locked(registry: &mut Registry, idle: u64) {
+    fn cutoffs(idle: u64) -> (i64, i64) {
         let now = Utc::now().timestamp();
         let cutoff = now.saturating_sub(idle.clamp(1, i64::MAX as u64) as i64);
-        let inferred_cutoff = cutoff.max(now - INFERRED_IDLE_SECONDS as i64);
+        (cutoff, cutoff.max(now - INFERRED_IDLE_SECONDS as i64))
+    }
+
+    fn expired(registry: &Registry, b: &Binding, idle: u64) -> bool {
+        let (cutoff, inferred_cutoff) = Self::cutoffs(idle);
+        b.last_seen <= if b.inferred { inferred_cutoff } else { cutoff } && !registry.active.contains_key(&b.session)
+    }
+
+    /// The request path's sweep: at most every few seconds.
+    fn prune_due(registry: &mut Registry, idle: u64) {
+        let now = Utc::now().timestamp();
+        if now - registry.last_prune >= PRUNE_EVERY_SECONDS {
+            registry.last_prune = now;
+            Self::prune_locked(registry, idle);
+        }
+    }
+
+    fn prune_locked(registry: &mut Registry, idle: u64) {
+        let (cutoff, inferred_cutoff) = Self::cutoffs(idle);
         let count = registry.bindings.len();
         registry.bindings.retain(|_, b| {
             b.last_seen > if b.inferred { inferred_cutoff } else { cutoff } || registry.active.contains_key(&b.session)
         });
-        registry.dirty |= count != registry.bindings.len();
+        if count != registry.bindings.len() {
+            registry.dirty = true;
+            registry.invalidate_index();
+        }
+        let responses = registry.responses.len();
         registry.responses.retain(|_, c| c.last_seen > cutoff);
-        registry.history_bytes = registry.responses.values().map(|c| c.bytes).sum();
+        if responses != registry.responses.len() {
+            registry.history_bytes = registry.responses.values().map(|c| c.bytes).sum();
+        }
     }
 
     pub fn flush(&self, idle: u64) {
@@ -665,19 +730,27 @@ impl Sessions {
         }
     }
 
-    /// New assignments and migrations reach disk before contacting the provider.
+    /// New assignments and migrations reach disk before the client sees output.
     /// Activity timestamps on an existing assignment use the periodic flush.
     pub async fn persist_selection(&self, selected: &Selected) {
+        if let Some(durable) = self.begin_persist(selected) {
+            let _ = durable.await;
+        }
+    }
+
+    /// Starts writing a selection that must be durable and returns its completion,
+    /// so the caller can contact the provider meanwhile and wait before replying.
+    pub fn begin_persist(&self, selected: &Selected) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let writer = self.persistence.as_ref()?;
         if matches!(
             selected.reason,
             "new_session" | "quota_exhausted" | "account_removed" | "account_disabled" | "model_unavailable"
         ) {
-            self.save_async().await;
-        } else if matches!(selected.reason, "session_reused" | "temporary_detour")
-            && let Some(writer) = &self.persistence
-            && let Some(pending) = writer.pending_write()
-        {
-            let _ = pending.await;
+            Some(writer.flush())
+        } else if matches!(selected.reason, "session_reused" | "temporary_detour") {
+            writer.pending_write()
+        } else {
+            None
         }
     }
 
@@ -702,18 +775,19 @@ impl Sessions {
         Some((session, (*input).clone()))
     }
 
-    pub fn remember(&self, headers: &HeaderMap, session: &str, response: &Value, full_input: &[Value]) {
+    /// Takes the input by value: the caller's copy becomes the stored history.
+    pub fn remember(&self, headers: &HeaderMap, session: &str, response: &Value, full_input: Vec<Value>) {
         let Some(id) = response["id"].as_str() else {
             return;
         };
         let Some(output) = response["output"].as_array() else {
             return;
         };
-        let Some(bytes) = history_size(full_input, output, MAX_RESPONSE_BYTES) else {
+        let Some(bytes) = history_size(&full_input, output, MAX_RESPONSE_BYTES) else {
             return;
         };
-        let mut input = Vec::with_capacity(full_input.len() + output.len());
-        input.extend(full_input.iter().chain(output).cloned());
+        let mut input = full_input;
+        input.extend(output.iter().cloned());
         let input = Arc::new(input);
         let key = digest(&[&client_scope(headers), "response", id]);
         let mut registry = self.registry.lock();
@@ -1438,7 +1512,7 @@ mod tests {
             &headers,
             "task",
             &json!({"id":"r1", "output":[{"text":"answer"}]}),
-            &[json!({"text":"question"})],
+            vec![json!({"text":"question"})],
         );
         assert_eq!(sessions.previous(&headers, "r1", Some("task")).unwrap().1.len(), 2);
         assert!(sessions.previous(&headers, "r1", Some("another-task")).is_none());
@@ -1456,8 +1530,8 @@ mod tests {
         assert_eq!(history_size(&input, &output, size - 1), None);
         assert_eq!(history_size(&[], &[], 2), Some(2));
         let sessions = Sessions::memory();
-        let large = [json!("x".repeat(MAX_RESPONSE_BYTES))];
-        sessions.remember(&HeaderMap::new(), "session", &json!({"id":"large", "output":[]}), &large);
+        let large = vec![json!("x".repeat(MAX_RESPONSE_BYTES))];
+        sessions.remember(&HeaderMap::new(), "session", &json!({"id":"large", "output":[]}), large);
         assert!(sessions.previous(&HeaderMap::new(), "large", None).is_none());
         assert_eq!(sessions.registry.lock().history_bytes, 0);
     }

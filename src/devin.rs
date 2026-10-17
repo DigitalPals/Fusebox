@@ -264,11 +264,12 @@ fn os_name() -> &'static str {
 fn metadata(token: &str, seed: &str) -> Vec<u8> {
     let mut m = Vec::new();
     put_str(&mut m, 1, "devin-cli");
-    put_str(&mut m, 2, CLIENT_VERSION);
+    let version = crate::clients::version(crate::clients::DEVIN);
+    put_str(&mut m, 2, &version);
     put_str(&mut m, 3, token);
     put_str(&mut m, 4, "en");
     put_str(&mut m, 5, os_name());
-    put_str(&mut m, 7, CLIENT_VERSION);
+    put_str(&mut m, 7, &version);
     put_str(&mut m, 12, CLIENT_NAME);
     put_str(&mut m, 28, CLIENT_NAME);
     put_str(&mut m, 31, &fingerprint(seed));

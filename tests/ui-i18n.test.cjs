@@ -55,3 +55,62 @@ test('lines of parts and several sentences translate piece by piece', () => {
   assert.equal(tr('Something nobody wrote down'), 'Something nobody wrote down', 'unknown text stays English');
   assert.equal(tr('work@example.com · Unknown text'), 'work@example.com · Unknown text');
 });
+
+test('answers are remembered, up to a bound, so unmatched text is not tried twice', () => {
+  const context = load();
+  let tries = 0;
+  // A pattern that matches nothing and counts how often it is asked.
+  context.FUSEBOX_I18N.zh.patterns.unshift([{ test: () => { tries++; return false; } }, '']);
+  const { tr } = context.FUSEBOX_I18N;
+  assert.equal(tr('Something nobody wrote down'), 'Something nobody wrote down');
+  assert.equal(tries, 1);
+  assert.equal(tr('  Something nobody wrote down '), '  Something nobody wrote down ', 'the same text with other spacing');
+  assert.equal(tries, 1, 'an unmatched line is not tried again');
+  assert.equal(tr('Overview'), '概览');
+  assert.equal(tr('Overview'), '概览');
+  for (let i = 0; i < 5000; i++) tr(`Unknown line ${i}`);
+  const before = tries;
+  tr('Something nobody wrote down');
+  assert.equal(tries, before + 1, 'old answers make room for new ones');
+});
+
+test('the dictionary is fetched from a URL the server can version', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../ui/i18n.js'), 'utf8');
+  assert.match(source, /'\/ui\/i18n-zh\.js'/);
+});
+
+test('quota attribution and the usage database read in Chinese', () => {
+  const { tr } = load().FUSEBOX_I18N;
+  assert.equal(tr('Used by'), '使用方');
+  assert.equal(tr('Each rise in the window’s reported use is split over the requests that finished since the previous rise, by their API list price. About 54% of it was split by tokens, as a model has no list price.'),
+    '窗口报告用量的每次上升，都按 API 标价分摊给上一次上升以来完成的请求。其中约 54% 因模型没有标价而按 token 分摊。');
+  assert.equal(tr('Estimated from quota readings · partly by tokens'), '根据额度读数估算 · 部分按 token 分摊');
+  assert.equal(tr('3 more clients'), '另外 3 个客户端');
+  assert.equal(tr('86% used · renewed Sat Oct 17'), '已用 86% · 10月17日 周六 已重置');
+  assert.equal(tr('12% of 5h · 4% of week · <1% of week opus'), '5 小时窗口的 12% · 每周窗口的 4% · 每周 opus窗口的 <1%');
+  assert.equal(tr('Opus weekly window'), 'Opus 每周窗口');
+  assert.equal(tr('Weekly limit runs out early at this pace'), '每周额度按当前速度会提前用完');
+  assert.equal(tr('It would run out before it renews. The laptop used 61% of it.'), '按当前速度，它会在重置前用完。The laptop 用掉了其中的 61%。');
+  assert.equal(tr('Disk almost full'), '磁盘空间即将用完');
+  assert.equal(tr('It is 900 MB and grows about 12 MB a day. Lower usage.retention-days, or raise usage.warn-database-mb.'),
+    '数据库已有 900 MB，每天约增长 12 MB。请调低 usage.retention-days，或调高 usage.warn-database-mb。');
+  assert.equal(tr('4.6M in · 870.0k out · 2.13B cached'), '输入 4.6M · 输出 870.0k · 缓存 2.13B');
+  assert.equal(tr('Top clients'), '主要客户端');
+  assert.equal(tr('$12.00 · 4 calls · 40% of this client'), '$12.00 · 4 次调用 · 占此客户端的 40%');
+  assert.equal(tr('1,000 input, 200 output, 9,000 read from the cache, 300 written to the cache'), '输入 1,000，输出 200，缓存读取 9,000，缓存写入 300');
+  assert.equal(tr('75% · 10.5k tokens'), '75% · 10.5k token');
+});
+
+test('combined weekly limits read in Chinese', () => {
+  const { tr } = load().FUSEBOX_I18N;
+  assert.equal(tr('Combined weekly limits'), '每周额度合计');
+  assert.equal(tr('3 accounts'), '3 个账号');
+  assert.equal(tr('2 of 3 accounts reporting'), '2/3 个账号已报告');
+  assert.equal(tr('pace 32%'), '均匀 32%');
+  assert.equal(tr('pace <1%'), '均匀 <1%');
+  assert.equal(tr('10 points under pace'), '低于均匀用量 10 个百分点');
+  assert.equal(tr('1 point over pace'), '高于均匀用量 1 个百分点');
+  assert.equal(tr('On pace'), '符合均匀用量');
+  assert.equal(tr('Claude combined weekly quota used'), 'Claude 每周合计额度已用');
+  assert.equal(tr('22% used · Healthy · even pace 32% used by now').split(' · ')[2], '均匀用量此刻应为 32%');
+});

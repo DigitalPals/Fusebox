@@ -270,11 +270,15 @@ fn has_cache_control(value: &Value) -> bool {
 /// Call only for an actual Claude provider, not every provider using its wire format.
 /// Explicit controls, including OpenAI's intentional explicit-with-no-markers mode,
 /// take precedence. With no existing markers, the default 5m TTL cannot conflict.
+#[cfg(test)]
 pub fn apply_translated_cache_policy(original: &Value, body: &mut Value) {
-    if original["prompt_cache_options"]["mode"] != "explicit"
-        && !has_cache_control(original)
-        && !has_cache_control(body)
-    {
+    let explicit = original["prompt_cache_options"]["mode"] == "explicit";
+    apply_translated_cache_policy_with(explicit, !explicit && has_cache_control(original), body);
+}
+
+/// The same, with the caller's mode and markers already known for this request.
+pub fn apply_translated_cache_policy_with(explicit_mode: bool, original_markers: bool, body: &mut Value) {
+    if !explicit_mode && !original_markers && !has_cache_control(body) {
         body["cache_control"] = json!({ "type": "ephemeral" });
     }
 }

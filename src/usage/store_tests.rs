@@ -681,10 +681,13 @@ async fn large_exact_integer_cost_overflow_returns_explicit_null() {
 }
 
 // Compare independent SQL and streaming implementations at their shared contract.
+// The reference has no per-client models; rollups and a full scan must agree on them.
 fn dashboard_metrics(value: &mut Value) {
     match value {
         Value::Object(fields) => {
-            for key in ["logical_requests", "attempts", "logical_requests_unknown", "attempts_unknown", "trends"] {
+            for key in
+                ["logical_requests", "attempts", "logical_requests_unknown", "attempts_unknown", "trends", "models"]
+            {
                 fields.remove(key);
             }
             for value in fields.values_mut() {
@@ -913,7 +916,7 @@ async fn sqlite_full_rolls_back_records_and_exposes_proxy_loss() {
     // flush return an error. All three accounting tables must remain unchanged.
     store
         .call(|conn| {
-            for table in ["usage_observations", "usage_entries", "usage_source_entries"] {
+            for table in ["usage_observations", "usage_entries"] {
                 let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?;
                 assert_eq!(count, 0);
             }
@@ -1155,12 +1158,13 @@ async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
                 [],
                 |r| r.get(0),
             )?;
-            let current: String =
+            let current: rusqlite::types::Value =
                 c.query_row("SELECT snapshot_json FROM usage_observations WHERE source_event_id='current'", [], |r| {
                     r.get(0)
                 })?;
+            let current = decode_document(c, (&current).into())?;
             let entries: i64 =
-                c.query_row("SELECT COUNT(*) FROM usage_source_entries WHERE cost_nanos IS NULL", [], |r| r.get(0))?;
+                c.query_row("SELECT COUNT(*) FROM usage_entries WHERE cost_nanos IS NULL", [], |r| r.get(0))?;
             Ok((unpriced, current, entries))
         })
         .await
@@ -1218,7 +1222,7 @@ async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots(
         // metadata. The same startup path is used on the production database.
         c.execute("UPDATE usage_observations SET cost_nanos=NULL,pricing_basis='unsupported_inference_region',snapshot_json='{}' WHERE source_event_id='unavailable'", [])?;
         let key: String = c.query_row("SELECT canonical_key FROM usage_observations WHERE source_event_id='unavailable'", [], |r| r.get(0))?;
-        rebuild_entries(c, &key, "proxy")?;
+        rebuild_entries(c, &key)?;
         Ok(())
     }).await.unwrap();
     let before: String = store
@@ -1262,7 +1266,7 @@ async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots(
     store.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn migrations_chain_to_v3_and_keep_existing_rows() {
+async fn migrations_chain_to_the_current_schema_and_keep_existing_rows() {
     let indexed = |c: &Connection| -> rusqlite::Result<(i64, bool, bool)> {
         Ok((
             c.query_row("PRAGMA user_version", [], |r| r.get(0))?,
@@ -1276,32 +1280,39 @@ async fn migrations_chain_to_v3_and_keep_existing_rows() {
             })?,
         ))
     };
-    for from in [2, 1] {
+    for from in [3, 2, 1] {
         let p = path(&format!("migrate-v{from}"));
         let store = Store::open(&p, 8, 90, None).unwrap();
-        assert_eq!(store.call(move |c| Ok(indexed(c)?)).await.unwrap(), (3, true, true));
+        assert_eq!(store.call(move |c| Ok(indexed(c)?)).await.unwrap(), (VERSION, true, true));
         let mut proxy = anthropic("proxy", "p", Some("r"), "2026-10-01T10:00:00Z");
         proxy.account_id = Some("acct".into());
         let copy = anthropic("claude_code", "c", Some("r"), "2026-10-01T10:00:00Z");
         store.call(move |c| insert_batch(c, &[proxy, copy])).await.unwrap();
         store.shutdown().await.unwrap();
         drop(store);
+        // A genuine schema-3 database, then the older steps undone by hand.
+        downgrade(&p).unwrap();
         let c = Connection::open(&p).unwrap();
-        c.execute_batch("DROP INDEX usage_entries_association;").unwrap();
+        if from <= 2 {
+            c.execute_batch("DROP INDEX usage_entries_association;").unwrap();
+        }
         if from == 1 {
             c.execute_batch("DROP TABLE usage_writer_sessions;").unwrap();
         }
         c.pragma_update(None, "user_version", from).unwrap();
-        assert_eq!(indexed(&c).unwrap(), (from, false, from == 2));
+        assert_eq!(indexed(&c).unwrap(), (from, from == 3, from >= 2));
         drop(c);
         let store = Store::open(&p, 8, 90, None).unwrap();
-        assert_eq!(store.call(move |c| Ok(indexed(c)?)).await.unwrap(), (3, true, true));
+        assert_eq!(store.call(move |c| Ok(indexed(c)?)).await.unwrap(), (VERSION, true, true));
         let summary = store
             .reference_summary(query(json!({"start":"2026-10-01","end":"2026-10-02","timezone":"UTC"})))
             .await
             .unwrap();
         assert_eq!(summary["combined"]["totals"]["observations"], 1);
         assert_eq!(summary["combined"]["totals"]["matched"], 1);
+        let dashboard =
+            store.dashboard(query(json!({"start":"2026-10-01","end":"2026-10-02","timezone":"UTC"}))).await.unwrap();
+        assert_eq!(dashboard["combined"]["totals"]["observations"], 1);
         assert_eq!(store.details(all()).await.unwrap()["total"], 2);
         store.shutdown().await.unwrap();
     }

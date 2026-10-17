@@ -8,8 +8,10 @@ use chrono::Offset;
 
 const AGG: &str = "COUNT(*),COUNT(DISTINCT logical_request_id),COUNT(DISTINCT COALESCE(attempt_id,source||':'||source_event_id)),usage_sum(cost_nanos),SUM(cost_nanos IS NULL),SUM(completeness='partial'),SUM(completeness='missing'),usage_sum(input),usage_sum(cache_read),usage_sum(cache_write),usage_sum(write_5m),usage_sum(write_1h),usage_sum(output),usage_sum(reasoning),SUM(input IS NULL),SUM(cache_read IS NULL),SUM(cache_write IS NULL),SUM(output IS NULL),SUM(reasoning IS NULL),SUM(pricing_partial=1),SUM(logical_request_id IS NULL),COUNT(cost_nanos),COUNT(input),COUNT(cache_read),COUNT(cache_write),COUNT(write_5m),COUNT(write_1h),COUNT(output),COUNT(reasoning)";
 fn aggregate(conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<Value> {
+    // Derived tables (the per-source winners) have no index to name.
+    let index = if table.starts_with('(') { String::new() } else { format!(" INDEXED BY {table}_event_time") };
     Ok(conn.query_row(
-        &format!("SELECT {AGG} FROM {table} o INDEXED BY {table}_event_time WHERE {where_sql}"),
+        &format!("SELECT {AGG} FROM {table} o{index} WHERE {where_sql}"),
         rusqlite::params_from_iter(values),
         |row| aggregate_row(row, 0),
     )?)
@@ -101,6 +103,7 @@ fn apply_request_counts(value: &mut Value, counts: &Value) {
     }
 }
 pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
+    let source_table = source_entries();
     let r = range(q)?;
     let (where_sql, values) = filter(q, &r, "o");
     let mut proxy = aggregate(conn, "usage_entries", &format!("{where_sql} AND o.source='proxy'"), &values)?;
@@ -112,8 +115,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
     for source in ["proxy", "claude_code", "codex"] {
         let mut source_values = values.clone();
         source_values.push(source.to_owned().into());
-        let mut totals =
-            aggregate(conn, "usage_source_entries", &format!("{where_sql} AND o.source=?"), &source_values)?;
+        let mut totals = aggregate(conn, &source_entries(), &format!("{where_sql} AND o.source=?"), &source_values)?;
         let records: i64 = conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM usage_observations o INDEXED BY usage_event_time WHERE {where_sql} AND o.source=?"
@@ -121,7 +123,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
             rusqlite::params_from_iter(&source_values),
             |row| row.get(0),
         )?;
-        let source_conflicts:i64=conn.query_row(&format!("SELECT COUNT(*) FROM usage_source_entries o INDEXED BY usage_source_entries_event_time WHERE {where_sql} AND o.source=? AND EXISTS(SELECT 1 FROM usage_observations x INDEXED BY usage_association WHERE x.association_key=o.association_key AND x.source=o.source AND ((x.model IS NOT NULL AND o.model IS NOT NULL AND x.model<>o.model) OR (x.account_id IS NOT NULL AND o.account_id IS NOT NULL AND x.account_id<>o.account_id) OR (x.input IS NOT NULL AND o.input IS NOT NULL AND x.input<>o.input) OR (x.cache_read IS NOT NULL AND o.cache_read IS NOT NULL AND x.cache_read<>o.cache_read) OR (x.cache_write IS NOT NULL AND o.cache_write IS NOT NULL AND x.cache_write<>o.cache_write) OR (x.output IS NOT NULL AND o.output IS NOT NULL AND x.output<>o.output)))"),rusqlite::params_from_iter(&source_values),|row|row.get(0))?;
+        let source_conflicts:i64=conn.query_row(&format!("SELECT COUNT(*) FROM {source_table} o WHERE {where_sql} AND o.source=? AND EXISTS(SELECT 1 FROM usage_observations x INDEXED BY usage_association WHERE x.association_key=o.association_key AND x.source=o.source AND ((x.model IS NOT NULL AND o.model IS NOT NULL AND x.model<>o.model) OR (x.account_id IS NOT NULL AND o.account_id IS NOT NULL AND x.account_id<>o.account_id) OR (x.input IS NOT NULL AND o.input IS NOT NULL AND x.input<>o.input) OR (x.cache_read IS NOT NULL AND o.cache_read IS NOT NULL AND x.cache_read<>o.cache_read) OR (x.cache_write IS NOT NULL AND o.cache_write IS NOT NULL AND x.cache_write<>o.cache_write) OR (x.output IS NOT NULL AND o.output IS NOT NULL AND x.output<>o.output)))"),rusqlite::params_from_iter(&source_values),|row|row.get(0))?;
         if source == "proxy" {
             apply_request_counts(&mut totals, &request_counts);
         }
@@ -138,7 +140,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
     // local dates in one pass without materializing event rows in application RAM.
     let date_expression = local_date_expression(&r)?;
     let mut trend = Vec::new();
-    let mut statement=conn.prepare(&format!("SELECT {date_expression},o.source,{AGG} FROM usage_source_entries o INDEXED BY usage_source_entries_event_time WHERE {where_sql} GROUP BY 1,2 ORDER BY 1,2 LIMIT 10980"))?;
+    let mut statement=conn.prepare(&format!("SELECT {date_expression},o.source,{AGG} FROM {source_table} o WHERE {where_sql} GROUP BY 1,2 ORDER BY 1,2 LIMIT 10980"))?;
     let rows = statement.query_map(rusqlite::params_from_iter(&values), |row| {
         let mut value = aggregate_row(row, 2)?;
         value["date"] = json!(row.get::<_, String>(0)?);
@@ -170,7 +172,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
     // lifecycle-only day even when canonical accounting has no entry for that day.
     for (date, counts) in proxy_days {
         if !trend.iter().any(|day| day["source"] == "proxy" && day["date"] == date) {
-            let mut empty = aggregate(conn, "usage_source_entries", "0", &[])?;
+            let mut empty = aggregate(conn, &source_entries(), "0", &[])?;
             empty["date"] = json!(date);
             empty["source"] = json!("proxy");
             apply_request_counts(&mut empty, &counts);
@@ -185,7 +187,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
         [("provider", "provider"), ("model", "model"), ("account", "account_id"), ("client", "client_id")]
     {
         let column = dimension(column, "o");
-        let mut statement=conn.prepare(&format!("SELECT {column},o.source,{AGG} FROM usage_source_entries o INDEXED BY usage_source_entries_event_time WHERE {where_sql} GROUP BY 1,2 ORDER BY COUNT(*) DESC,1,2 LIMIT 500"))?;
+        let mut statement=conn.prepare(&format!("SELECT {column},o.source,{AGG} FROM {source_table} o WHERE {where_sql} GROUP BY 1,2 ORDER BY COUNT(*) DESC,1,2 LIMIT 500"))?;
         let rows = statement.query_map(rusqlite::params_from_iter(&values), |row| {
             let mut value = aggregate_row(row, 2)?;
             value["id"] = json!(row.get::<_, Option<String>>(0)?);
@@ -205,7 +207,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
             if let Some(group) = out.iter_mut().find(|v| v["source"] == "proxy" && v["id"] == json!(id)) {
                 apply_request_counts(group, &counts);
             } else {
-                let mut group = aggregate(conn, "usage_source_entries", "0", &[])?;
+                let mut group = aggregate(conn, &source_entries(), "0", &[])?;
                 group["id"] = json!(id);
                 group["source"] = json!("proxy");
                 apply_request_counts(&mut group, &counts);
@@ -291,5 +293,15 @@ fn combined_summary(
     }
     Ok(
         json!({"basis":"One entry per provider response. Imported entries that share a response ID with a proxy entry are excluded.","totals":totals,"proxy_first_event_at_ms":proxy_first,"stack":stack,"trend":trend,"breakdowns":breakdowns}),
+    )
+}
+
+/// Schema 4 keeps no per-source winner table (only the retired summary read it);
+/// the reference derives the same winners from observations.
+fn source_entries() -> String {
+    format!(
+        "(SELECT {ENTRY_COLUMNS} FROM (SELECT o.*,row_number() OVER (PARTITION BY o.source,o.canonical_key ORDER BY {WINNER_ORDER}) AS winner
+          FROM usage_observations o WHERE NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=o.source AND s.source_event_id=o.source_event_id
+            AND (s.origin_id='' OR s.origin_id=o.origin_id))) WHERE winner=1)"
     )
 }

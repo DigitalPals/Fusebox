@@ -49,6 +49,54 @@ pub struct Fault {
     pub until: Option<DateTime<Utc>>,
 }
 
+/// Space left under this on the database's filesystem is an error: SQLite stops
+/// writing when the disk fills, and usage recording with it.
+const LOW_DISK: u64 = 1 << 30;
+
+/// The usage database growing past `warn_mb`, or the disk under it filling up.
+pub fn storage(stats: Option<&crate::usage::store::DatabaseStats>, warn_mb: u64) -> Option<Fault> {
+    let stats = stats?;
+    let mb = |b: u64| format!("{} MB", b / 1_000_000);
+    let fault = |level, summary: &str, detail: String| Fault {
+        key: "storage:usage".into(),
+        event: Event::Quiet,
+        provider: String::new(),
+        provider_name: "Usage".into(),
+        title: summary.to_string(),
+        body: detail.clone(),
+        path: "#/usage".into(),
+        kind: "storage",
+        level,
+        summary: summary.to_string(),
+        detail: Some(detail),
+        ..Default::default()
+    };
+    if let Some(free) = stats.disk_free_bytes.filter(|f| *f < LOW_DISK) {
+        return Some(fault(
+            "err",
+            "Disk almost full",
+            format!("{} left where the usage database is; usage recording stops when the disk is full.", mb(free)),
+        ));
+    }
+    (warn_mb > 0 && stats.bytes > warn_mb << 20).then(|| {
+        fault(
+            "warn",
+            "Usage database is large",
+            format!(
+                "It is {} and grows about {} a day. Lower usage.retention-days, or raise usage.warn-database-mb.",
+                mb(stats.bytes),
+                mb(stats.growth_bytes_per_day)
+            ),
+        )
+    })
+}
+
+/// The app badge's count. A pace warning is not counted: it can hold for days and
+/// asks for no action, only attention.
+pub fn badge(faults: &[Fault]) -> usize {
+    faults.iter().filter(|f| f.kind != "pace").count()
+}
+
 impl Fault {
     /// The management API's form. It has no countdown text, so it only changes when the
     /// fault does: clients count down to `until` themselves.
@@ -65,6 +113,7 @@ impl Fault {
             "detail": self.detail,
             "until": self.until.map(|t| t.to_rfc3339()),
             "path": self.path,
+            "badge": self.kind != "pace",
         })
     }
 }
@@ -88,6 +137,9 @@ pub struct AccountView {
     pub windows: Vec<Window>,
     /// Failed requests (not cancellations) in the last hour.
     pub failures: u64,
+    /// Per current window (name, model scope): the client that used most of it, and
+    /// its points (from quota attribution).
+    pub top_clients: Vec<(String, Option<String>, String, f64)>,
 }
 
 impl AccountView {
@@ -106,6 +158,21 @@ impl AccountView {
 }
 
 /// The text the dashboard reads as an expired sign-in (`SIGNIN_ERR` in ui/app.js).
+/// When a window runs out if use continues at its pace so far, if that is before
+/// it renews. As the dashboard's pace mark: at least a quarter of the window gone
+/// and 20% used.
+pub fn early_run_out(w: &Window, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let resets = w.resets_at.filter(|r| *r > now)?;
+    let length = crate::attribution::length(&w.name)?;
+    let elapsed = (now - (resets - length)).num_seconds() as f64;
+    if w.used < 20.0 || w.used >= 100.0 || elapsed < 0.25 * length.num_seconds() as f64 {
+        return None;
+    }
+    let per_second = w.used / elapsed;
+    let out = now + chrono::Duration::seconds(((100.0 - w.used) / per_second) as i64);
+    (out < resets).then_some(out)
+}
+
 pub fn signin_error(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     [
@@ -182,6 +249,44 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
                 });
             }
             _ => {}
+        }
+        // A window that this pace would use up before it renews. Not pushed: the
+        // meters say it too; this says who.
+        if !matches!(pause, Some((_, (_, "quota")))) {
+            for w in &a.windows {
+                let Some(pace) = early_run_out(w, now) else { continue };
+                let who = a
+                    .top_clients
+                    .iter()
+                    .find(|(name, model, ..)| *name == w.name && *model == w.model)
+                    .filter(|(.., points)| *points > 0.0 && w.used > 0.0)
+                    .map(|(.., label, points)| format!(" {label} used {:.0}% of it.", 100.0 * points / w.used));
+                let limit = window_title(&w.name);
+                out.push(Fault {
+                    key: format!(
+                        "pace:{}:{}{}",
+                        a.id,
+                        w.name,
+                        w.model.as_deref().map(|m| format!(":{m}")).unwrap_or_default()
+                    ),
+                    kind: "pace",
+                    level: "warn",
+                    summary: format!("{} limit runs out early at this pace", capitalized(limit)),
+                    detail: Some(format!("It would run out before it renews.{}", who.clone().unwrap_or_default())),
+                    until: w.resets_at,
+                    ..fault(
+                        "pace",
+                        Event::Quiet,
+                        format!("{}: {limit} limit runs out early", a.label),
+                        format!(
+                            "At this pace in {}, before it renews in {}.{}",
+                            span(pace - now),
+                            span(w.resets_at.unwrap_or(now) - now),
+                            who.unwrap_or_default()
+                        ),
+                    )
+                });
+            }
         }
         if error {
             if a.signin_error() {

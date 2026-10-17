@@ -67,6 +67,13 @@ fn usd() -> String {
     "USD".into()
 }
 impl Catalogue {
+    /// The catalogue built into this release, loaded once.
+    pub fn bundled_catalogue() -> Option<&'static Catalogue> {
+        static BUNDLED: std::sync::LazyLock<Option<Catalogue>> =
+            std::sync::LazyLock::new(|| Catalogue::load(None).ok());
+        BUNDLED.as_ref()
+    }
+
     pub fn load(overrides: Option<&Path>) -> Result<Self> {
         let raw = match overrides {
             Some(p) => std::fs::read_to_string(p).context("read pricing catalogue")?,

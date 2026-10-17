@@ -47,7 +47,9 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .merge(api)
         .route("/api/usage-ingest", post(crate::usage::api::ingest).layer(DefaultBodyLimit::max(512 << 10)))
-        .nest("/api", crate::mgmt::router(app.clone()))
+        // Dashboard JSON compresses well (the request log ~20x); streams and
+        // WebSocket upgrades are left alone by the layer's default predicate.
+        .nest("/api", crate::mgmt::router(app.clone()).layer(tower_http::compression::CompressionLayer::new()))
         .route("/", get(ui_index))
         .route("/ui/{file}", get(ui_asset))
         .route("/ui/fonts/{file}", get(ui_font))
@@ -553,14 +555,60 @@ fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
 
+/// One write carries at most this much of what is already waiting.
+const BATCH_BYTES: usize = 64 << 10;
+
+/// The next frame, or None when the keepalive interval passed first. One timer is
+/// reused for the whole stream instead of a new one per frame.
+async fn next_or_keepalive(
+    frames: &mut FrameStream,
+    keepalive: &mut std::pin::Pin<&mut tokio::time::Sleep>,
+) -> Option<Option<Frame>> {
+    tokio::select! {
+        biased;
+        next = frames.next() => Some(next),
+        _ = keepalive.as_mut() => None,
+    }
+}
+
+/// Frames that are ready right now (one upstream chunk often carries several),
+/// so they leave in one write. Never waits.
+fn drain_ready(frames: &mut FrameStream, mut write: impl FnMut(Frame) -> usize) -> bool {
+    use futures::FutureExt;
+    let mut written = 0;
+    while written < BATCH_BYTES {
+        match frames.next().now_or_never() {
+            Some(Some(f)) => written += write(f),
+            Some(None) => return true,
+            None => break,
+        }
+    }
+    false
+}
+
 fn sse_body(mut frames: FrameStream) -> Body {
     Body::from_stream(async_stream::stream! {
+        let keepalive = tokio::time::sleep(KEEPALIVE);
+        tokio::pin!(keepalive);
         loop {
-            match tokio::time::timeout(KEEPALIVE, frames.next()).await {
-                Ok(Some(f)) => yield Ok::<_, Infallible>(Bytes::from(f.to_sse())),
-                Ok(None) => break,
-                Err(_) => yield Ok(Bytes::from_static(b": keepalive\n\n")),
+            match next_or_keepalive(&mut frames, &mut keepalive).await {
+                Some(Some(f)) => {
+                    let mut buf = Vec::with_capacity(f.data.len() + 48);
+                    f.write_sse(&mut buf);
+                    let ended = drain_ready(&mut frames, |f| {
+                        let before = buf.len();
+                        f.write_sse(&mut buf);
+                        buf.len() - before
+                    });
+                    yield Ok::<_, Infallible>(Bytes::from(buf));
+                    if ended {
+                        break;
+                    }
+                }
+                Some(None) => break,
+                None => yield Ok(Bytes::from_static(b": keepalive\n\n")),
             }
+            keepalive.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE);
         }
     })
 }
@@ -570,16 +618,31 @@ fn json_array_body(mut frames: FrameStream) -> Body {
     Body::from_stream(async_stream::stream! {
         let mut first = true;
         yield Ok::<_, Infallible>(Bytes::from_static(b"["));
+        let keepalive = tokio::time::sleep(KEEPALIVE);
+        tokio::pin!(keepalive);
         loop {
-            match tokio::time::timeout(KEEPALIVE, frames.next()).await {
-                Ok(Some(Frame { data, .. })) => {
-                    let sep = if first { "" } else { ",\r\n" };
-                    first = false;
-                    yield Ok(Bytes::from(format!("{sep}{data}")));
+            match next_or_keepalive(&mut frames, &mut keepalive).await {
+                Some(Some(f)) => {
+                    let mut buf = Vec::with_capacity(f.data.len() + 4);
+                    let mut append = |Frame { data, .. }: Frame| {
+                        if !first {
+                            buf.extend_from_slice(b",\r\n");
+                        }
+                        first = false;
+                        buf.extend_from_slice(data.as_bytes());
+                        data.len()
+                    };
+                    append(f);
+                    let ended = drain_ready(&mut frames, &mut append);
+                    yield Ok::<_, Infallible>(Bytes::from(buf));
+                    if ended {
+                        break;
+                    }
                 }
-                Ok(None) => break,
-                Err(_) => yield Ok(Bytes::from_static(b"\n")),
+                Some(None) => break,
+                None => yield Ok(Bytes::from_static(b"\n")),
             }
+            keepalive.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE);
         }
         yield Ok(Bytes::from_static(b"]"));
     })
@@ -590,11 +653,16 @@ fn json_array_body(mut frames: FrameStream) -> Body {
 const FAVICON: &[u8] = include_bytes!("../ui/favicon.ico");
 
 async fn ui_index(headers: HeaderMap) -> Response {
-    assets::serve("/", &headers)
+    assets::serve("/", &headers, None)
 }
 
-async fn ui_asset(Path(file): Path<String>, headers: HeaderMap) -> Response {
-    assets::serve(&file, &headers)
+// `?v=` names the version the index linked to; see assets.rs.
+async fn ui_asset(
+    Path(file): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    assets::serve(&file, &headers, assets::version(query.as_deref()).as_deref())
 }
 
 // Self-hosted fonts (latin subset, SIL OFL 1.1; licences in ui/fonts). Their names
@@ -628,11 +696,11 @@ const ICONS: &[(&str, &[u8])] = &[
 ];
 
 async fn manifest(headers: HeaderMap) -> Response {
-    assets::serve("manifest.webmanifest", &headers)
+    assets::serve("manifest.webmanifest", &headers, None)
 }
 
 async fn service_worker(headers: HeaderMap) -> Response {
-    assets::serve("sw.js", &headers)
+    assets::serve("sw.js", &headers, None)
 }
 
 async fn ui_icon(Path(file): Path<String>) -> Response {

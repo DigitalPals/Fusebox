@@ -36,6 +36,18 @@ pub enum UsageCommand {
         #[arg(long)]
         database: Option<PathBuf>,
     },
+    /// Compress every record and shrink the file now, with Fusebox stopped. A running
+    /// Fusebox does this by itself; use this when it lacked the disk space to vacuum.
+    Compact {
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
+    /// Rewrite the database in the layout releases before 0.6 read, with Fusebox stopped.
+    /// Run this before going back to an older release.
+    Downgrade {
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
     /// Report candidate homes; do not read history without enabled roots.
     Status {
         #[arg(long)]
@@ -118,7 +130,11 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         | UsageCommand::Scan { database, .. }
         | UsageCommand::Backfill { database, .. }
         | UsageCommand::Reprice { database } => database,
-        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } | UsageCommand::Backup { .. } => {
+        UsageCommand::ImportKeeper { .. }
+        | UsageCommand::EstimateKeeperCache { .. }
+        | UsageCommand::Backup { .. }
+        | UsageCommand::Compact { .. }
+        | UsageCommand::Downgrade { .. } => {
             unreachable!()
         }
     };
@@ -131,7 +147,11 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         UsageCommand::Scan { source, .. } => scan(&store, source).await,
         UsageCommand::Backfill { source, .. } => backfill(&store, source).await,
         UsageCommand::Reprice { .. } => reprice(&store).await,
-        UsageCommand::ImportKeeper { .. } | UsageCommand::EstimateKeeperCache { .. } | UsageCommand::Backup { .. } => {
+        UsageCommand::ImportKeeper { .. }
+        | UsageCommand::EstimateKeeperCache { .. }
+        | UsageCommand::Backup { .. }
+        | UsageCommand::Compact { .. }
+        | UsageCommand::Downgrade { .. } => {
             unreachable!()
         }
     };

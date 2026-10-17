@@ -202,8 +202,8 @@ pub fn estimate_cache(database: &Path, origin: &str, apply: bool) -> Result<Valu
             .query_map(params![cursor, origin], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
+                    r.get::<_, rusqlite::types::Value>(1)?,
+                    r.get::<_, rusqlite::types::Value>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                 ))
@@ -217,8 +217,15 @@ pub fn estimate_cache(database: &Path, origin: &str, apply: bool) -> Result<Valu
             break;
         };
         cursor = last.0;
+        let mut documents = store::Documents::new(&tx)?;
         for (id, payload, original, key, model) in rows {
-            let snapshot = cache_estimate(&catalogue, &payload, &original, origin, at)?;
+            let snapshot = cache_estimate(
+                &catalogue,
+                &store::decode_document(&tx, (&payload).into())?,
+                &store::decode_document(&tx, (&original).into())?,
+                origin,
+                at,
+            )?;
             let cost = snapshot["cost_nanos"].as_i64().ok_or_else(|| anyhow!("invalid estimated cost"))?;
             let evidence = &snapshot["historical_estimate"];
             let values = [
@@ -234,11 +241,12 @@ pub fn estimate_cache(database: &Path, origin: &str, apply: bool) -> Result<Valu
             }
             estimated += 1;
             if apply {
-                let changed = tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,snapshot_json=?4 WHERE id=?1 AND cost_nanos IS NULL AND snapshot_json=?5", params![id,cost,snapshot["basis"].as_str().unwrap(),serde_json::to_string(&snapshot)?,original])?;
+                // Compare against the stored value exactly as read, compressed or not.
+                let changed = tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,snapshot_json=?4,pricing_partial=?6 WHERE id=?1 AND cost_nanos IS NULL AND snapshot_json=?5", params![id,cost,snapshot["basis"].as_str().unwrap(),documents.store(&serde_json::to_string(&snapshot)?)?,original,i64::from(snapshot["partial"].as_bool().unwrap_or(false))])?;
                 if changed != 1 {
                     bail!("keeper estimate evidence changed");
                 }
-                store::rebuild_entries(&tx, &key, "proxy")?;
+                store::rebuild_entries(&tx, &key)?;
                 updated += 1;
             }
         }

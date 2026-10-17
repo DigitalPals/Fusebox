@@ -29,6 +29,14 @@ The catalogue has a limited set of explicit service-tier multipliers. For GPT-6 
 
 In particular, API-token estimates do not describe Claude Pro/Max, ChatGPT Plus/Pro/Team, or other subscription-plan usage. API billing and subscription allowances are separate provider products. The quota meters and cooldowns on Accounts continue to represent provider-reported subscription limits; the Usage page does not combine those limits with API costs.
 
+### Who used a subscription window
+
+Subscriptions run out in percent of a 5-hour or weekly window, and the providers report only the window's total. Fusebox estimates who used it. It reads the total after every Claude and ChatGPT response and from the usage endpoints, and it knows every attempt that finished on the account in between. When the reported use rises, the rise is split over the attempts that finished since the previous rise, weighted by their API list-price estimate (by weighted tokens when a model has no price). Whole-percent readings make attempts wait until the reported use actually moves; then they share it. A rise with no Fusebox attempt to explain it counts as **outside Fusebox**: claude.ai, the desktop app or another tool using the same subscription. Use already on a window when Fusebox began following it is kept apart as **before**.
+
+These are estimates and labelled so. The provider's own accounting is per token and model, and Fusebox sees only the sum. Readings that arrive with a response describe the window before that response's own work, so each attempt is usually explained by the next reading. Model-scoped windows (such as a weekly Opus limit) count only matching models.
+
+A client is its key: a named client by its name, a shared key from `api-keys` as "Shared key" and the start of its hash. Only a request without a key is named by its program. Each account's page shows, under every meter, which clients used the current window and the last one; its coding sessions show their share of the current windows. The Usage page's **Top clients** ranks the clients in the selected range and filters by estimated cost, with each one's share of the cost, its tokens and its models; it names clients only, not the subscription accounts they used. A window that would run out before it renews at its pace so far appears in the faults menu, naming the client that used most of it; it is not pushed and does not count on the app badge. The current and last windows survive restarts in `<auth-dir>/.quota-attribution.state`; the usage database keeps no history of them.
+
 ## Local setup and configuration
 
 Usage storage is enabled by default for the proxy and is created beside the selected `config.yaml` as `usage.sqlite3`. Imports and collectors are opt-in. The SQLite library is built into the Fusebox binary; no database server or additional runtime is required.
@@ -52,7 +60,7 @@ named-clients:
 
 Named clients add stable attribution to an inference credential. They are additive to `api-keys` and are not a machine identity mechanism: anyone who has the key can use that client identity. Keep them private and rotate them if shared. Client keys are compared as credentials and only their derived scope is used for attribution; old API-key behavior is unchanged.
 
-With a running server, use **Usage** in the dashboard to inspect totals, source coverage, health, imports, collectors, and the pricing assumptions. `/api/usage/dashboard`, `/api/usage/observations`, `/api/usage/status`, and `/api/usage/export` use the dashboard's management authentication. The Usage page's export button exports only the currently displayed page and filters. Use a local database backup for a complete archive. The former `/api/usage/summary` endpoint returns a management-authenticated `410 Gone`; migrate to the dashboard contract rather than expecting its former per-source or request/attempt aggregate fields.
+With a running server, use **Usage** in the dashboard to inspect totals, source coverage, health, imports, collectors, and the pricing assumptions. `/api/usage/dashboard`, `/api/usage/observations`, `/api/usage/status`, and `/api/usage/export` use the dashboard's management authentication. `/api/usage/export` returns one page of records at a time, as JSON or CSV. Use a local database backup for a complete archive. The former `/api/usage/summary` endpoint returns a management-authenticated `410 Gone`; migrate to the dashboard contract rather than expecting its former per-source or request/attempt aggregate fields.
 
 ## Import Claude Code and Codex history
 
@@ -164,9 +172,21 @@ The server's collector status distinguishes contact from successful synchronizat
 
 ## Storage, backups, and recovery
 
-The server usage database is a versioned SQLite file using WAL mode, full synchronous commits, foreign keys, and transactions. The current SQLite schema is version 3. Migrations run one step at a time in a single transaction: version 1 to 2 adds the writer-session health table, and version 2 to 3 adds the `usage_entries(association_key, source)` index used by combined accounting. After migrations the server prices again any rows saved as unpriced only because they predated the catalogue, in batches of at most 2,000 rows per transaction. This database schema version is separate from the version 1 observation/batch envelopes and the versioned native importer parser. Fusebox applies supported migrations on startup and rejects a database from a newer schema version.
+The server usage database is a versioned SQLite file using WAL mode, full synchronous commits, foreign keys, and transactions. The current SQLite schema is version 4. Migrations run in a single transaction: version 1 to 2 adds the writer-session health table, version 2 to 3 adds the `usage_entries(association_key, source)` index used by combined accounting, and version 3 to 4 makes the database smaller and the Usage page faster (below). After migrations the server prices again any rows saved as unpriced only because they predated the catalogue, in batches of at most 2,000 rows per transaction. This database schema version is separate from the version 1 observation/batch envelopes and the versioned native importer parser. Fusebox applies supported migrations on startup and rejects a database from a newer schema version.
 
 Proxy observations go through a bounded background writer so disk latency does not hold up a response. Queue acceptance is not yet a durable commit: a crash can lose queued events and the current uncommitted batch. A full queue increments the current writer's dropped count; a malformed observation increments rejected; a failed insert batch increments dropped and writer errors. Health reports the current session plus best-effort persisted counters from earlier writer sessions. A previous unclosed session can indicate a crash, forced stop, or concurrent process sharing the database. Counters can lag because health snapshots are persisted between commands and on an idle timer, and disk failure can prevent their update. A storage gap remains visible as degraded health rather than an implicit zero. Imports and collector ingestion wait for durable transaction acknowledgment; their data and checkpoints/outbox updates commit together so retries are safe.
+
+### Size
+
+Schema 4 stores each record's payload and price snapshot compressed, with a zstd dictionary trained on the database's own records once it holds 1,000 of them (and again after every 100,000 more); older records are compressed in the background in short steps between writes. It keeps 15-minute rollups of the accounting entries and of the filter values, maintained by triggers, so the Usage page reads a few thousand rollup rows instead of every record; partial buckets at the ends of a range and imported histories are still read from the records, so totals are exact in every timezone. It drops the per-source copy of the accounting entries and three indexes that no query used. A new database uses incremental vacuum, so each hourly retention purge returns its space to the filesystem; an existing database is vacuumed once, after its records are compressed, when there is free disk for a copy of it (otherwise its free pages are reused and `fusebox usage compact` can shrink it later). On one production database of 286,593 records this took the file from 1,913 MiB to 760 MiB and the 30-day Usage summary from 450 ms to 9 ms, with every answer unchanged.
+
+`GET /api/usage/status` reports the database size, live and free bytes, bytes per record, an estimate of daily growth, the free disk space and whether compaction is still running.
+
+Releases before 0.6 read only schema 3. Before going back to one, stop Fusebox and run `fusebox usage downgrade` (with `--config` or `--database`): it decompresses every record, removes the rollups and recreates the schema-3 tables and indexes. `fusebox usage compact` compresses and vacuums a stopped database in one go. Both refuse to run while a Fusebox process has the database open (a `usage.sqlite3.lock` file next to it records that).
+
+```sh
+fusebox --config config.yaml usage downgrade
+```
 
 Back up the database through SQLite's backup API while Fusebox is running. `fusebox usage backup` does that for the database your config file uses (or the one `--database` names), writes a new private file, and checks its integrity before saying it's done:
 
@@ -186,6 +206,6 @@ The read API is under `/api/usage` and uses the existing dashboard management au
 
 See [`usage-ui-contract.md`](usage-ui-contract.md) for the response and dashboard contract, and [`usage-provenance.md`](usage-provenance.md) for the native-format field references, pricing source links, and parser confidence boundaries.
 
-Collector/client filters select named clients or `collector:<server-id>` identities. Source records include retained revisions and copies; selected accounting entries remain globally deduplicated. A filtered collector can have raw records whose preferred accounting evidence belongs to another collector or a local import. The page explains this exclusion and retains the matching detail records.
+Collector/client filters select named clients or `collector:<server-id>` identities. Source records include retained revisions and copies; selected accounting entries remain globally deduplicated. A filtered collector can have raw records whose preferred accounting evidence belongs to another collector or a local import. `/api/usage/observations` keeps the matching detail records.
 
 The T3 Code comparison, calculation examples, implementation decisions, and production evidence are in [the usage research report](../notes/t3code-usage-research.md).

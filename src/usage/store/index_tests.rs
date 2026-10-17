@@ -28,7 +28,7 @@ fn covering_upgrade_preserves_rows_schema_version_and_existing_query_contract() 
     upgrade_dashboard_index(&mut conn).unwrap();
     assert_eq!(columns(&conn), ["event_at_ms", "provider", "model", "account_id", "client_id", "origin_id", "source"]);
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, VERSION);
     let payload: String = conn
         .query_row(
             "SELECT payload FROM usage_observations INDEXED BY usage_event_time WHERE event_at_ms>=0 AND event_at_ms<2",

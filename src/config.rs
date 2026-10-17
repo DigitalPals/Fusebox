@@ -82,6 +82,11 @@ pub struct Config {
     /// Claude Code's quick background calls (its Haiku model) go to this model instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_model: Option<String>,
+    /// Client releases to speak as when newer than this build's (`claude-code: 2.1.310`),
+    /// for catching up before a Fusebox release does. Claude Code and Codex are also
+    /// learned from the real clients that send requests through Fusebox.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub client_identities: BTreeMap<String, String>,
     /// CLIProxyAPI settings found in the file that have no effect here.
     #[serde(skip)]
     pub ignored: Vec<String>,
@@ -378,6 +383,7 @@ impl Default for Config {
             oauth_model_alias: BTreeMap::new(),
             oauth_excluded_models: BTreeMap::new(),
             extra_models: BTreeMap::new(),
+            client_identities: BTreeMap::new(),
             model_groups: BTreeMap::new(),
             background_model: None,
             ignored: vec![],
@@ -614,6 +620,9 @@ impl Config {
         cfg.prompt_cache.validate().map_err(anyhow::Error::msg)?;
         cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
         cfg.banked_reset_policy.validate().map_err(anyhow::Error::msg)?;
+        for (client, version) in &cfg.client_identities {
+            crate::clients::validate(client, version).map_err(anyhow::Error::msg)?;
+        }
         // An explicit auth-dir always wins; otherwise keep using an existing legacy directory.
         if !explicit && default_auth_dir() == LEGACY_AUTH_DIR {
             cfg.auth_dir = LEGACY_AUTH_DIR.into();

@@ -273,14 +273,14 @@ async fn check(app: &App) {
         return;
     }
     let accounts = views(app);
-    let current = faults::faults(&accounts, Utc::now());
+    let current = all_faults(app, &accounts);
     if !app.push.active() {
         app.push.seed(&current);
         return;
     }
     let send = app.push.track(&current, &accounts, &cfg.notifications);
     for fault in send {
-        notify(app, &fault, current.len()).await;
+        notify(app, &fault, faults::badge(&current)).await;
         webhooks::deliver_all(app, hooks, &fault).await;
     }
 }
@@ -288,9 +288,17 @@ async fn check(app: &App) {
 /// Every current fault in the management API's form, errors first, as the faults
 /// menu lists them.
 pub fn current_faults(app: &App) -> Value {
-    let mut current = faults::faults(&views(app), Utc::now());
+    let mut current = all_faults(app, &views(app));
     current.sort_by_key(|f| f.level != "err");
     Value::Array(current.iter().map(Fault::json).collect())
+}
+
+/// Account faults and the usage database's storage fault.
+fn all_faults(app: &App, accounts: &[AccountView]) -> Vec<Fault> {
+    let mut current = faults::faults(accounts, Utc::now());
+    let stats = app.usage.as_ref().and_then(|s| s.database_stats());
+    current.extend(faults::storage(stats.as_ref(), app.cfg().usage.warn_database_mb));
+    current
 }
 
 /// The rules' view of every account.
@@ -324,7 +332,7 @@ fn views(app: &App) -> Vec<AccountView> {
                 Provider::Compat => format!("openai-compat:{compat}"),
                 p => p.as_str().to_string(),
             };
-            let failures = app.stats.account_series(&a.id).iter().map(|b| b.failed).sum();
+            let failures = app.stats.account_failures(&a.id);
             let st = a.state.lock();
             AccountView {
                 id: a.id.clone(),
@@ -338,6 +346,15 @@ fn views(app: &App) -> Vec<AccountView> {
                 last_error: st.last_error.clone(),
                 windows: st.quota.windows.clone(),
                 failures,
+                top_clients: st
+                    .attribution
+                    .current
+                    .iter()
+                    .filter_map(|s| {
+                        let (client, points) = s.clients.iter().max_by(|a, b| a.1.total_cmp(b.1))?;
+                        Some((s.name.clone(), s.model.clone(), crate::mgmt::client_label(&app.cfg(), client), *points))
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -530,7 +547,7 @@ async fn test(State(app): State<Arc<App>>, Json(req): Json<TestRequest>) -> Resp
         path: "#/config/notifications".into(),
         ..Default::default()
     };
-    let badge = faults::faults(&views(&app), Utc::now()).len();
+    let badge = faults::badge(&all_faults(&app, &views(&app)));
     match deliver(&app, &sub, &fault, badge, "normal").await {
         Ok(status) if status.is_success() => Json(json!({ "ok": true })).into_response(),
         Ok(StatusCode::NOT_FOUND | StatusCode::GONE) => {

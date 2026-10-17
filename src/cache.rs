@@ -110,7 +110,43 @@ pub struct Policy {
     pub downgrade_reason: Option<String>,
 }
 
+/// What the caller's own body asks of the cache, read once per request: each
+/// question walks the whole body, and retries ask again for every attempt.
+pub struct Requested {
+    pub intent: &'static str,
+    /// Any cache marker anywhere in the body (Claude's or OpenAI's).
+    pub markers: bool,
+    pub explicit_mode: bool,
+}
+
+impl Requested {
+    pub fn of(original: &Value) -> Self {
+        let markers = has_markers(original);
+        Self {
+            intent: intent_with(original, markers),
+            markers,
+            explicit_mode: original["prompt_cache_options"]["mode"] == "explicit",
+        }
+    }
+}
+
 impl Policy {
+    pub fn for_request(
+        requested: &Requested,
+        prepared: &Value,
+        wire: Format,
+        scope: &'static str,
+        downgrade: Option<String>,
+    ) -> Self {
+        let applied = intent(prepared);
+        Self {
+            requested: requested.intent,
+            applied: if applied == "provider_default" && wire == Format::Claude { "none" } else { applied },
+            key_scope: if prepared["prompt_cache_key"].is_string() { scope } else { "not_sent" },
+            downgrade_reason: downgrade,
+        }
+    }
+
     pub fn new(
         original: &Value,
         prepared: &Value,
@@ -148,13 +184,21 @@ fn has_fields(value: &Value, fields: &[&str]) -> bool {
 }
 
 fn intent(body: &Value) -> &'static str {
+    let explicit = body["prompt_cache_options"]["mode"] == "explicit";
+    let automatic = !body["cache_control"].is_null() || body["prompt_cache_options"]["mode"] == "implicit";
+    // Walk the body for markers only when the answer depends on them.
+    let markers = (body["prompt_cache_options"]["prewarm"] != true && (explicit || !automatic)) && has_markers(body);
+    intent_with(body, markers)
+}
+
+fn intent_with(body: &Value, markers: bool) -> &'static str {
     if body["prompt_cache_options"]["prewarm"] == true {
         "prewarm"
     } else if body["prompt_cache_options"]["mode"] == "explicit" {
-        if has_markers(body) { "explicit" } else { "explicit_no_breakpoints" }
+        if markers { "explicit" } else { "explicit_no_breakpoints" }
     } else if !body["cache_control"].is_null() || body["prompt_cache_options"]["mode"] == "implicit" {
         "automatic"
-    } else if has_markers(body) {
+    } else if markers {
         "explicit"
     } else {
         "provider_default"

@@ -34,8 +34,16 @@ impl Frame {
     pub fn named(event: &'static str, data: impl Into<String>) -> Self {
         Self { event: Some(Cow::Borrowed(event)), data: data.into() }
     }
-    pub fn to_sse(&self) -> String {
-        crate::sse::frame(self.event.as_deref(), &self.data)
+    /// Appends the SSE encoding to a buffer that may already hold other frames.
+    pub fn write_sse(&self, out: &mut Vec<u8>) {
+        if let Some(event) = &self.event {
+            out.extend_from_slice(b"event: ");
+            out.extend_from_slice(event.as_bytes());
+            out.push(b'\n');
+        }
+        out.extend_from_slice(b"data: ");
+        out.extend_from_slice(self.data.as_bytes());
+        out.extend_from_slice(b"\n\n");
     }
 }
 
@@ -44,6 +52,8 @@ pub trait StreamParser: Send {
     /// a stream that also reads usage and quota from each event parses it once.
     fn feed_value(&mut self, ev: &SseEvent, v: Option<&Value>, out: &mut Vec<Event>);
 
+    /// Parses the data itself; production paths always hold the parsed value already.
+    #[cfg(test)]
     fn feed(&mut self, ev: &SseEvent, out: &mut Vec<Event>) {
         let v = serde_json::from_str::<Value>(&ev.data).ok();
         self.feed_value(ev, v.as_ref(), out);
@@ -81,7 +91,14 @@ pub fn preserve_cache_hints(
         return Err("Prompt cache prewarming is only supported by the Responses API".into());
     }
     if let Err(reason) = carry_cache_hints(source, target, original, translated) {
-        tracing::warn!("dropping explicit prompt cache hints: {reason}");
+        // Every attempt of every such request would log this; once per reason is enough.
+        if crate::diagnostics::warn_once(&format!("cache:{reason}"), std::time::Duration::from_secs(600)) {
+            tracing::warn!(
+                "dropping explicit prompt cache hints: {reason} (repeats are logged at debug for ten minutes)"
+            );
+        } else {
+            tracing::debug!("dropping explicit prompt cache hints: {reason}");
+        }
         strip_breakpoints(translated);
         if let Some(body) = translated.as_object_mut() {
             body.remove("prompt_cache_options");

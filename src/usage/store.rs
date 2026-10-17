@@ -3,6 +3,7 @@ use super::{pricing::Catalogue, types::Observation};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
+pub(crate) use codec::{Documents, decode as decode_document};
 use rusqlite::{Connection, OptionalExtension, params, types::Value as SqlValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,16 +17,24 @@ use std::{
     },
 };
 use tokio::sync::{OnceCell, Semaphore, mpsc, oneshot};
+mod codec;
+mod compact;
 mod dashboard;
 mod read;
+mod rollup;
+pub use compact::{DatabaseStats, compact, downgrade};
 pub(crate) use read::ReadError;
 #[cfg(test)]
 mod reference;
 
-pub(super) const VERSION: i64 = 3;
+pub(super) const VERSION: i64 = 4;
+/// The last layout releases before 0.6 can open; `usage downgrade` returns to it.
+pub(super) const LEGACY_VERSION: i64 = 3;
 pub(super) const APPLICATION_ID: i64 = 0x46555345;
 const MAX_QUERY_DAYS: i64 = 3660;
-const ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,json_extract(snapshot_json,'$.partial') AS pricing_partial";
+const ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,COALESCE(pricing_partial,CASE WHEN typeof(snapshot_json)='text' THEN json_extract(snapshot_json,'$.partial') END) AS pricing_partial";
+/// The schema-3 entry columns, for recreating that layout on downgrade.
+const LEGACY_ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,json_extract(snapshot_json,'$.partial') AS pricing_partial";
 const WINNER_ORDER: &str = "trust_rank,CASE completeness WHEN 'complete' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,known_fields DESC,COALESCE(output,-1) DESC,source,origin_id,source_event_id,fingerprint";
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 enum Command {
@@ -49,6 +58,9 @@ struct Health {
     prior_unclosed: u64,
     closed: AtomicBool,
     gate: RwLock<()>,
+    /// Size and compaction progress, refreshed by the writer at startup, when
+    /// compaction finishes and hourly.
+    database: Mutex<Option<DatabaseStats>>,
 }
 #[derive(Clone)]
 pub struct Store {
@@ -194,7 +206,9 @@ impl Store {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             bail!("usage requires a persistent database path");
         }
+        let file_lock = compact::lock(path, false)?;
         let mut conn = Connection::open(path).context("open usage database")?;
+        codec::register(&conn)?;
         #[cfg(test)]
         register_aggregates(&conn)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -217,7 +231,9 @@ impl Store {
         }
         migrate(&mut conn)?;
         if byte_limit.is_none() {
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            // A vacuum writes the whole database through the WAL once; the limit trims
+            // the WAL back after the next checkpoint instead of keeping it that large.
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA journal_size_limit=67108864;")?;
             // Bounded collector outboxes never serve dashboards. Keep their
             // compact timestamp index and allocation budget unchanged.
             upgrade_dashboard_index(&mut conn)?;
@@ -246,13 +262,16 @@ impl Store {
             "INSERT INTO usage_writer_sessions(id,started_at_ms) VALUES(?1,?2)",
             params![session_id, Utc::now().timestamp_millis()],
         )?;
+        let mut compactor = compact::Compactor::new(path, byte_limit.is_some());
         let health = Arc::new(Health {
             historical_dropped,
             historical_rejected,
             historical_errors,
             prior_unclosed,
+            database: Mutex::new(compact::stats(&conn, path, true).ok()),
             ..Default::default()
         });
+        let stats_path = path.to_path_buf();
         let worker_health = health.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -262,10 +281,19 @@ impl Store {
         std::thread::Builder::new()
             .name("fusebox-usage-db".into())
             .spawn(move || {
+                let _file_lock = file_lock;
                 let mut last_retention = Utc::now().timestamp_millis();
+                let refresh_stats = |conn: &Connection, compressing: bool| {
+                    if let Ok(stats) = compact::stats(conn, &stats_path, compressing) {
+                        *worker_health.database.lock().unwrap() = Some(stats);
+                    }
+                };
+                let mut last_health = std::time::Instant::now();
                 let stop = loop {
-                    let received = runtime
-                        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await });
+                    // Wake sooner while the compactor has work, so it keeps its pace.
+                    let wait =
+                        if compactor.busy() { compact::STEP_INTERVAL } else { std::time::Duration::from_secs(1) };
+                    let received = runtime.block_on(async { tokio::time::timeout(wait, rx.recv()).await });
                     let command = match received {
                         Ok(Some(command)) => Some(command),
                         Ok(None) => {
@@ -278,11 +306,27 @@ impl Store {
                     if now - last_retention >= 3_600_000 {
                         if let Err(e) = purge_conn(&mut conn, (now - i64::from(retention_days) * 86_400_000).max(0)) {
                             worker_health.fail(&e);
+                        } else if let Err(e) = compact::release_free_pages(&conn) {
+                            tracing::warn!("usage database: could not release free pages: {e:#}");
                         }
+                        refresh_stats(&conn, compactor.busy());
                         last_retention = now;
                     }
-                    if let Err(e) = persist_health(&conn, &worker_session, &worker_health) {
-                        worker_health.fail(&e);
+                    // Compaction never marks accounting unhealthy: a failure only
+                    // postpones it, and every row stays readable either way.
+                    let was_busy = compactor.busy();
+                    if let Err(e) = compactor.tick(&mut conn) {
+                        tracing::warn!("usage database compaction paused for an hour: {e:#}");
+                        compactor.pause();
+                    }
+                    if was_busy && !compactor.busy() {
+                        refresh_stats(&conn, false);
+                    }
+                    if last_health.elapsed() >= std::time::Duration::from_secs(1) {
+                        last_health = std::time::Instant::now();
+                        if let Err(e) = persist_health(&conn, &worker_session, &worker_health) {
+                            worker_health.fail(&e);
+                        }
                     }
                     let Some(command) = command else {
                         continue;
@@ -354,6 +398,11 @@ impl Store {
     /// Rows the startup reprice step updated when this handle opened the database.
     pub fn startup_repriced(&self) -> u64 {
         self.startup_repriced
+    }
+
+    /// Database size and compaction progress, as of the writer's last refresh.
+    pub fn database_stats(&self) -> Option<DatabaseStats> {
+        self.health.database.lock().unwrap().clone()
     }
 
     pub fn price(&self, observation: &Observation) -> super::pricing::Snapshot {
@@ -506,6 +555,10 @@ impl Store {
     pub async fn dashboard(&self, q: Query) -> Result<Value> {
         self.read(move |conn| dashboard::summary(conn, &q)).await
     }
+    #[cfg(test)]
+    pub async fn dashboard_scan(&self, q: Query) -> Result<Value> {
+        self.read(move |conn| dashboard::summary_scan(conn, &q)).await
+    }
     pub async fn details(&self, q: Query) -> Result<Value> {
         self.read(move |conn| details(conn, &q)).await
     }
@@ -541,7 +594,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             bail!("refusing to initialize usage schema in a nonempty unversioned database");
         }
     }
-    // Each step upgrades exactly one version inside one transaction: 0→1→2→3.
+    if version == 0 {
+        // Only an empty database can choose incremental vacuum without rewriting itself;
+        // existing ones switch when the compactor first vacuums them.
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+    }
+    // Every step runs inside one transaction: 0→1→2→3→4.
     let tx = conn.transaction()?;
     if version < 1 {
         tx.execute_batch(&format!("CREATE TABLE usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -561,11 +619,11 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     CREATE INDEX usage_source_event ON usage_observations(source,source_event_id);
     CREATE INDEX usage_source_canonical ON usage_observations(source,canonical_key,trust_rank);
     CREATE INDEX usage_filters ON usage_observations(provider,model,account_id,client_id,event_at_ms);
-    CREATE TABLE usage_entries AS SELECT {ENTRY_COLUMNS} FROM usage_observations WHERE 0;
+    CREATE TABLE usage_entries AS SELECT {LEGACY_ENTRY_COLUMNS} FROM usage_observations WHERE 0;
     CREATE UNIQUE INDEX usage_entries_key ON usage_entries(canonical_key);
     CREATE INDEX usage_entries_event_time ON usage_entries(event_at_ms);
     CREATE INDEX usage_entries_filters ON usage_entries(provider,model,account_id,client_id,event_at_ms);
-    CREATE TABLE usage_source_entries AS SELECT {ENTRY_COLUMNS} FROM usage_observations WHERE 0;
+    CREATE TABLE usage_source_entries AS SELECT {LEGACY_ENTRY_COLUMNS} FROM usage_observations WHERE 0;
     CREATE UNIQUE INDEX usage_source_entries_key ON usage_source_entries(source,canonical_key);
     CREATE INDEX usage_source_entries_event_time ON usage_source_entries(event_at_ms);
     CREATE INDEX usage_source_entries_filters ON usage_source_entries(provider,model,account_id,client_id,event_at_ms);
@@ -578,8 +636,32 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         // Combined accounting drops imported copies of proxy responses by association key.
         tx.execute_batch("CREATE INDEX usage_entries_association ON usage_entries(association_key,source);")?;
     }
+    if version < 4 {
+        upgrade_to_4(&tx)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Schema 4: compressed documents (see `codec`), the pricing flag lifted out of the
+/// snapshot so SQL never parses it, rollups that keep the Usage page's reads
+/// independent of row count (see `rollup`), and a partial index for imported entries.
+/// The per-source winner copy is dropped: only the retired summary endpoint read it.
+/// So are three indexes no query uses (every range query names the timestamp index).
+/// `usage downgrade` reverses all of this for releases before 0.6.
+fn upgrade_to_4(tx: &Connection) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE usage_observations ADD COLUMN pricing_partial INTEGER;
+         CREATE TABLE usage_dictionaries(id INTEGER PRIMARY KEY,created_at_ms INTEGER NOT NULL,trained_through_id INTEGER NOT NULL,samples INTEGER NOT NULL,dictionary BLOB NOT NULL);
+         DROP TABLE usage_source_entries;
+         DROP INDEX usage_source_canonical;
+         DROP INDEX usage_filters;
+         DROP INDEX usage_entries_filters;
+         CREATE INDEX usage_entries_imported ON usage_entries(event_at_ms) WHERE source<>'proxy';",
+    )?;
+    rollup::create(tx)?;
+    codec::ensure_database_id(tx)?;
     Ok(())
 }
 
@@ -621,6 +703,9 @@ fn upgrade_dashboard_index(conn: &mut Connection) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "store/compact_tests.rs"]
+mod compact_tests;
+#[cfg(test)]
 #[path = "store/index_tests.rs"]
 mod index_tests;
 
@@ -642,10 +727,12 @@ fn canonical_key(o: &Observation) -> String {
     }
     base
 }
-/// Reselect the global and per-source accounting entry for one canonical group.
-pub(super) fn rebuild_entries(conn: &Connection, key: &str, source: &str) -> Result<()> {
-    conn.prepare_cached(&format!("INSERT OR REPLACE INTO usage_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"))?.execute([key])?;
-    conn.prepare_cached(&format!("INSERT OR REPLACE INTO usage_source_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND source=?2 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"))?.execute(params![key,source])?;
+/// Reselect the accounting entry for one canonical group. Delete-then-insert (not
+/// REPLACE, which skips delete triggers) keeps the rollups exact, and a group whose
+/// every observation is gone or suppressed is left without an entry.
+pub(super) fn rebuild_entries(conn: &Connection, key: &str) -> Result<()> {
+    conn.prepare_cached("DELETE FROM usage_entries WHERE canonical_key=?1")?.execute([key])?;
+    conn.prepare_cached(&format!("INSERT INTO usage_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"))?.execute([key])?;
     Ok(())
 }
 /// Copies the usage database to `to`, a new private file, with SQLite's online backup:
@@ -694,23 +781,25 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
         // Take the write lock first: a read that later upgrades fails at once (SQLITE_BUSY_SNAPSHOT)
         // when another connection wrote in between, where waiting for the lock just works.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let rows = tx.prepare("SELECT id,payload,canonical_key,source,pricing_basis FROM usage_observations WHERE id>?1 AND cost_nanos IS NULL AND pricing_basis IN ('outside_effective_period','local_override:outside_effective_period','unsupported_inference_region','local_override:unsupported_inference_region') ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = tx.prepare("SELECT id,payload,canonical_key,pricing_basis FROM usage_observations WHERE id>?1 AND cost_nanos IS NULL AND pricing_basis IN ('outside_effective_period','local_override:outside_effective_period','unsupported_inference_region','local_override:unsupported_inference_region') ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let Some(last) = rows.last() else { break };
         cursor = last.0;
+        let mut documents = Documents::new(&tx)?;
         let mut groups = BTreeSet::new();
-        for (id, payload, key, source, basis) in rows {
+        for (id, payload, key, basis) in rows {
             // Payloads written by an incompatible build stay as stored rather than guessed.
+            let Ok(payload) = codec::decode(&tx, (&payload).into()) else { continue };
             let Ok(o) = serde_json::from_str::<Observation>(&payload) else { continue };
             let snapshot = catalogue.price(&o);
             if snapshot.cost_nanos.is_none() && snapshot.basis == basis {
                 continue;
             }
-            tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,catalogue_version=?4,snapshot_json=?5 WHERE id=?1 AND cost_nanos IS NULL",params![id,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,serde_json::to_string(&snapshot)?])?;
-            groups.insert((key, source));
+            tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,catalogue_version=?4,snapshot_json=?5,pricing_partial=?6 WHERE id=?1 AND cost_nanos IS NULL",params![id,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,i64::from(snapshot.partial)])?;
+            groups.insert(key);
             repriced += 1;
         }
-        for (key, source) in groups {
-            rebuild_entries(&tx, &key, &source)?;
+        for key in groups {
+            rebuild_entries(&tx, &key)?;
         }
         tx.commit()?;
     }
@@ -728,6 +817,9 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let watermark: i64 =
         conn.query_row("SELECT CAST(value AS INTEGER) FROM usage_meta WHERE key='purge_before_ms'", [], |r| r.get(0))?;
+    // Read before the savepoint: its first statement must be the write, or a commit
+    // by another connection in between turns the upgrade into SQLITE_BUSY_SNAPSHOT.
+    let mut documents = Documents::new(conn)?;
     let tx = conn.savepoint()?;
     let mut changed_groups = BTreeSet::new();
     let mut inserted = 0;
@@ -753,17 +845,18 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
         } else {
             2
         };
-        let changed=tx.prepare_cached("INSERT OR IGNORE INTO usage_observations(source,origin_id,source_event_id,fingerprint,canonical_key,association_key,trust_rank,event_at_ms,ingested_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,known_fields,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,snapshot_json,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)")?.execute(params![o.source,o.origin_id,o.source_event_id,fingerprint,canonical_key(o),association_key(o),rank,o.event_at_ms,Utc::now().timestamp_millis(),o.provider,o.actual_model.as_ref(),o.account_id,o.client_id,o.logical_request_id,o.attempt_id,o.response_id,o.completeness,known as i64,tokens.input,tokens.cache_read,tokens.cache_write,tokens.write_5m,tokens.write_1h,tokens.output,tokens.reasoning,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,serde_json::to_string(&snapshot)?,serde_json::to_string(o)?])?;
+        let changed=tx.prepare_cached("INSERT OR IGNORE INTO usage_observations(source,origin_id,source_event_id,fingerprint,canonical_key,association_key,trust_rank,event_at_ms,ingested_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,known_fields,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,snapshot_json,payload,pricing_partial) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)")?.execute(params![o.source,o.origin_id,o.source_event_id,fingerprint,canonical_key(o),association_key(o),rank,o.event_at_ms,Utc::now().timestamp_millis(),o.provider,o.actual_model.as_ref(),o.account_id,o.client_id,o.logical_request_id,o.attempt_id,o.response_id,o.completeness,known as i64,tokens.input,tokens.cache_read,tokens.cache_write,tokens.write_5m,tokens.write_1h,tokens.output,tokens.reasoning,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,documents.store(&serde_json::to_string(o)?)?,i64::from(snapshot.partial)])?;
         if changed > 0 {
-            changed_groups.insert((canonical_key(o), o.source.clone()));
+            changed_groups.insert(canonical_key(o));
             inserted += 1;
         } else {
             duplicates += 1;
         }
     }
-    for (key, source) in changed_groups {
-        rebuild_entries(&tx, &key, &source)?;
+    for key in changed_groups {
+        rebuild_entries(&tx, &key)?;
     }
+    drop(documents);
     tx.commit()?;
     Ok(json!({"inserted":inserted,"duplicates":duplicates,"purged":purged}))
 }
@@ -805,9 +898,7 @@ pub fn suppress_origin_event(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for key in &keys {
-        tx.execute("DELETE FROM usage_entries WHERE canonical_key=?1", [key])?;
-        tx.execute("DELETE FROM usage_source_entries WHERE canonical_key=?1 AND source=?2", params![key, source])?;
-        rebuild_entries(&tx, key, source)?;
+        rebuild_entries(&tx, key)?;
     }
     tx.commit()?;
     Ok(json!({"suppressed_groups":keys.len()}))
@@ -819,18 +910,17 @@ fn purge_conn(conn: &mut Connection, before_ms: i64) -> Result<Value> {
     let tx = conn.savepoint()?;
     let mut affected = Vec::new();
     {
-        let mut statement=tx.prepare("SELECT canonical_key,source FROM usage_entries WHERE event_at_ms<?1 UNION SELECT canonical_key,source FROM usage_source_entries WHERE event_at_ms<?1")?;
-        let rows = statement.query_map([before_ms], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut statement = tx.prepare("SELECT canonical_key FROM usage_entries WHERE event_at_ms<?1")?;
+        let rows = statement.query_map([before_ms], |r| r.get::<_, String>(0))?;
         for row in rows {
             affected.push(row?);
         }
     }
     let deleted = tx.execute("DELETE FROM usage_observations WHERE event_at_ms<?1", [before_ms])?;
     tx.execute("DELETE FROM usage_entries WHERE event_at_ms<?1", [before_ms])?;
-    tx.execute("DELETE FROM usage_source_entries WHERE event_at_ms<?1", [before_ms])?;
     tx.execute("DELETE FROM usage_suppressed WHERE NOT EXISTS(SELECT 1 FROM usage_observations o WHERE o.source=usage_suppressed.source AND o.source_event_id=usage_suppressed.source_event_id)",[])?;
-    for (key, source) in affected {
-        rebuild_entries(&tx, &key, &source)?;
+    for key in affected {
+        rebuild_entries(&tx, &key)?;
     }
     tx.execute(
         "UPDATE usage_meta SET value=CAST(MAX(CAST(value AS INTEGER),?1) AS TEXT) WHERE key='purge_before_ms'",
@@ -968,10 +1058,10 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
     let rows = statement.query_map(rusqlite::params_from_iter(&values), |row| {
         Ok((
             row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, rusqlite::types::Value>(1)?,
             row.get::<_, Option<i64>>(2)?,
             row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, rusqlite::types::Value>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, i64>(6)?,
             row.get::<_, bool>(7)?,
@@ -982,12 +1072,12 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
     for row in rows {
         read::check()?;
         let (id, payload, cost, basis, snapshot, key, ingested, suppressed, association) = row?;
-        let mut value: Value = serde_json::from_str(&payload)?;
+        let mut value: Value = serde_json::from_str(&codec::decode(conn, (&payload).into())?)?;
         value["id"] = json!(id);
         value["ingested_at_ms"] = json!(ingested);
         value["estimated_cost_nanos"] = json!(cost);
         value["pricing_basis"] = json!(basis);
-        value["pricing_snapshot"] = serde_json::from_str(&snapshot)?;
+        value["pricing_snapshot"] = serde_json::from_str(&codec::decode(conn, (&snapshot).into())?)?;
         value["canonical_key"] = json!(key);
         value["superseded"] = json!(suppressed);
         if let Some(origin) = value["origin_id"].as_str()

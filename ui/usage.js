@@ -1,6 +1,6 @@
 'use strict';
 
-// Small shared helpers are exported for date, privacy, chart and authenticated-export tests.
+// Small shared helpers are exported for date, privacy and chart tests.
 const UsageTools = (() => {
   const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const date = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -22,17 +22,14 @@ const UsageTools = (() => {
     for (let d = r.start; d < r.end && out.length < 3660; d = shift(d, 1)) out.push(d);
     return out;
   };
-  const query = (r, filters, timezone, page, extra = {}) => {
+  const query = (r, filters, timezone) => {
     shift(r.start, 0); shift(r.end, 0);
     if (r.start >= r.end) throw new Error('The end date must be on or after the start date.');
     const q = new URLSearchParams({ start: r.start, end: r.end, timezone });
     for (const k of ['provider', 'model', 'account', 'client']) if (filters[k]) q.set(k, filters[k]);
-    for (const [k, v] of Object.entries(extra)) if (['stack', 'view'].includes(k) && v) q.set(k, v);
-    if (page) { q.set('limit', String(page.limit)); q.set('offset', String(page.offset)); }
     return q.toString();
   };
   const privateLabel = (value, hidden) => hidden && value != null && value !== '' ? '••••••' : String(value ?? 'Unknown');
-  const money = (nanos) => nanos == null || !Number.isFinite(Number(nanos)) ? 'Unpriced' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(Number(nanos) / 1e9);
   // Totals: cents above a dollar, four places below so small estimates stay visible.
   const dollars = (nanos) => {
     if (nanos == null || !Number.isFinite(Number(nanos))) return 'Unpriced';
@@ -40,7 +37,6 @@ const UsageTools = (() => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: small ? 4 : 2, maximumFractionDigits: small ? 4 : 2 }).format(v);
   };
   const compact = (v) => v == null || !Number.isFinite(Number(v)) ? 'Unknown' : v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(Math.round(v));
-  const exportRequest = (queryString, format, key, offset = 0, limit = 50) => ({ url: `/api/usage/export?${queryString}&format=${encodeURIComponent(format)}&limit=${limit}&offset=${offset}`, options: { headers: key ? { authorization: `Bearer ${key}` } : {} } });
 
   // BY DAY series: the top five groups keep their own colour, the rest merge into Other.
   const OTHER = '\u0000other';
@@ -84,22 +80,29 @@ const UsageTools = (() => {
   // Local calendar date of an instant in the page's timezone.
   const localDate = (ms, timezone) => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
   const beforeProxy = (day, firstProxyMs, timezone) => firstProxyMs != null && Number.isFinite(Number(firstProxyMs)) && day < localDate(Number(firstProxyMs), timezone);
+  // Sizes in decimal units, as the server's messages: "512 B", "3.4 MB", "128 MB", "1.2 GB".
+  const bytes = (v) => {
+    const n = Math.max(0, Number(v) || 0);
+    const [div, unit] = n >= 1e9 ? [1e9, 'GB'] : n >= 1e6 ? [1e6, 'MB'] : n >= 1e3 ? [1e3, 'KB'] : [1, 'B'];
+    const x = n / div;
+    return `${unit === 'B' ? Math.round(x) : x < 10 ? x.toFixed(1).replace(/\.0$/, '') : Math.round(x)} ${unit}`;
+  };
   const W = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const parts = (iso) => { const at = new Date(`${iso}T00:00:00Z`); return { w: W[at.getUTCDay()], m: M[at.getUTCMonth()], d: at.getUTCDate(), y: at.getUTCFullYear(), monday: at.getUTCDay() === 1 }; };
   const dayLabel = (iso) => { const p = parts(iso); return `${p.w} ${p.m} ${p.d}`; };
   const shortDate = (iso) => { const p = parts(iso); return `${p.m} ${p.d}`; };
-  return { OTHER, escape, date, shift, range, dates, query, privateLabel, money, dollars, compact, exportRequest, chart, localDate, beforeProxy, parts, dayLabel, shortDate };
+  return { OTHER, escape, date, shift, range, dates, query, privateLabel, dollars, compact, chart, localDate, beforeProxy, parts, dayLabel, shortDate, bytes };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools;
 
 const Usage = {
   preset: '7', range: UsageTools.range(7), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   filters: { provider: '', model: '', account: '', client: '' },
-  stack: 'provider', metric: 'cost', hoverDay: null, dim: 'model', showAll: false,
-  offset: 0, limit: 50, openRecord: null, drawerOpen: false, customError: '',
-  summary: null, observations: null, status: null,
-  loading: false, recordsLoading: false, loaded: false, error: '', actionError: '', busy: false,
-  sequence: 0, recordSequence: 0, credential: null, confirm: null, roots: {}, collectorDraft: '', rows: [],
+  stack: 'provider', metric: 'cost', hoverDay: null, dim: 'model', showAll: false, clientsAll: false,
+  drawerOpen: false, customError: '',
+  summary: null, status: null,
+  loading: false, loaded: false, error: '', actionError: '', busy: false,
+  sequence: 0, credential: null, confirm: null, roots: {}, collectorDraft: '', rows: [],
 };
 const ux = UsageTools.escape;
 const usageCount = (value) => value == null ? 'Unknown' : new Intl.NumberFormat('en-US').format(value);
@@ -128,18 +131,39 @@ const usageToday = () => UsageTools.date(new Date());
 const usageRangeLabel = () => Usage.preset === '1' ? 'Today' : Usage.preset === '7' ? 'Last 7 days' : Usage.preset === '30' ? 'Last 30 days' : `${UsageTools.shortDate(Usage.range.start)} – ${UsageTools.shortDate(Usage.range.through)}`;
 const usageDayCost = (day) => day.priced ? UsageTools.dollars(day.cost) : day.calls ? 'Unpriced' : '$0.00';
 
+// The page is drawn once; after that each section is its own patch target (a
+// display:contents wrapper, so the layout is unchanged) and repaints only when its
+// markup changes. A read repaints the sections it feeds.
+const USAGE_PARTS = {
+  head: () => usageHeadHTML(),
+  notices: () => usageNoticesHTML(),
+  cost: () => (Usage.summary ? usageCostHTML() : !Usage.loading && !Usage.error ? '<div class="card pad"><h2 class="h-sec">No usage loaded</h2><p class="meta">Refresh to read persisted metadata.</p></div>' : ''),
+  breakdown: () => (Usage.summary ? usageBreakdownHTML() : ''),
+  clients: () => (Usage.summary ? usageClientsHTML() : ''),
+  drawer: () => (Usage.drawerOpen ? usageDrawerHTML() : ''),
+};
+// What a full render drew in each section, handed to the patcher by bindUsage.
+let usageShell = null;
+const usagePart = (name) => {
+  const html = USAGE_PARTS[name]();
+  if (usageShell) usageShell[name] = html;
+  return `<div id="usage-part-${name}" style="display:contents">${html}</div>`;
+};
 function usageHTML() {
-  const u = Usage;
+  usageShell = {};
   return `<div class="usage-page">
-    ${usageHeadHTML()}
-    ${u.error ? `<div class="notice usage-message err" role="alert"><span class="grow">${S.private ? 'Usage could not be loaded. Try refreshing.' : ux(u.error)}</span>${usageButton('refresh', 'Retry', '', false, 'btn sm')}</div>` : ''}
-    ${u.actionError && !u.drawerOpen ? `<p class="notice usage-message err" role="alert">${S.private ? 'The action failed. Retry or check server logs.' : ux(u.actionError)}</p>` : ''}
-    ${u.loading && !u.summary ? '<p class="usage-message meta" role="status">Loading usage metadata…</p>' : ''}
-    <div id="usage-results" class="usage-results" aria-busy="${u.loading}">${u.summary ? usageCostHTML() + usageBreakdownHTML() : !u.loading && !u.error ? '<div class="card pad"><h2 class="h-sec">No usage loaded</h2><p class="meta">Refresh to read persisted metadata.</p></div>' : ''}
-    ${usageAllowancesHTML()}
-    ${u.summary || u.observations ? usageObservationsHTML() : ''}</div>
-    ${u.drawerOpen ? usageDrawerHTML() : ''}
+    ${usagePart('head')}
+    ${usagePart('notices')}
+    <div id="usage-results" class="usage-results" aria-busy="${Usage.loading}">${usagePart('cost')}${usagePart('breakdown')}
+    ${usagePart('clients')}</div>
+    ${usagePart('drawer')}
   </div>`;
+}
+function usageNoticesHTML() {
+  const u = Usage;
+  return `${u.error ? `<div class="notice usage-message err" role="alert"><span class="grow">${S.private ? 'Usage could not be loaded. Try refreshing.' : ux(u.error)}</span>${usageButton('refresh', 'Retry', '', false, 'btn sm')}</div>` : ''}
+    ${u.actionError && !u.drawerOpen ? `<p class="notice usage-message err" role="alert">${S.private ? 'The action failed. Retry or check server logs.' : ux(u.actionError)}</p>` : ''}
+    ${u.loading && !u.summary ? '<p class="usage-message meta" role="status">Loading usage metadata…</p>' : ''}`;
 }
 
 // The header dot also turns amber for a stale collector; the drawer's health line does not.
@@ -269,6 +293,11 @@ function usageCoverage(r) {
   if (r.missing_usage) return [`${usageCount(r.missing_usage)} no usage`, 'warn'];
   return ['Full', 'dim'];
 }
+// A row's share of the range's estimated cost: the bar's fraction and its label.
+function usageCostShare(r, total) {
+  const share = total > 0 && r.estimated_cost_nanos != null ? Number(r.estimated_cost_nanos) / total : 0;
+  return [share, total > 0 && r.estimated_cost_nanos ? (share * 100 < 1 ? '<1%' : `${Math.round(share * 100)}%`) : '—'];
+}
 function usageBreakdownHTML() {
   const u = Usage, b = usageCombined().breakdowns || {}, phone = usagePhone();
   const rows = b[u.dim] || [], total = Number(usageCombined().totals?.estimated_cost_nanos || 0);
@@ -278,8 +307,7 @@ function usageBreakdownHTML() {
   const tabs = `<div class="u-tabs" role="tablist" aria-label="Breakdown">${USAGE_DIMS.map(([k, l]) => `<button type="button" role="tab" data-usage-act="dim" data-value="${k}" aria-selected="${u.dim === k}">${l} <span class="mono dim">${(b[k] || []).length}</span></button>`).join('')}</div>`;
   const body = shown.map((r, i) => {
     const x = usageBreakdownRow(u.dim, r), selected = r.id != null && u.filters[u.dim] === r.id;
-    const share = total > 0 && r.estimated_cost_nanos != null ? Number(r.estimated_cost_nanos) / total : 0;
-    const pct = total > 0 && r.estimated_cost_nanos ? (share * 100 < 1 ? '<1%' : `${Math.round(share * 100)}%`) : '—';
+    const [share, pct] = usageCostShare(r, total);
     const [cov, covCls] = usageCoverage(r);
     const coverageTitle = ux(usageCoverageLine(r));
     const name = x.sensitive ? usageSensitive(x.name) : ux(x.name);
@@ -299,87 +327,40 @@ function usageBreakdownHTML() {
     ${body}${empty}${more}</section>`;
 }
 
-function usageAllowancesHTML() {
-  const phone = usagePhone();
-  const accounts = (S.accounts || []).filter((a) => typeof metered === 'function' && metered(a));
-  Usage.subs = accounts.map((a) => a.id);
-  const updated = (a) => (a.quota?.updated_at ? `Updated ${new Date(a.quota.updated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })}` : 'Not updated yet');
-  const cards = accounts.map((a, i) => {
-    const sub = `${ux(provName(a))} · ${ux(planName(a) || authName(a))}`;
-    return `<article class="${phone ? 'item' : 'card'} u-sub" data-usage-act="open-sub" data-index="${i}"><div class="u-sub-top">${acctLogo(a, 18)}<div class="cell2"><span class="u-sub-name">${ux(acctLabel(a))}</span><span class="dim">${sub}${phone ? ` · ${ux(updated(a))}` : ''}</span></div>${phone ? '' : statusHTML(a, 7)}</div>${metersHTML(a)}${phone ? '' : `<span class="meta u-sub-upd">${ux(updated(a))}</span>`}</article>`;
+// Top clients: what each client used in the range, largest estimated cost first, and
+// the models it used.
+const USAGE_CLIENT_ROWS = 8;
+// Every token a client sent or received: cache reads and writes are kept apart from input.
+const usageTokenTotal = (t = {}) => ['input', 'cache_read', 'cache_write', 'output'].reduce((n, k) => n + Number(t[k] || 0), 0);
+const usageTokenSplit = (t = {}) => `${usageCount(t.input || 0)} input, ${usageCount(t.output || 0)} output, ${usageCount(t.cache_read || 0)} read from the cache, ${usageCount(t.cache_write || 0)} written to the cache`;
+function usageModelBadges(r) {
+  const models = r.models || [], cost = Number(r.estimated_cost_nanos || 0);
+  const badges = models.slice(0, 3).map((m) => {
+    const title = [m.estimated_cost_nanos != null ? UsageTools.dollars(m.estimated_cost_nanos) : 'Unpriced', `${usageCount(m.observations)} ${m.observations === 1 ? 'call' : 'calls'}`];
+    if (cost > 0 && m.estimated_cost_nanos) title.push(`${usageCostShare(m, cost)[1]} of this client`);
+    return `<span class="idchip static" title="${ux(title.join(' · '))}">${ux(m.id || 'Unknown model')}</span>`;
+  });
+  if (models.length > 3) badges.push(`<span class="idchip static" title="${ux(models.slice(3).map((m) => m.id || 'Unknown model').join(', '))}">+${models.length - 3}</span>`);
+  return badges.join('') || '<span class="dim">No model reported</span>';
+}
+function usageClientsHTML() {
+  const u = Usage, rows = usageCombined().breakdowns?.client || [], phone = usagePhone();
+  const total = Number(usageCombined().totals?.estimated_cost_nanos || 0);
+  const shown = u.clientsAll ? rows : rows.slice(0, USAGE_CLIENT_ROWS);
+  const body = shown.map((r) => {
+    const name = r.id == null ? 'No client reported' : usageSensitive(usageClientLabel(r.id));
+    const [share, pct] = usageCostShare(r, total);
+    const cost = r.estimated_cost_nanos != null ? UsageTools.dollars(r.estimated_cost_nanos) : 'Unpriced';
+    const tokens = UsageTools.compact(usageTokenTotal(r.tokens)), split = ux(usageTokenSplit(r.tokens));
+    const bar = `<span class="u-share-bar"><i style="width:${(share * 100).toFixed(1)}%"></i></span>`;
+    if (phone) return `<div class="u-tc-item"><span class="u-bd-l1"><span class="u-bd-name">${name}</span><span class="u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span></span><span class="u-bd-l2">${bar}<span class="dim" title="${split}">${ux(pct)} · ${ux(tokens)} tokens</span></span><span class="u-tc-models">${usageModelBadges(r)}</span></div>`;
+    return `<div class="u-tc-row"><span class="u-tc-name">${name}</span><span class="u-share">${bar}<span class="fg2">${ux(pct)}</span></span><span class="r u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span><span class="r mono fg2" title="${split}">${ux(tokens)}</span><span class="u-tc-models">${usageModelBadges(r)}</span></div>`;
   }).join('');
-  const empty = '<div class="card pad"><p class="meta">No subscription windows reported. Connected API keys do not report subscription limits.</p></div>';
-  if (phone) return `<section class="sec u-subs"><div class="sec-head"><div class="stack"><h2 class="h-sec">Subscription windows</h2><span class="meta">Reported by each provider, separate from the estimate</span></div>${quotaControlsHTML(true, false, false)}</div>${cards ? `<div class="card stack-list">${cards}</div>` : empty}</section>`;
-  return `<section class="sec u-subs" aria-labelledby="usage-allowance-title"><div class="sec-head"><h2 class="h-sec" id="usage-allowance-title">Subscription windows</h2><span class="meta">Reported by each provider, separate from the estimate. API dollars are not converted into subscription credits.</span><span class="grow"></span>${quotaControlsHTML(false, true, true)}</div>
-    ${cards ? `<div class="u-sub-grid">${cards}</div>` : empty}</section>`;
-}
-
-const USAGE_TOKENS = [['input', 'Input'], ['output', 'Output'], ['cache_read', 'Cache read'], ['cache_write', 'Cache write'], ['write_5m', 'Write 5m'], ['write_1h', 'Write 1h'], ['reasoning', 'Reasoning']];
-const USAGE_BASIS = {
-  unknown_model: 'No published price for this model in the catalogue.', outside_effective_period: 'No published rate covers the time of this call.',
-  missing_tokens: 'Not priced: the provider did not report every token count.', cumulative_usage_not_per_request: 'Not priced: this history record is a running total, not one response.',
-  unsupported_service_tier: 'Not priced: the catalogue has no rate for this service tier.', unsupported_inference_region: 'Not priced: the catalogue has no rate for this region.',
-  unsupported_regional_model: 'Not priced: this model has no published regional rate.', unsupported_modality_or_tools: 'Not priced: audio, image or tool tokens have no rate here.',
-  unknown_cache_write_ttl: 'Not priced: the cache write lifetime was not reported.', invalid_tokens: 'Not priced: the reported token counts are inconsistent.',
-  unsupported_rate_or_overflow: 'Not priced: the rate is incomplete or the amount is out of range.', overflow: 'Not priced: the amount is out of range.',
-};
-function usageRateLine(rate) {
-  if (!rate) return '';
-  const per = (n) => (n == null ? null : `$${(Number(n) / 1000).toFixed(Number(n) % 1000 ? 3 : 2).replace(/(\.\d\d)0$/, '$1')}`);
-  const write = rate.cache_write_nanos_per_token ?? rate.cache_write_5m_nanos_per_token;
-  return [`${per(rate.input_nanos_per_token)} in`, `${per(rate.output_nanos_per_token)} out`, rate.cache_read_nanos_per_token != null ? `${per(rate.cache_read_nanos_per_token)} cache read` : '', write != null ? `${per(write)} cache write` : ''].filter(Boolean).join(' · ') + ' per 1M tokens';
-}
-function usageRecordState(r) {
-  let state = r.superseded ? 'Excluded: superseded by per-response evidence' : 'Recorded observation';
-  const matched = (r.matched_sources || []).filter((s) => s !== 'proxy');
-  if (r.source === 'proxy' && matched.length) state += ` · also in ${matched.map(usageSource).join(' and ')} with the same ${matched.includes('claude_code') ? 'message' : 'response'} ID, counted once`;
-  if (r.source && r.source !== 'proxy') state += ` · from ${usageSource(r.source)}, ${UsageTools.privateLabel(usageOrigin(r), S.private && r.origin_id !== 'local')} · not seen by the proxy`;
-  if (r.pricing_snapshot?.backdated) state += ` · Priced at today's rate (catalogue ${Usage.summary?.pricing?.verified_at || Usage.status?.pricing?.verified_at || 'current'})`;
-  return state;
-}
-const usageOrigin = (r) => r.origin_label || r.collector_label || (r.origin_id === 'local' ? 'This server' : r.origin_id) || 'Unknown origin';
-function usageRecordClient(r) {
-  if (r.source && r.source !== 'proxy') return `${ux(usageSource(r.source))} · ${r.origin_id === 'local' ? ux(usageOrigin(r)) : usageSensitive(usageOrigin(r))}`;
-  return usageSensitive(r.client_label || r.client_id || r.collector_label);
-}
-function usageRecordDetailHTML(r, i) {
-  const p = r.pricing_snapshot || {}, t = r.tokens || {}, cost = r.estimated_cost_nanos;
-  const basis = String(r.pricing_basis || p.basis || '').replace(/^local_override:/, '');
-  const pLine = cost == null ? (r.completeness === 'missing' ? 'Not priced: the provider reported no usage for this response.' : USAGE_BASIS[basis] || `Not priced: ${basis.replace(/_/g, ' ') || 'basis not reported'}.`)
-    : `${p.local_override ? 'Local override' : 'Published rate'} · catalogue ${p.catalogue_version || 'unknown'} · ${p.service_tier || 'standard tier'}${p.partial ? ' · partial estimate' : ''}`;
-  const url = p.rate?.source_url, rate = cost != null ? usageRateLine(p.rate) : '';
-  const account = usageAccount(r.account_id);
-  return `<div class="u-rec-detail">
-    <div class="u-rec-tokens"><span class="label">REPORTED TOKENS</span><dl>${USAGE_TOKENS.map(([k, l]) => `<div><dt>${l}</dt><dd class="mono${t[k] == null ? ' dim' : ''}">${usageCount(t[k])}</dd></div>`).join('')}</dl><span class="meta">Input excludes cache reads and writes. Reasoning is part of output. Write 5m and 1h are part of cache write.</span></div>
-    <div class="u-rec-price"><span class="label">PRICING</span><span class="u-pline">${ux(pLine)}</span>${rate ? `<span class="mono fg2 u-rate">${ux(rate)}</span>` : ''}${(p.assumptions || []).map((a) => `<span class="warn">Assumption: ${ux(String(a).replace(/_/g, ' '))}</span>`).join('')}<span class="dim">${ux(usageRecordState(r))}</span>${url && /^https:\/\//.test(url) && cost != null ? `<a class="u-src" href="${ux(url)}" target="_blank" rel="noopener noreferrer">Rate source ↗</a>` : ''}</div>
-    <div class="u-rec-actions">${usageButton('open-account', 'Open account', `data-index="${i}"`, !account, 'btn sm')}${usageButton('only-model', 'Only this model', `data-index="${i}"`, !r.actual_model, 'btn sm')}</div>
-  </div>`;
-}
-function usageObservationsHTML() {
-  const u = Usage, o = u.observations || { items: [], total: 0 }, items = o.items || [], phone = usagePhone();
-  const count = o.total ?? 0, end = Math.min(u.offset + items.length, count);
-  const label = count ? `${usageCount(u.offset + 1)}–${usageCount(end)} of ${usageCount(count)} · ${u.limit} per page` : '0 records';
-  const day = new Intl.DateTimeFormat('en-US', { timeZone: u.timezone, month: 'short', day: 'numeric' }), clock = new Intl.DateTimeFormat('en-GB', { timeZone: u.timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  const rows = items.map((r, i) => {
-    const open = u.openRecord === i, t = r.tokens || {}, none = r.completeness === 'missing';
-    const at = Number.isFinite(new Date(r.event_at_ms).getTime()) ? new Date(r.event_at_ms) : null;
-    const tag = none ? ['No usage', 'warn'] : r.completeness === 'partial' ? ['Partial', 'warn'] : r.estimated_cost_nanos == null ? ['Unpriced', ''] : null;
-    const tok = (v) => (none ? '—' : UsageTools.compact(v));
-    const cost = r.estimated_cost_nanos == null ? '—' : UsageTools.money(r.estimated_cost_nanos);
-    const model = `${usageLogo(r.provider, 14)}<span class="mono ellipsis">${ux(r.actual_model || r.requested_model || 'Unknown model')}</span>`;
-    const acct = usageAccountName(r.account_id, r.account_label), client = usageRecordClient(r);
-    const tagHTML = tag ? `<span class="u-tag ${tag[1]}">${tag[0]}</span>` : '';
-    const when = at ? [day.format(at), clock.format(at)] : ['Unknown', ''];
-    if (phone) return `<div class="u-rec${open ? ' open' : ''}${r.superseded ? ' faded' : ''}"><button type="button" class="u-rec-card" data-usage-act="record" data-index="${i}" aria-expanded="${open}"><span class="u-rec-l1"><span class="mono fg2">${ux(when.join(' '))}</span><span class="grow"></span>${tagHTML}<span class="mono${cost === '—' ? ' dim' : ''}">${ux(cost)}</span></span><span class="u-rec-l2">${model}</span><span class="u-rec-l3">${acct} · ${client} · ${ux(tok(t.input))} in · ${ux(tok(t.output))} out</span></button>${open ? usageRecordDetailHTML(r, i) : ''}</div>`;
-    return `<div class="u-rec${open ? ' open' : ''}${r.superseded ? ' faded' : ''}"><button type="button" class="u-rec-row" data-usage-act="record" data-index="${i}" aria-expanded="${open}"><span class="mono u-when"><span class="dim">${ux(when[0])}</span><span class="fg2">${ux(when[1])}</span></span><span class="u-model">${model}</span><span class="cell2"><span>${acct}</span><span class="dim">${client}</span></span><span class="r mono fg2">${ux(tok(t.input))}</span><span class="r mono fg2">${ux(tok(t.output))}</span><span class="r mono fg2 u-xwide">${ux(tok(t.cache_read))}</span><span class="r mono${cost === '—' ? ' dim' : ''}">${ux(cost)}</span><span class="r">${tagHTML}</span></button>${open ? usageRecordDetailHTML(r, i) : ''}</div>`;
-  }).join('');
-  const exportBtns = `${usageButton('export-csv', 'CSV', 'aria-label="Export this page as CSV"', !items.length || u.recordsLoading, 'btn sm')}${usageButton('export-json', 'JSON', 'aria-label="Export this page as JSON"', !items.length || u.recordsLoading, 'btn sm')}`;
-  const empty = items.length ? '' : `<p class="u-empty">${u.recordsLoading ? 'Loading records…' : Object.values(u.filters).some(Boolean) ? 'No records match these filters.' : 'No records match.'}</p>`;
-  const pager = `${usageButton('previous', 'Previous', '', u.offset === 0 || u.recordsLoading)}${usageButton('next', 'Next', '', end >= count || u.recordsLoading)}`;
-  if (phone) return `<section class="sec u-records" aria-labelledby="usage-records-title"><div class="sec-head"><h2 class="h-sec" id="usage-records-title">Records</h2><span class="grow"></span>${exportBtns}</div><span class="meta u-rec-count">${label} · exports contain this page only</span><div class="card u-rec-list">${rows}${empty}</div><div class="u-pager">${pager}</div></section>`;
-  return `<section class="sec u-records" aria-labelledby="usage-records-title"><div class="sec-head"><h2 class="h-sec" id="usage-records-title">Records</h2><span class="meta">One row per upstream response, newest first. Metadata only, no prompt or completion text.</span><span class="grow"></span><span class="meta u-export-label">Export this page</span>${exportBtns}</div>
-    <div class="card u-rec-table"><div class="u-rec-th" aria-hidden="true"><span>TIME</span><span>MODEL</span><span>ACCOUNT · CLIENT / ORIGIN</span><span class="r">IN</span><span class="r">OUT</span><span class="r u-xwide">CACHE READ</span><span class="r">EST. COST</span><span class="r">COVERAGE</span></div>${rows}${empty}</div>
-    <div class="u-pager"><span class="meta" role="status">${label} · exports contain this page only</span><span class="grow"></span>${pager}</div></section>`;
+  const more = rows.length > USAGE_CLIENT_ROWS ? `<button type="button" class="u-more" data-usage-act="clients-all">${u.clientsAll ? `Show top ${USAGE_CLIENT_ROWS}` : `Show all ${rows.length}`}</button>` : '';
+  const empty = rows.length ? '' : '<p class="u-empty">No records match these filters.</p>';
+  const th = phone || !rows.length ? '' : '<div class="u-tc-th" aria-hidden="true"><span>CLIENT</span><span>SHARE OF COST</span><span class="r">EST. COST</span><span class="r">TOKENS</span><span>MODELS</span></div>';
+  return `<section class="sec u-clients" aria-labelledby="usage-clients-title"><div class="sec-head"><h2 class="h-sec" id="usage-clients-title">Top clients</h2>${phone ? '' : '<span class="meta">By estimated cost at API list prices</span>'}</div>
+    <div class="card u-tc-table">${th}${body}${empty}${more}</div></section>`;
 }
 
 function usageDrawerHTML() {
@@ -396,6 +377,7 @@ function usageDrawerHTML() {
         <div class="statline"><span class="dot ${usageHealthDot(false)}"></span><span>${ux(word)}</span><span class="dim">· last commit ${ux(usageClock(health.last_commit_at_ms))}</span></div>
         ${health.message ? `<p class="meta">${S.private ? 'See server status for details' : ux(health.message)}</p>` : ''}
         <div class="figs u-figs">${[['queue_depth', 'Queued'], ['dropped', 'Dropped'], ['writer_errors', 'Writer errors'], ['rejected', 'Rejected']].map(([k, l]) => `<div><b>${usageCount(health[k])}</b><span>${l}</span></div>`).join('')}</div>
+        ${usageDatabaseHTML(status?.database)}
         ${gaps || health.recovery_warning ? `<div class="notice warn"><span class="dot s7 warn"></span><span class="grow">${ux(gapText)}${health.recovery_warning ? `${gaps ? ' ' : ''}An earlier or concurrent writer may have left usage uncommitted.` : ''}</span></div>` : ''}
         <span class="meta">Proxy records count once they are committed to disk. Gaps and writer errors can make totals incomplete.</span></div>
       <div class="block"><span class="label">LOCAL HISTORY IMPORTS</span><span class="meta">Reads usage metadata from Claude Code or Codex history on this server and rescans about every 30 seconds. Each record keeps the time it happened, not the time it was imported. No transcript content is stored.</span>${['claude_code', 'codex'].map(usageImportHTML).join('')}</div>
@@ -405,6 +387,13 @@ function usageDrawerHTML() {
         <div class="u-collectors">${(status?.collectors || []).map(usageCollectorHTML).join('') || '<p class="meta">No collectors enrolled.</p>'}</div></div>
     </div>
   </aside>`;
+}
+// The usage database on disk (null while it is off): its size, how fast it grows, the
+// disk space left under it, and whether older records are being compressed.
+function usageDatabaseHTML(db) {
+  if (!db) return '';
+  const figs = [[UsageTools.bytes(db.bytes), 'Database'], [UsageTools.bytes(db.growth_bytes_per_day), 'Growth a day'], [db.disk_free_bytes == null ? 'Unknown' : UsageTools.bytes(db.disk_free_bytes), 'Free disk']];
+  return `<div class="figs u-figs u-db">${figs.map(([v, l]) => `<div><b>${ux(v)}</b><span>${l}</span></div>`).join('')}</div>${db.compressing ? '<p class="meta" role="status">Compressing older records…</p>' : ''}`;
 }
 function usageImportHTML(source) {
   const roots = (Usage.status?.imports || []).map((item, index) => ({ item, index })).filter(({ item }) => item.source === source);
@@ -445,14 +434,38 @@ function usageFocusSelector(el) {
   if (form && el.name) return `${form.id ? `#${form.id}` : `[data-usage-import="${form.dataset.usageImport}"]`} [name="${el.name}"]`;
   return null;
 }
-function usageRender(focusSelector) {
+// The markup each section last received; a section whose markup is unchanged is left alone.
+const usagePainted = new WeakMap();
+// Repaints the page's sections (all of them unless named). The first call on a fresh
+// route draws the whole page; later calls patch only the sections whose markup changed,
+// keeping focus, the drawer's scroll and hover where they were.
+function usageRender(focusSelector, parts = Object.keys(USAGE_PARTS)) {
   if (S.route !== 'usage' || S.locked) return;
-  const selector = focusSelector || usageFocusSelector(document.activeElement) || Usage.focus;
+  const active = document.activeElement;
+  const selector = focusSelector || usageFocusSelector(active) || Usage.focus;
   Usage.focus = selector;
+  const results = document.getElementById('usage-results');
   const scroll = document.querySelector('#usage-drawer .drawer-body')?.scrollTop;
-  render();
-  if (scroll) { const body = document.querySelector('#usage-drawer .drawer-body'); if (body) body.scrollTop = scroll; }
-  if (selector) document.querySelector(selector)?.focus({ preventScroll: true });
+  if (!results) {
+    render();
+    if (scroll) { const body = document.querySelector('#usage-drawer .drawer-body'); if (body) body.scrollTop = scroll; }
+    if (selector) document.querySelector(selector)?.focus({ preventScroll: true });
+    return;
+  }
+  let lost = !active || active === document.body;
+  for (const name of parts) {
+    const el = document.getElementById(`usage-part-${name}`);
+    if (!el) continue;
+    const html = USAGE_PARTS[name]();
+    if (usagePainted.get(el) === html) continue;
+    if (el.contains(active)) lost = true;
+    el.innerHTML = html;
+    usagePainted.set(el, html);
+  }
+  results.setAttribute('aria-busy', String(Usage.loading));
+  if (scroll) { const body = document.querySelector('#usage-drawer .drawer-body'); if (body && body.scrollTop !== scroll) body.scrollTop = scroll; }
+  // Focus goes back where it was when a repaint took it away, or where the caller asked.
+  if (selector && (focusSelector || lost || !document.contains(active))) document.querySelector(selector)?.focus({ preventScroll: true });
 }
 // Hover and stacking only touch the chart; the rest of the page keeps its DOM.
 function usageRenderChart() {
@@ -460,8 +473,21 @@ function usageRenderChart() {
   if (!el) return usageRender();
   const focus = usageFocusSelector(document.activeElement);
   el.innerHTML = usageChartHTML();
+  // The cost section's markup now differs from what it last received as a whole.
+  const cost = document.getElementById('usage-part-cost');
+  if (cost) usagePainted.delete(cost);
   if (focus) el.querySelector(focus)?.focus({ preventScroll: true });
 }
+// Account changes reach account names in the filter and the breakdown.
+function usageAccountsChanged() {
+  usageRender(undefined, ['head', 'breakdown']);
+}
+// What each read feeds.
+const USAGE_READ_PARTS = {
+  summary: ['head', 'notices', 'cost', 'breakdown', 'clients'],
+  status: ['head', 'notices', 'cost', 'drawer'],
+};
+const USAGE_LOAD_PARTS = ['head', 'notices', 'cost', 'breakdown', 'clients'];
 const usageQuery = () => UsageTools.query(Usage.range, Usage.filters, Usage.timezone);
 function usageSelectStack(summary) {
   const combined = summary?.combined;
@@ -481,16 +507,16 @@ function usageCancelReads() {
   for (const field of usageReads.keys()) usageCancelRead(field);
 }
 function usageSuspendReads() {
-  ++Usage.sequence; ++Usage.recordSequence;
+  ++Usage.sequence;
   usageCancelReads();
-  Usage.loading = false; Usage.recordsLoading = false; Usage.loaded = false;
+  Usage.loading = false; Usage.loaded = false;
 }
-async function usageRead(field, path, sequence, recordSequence) {
+async function usageRead(field, path, sequence) {
   usageCancelRead(field);
   const controller = new AbortController();
   usageReads.set(field, controller);
   // Keep both guards: a transport may finish even after its signal is aborted.
-  const current = () => !controller.signal.aborted && usageReads.get(field) === controller && sequence === Usage.sequence && (field !== 'observations' || recordSequence === Usage.recordSequence);
+  const current = () => !controller.signal.aborted && usageReads.get(field) === controller && sequence === Usage.sequence;
   try {
     const value = await api(path, { signal: controller.signal });
     if (current()) Usage[field] = field === 'summary' ? usageSelectStack(value) : value;
@@ -502,71 +528,36 @@ async function usageRead(field, path, sequence, recordSequence) {
   } finally {
     const active = current();
     if (usageReads.get(field) === controller) usageReads.delete(field);
-    if (active) {
-      if (field === 'observations') Usage.recordsLoading = false;
-      usageRender();
-    }
+    if (active) usageRender(undefined, USAGE_READ_PARTS[field]);
   }
 }
 async function usageLoad() {
-  const u = Usage, sequence = ++u.sequence, recordSequence = ++u.recordSequence;
+  const u = Usage, sequence = ++u.sequence;
   usageCancelReads();
-  u.loading = true; u.recordsLoading = true; u.error = ''; u.loaded = true;
-  usageRender();
+  u.loading = true; u.error = ''; u.loaded = true;
+  usageRender(undefined, USAGE_LOAD_PARTS);
   try {
     const query = usageQuery();
     // Each section renders as soon as its own read completes.
     await Promise.allSettled([
       usageRead('summary', `/usage/dashboard?${query}&stack=${u.stack}`, sequence),
-      usageRead('observations', `/usage/observations?${query}&view=combined&limit=${u.limit}&offset=${u.offset}`, sequence, recordSequence),
       usageRead('status', '/usage/status', sequence),
     ]);
   } catch (e) { if (sequence === u.sequence) u.error = e.message === 'locked' ? 'Management authentication required.' : e.message; }
-  finally { if (sequence === u.sequence) { u.loading = false; if (recordSequence === u.recordSequence) u.recordsLoading = false; usageRender(); } }
+  finally { if (sequence === u.sequence) { u.loading = false; usageRender(undefined, USAGE_LOAD_PARTS); } }
 }
 // Both chart groupings arrive in the same snapshot; toggling needs no round trip.
 function usageLoadStack() {
   usageSelectStack(Usage.summary); usageRenderChart();
 }
-async function usageLoadRecords() {
-  const u = Usage, sequence = u.sequence, recordSequence = ++u.recordSequence;
-  usageCancelRead('observations');
-  u.recordsLoading = true; u.error = ''; u.observations = null; usageRender();
-  try {
-    await usageRead('observations', `/usage/observations?${usageQuery()}&view=combined&limit=${u.limit}&offset=${u.offset}`, sequence, recordSequence);
-  } catch (e) {
-    if (sequence === u.sequence && recordSequence === u.recordSequence) { u.recordsLoading = false; u.error = e.message; usageRender(); }
-  }
-}
-// Range, filter and breakdown changes start the records from the first page.
-function usageReload() { Usage.offset = 0; Usage.openRecord = null; Usage.hoverDay = null; Usage.summary = null; Usage.observations = null; return usageLoad(); }
+// Range and filter changes read everything again.
+function usageReload() { Usage.hoverDay = null; Usage.summary = null; return usageLoad(); }
 async function usageMutate(path, body, after) {
   Usage.busy = true; Usage.actionError = ''; usageRender();
   try {
     const r = await api(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) });
     if (after) after(r);
     await usageLoad();
-  } catch (e) { Usage.actionError = e.message; }
-  finally { Usage.busy = false; usageRender(); }
-}
-async function usageExport(format) {
-  Usage.busy = true; Usage.actionError = ''; usageRender();
-  let url;
-  try {
-    const q = UsageTools.query(Usage.range, Usage.filters, Usage.timezone, null, { view: 'combined' });
-    const request = UsageTools.exportRequest(q, format, S.key, Usage.offset, Usage.limit);
-    const res = await fetch(request.url, request.options);
-    if (res.status === 401 || res.status === 403) {
-      S.locked = res.status === 401 ? 'key' : 'remote'; render();
-      throw new Error('Management authentication required.');
-    }
-    if (!res.ok) throw new Error(`Export failed (${res.status}).`);
-    url = URL.createObjectURL(await res.blob());
-    const a = document.createElement('a'); a.href = url; a.download = `fusebox-usage-${Usage.range.start}-page-${Math.floor(Usage.offset / Usage.limit) + 1}.${format}`;
-    document.body.append(a); a.click(); a.remove();
-    // Let the browser consume the download before releasing its object URL.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast(`Downloaded metadata ${format.toUpperCase()} · this page`);
   } catch (e) { Usage.actionError = e.message; }
   finally { Usage.busy = false; usageRender(); }
 }
@@ -585,6 +576,13 @@ function usageCloseDrawer() {
   usageDrawerOpener = null;
 }
 function bindUsage() {
+  if (usageShell && typeof document !== 'undefined' && document.getElementById) {
+    for (const [name, html] of Object.entries(usageShell)) {
+      const el = document.getElementById(`usage-part-${name}`);
+      if (el) usagePainted.set(el, html);
+    }
+  }
+  usageShell = null;
   if (!Usage.loaded && !Usage.loading) usageLoad();
 }
 
@@ -653,6 +651,7 @@ if (typeof document !== 'undefined') {
     if (act === 'metric') { Usage.metric = el.dataset.value; return usageRenderChart(); }
     if (act === 'dim') { Usage.dim = el.dataset.value; Usage.showAll = false; return usageRender(); }
     if (act === 'show-all') { Usage.showAll = !Usage.showAll; return usageRender(); }
+    if (act === 'clients-all') { Usage.clientsAll = !Usage.clientsAll; return usageRender(undefined, ['clients']); }
     if (act === 'filter-row') {
       const id = Usage.rows[index];
       if (id == null) return;
@@ -661,16 +660,6 @@ if (typeof document !== 'undefined') {
     }
     if (act === 'clear-filter') { Usage.filters[el.dataset.value] = ''; return usageReload(); }
     if (act === 'clear-filters') { Object.keys(Usage.filters).forEach((k) => { Usage.filters[k] = ''; }); return usageReload(); }
-    if (act === 'record') { Usage.openRecord = Usage.openRecord === index ? null : index; return usageRender(); }
-    if (act === 'open-account') { const id = Usage.observations?.items?.[index]?.account_id; if (id) openAccount(id); return; }
-    if (act === 'open-sub') { const id = Usage.subs?.[index]; if (id) openAccount(id); return; }
-    if (act === 'only-model') {
-      const model = Usage.observations?.items?.[index]?.actual_model;
-      if (model) { Usage.filters.model = model; Usage.dim = 'account'; Usage.showAll = false; usageReload(); }
-      return;
-    }
-    if (act === 'previous' || act === 'next') { Usage.offset = Math.max(0, Usage.offset + (act === 'next' ? Usage.limit : -Usage.limit)); Usage.openRecord = null; return usageLoadRecords(); }
-    if (act.startsWith('export-')) return usageExport(act.slice(7));
     if (act === 'open-collection') return usageOpenDrawer();
     if (act === 'close-collection') return usageCloseDrawer();
     if (act === 'scan') return usageMutate('/usage/imports/scan', { source: el.dataset.source });
@@ -710,7 +699,7 @@ if (typeof document !== 'undefined') {
 
 // Refresh persistent analytics while the page is open; never interrupts a source action.
 if (typeof document !== 'undefined') setInterval(() => {
-  if (S.route !== 'usage' || S.locked || Usage.loading || Usage.recordsLoading || Usage.busy || document.hidden) return;
+  if (S.route !== 'usage' || S.locked || Usage.loading || Usage.busy || document.hidden) return;
   if (Usage.preset !== 'custom') Usage.range = UsageTools.range(Number(Usage.preset));
   usageLoad();
 }, 60000);

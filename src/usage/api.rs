@@ -69,10 +69,13 @@ fn labels(app: &App, v: &mut Value) {
             }
         }
     }
+    // Named clients by name, shared keys as "Shared key 73d46a0a…" rather than a hash.
+    // A collector keeps the label the store gave it.
     if let Some(items) = v.pointer_mut("/facets/clients").and_then(Value::as_array_mut) {
         for item in items {
-            if let Some(c) = cfg.named_clients.iter().find(|c| item["id"] == c.id) {
-                item["label"] = c.label.clone().into();
+            let id = item["id"].as_str().filter(|id| !id.is_empty() && !id.starts_with("collector:")).map(String::from);
+            if let Some(id) = id {
+                item["label"] = crate::mgmt::client_label(&cfg, &id).into();
             }
         }
     }
@@ -81,8 +84,8 @@ fn labels(app: &App, v: &mut Value) {
             if let Some(a) = accounts.iter().find(|a| item["account_id"] == a.id) {
                 item["account_label"] = a.label.clone().into();
             }
-            if let Some(c) = cfg.named_clients.iter().find(|c| item["client_id"] == c.id) {
-                item["client_label"] = c.label.clone().into();
+            if let Some(id) = item["client_id"].as_str().filter(|id| !id.is_empty()).map(String::from) {
+                item["client_label"] = crate::mgmt::client_label(&cfg, &id).into();
             }
         }
     }
@@ -131,7 +134,7 @@ async fn status(State(app): State<Arc<App>>) -> Response {
         return Json(json!({"health":{"state":if app.usage_error.is_some(){"error"}else{"disabled"},"message":app.usage_error},"imports":[],"collectors":[]})).into_response();
     };
     let (i, c) = tokio::join!(imports::status(s), collector::status(s));
-    match (i,c){(Ok(i),Ok(c))=>Json(json!({"health":s.health(),"imports":i["imports"],"import_candidates":i["candidates"],"collectors":c["collectors"],"pricing":super::pricing::catalogue_info()})).into_response(),_=>error(StatusCode::SERVICE_UNAVAILABLE,"Usage status unavailable")}
+    match (i,c){(Ok(i),Ok(c))=>Json(json!({"health":s.health(),"imports":i["imports"],"import_candidates":i["candidates"],"collectors":c["collectors"],"pricing":super::pricing::catalogue_info(),"database":s.database_stats()})).into_response(),_=>error(StatusCode::SERVICE_UNAVAILABLE,"Usage status unavailable")}
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

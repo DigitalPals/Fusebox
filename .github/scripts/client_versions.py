@@ -80,6 +80,12 @@ def parse(version):
     return tuple(int(p) for p in version.split("."))
 
 
+# Clients `client-identities` can set (src/clients.rs: CONFIGURABLE), and those
+# Fusebox learns from real clients passing through.
+CONFIGURABLE = {"claude-code", "codex", "grok-build", "devin-cli", "antigravity"}
+LEARNED = {"claude-code", "codex"}
+
+
 def issue_body(client, latest_version):
     ours = client["version"]
     lines = [
@@ -92,6 +98,18 @@ def issue_body(client, latest_version):
         lines.append(f"- Release notes: {client['notes']}")
     if client.get("compare"):
         lines.append(f"- Changes: {client['compare'].format(**{'from': ours, 'to': latest_version})}")
+    if client["id"] in CONFIGURABLE:
+        lines += [
+            "",
+            "Until a release catches up, users can claim the new release by adding it to `config.yaml`:",
+            "",
+            "```yaml",
+            "client-identities:",
+            f"  {client['id']}: {latest_version}",
+            "```",
+        ]
+        if client["id"] in LEARNED:
+            lines.append(f"Fusebox also claims it by itself once a real {client['name']} {latest_version} sends requests through it.")
     lines += [
         "",
         "To catch up, check what the new release sends (headers, body fields, websocket messages),",

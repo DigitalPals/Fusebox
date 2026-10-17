@@ -33,6 +33,22 @@ impl Metrics {
             }
         }
     }
+    /// Adds a rollup bucket: the same result as adding each of its entries.
+    fn merge(&mut self, counts: [i64; 4], known: &[i64; 8], sums: &[i64; 8]) {
+        self.observations += counts[0];
+        self.partial += counts[1];
+        self.missing += counts[2];
+        self.pricing_partial += counts[3];
+        for i in 0..8 {
+            if known[i] > 0 {
+                self.known[i] += known[i];
+                if !self.overflow[i] {
+                    self.sums[i] = self.sums[i].unwrap_or(0).checked_add(i128::from(sums[i]));
+                    self.overflow[i] = self.sums[i].is_none();
+                }
+            }
+        }
+    }
     fn value(&self) -> Value {
         let sums = self.sums.map(|n| n.and_then(|n| i64::try_from(n).ok()));
         let overflow: Vec<_> = METRICS
@@ -72,52 +88,41 @@ fn update_group<T: Default>(groups: &mut BTreeMap<Option<String>, T>, key: &Opti
     }
 }
 
-pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
-    let r = range(q)?;
-    let (where_sql, values) = filter(q, &r, "o");
-    let client = dimension("client_id", "o");
-    let mut totals = Metrics::default();
-    let (mut matched, mut history_only, mut weak_identity) = (0_i64, 0_i64, 0_i64);
-    let mut trends: [BTreeMap<NaiveDate, BTreeMap<Option<String>, Metrics>>; 2] = Default::default();
-    let mut breakdowns: [BTreeMap<Option<String>, Group>; 4] = Default::default();
-    // Match against the entire journal, including proxy evidence outside this range/filter.
-    // Only scalar accounting columns are read; no payload or pricing JSON is parsed.
-    let mut statement = conn.prepare(&format!(
-        "SELECT CASE WHEN o.source='proxy' THEN 0 ELSE EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy') END,
-         o.source<>'proxy',COALESCE(o.response_id,'')='',o.event_at_ms,o.provider,o.model,o.account_id,{client},
-         o.cost_nanos,o.input,o.cache_read,o.cache_write,o.write_5m,o.write_1h,o.output,o.reasoning,o.completeness,o.pricing_partial
-         FROM usage_entries o INDEXED BY usage_entries_event_time WHERE {where_sql}"
-    ))?;
-    let mut rows = statement.query(rusqlite::params_from_iter(&values))?;
-    while let Some(row) = rows.next()? {
-        read::check()?;
-        if row.get::<_, bool>(0)? {
-            matched += 1;
-            continue;
+/// Everything one summary accumulates, fed by rollup buckets and by entry rows alike.
+struct Summary {
+    tz: Tz,
+    totals: Metrics,
+    matched: i64,
+    history_only: i64,
+    weak_identity: i64,
+    trends: [BTreeMap<NaiveDate, BTreeMap<Option<String>, Metrics>>; 2],
+    breakdowns: [BTreeMap<Option<String>, Group>; 4],
+    /// Per client, what each of its models used: the Usage page's top clients.
+    client_models: BTreeMap<Option<String>, BTreeMap<Option<String>, Metrics>>,
+}
+
+impl Summary {
+    fn new(tz: Tz) -> Self {
+        Self {
+            tz,
+            totals: Metrics::default(),
+            matched: 0,
+            history_only: 0,
+            weak_identity: 0,
+            trends: Default::default(),
+            breakdowns: Default::default(),
+            client_models: BTreeMap::new(),
         }
-        let history = row.get::<_, bool>(1)?;
-        history_only += i64::from(history);
-        weak_identity += i64::from(history && row.get::<_, bool>(2)?);
-        let date = DateTime::from_timestamp_millis(row.get(3)?)
-            .context("usage timestamp out of bounds")?
-            .with_timezone(&r.tz)
-            .date_naive();
-        let dims: [Option<String>; 4] = [row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?];
-        let mut amounts = [None; 8];
-        for (i, amount) in amounts.iter_mut().enumerate() {
-            *amount = row.get(8 + i)?;
+    }
+
+    fn add(&mut self, date: NaiveDate, dims: &[Option<String>; 4], add: impl Fn(&mut Metrics)) {
+        add(&mut self.totals);
+        for (i, trend) in self.trends.iter_mut().enumerate() {
+            update_group(trend.entry(date).or_default(), &dims[i], &add);
         }
-        let completeness = row.get_ref(16)?.as_str()?;
-        let pricing_partial = row.get::<_, Option<i64>>(17)? == Some(1);
-        totals.add(&amounts, completeness, pricing_partial);
-        for (i, trend) in trends.iter_mut().enumerate() {
-            update_group(trend.entry(date).or_default(), &dims[i], |metrics| {
-                metrics.add(&amounts, completeness, pricing_partial)
-            });
-        }
-        for (i, breakdown) in breakdowns.iter_mut().enumerate() {
+        for (i, breakdown) in self.breakdowns.iter_mut().enumerate() {
             update_group(breakdown, &dims[i], |group| {
-                group.metrics.add(&amounts, completeness, pricing_partial);
+                add(&mut group.metrics);
                 if let Some(account) = &dims[2]
                     && !group.accounts.contains(account)
                 {
@@ -128,7 +133,141 @@ pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
                 }
             });
         }
+        update_group(&mut self.client_models, &dims[3], |models| update_group(models, &dims[1], &add));
     }
+
+    /// One pass over entry rows, as the summary always worked.
+    fn scan(&mut self, conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<()> {
+        let client = dimension("client_id", "o");
+        // Match against the entire journal, including proxy evidence outside this range/filter.
+        // Only scalar accounting columns are read; no payload or pricing JSON is parsed.
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT CASE WHEN o.source='proxy' THEN 0 ELSE EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy') END,
+             o.source<>'proxy',COALESCE(o.response_id,'')='',o.event_at_ms,o.provider,o.model,o.account_id,{client},
+             o.cost_nanos,o.input,o.cache_read,o.cache_write,o.write_5m,o.write_1h,o.output,o.reasoning,o.completeness,o.pricing_partial
+             FROM {table} WHERE {where_sql}"
+        ))?;
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            read::check()?;
+            if row.get::<_, bool>(0)? {
+                self.matched += 1;
+                continue;
+            }
+            let history = row.get::<_, bool>(1)?;
+            self.history_only += i64::from(history);
+            self.weak_identity += i64::from(history && row.get::<_, bool>(2)?);
+            let date = DateTime::from_timestamp_millis(row.get(3)?)
+                .context("usage timestamp out of bounds")?
+                .with_timezone(&self.tz)
+                .date_naive();
+            let dims: [Option<String>; 4] = [row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?];
+            let mut amounts = [None; 8];
+            for (i, amount) in amounts.iter_mut().enumerate() {
+                *amount = row.get(8 + i)?;
+            }
+            let completeness = row.get_ref(16)?.as_str()?;
+            let pricing_partial = row.get::<_, Option<i64>>(17)? == Some(1);
+            self.add(date, &dims, |m| m.add(&amounts, completeness, pricing_partial));
+        }
+        Ok(())
+    }
+
+    /// Adds whole rollup buckets. False when a bucket can't be used exactly (a sum
+    /// left the 64-bit range, or the bucket crosses a local midnight in this
+    /// timezone); the caller then recomputes everything from entries.
+    fn rollups(&mut self, conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<bool> {
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT bucket,provider,model,account_id,client,observations,partial,missing,pricing_partial,
+               k0,k1,k2,k3,k4,k5,k6,k7,s0,s1,s2,s3,s4,s5,s6,s7 FROM usage_rollup WHERE {where_sql}"
+        ))?;
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            read::check()?;
+            let bucket: i64 = row.get(0)?;
+            let first = bucket * rollup::BUCKET_MS;
+            let tz = self.tz;
+            let local = |ms: i64| -> Result<NaiveDate> {
+                Ok(DateTime::from_timestamp_millis(ms)
+                    .context("usage timestamp out of bounds")?
+                    .with_timezone(&tz)
+                    .date_naive())
+            };
+            let date = local(first)?;
+            if local(first + rollup::BUCKET_MS - 1)? != date {
+                return Ok(false);
+            }
+            let dims: [Option<String>; 4] = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
+            let counts: [i64; 4] = [row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?];
+            let mut known = [0_i64; 8];
+            let mut sums = [0_i64; 8];
+            for i in 0..8 {
+                known[i] = row.get(9 + i)?;
+                match row.get_ref(17 + i)? {
+                    rusqlite::types::ValueRef::Integer(n) => sums[i] = n,
+                    _ => return Ok(false),
+                }
+            }
+            self.add(date, &dims, |m| m.merge(counts, &known, &sums));
+        }
+        Ok(true)
+    }
+}
+
+pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
+    summary_with(conn, q, true)
+}
+
+/// The same summary computed only from entries, as before rollups existed.
+#[cfg(test)]
+pub(super) fn summary_scan(conn: &Connection, q: &Query) -> Result<Value> {
+    summary_with(conn, q, false)
+}
+
+fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value> {
+    let r = range(q)?;
+    let (where_sql, values) = filter(q, &r, "o");
+    let everything = "usage_entries o INDEXED BY usage_entries_event_time";
+    let mut summary = Summary::new(r.tz);
+    // Rollups hold proxy entries only; a filter for another source reads entries.
+    let buckets = rollup::whole_buckets(r.start, r.end)
+        .filter(|_| use_rollups && q.source.as_deref().is_none_or(|s| s == "proxy"));
+    let complete = match buckets {
+        Some(buckets) => {
+            let (rollup_sql, rollup_values) = rollup::filter(q, buckets, false);
+            summary.rollups(conn, &rollup_sql, &rollup_values)?
+        }
+        None => false,
+    };
+    if let (true, Some((first, last))) = (complete, buckets) {
+        // Proxy entries in the partial buckets at either end of the range.
+        for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
+            if low < high {
+                let edge = Range { start: low, end: high, tz: r.tz };
+                let (edge_sql, edge_values) = filter(q, &edge, "o");
+                summary.scan(conn, everything, &format!("{edge_sql} AND o.source='proxy'"), &edge_values)?;
+            }
+        }
+        // Imported entries are never rolled up: whether one counts depends on proxy
+        // evidence anywhere in the journal.
+        if q.source.as_deref().is_none_or(|s| s != "proxy") {
+            summary.scan(
+                conn,
+                "usage_entries o INDEXED BY usage_entries_imported",
+                &format!("{where_sql} AND o.source<>'proxy'"),
+                &values,
+            )?;
+        }
+    } else {
+        summary = Summary::new(r.tz);
+        if q.source.as_deref().is_some_and(|s| s != "proxy") {
+            let sql = format!("{where_sql} AND o.source<>'proxy'");
+            summary.scan(conn, "usage_entries o INDEXED BY usage_entries_imported", &sql, &values)?;
+        } else {
+            summary.scan(conn, everything, &where_sql, &values)?;
+        }
+    }
+    let Summary { totals, matched, history_only, weak_identity, trends, breakdowns, mut client_models, .. } = summary;
     let mut totals = totals.value();
     totals["matched"] = json!(matched);
     totals["history_only"] = json!(history_only);
@@ -152,6 +291,9 @@ pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
         for (id, group) in groups {
             read::check()?;
             let mut value = group.metrics.value();
+            if name == "client" {
+                value["models"] = client_model_values(client_models.remove(&id).unwrap_or_default());
+            }
             value["id"] = json!(id);
             value["accounts"] = json!(group.accounts.len());
             value["provider"] = json!(group.provider);
@@ -176,7 +318,7 @@ pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |row| row.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let stack = q.stack.as_deref().unwrap_or("provider");
-    let facets = facets(conn, &where_sql, &values)?;
+    let facets = facets(conn, q, &r, use_rollups)?;
     read::check()?;
     Ok(json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},
         "combined":{"basis":"One entry per provider response. Imported entries that share a response ID with a proxy entry are excluded.",
@@ -187,14 +329,25 @@ pub(super) fn summary(conn: &Connection, q: &Query) -> Result<Value> {
             "basis":"API list-price equivalent estimate; usage older than the catalogue is priced at today's rates as a backdated current-rate equivalent, not what was paid at the time"}}))
 }
 
-fn facets(conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<Value> {
-    let mut facets: [BTreeSet<String>; 5] = Default::default();
-    // Distinct dimension tuples keep memory tied to facets, not record count, and
-    // retain raw-only origins whose canonical evidence is selected elsewhere.
-    let client = dimension("client_id", "o");
-    let mut statement = conn.prepare(&format!(
-        "SELECT DISTINCT o.provider,o.model,o.account_id,{client},o.source FROM usage_observations o INDEXED BY usage_event_time WHERE {where_sql}"
-    ))?;
+/// A client's models, largest list price first: the model, its calls and its cost.
+fn client_model_values(models: BTreeMap<Option<String>, Metrics>) -> Value {
+    // None when nothing was priced or the sum left the supported range.
+    let cost = |m: &Metrics| m.sums[0];
+    let mut models: Vec<(Option<String>, Metrics)> = models.into_iter().collect();
+    models
+        .sort_by(|a, b| cost(&b.1).cmp(&cost(&a.1)).then(b.1.observations.cmp(&a.1.observations)).then(a.0.cmp(&b.0)));
+    models.truncate(50);
+    models
+        .into_iter()
+        .map(|(id, m)| {
+            json!({"id":id,"observations":m.observations,"unpriced":m.observations-m.known[0],
+                "estimated_cost_nanos":cost(&m).and_then(|n| i64::try_from(n).ok())})
+        })
+        .collect()
+}
+
+fn collect_facets(conn: &Connection, sql: &str, values: &[SqlValue], facets: &mut [BTreeSet<String>; 5]) -> Result<()> {
+    let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(values))?;
     while let Some(row) = rows.next()? {
         read::check()?;
@@ -202,6 +355,44 @@ fn facets(conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<Val
             if let Some(value) = row.get::<_, Option<String>>(i)? {
                 facet.insert(value);
             }
+        }
+    }
+    Ok(())
+}
+
+fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<Value> {
+    let mut facets: [BTreeSet<String>; 5] = Default::default();
+    // Distinct dimension tuples keep memory tied to facets, not record count, and
+    // retain raw-only origins whose canonical evidence is selected elsewhere.
+    let client = dimension("client_id", "o");
+    let raw = |range: &Range| {
+        let (sql, values) = filter(q, range, "o");
+        (
+            format!(
+                "SELECT DISTINCT o.provider,o.model,o.account_id,{client},o.source FROM usage_observations o INDEXED BY usage_event_time WHERE {sql}"
+            ),
+            values,
+        )
+    };
+    match rollup::whole_buckets(r.start, r.end).filter(|_| use_rollups) {
+        Some((first, last)) => {
+            let (sql, values) = rollup::filter(q, (first, last), true);
+            collect_facets(
+                conn,
+                &format!("SELECT DISTINCT provider,model,account_id,client,source FROM usage_facets WHERE {sql}"),
+                &values,
+                &mut facets,
+            )?;
+            for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
+                if low < high {
+                    let (sql, values) = raw(&Range { start: low, end: high, tz: r.tz });
+                    collect_facets(conn, &sql, &values, &mut facets)?;
+                }
+            }
+        }
+        None => {
+            let (sql, values) = raw(r);
+            collect_facets(conn, &sql, &values, &mut facets)?;
         }
     }
     let mut out = serde_json::Map::new();

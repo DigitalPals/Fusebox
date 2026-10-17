@@ -36,6 +36,10 @@ pub struct App {
     pub reset_test_origin: Mutex<Option<String>>,
     pub started: DateTime<Utc>,
     pub live: broadcast::Sender<String>,
+    /// Hash of the last model list dashboards were told about.
+    pub models_fingerprint: std::sync::atomic::AtomicU64,
+    /// The dashboard ticker starts with the first dashboard connection.
+    pub live_ticker: std::sync::atomic::AtomicBool,
     /// Ignore our own writes to the auth dir in the file watcher.
     quiet_until: AtomicI64,
     /// Fired when the server starts shutting down, so long-lived sockets can close cleanly.
@@ -54,6 +58,7 @@ impl App {
         pool.restore_cooldowns(&crate::accounts::Cooldowns::load(
             &cfg.auth_dir().join(crate::accounts::COOLDOWNS_FILE),
         ));
+        pool.restore_attributions(crate::attribution::Saved::load(&cfg.auth_dir().join(crate::attribution::FILE)));
         let (live, _) = broadcast::channel(512);
         let sessions = Arc::new(crate::affinity::Sessions::load(&cfg.auth_dir(), cfg.session_affinity_idle_seconds));
         let push = crate::push::Push::load(&cfg.auth_dir());
@@ -83,6 +88,7 @@ impl App {
         // Read the system's TLS roots now, not on the first request's worker thread.
         crate::tls::warm();
         let clients = crate::policy::Clients::new(usage.clone());
+        crate::clients::configure(&cfg.client_identities);
         Arc::new(Self {
             usage,
             usage_error,
@@ -103,6 +109,8 @@ impl App {
             reset_test_origin: Mutex::new(None),
             started: Utc::now(),
             live,
+            models_fingerprint: Default::default(),
+            live_ticker: Default::default(),
             quiet_until: AtomicI64::new(0),
             shutdown: Default::default(),
             clients,
@@ -116,6 +124,7 @@ impl App {
     }
 
     pub fn set_config(&self, cfg: Config) {
+        crate::clients::configure(&cfg.client_identities);
         self.http.set_default_proxy(&cfg.proxy_url);
         self.pool.reload(&cfg);
         self.models.apply(&self.pool);
@@ -147,6 +156,18 @@ impl App {
         if self.live.receiver_count() > 0 {
             let msg = serde_json::json!({ "type": kind, "data": data }).to_string();
             let _ = self.live.send(msg);
+            // Every path that changes the model list (config, sign-ins, discovery)
+            // already announces account changes; tell dashboards about models only
+            // when the list they read actually changed.
+            if kind == "accounts" {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                crate::mgmt::model_list(self).to_string().hash(&mut hasher);
+                let fingerprint = hasher.finish();
+                if self.models_fingerprint.swap(fingerprint, Ordering::Relaxed) != fingerprint {
+                    let _ = self.live.send(r#"{"type":"models","data":null}"#.to_string());
+                }
+            }
         }
     }
 }
@@ -401,14 +422,18 @@ fn add_to_minute(series: &mut VecDeque<Bucket>, log: &RequestLog) {
     series[index].add(log);
 }
 
-/// The last 60 minutes, oldest first, with empty minutes filled in.
+/// The last 60 minutes, oldest first, with empty minutes filled in. The series is
+/// kept sorted by minute, so one forward pass fills the hour.
 fn last_hour(series: &VecDeque<Bucket>) -> Vec<Bucket> {
     let now = Utc::now().timestamp() / 60;
-    (0..MINUTES as i64)
-        .rev()
-        .map(|ago| {
-            let m = now - ago;
-            series.iter().find(|b| b.minute == m).cloned().unwrap_or(Bucket { minute: m, ..Default::default() })
+    let mut stored = series.iter().peekable();
+    (now - MINUTES as i64 + 1..=now)
+        .map(|m| {
+            while stored.next_if(|b| b.minute < m).is_some() {}
+            match stored.next_if(|b| b.minute == m) {
+                Some(b) => b.clone(),
+                None => Bucket { minute: m, ..Default::default() },
+            }
         })
         .collect()
 }
@@ -471,6 +496,12 @@ impl Stats {
     /// One account's last 60 minutes.
     pub fn account_series(&self, id: &str) -> Vec<Bucket> {
         last_hour(self.accounts.lock().get(id).unwrap_or(&VecDeque::new()))
+    }
+
+    /// Failed requests on one account in the last hour, without building the series.
+    pub fn account_failures(&self, id: &str) -> u64 {
+        let cutoff = Utc::now().timestamp() / 60 - MINUTES as i64 + 1;
+        self.accounts.lock().get(id).map_or(0, |s| s.iter().filter(|b| b.minute >= cutoff).map(|b| b.failed).sum())
     }
 }
 

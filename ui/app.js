@@ -40,9 +40,12 @@ const S = {
   overview: null,
   accounts: null,
   requests: [],
+  requestsFull: false, // S.requests holds the whole log, not only the newest few
   models: [],
   routes: null,
-  activity: {}, // account id -> { series, sessions, at }
+  routesStale: true, // account or model changes since S.routes was fetched
+  faultList: null, // the server's faults (live "faults"); null until the first arrives
+  activity: {}, // account id -> { series, sessions, at, fetched }
   load: null, // account id -> { in_flight, sessions } for busy accounts; null while disconnected
   live: 'connecting',
   paused: false,
@@ -95,10 +98,10 @@ function cycleTheme() {
   S.theme = { system: 'light', light: 'dark' }[S.theme] || 'system';
   if (S.theme === 'system') store.del('theme'); else store.set('theme', S.theme);
   applyTheme();
-  if (S.route === 'usage') usageRender();
+  if (S.route === 'usage') usageRenderChart();
   toast(`Theme: ${THEMES[S.theme]}`);
 }
-LIGHT.addEventListener('change', () => { applyTheme(); if (S.route === 'usage') usageRender(); });
+LIGHT.addEventListener('change', () => { applyTheme(); if (S.route === 'usage') usageRenderChart(); });
 applyTheme();
 
 const PROVIDER = {
@@ -287,25 +290,105 @@ function toast(text) {
 
 // ---------------------------------------------------------------- data
 
+let overviewAt = 0; // when S.overview was last fetched whole
+
+// The first paint needs only the newest requests (the overview shows six). Pages that
+// read the whole log (up to 300) fetch it when they open; see loadRequests.
+const FIRST_REQUESTS = 6;
+const needsLog = () => ['requests', 'models'].includes(S.route) || (S.route === 'accounts' && !!S.sub) || !!S.drawer;
+const requestsPath = (full) => (full ? '/requests' : `/requests?limit=${FIRST_REQUESTS}`);
+// A short answer is the whole log; a long one comes from a server that sends it all.
+const wholeLog = (list, full) => full || list.length !== FIRST_REQUESTS;
+
 async function loadAll() {
-  const [overview, accounts, requests, models, routes] = await Promise.all([
-    api('/overview'), api('/accounts'), api('/requests'), api('/models'), api('/routes'),
+  const full = needsLog();
+  const routes = S.route === 'models';
+  const [overview, accounts, requests, models, routeData] = await Promise.all([
+    api('/overview'), api('/accounts'), api(requestsPath(full)), api('/models'), routes ? api('/routes') : null,
   ]);
-  Object.assign(S, { overview, accounts, requests, models, routes, locked: null });
+  Object.assign(S, { overview, accounts, requests, models, requestsFull: wholeLog(requests, full), locked: null });
+  if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
+  overviewAt = Date.now();
 }
 
-let accountsTimer = 0;
-function refreshAccounts() {
-  clearTimeout(accountsTimer);
-  accountsTimer = setTimeout(async () => {
-    try {
-      const [accounts, overview, models, routes] = await Promise.all([api('/accounts'), api('/overview'), api('/models'), api('/routes')]);
-      Object.assign(S, { accounts, overview, models, routes });
-      S.activity = {};
-      refreshViews();
-      syncResetModal();
-    } catch {}
-  }, 250);
+// The whole request log, merged with what arrived live while it was on its way.
+let requestsLoading = null;
+function loadRequests() {
+  if (S.requestsFull || requestsLoading || S.locked) return;
+  requestsLoading = api('/requests').then((list) => {
+    const seen = new Set(list.map((r) => r.id));
+    S.requests = [...S.requests.filter((r) => !seen.has(r.id)), ...list].slice(0, 300);
+    S.requestsFull = true;
+    requestsArrived();
+  }).catch(() => {}).finally(() => { requestsLoading = null; });
+}
+
+// After time away: the log again, as much of it as this page has had.
+function reloadRequests() {
+  const full = S.requestsFull || needsLog();
+  api(requestsPath(full)).then((list) => {
+    S.requests = list;
+    S.requestsFull = wholeLog(list, full);
+    requestsArrived();
+  }).catch(() => {});
+}
+
+// Repaints what reads the request log once more of it is here.
+function requestsArrived() {
+  if (S.locked || !S.overview) return;
+  if (S.route === 'overview') patch('recent', recentHTML);
+  else if (S.route === 'requests') refreshRequests();
+  else if (S.route === 'accounts' && S.sub) patch('det-reqs', detRequestsHTML);
+  else if (S.route === 'models') patch('models-root', modelsBodyHTML);
+  if (S.drawer) patch('drawer-reqs', drawerRequestsHTML);
+  if (!S.faultList) renderFaults();
+}
+
+// Route order follows account state and the model list, so it is fetched while the
+// Models page shows and marked stale otherwise.
+let routesLoading = null;
+function loadRoutes() {
+  if (routesLoading || S.locked) return;
+  routesLoading = api('/routes').then((routes) => {
+    Object.assign(S, { routes, routesStale: false });
+    if (S.route === 'models') patchModels();
+  }).catch(() => {}).finally(() => { routesLoading = null; });
+}
+
+// Account changes ("accounts": state, cooldowns, quota, priority) reload accounts and the
+// overview; model changes ("models") reload the model list. Both are debounced together.
+const refreshing = { accounts: false, models: false };
+let refreshTimer = 0;
+function scheduleRefresh(kind) {
+  refreshing[kind] = true;
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(runRefresh, 250);
+}
+const refreshAccounts = () => scheduleRefresh('accounts');
+const refreshModels = () => scheduleRefresh('models');
+async function runRefresh() {
+  const { accounts: acc, models: mod } = refreshing;
+  refreshing.accounts = refreshing.models = false;
+  const routes = S.route === 'models';
+  if (!routes) S.routesStale = true;
+  try {
+    const [accounts, overview, models, routeData] = await Promise.all([
+      acc ? api('/accounts') : null, acc ? api('/overview') : null, mod ? api('/models') : null, routes ? api('/routes') : null,
+    ]);
+    if (accounts) S.accounts = accounts;
+    if (overview) { S.overview = overview; overviewAt = Date.now(); }
+    if (models) S.models = models;
+    if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
+    if (acc) expireActivity();
+    refreshViews();
+    syncResetModal();
+  } catch {}
+}
+
+// Activity outlives account changes, but not by more than a minute.
+function expireActivity() {
+  const old = Date.now() - 60000;
+  for (const [id, a] of Object.entries(S.activity)) if (a.fetched < old) delete S.activity[id];
 }
 
 // One account's last hour and pinned sessions, fetched when its page or drawer opens.
@@ -315,7 +398,7 @@ function loadActivity(id, force = false) {
   if (!force && have && Date.now() - have.at < 15000) return;
   if (activityLoads[id]) return;
   activityLoads[id] = api(`/accounts/${encodeURIComponent(id)}/activity`).then((r) => {
-    S.activity[id] = { ...r, at: Date.now() };
+    S.activity[id] = { ...r, at: Date.now(), fetched: Date.now() };
     if (S.route === 'accounts' && S.sub === id) { patch('det-load', detLoadHTML); patch('det-sess', detSessionsHTML); }
     if (S.drawer === id) patch('drawer-since', drawerSinceHTML);
   }).catch(() => {}).finally(() => { delete activityLoads[id]; });
@@ -354,14 +437,20 @@ function resume() {
   if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
   const away = hiddenAt ? Date.now() - hiddenAt : 0;
   hiddenAt = 0;
+  // Timers pause while hidden; catch up at once.
+  tickTimers();
   if (S.locked || !S.overview) return;
-  if (ws && ws.readyState <= 1 && away < 30000) return;
+  if (ws && ws.readyState <= 1 && away < 30000) {
+    if (Date.now() - overviewAt >= 60000) pollOverview();
+    return;
+  }
   const old = ws;
   wsDelay = 1000;
   connectLive();
   old?.close();
   refreshAccounts();
-  api('/requests').then((requests) => { S.requests = requests; refreshViews(); }).catch(() => {});
+  refreshModels();
+  reloadRequests();
 }
 
 function setLive(state) {
@@ -372,14 +461,48 @@ function setLive(state) {
 function onLive(msg) {
   if (msg.type === 'request') return onRequest(msg.data);
   if (msg.type === 'load') return onLoad(msg.data);
+  if (msg.type === 'faults') return onFaults(msg.data);
   if (msg.type === 'accounts') return refreshAccounts();
+  if (msg.type === 'models') return refreshModels();
   if (msg.type === 'login') return pollLogin();
   if (msg.type === 'tick' && S.overview) {
-    S.overview.totals = msg.data.totals;
-    S.overview.active = msg.data.active;
-    if (S.route === 'overview') patch('figures', figuresHTML);
+    const o = S.overview;
+    const { totals, active } = msg.data;
+    const same = o.active === active && JSON.stringify(o.totals) === JSON.stringify(totals);
+    o.totals = totals;
+    o.active = active;
+    if (!same && S.route === 'overview') patchFigures();
   }
 }
+
+// The server's faults, sent whenever they change (see faultItems).
+function onFaults(list) {
+  S.faultList = faultItems(list);
+  renderFaults();
+  if (S.route === 'accounts' && !S.sub && !S.locked && S.overview) {
+    patch('acct-filters', acctFiltersHTML);
+    if (S.acctFilter === 'attention') patch('acct-list', accountListHTML);
+  }
+}
+
+// The menu's items from the server's list: errors first, then warnings, and last the
+// pace warnings (a window that would run out early: worth a look, nothing to do).
+// Account faults and the usage database's ("storage", linking to the Usage page);
+// provider-wide faults are left out, as the menu has always listed accounts.
+const FAULT_RANK = { err: 0, warn: 1, pace: 2 };
+function faultItems(list) {
+  const items = (Array.isArray(list) ? list : []).filter((f) => f.account_id || f.kind === 'storage').map((f) => ({
+    lvl: f.level === 'err' ? 'err' : 'warn', id: f.account_id || null, title: f.title, signin: f.kind === 'signin',
+    provider: f.provider_name || '', label: f.label || '', kind: f.kind || '', detail: f.detail || '', badge: f.badge !== false,
+    path: f.path || '',
+  }));
+  const rank = (f) => FAULT_RANK[f.kind === 'pace' ? 'pace' : f.lvl];
+  return items.map((f, i) => [f, i]).sort(([x, i], [y, j]) => rank(x) - rank(y) || i - j).map(([f]) => f);
+}
+
+// The app badge counts faults that ask for something to be done; a pace warning
+// (badge: false) only asks for attention.
+const badgeCount = (list) => list.filter((f) => f.badge !== false).length;
 
 // Puts the lamps and activity cells of accounts whose load changed right, without
 // re-rendering whole sections (that would restart every pulse).
@@ -407,11 +530,6 @@ function onRequest(log) {
   S.requests.unshift(log);
   if (S.requests.length > 300) S.requests.length = 300;
   if (S.paused) S.pending = Math.min(S.pending + 1, 300);
-  S.fresh.set(log.id, Date.now() + 1500);
-  setTimeout(() => {
-    S.fresh.delete(log.id);
-    for (const el of $$(`[data-req="${log.id}"]`)) el.classList.remove('fresh');
-  }, 1500);
   const o = S.overview;
   if (o) {
     addRequestCounters(o.totals, log, true);
@@ -429,22 +547,54 @@ function onRequest(log) {
     }
   }
   if (log.account_id && S.activity[log.account_id]) S.activity[log.account_id].at = 0;
-  renderFaults();
+  queueRequest(log);
+}
+
+// Coding agents send several requests a second. Each one's data is kept as it arrives;
+// the page catches up once a frame however many came (and not at all while hidden).
+const requestQueue = [];
+let requestFrame = 0;
+function queueRequest(log) {
+  if (requestQueue.length < 300) requestQueue.push(log); else requestQueue.overflow = true;
+  if (!requestFrame) requestFrame = (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : setTimeout)(flushRequests) || 1;
+}
+
+function flushRequests() {
+  requestFrame = 0;
+  const logs = requestQueue.splice(0);
+  const many = !!requestQueue.overflow || logs.length > 50;
+  requestQueue.overflow = false;
+  if (!logs.length) return;
+  // New rows glow for a moment once they are on screen.
+  const until = Date.now() + 1500;
+  for (const log of logs) S.fresh.set(log.id, until);
+  setTimeout(() => {
+    const body = $('#req-body');
+    for (const log of logs) {
+      S.fresh.delete(log.id);
+      body?.querySelector(`[data-req="${log.id}"]`)?.classList.remove('fresh');
+    }
+  }, 1500);
+  if (S.locked || !S.overview) return;
+  // Without the server's list yet, faults still come from the request log.
+  if (!S.faultList) renderFaults();
+  const on = (id) => id && logs.some((log) => log.account_id === id);
   if (S.route === 'overview') {
     patchMainline();
-    patch('figures', figuresHTML);
-    patch('bars', barsHTML);
+    patchFigures();
+    patchBars();
     patch('recent', recentHTML);
   } else if (S.route === 'requests') {
-    if (S.paused) patch('req-pause', pauseHTML);
-    else insertRequest(log);
-  } else if (S.route === 'accounts' && S.sub && S.sub === log.account_id) {
+    if (S.paused) patchChanged('req-pause', pauseHTML);
+    else if (many) refreshRequests();
+    else insertRequests(logs);
+  } else if (S.route === 'accounts' && S.sub && on(S.sub)) {
     patch('det-reqs', detRequestsHTML);
     loadActivity(S.sub);
   } else if (S.route === 'models') {
-    patch('models-root', modelsBodyHTML);
+    patchModelFailures();
   }
-  if (S.drawer && S.drawer === log.account_id) { patch('drawer-reqs', drawerRequestsHTML); loadActivity(S.drawer); }
+  if (on(S.drawer)) { patch('drawer-reqs', drawerRequestsHTML); loadActivity(S.drawer); }
 }
 
 function usageState(r) {
@@ -504,13 +654,41 @@ function focusSelector(el) {
   return parts.length ? parts.join('') : null;
 }
 
-function patch(id, fn, ...args) {
-  const el = document.getElementById(id);
-  if (!el) return;
+// The markup each patched element last received, so live updates can skip a repaint
+// that would change nothing. A full render makes new elements, which start empty.
+const painted = new WeakMap();
+
+function writeHTML(el, html) {
   const active = document.activeElement;
   const sel = el.contains(active) ? focusSelector(active) : null;
-  el.innerHTML = fn(...args);
+  el.innerHTML = html;
+  painted.set(el, html);
   if (sel) el.querySelector(sel)?.focus({ preventScroll: true });
+}
+
+function patch(id, fn, ...args) {
+  const el = document.getElementById(id);
+  if (el) writeHTML(el, fn(...args));
+}
+
+// Like patch, but leaves the element alone when its markup is unchanged.
+function patchChanged(id, fn, ...args) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const html = fn(...args);
+  if (painted.get(el) !== html) writeHTML(el, html);
+}
+
+// Swaps one element for new markup, keeping focus on the same control.
+function replaceHTML(el, html) {
+  const active = document.activeElement;
+  const sel = el.contains(active) ? focusSelector(active) : null;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const next = tpl.content.firstElementChild;
+  if (!next) return;
+  el.replaceWith(next);
+  if (sel) next.querySelector(sel)?.focus({ preventScroll: true });
 }
 
 // Re-renders the parts of the current page that show account state.
@@ -519,21 +697,28 @@ function refreshViews() {
   if (S.locked || !S.overview) return;
   if (S.route === 'overview') {
     patchMainline();
+    patchFigures();
+    patchBars();
     patch('ov-subs', ovSubsHTML);
+    patchChanged('ov-pool', ovPoolHTML);
     patch('ov-other', ovOtherHTML);
     patch('recent', recentHTML);
   } else if (S.route === 'accounts') {
     if (S.sub) patch('det-root', detailBodyHTML);
     else { patch('acct-head', accountHeadHTML); patch('acct-filters', acctFiltersHTML); patch('acct-timeline', resetTimelineHTML); patch('acct-list', accountListHTML); }
   } else if (S.route === 'usage') {
-    usageRender();
+    usageAccountsChanged();
   } else if (S.route === 'models') {
-    patch('models-head', modelsHeadHTML);
-    if (!S.addModel) patch('models-panel', modelsPanelHTML);
-    patch('models-root', modelsBodyHTML);
-    patch('models-groups', groupsCardHTML);
+    patchModels();
   }
   renderDrawer();
+}
+
+function patchModels() {
+  patch('models-head', modelsHeadHTML);
+  if (!S.addModel) patch('models-panel', modelsPanelHTML);
+  patch('models-root', modelsBodyHTML);
+  patch('models-groups', groupsCardHTML);
 }
 
 function renderLive() {
@@ -556,20 +741,24 @@ function renderPrivacy() {
   }
 }
 
-function faultsButtonHTML(phone) {
-  const list = alertsList();
+function faultsButtonHTML(phone, list = faultsList()) {
   const n = list.length;
   const lvl = list.some((a) => a.lvl === 'err') ? 'err' : n ? 'warn' : 'ok';
   const label = n ? `${n} fault${n === 1 ? '' : 's'}` : 'No faults';
-  return `<button class="faults" type="button" data-act="faults" aria-haspopup="true" aria-expanded="${S.faults}" aria-controls="faults-menu"${phone ? ` aria-label="${label}" title="Faults"` : ''}><span class="dot s7 ${lvl}"></span><span>${phone ? n : label}</span></button>`;
+  return `<button class="faults" type="button" data-act="faults" aria-haspopup="true" aria-expanded="${!!S.faults}" aria-controls="faults-menu"${phone ? ` aria-label="${label}" title="Faults"` : ''}><span class="dot s7 ${lvl}"></span><span>${phone ? n : label}</span></button>`;
 }
 
 let badge = -1;
 function renderFaults() {
-  for (const slot of $$('[data-faults-slot]')) slot.innerHTML = S.overview && !S.locked ? faultsButtonHTML(slot.closest('.mbar')) : '';
-  if (S.faults) renderFaultsMenu();
+  const ready = S.overview && !S.locked;
+  const list = ready ? faultsList() : [];
+  for (const slot of $$('[data-faults-slot]')) {
+    const html = ready ? faultsButtonHTML(slot.closest('.mbar'), list) : '';
+    if (painted.get(slot) !== html) writeHTML(slot, html);
+  }
+  if (S.faults) renderFaultsMenu(list);
   // An installed app shows the fault count on its icon.
-  const n = S.overview && !S.locked ? alertsList().length : 0;
+  const n = badgeCount(list);
   if (n !== badge && 'setAppBadge' in navigator) {
     badge = n;
     (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
@@ -779,15 +968,17 @@ function runsOutAt(w, now = Date.now()) {
 
 // 20 segments of 5%, lit for the displayed share, coloured by how much is used. A thin
 // mark shows even pace: where usage would be now if spread evenly over the window.
-function segsHTML(w, label, cls = '') {
-  const q = quotaOf(w);
+const segsHTML = (w, label, cls = '') => meterHTML(quotaOf(w), windowElapsed(w), label, cls, w && w.resets_at);
+
+// The meter for any quota: `t` places the even-pace mark (0 to 1, or null for none), and
+// a reset time makes the page refresh once the window renews.
+function meterHTML(q, t, label, cls = '', resetsAt = '') {
   if (!q) return `<span class="segs ${cls}" role="img" aria-label="${esc(label)}: not reported">${'<i></i>'.repeat(20)}</span>`;
   const v = quotaView(q);
   const lit = Math.round(v.value / 5);
-  const t = windowElapsed(w);
   const pace = t == null ? '' : `<b class="pace" style="left:${(v.mode === 'used' ? t : 1 - t) * 100}%" aria-hidden="true"></b>`;
   const paceText = t == null ? '' : ` · even pace ${Math.round(t * 100)}% used by now`;
-  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}${paceText}"${w.resets_at ? ` data-quota-reset="${esc(w.resets_at)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < lit ? '<i class="on"></i>' : '<i></i>')).join('')}${pace}</span>`;
+  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}${paceText}"${resetsAt ? ` data-quota-reset="${esc(resetsAt)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < lit ? '<i class="on"></i>' : '<i></i>')).join('')}${pace}</span>`;
 }
 
 function pctHTML(w) {
@@ -825,7 +1016,15 @@ function miniMetersHTML(a) {
 // A window as a big bar with its reset line (drawer and account page).
 function windowHTML(a, short, size) {
   const w = windowOf(a, short);
-  const title = short ? '5-hour' : w && w.name === 'day' ? 'Daily' : 'Weekly';
+  return windowBlockHTML(a, w, short ? '5-hour' : w && w.name === 'day' ? 'Daily' : 'Weekly', size);
+}
+
+// Windows limited to one model ("week opus" on some Claude plans), shown on the account page.
+const scopedWindows = (a) => ((a.quota && a.quota.windows) || []).filter((w) => w.model && quotaOf(w))
+  .sort((x, y) => String(x.name).localeCompare(String(y.name)));
+const scopedTitle = (w) => `${cap(w.model)} ${windowTitle(w).toLowerCase()}`;
+
+function windowBlockHTML(a, w, title, size) {
   const q = quotaOf(w);
   let note = 'Not reported yet';
   if (w && w.resets_at) note = `${q && q.exhausted ? 'Back' : 'Resets'} ${esc(when(w.resets_at))} · in ${liveLeft(w.resets_at)}`;
@@ -834,7 +1033,71 @@ function windowHTML(a, short, size) {
   if (out) note += ` · <span class="warn">at this pace, used up ${esc(when(new Date(out).toISOString()))}</span>`;
   const big = size === 'xl';
   return `<div class="window"><div class="window-top"><span>${title}${big ? ' window' : ''}</span>${q ? `<span class="pct ${q.cls}${big ? ' big' : ''}" style="width:auto">${quotaPercent(q[S.quotaDisplay])}</span>` : '<span class="dim">–</span>'}</div>
-    ${segsHTML(w, `${title} window`, size === 'xl' ? 'xl' : 'lg')}<span class="note">${note}</span></div>`;
+    ${segsHTML(w, `${title} window`, size === 'xl' ? 'xl' : 'lg')}<span class="note">${note}</span>${usedByHTML(a, w)}</div>`;
+}
+
+// ---------------------------------------------------------------- quota attribution
+
+// Which clients used each subscription window, from `quota_attribution` on /api/accounts:
+// estimates in percentage points of the window, so 18 points read "18%".
+const sharePercent = (points) => quotaPercent(Math.min(100, Math.max(0, Number(points) || 0)));
+// A window's key as the server writes it: "5h", "week", or "<name> · <model>".
+const shareKey = (w) => (w.model ? `${w.name} · ${w.model}` : w.name);
+// A window as people read it: "5h", "week", "week opus".
+const windowName = (name, model) => (model && !String(name).includes(model) ? `${name} ${model}` : String(name || ''));
+const currentShare = (a, key) => (a.quota_attribution?.current || []).find((s) => s.key === key) || null;
+// The window of this kind that renewed last (the server lists them newest first).
+const previousShare = (attribution, key) => (attribution?.previous || []).find((s) => s.key === key) || null;
+// Named clients are hidden with the rest of the labels; programs ("Claude Code") are not.
+function quotaClientName(c) {
+  const id = String(c.id ?? '');
+  if (!id) return c.label || 'Other requests';
+  if (id.startsWith('app:')) return c.label || id.slice(4);
+  return S.private ? HIDDEN : c.label || id;
+}
+const QUOTA_METHOD = 'Each rise in the window’s reported use is split over the requests that finished since the previous rise, by their API list price.';
+const dayLabel = (iso) => `${weekday(iso)} ${new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+
+// One row per client (the five largest, then the rest together), then use from outside
+// Fusebox and from before it looked. Bars span the whole window, in the meter's colour.
+function shareRowsHTML(s, cls = '') {
+  const clients = (s.clients || []).filter((c) => c.points > 0);
+  const rows = clients.slice(0, 5).map((c) => [quotaClientName(c), c.points, '']);
+  const rest = clients.slice(5);
+  if (rest.length) rows.push([plural(rest.length, 'more client'), rest.reduce((n, c) => n + c.points, 0), 'other']);
+  if (s.outside > 0) rows.push(['Outside Fusebox', s.outside, 'other']);
+  if (s.before > 0) rows.push(['Before Fusebox looked', s.before, 'other']);
+  return rows.map(([name, points, kind]) => `<div class="ub-row${kind ? ` ${kind}` : ''}"><span class="ub-name" title="${esc(name)}">${esc(name)}</span><span class="ub-bar" aria-hidden="true"><i${cls ? ` class="${cls}"` : ''} style="width:${Math.min(100, points).toFixed(1)}%"></i></span><span class="ub-pct">${esc(sharePercent(points))}</span></div>`).join('');
+}
+
+// "Used by" under a meter: the current window, and the last one of its kind folded away.
+function usedByHTML(a, w) {
+  const attribution = a.quota_attribution;
+  if (!w || !attribution) return '';
+  const key = shareKey(w);
+  const s = currentShare(a, key);
+  const prev = previousShare(attribution, key);
+  const rows = s ? shareRowsHTML(s, quotaOf(w)?.cls || '') : '';
+  if (!rows && !prev) return '';
+  const tokens = s && s.by_tokens > 0;
+  const tip = `${QUOTA_METHOD}${tokens ? ` About ${sharePercent(s.by_tokens)} of it was split by tokens, as a model has no list price.` : ''}`;
+  const head = rows ? `<div class="ub-head"><span class="capsm">Used by</span><span class="ub-basis" title="${esc(tip)}">Estimated from quota readings${tokens ? ' · partly by tokens' : ''}</span></div>${rows}` : '';
+  return `<div class="used-by">${head}${prev ? lastShareHTML(a, prev) : ''}</div>`;
+}
+
+// Open "Last week" sections, so a refresh leaves them open.
+const lastOpen = new Set();
+document.addEventListener('toggle', (e) => {
+  const id = e.target.dataset?.last;
+  if (id) { if (e.target.open) lastOpen.add(id); else lastOpen.delete(id); }
+}, true);
+
+function lastShareHTML(a, s) {
+  const id = `${a.id}|${s.key}`;
+  const label = /^week/.test(s.name) ? 'Last week' : 'Last window';
+  const renewed = s.resets_at ? ` · renewed ${dayLabel(s.resets_at)}` : '';
+  const rows = shareRowsHTML(s);
+  return `<details class="ub-last" data-last="${esc(id)}"${lastOpen.has(id) ? ' open' : ''}><summary><span class="capsm">${label}</span><span class="ub-basis">${esc(`${sharePercent(s.used)} used${renewed}`)}</span></summary><div class="ub-rows">${rows || '<span class="ub-basis">Nothing was used.</span>'}</div></details>`;
 }
 
 function quotaControlsHTML(short = false, label = true) {
@@ -851,6 +1114,10 @@ function setQuotaDisplay(mode, persist = true) {
 }
 
 // ---------------------------------------------------------------- alerts
+
+// The faults menu, the badge and the Needs attention filter follow the server's list
+// (live "faults"); until it arrives they are worked out here.
+const faultsList = () => S.faultList || alertsList();
 
 // Faults come from account state and the request log: expired sign-ins, quota used
 // up, rate limits, account errors and a run of failed requests in the last hour.
@@ -891,9 +1158,10 @@ function alertsList() {
 }
 
 function runAlert(i) {
-  const al = alertsList()[Number(i)];
+  const al = faultsList()[Number(i)];
   if (!al) return;
   closeFaults();
+  if (al.kind === 'storage') { location.hash = al.path || '#/usage'; return; }
   const a = accountById(al.id);
   if (al.signin && a) return signInAgain(a);
   openAccount(al.id);
@@ -908,14 +1176,15 @@ function overviewHTML() {
       <div class="bars" id="bars">${barsHTML()}</div>
       <div class="axis" aria-hidden="true"><span>60 min ago</span><span>now</span></div></section>`;
   const subs = `<section class="sec" id="ov-subs" aria-label="Subscriptions">${ovSubsHTML()}</section>`;
+  const pool = `<section class="sec" id="ov-pool" aria-label="Combined weekly limits">${ovPoolHTML()}</section>`;
   const other = `<section class="sec" id="ov-other" aria-label="Other circuits">${ovOtherHTML()}</section>`;
   const latest = `<section class="sec" aria-labelledby="latest-title"><div class="sec-head"><h2 class="h-sec" id="latest-title">Latest requests</h2><span class="grow"></span><a class="link" href="#/requests">All requests →</a></div>
       <div id="recent">${recentHTML()}</div></section>`;
   if (mob()) {
     const loadSec = `<section class="sec" aria-labelledby="load-title-m"><h2 class="h-sec" id="load-title-m">Load · last 60 min</h2>${load.replace(' aria-labelledby="load-title"', '').replace('<h2 class="label" id="load-title">Load · last 60 min</h2>', '')}</section>`;
-    return main + subs + loadSec + other + latest;
+    return main + subs + pool + loadSec + other + latest;
   }
-  return `${main}${load}${subs}${other}${latest}`;
+  return `${main}${load}${subs}${pool}${other}${latest}`;
 }
 
 function figuresHTML() {
@@ -938,17 +1207,58 @@ function figuresHTML() {
   return items.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
 }
 
+// "14:05" for a minute, formatted once: the hour's bars are redrawn as requests arrive.
+const minuteLabels = new Map();
+function minuteLabel(minute) {
+  let label = minuteLabels.get(minute);
+  if (label == null) {
+    if (minuteLabels.size > 600) minuteLabels.clear();
+    label = new Date(minute * 60000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    minuteLabels.set(minute, label);
+  }
+  return label;
+}
+
+function barHTML(b, max, now) {
+  const coverage = usageCoverageText(b);
+  const label = `${minuteLabel(b.minute)} · ${plural(b.requests, 'request')}${b.failed ? `, ${b.failed} failed` : ''}${b.cancelled ? `, ${b.cancelled} cancelled` : ''} · ${aggregateTokenText(b, 'tokens')} tokens${coverage ? ` · usage: ${coverage}` : ''}`;
+  const cls = [b.minute === now ? 'now' : '', b.failed ? 'fail' : '', b.requests ? '' : 'zero'].filter(Boolean).join(' ');
+  return `<i${cls ? ` class="${cls}"` : ''} style="height:${b.requests ? Math.max(3, (b.requests / max) * 100) : 0}%" title="${esc(label)}"></i>`;
+}
+const barsMax = (series) => Math.max(4, ...series.map((b) => b.requests));
+const barsTotalHTML = (series) => `<span class="sr-only">${plural(series.reduce((a, b) => a + b.requests, 0), 'request')} in the last hour</span>`;
+
 function barsHTML(series = S.overview.series) {
-  const max = Math.max(4, ...series.map((b) => b.requests));
+  const max = barsMax(series);
   const now = Math.floor(Date.now() / 60000);
-  const total = series.reduce((a, b) => a + b.requests, 0);
-  const bars = series.map((b) => {
-    const coverage = usageCoverageText(b);
-    const label = `${new Date(b.minute * 60000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} · ${plural(b.requests, 'request')}${b.failed ? `, ${b.failed} failed` : ''}${b.cancelled ? `, ${b.cancelled} cancelled` : ''} · ${aggregateTokenText(b, 'tokens')} tokens${coverage ? ` · usage: ${coverage}` : ''}`;
-    const cls = [b.minute === now ? 'now' : '', b.failed ? 'fail' : '', b.requests ? '' : 'zero'].filter(Boolean).join(' ');
-    return `<i${cls ? ` class="${cls}"` : ''} style="height:${b.requests ? Math.max(3, (b.requests / max) * 100) : 0}%" title="${esc(label)}"></i>`;
-  });
-  return `<span class="sr-only">${plural(total, 'request')} in the last hour</span>${bars.join('')}`;
+  return `${barsTotalHTML(series)}${series.map((b) => barHTML(b, max, now)).join('')}`;
+}
+
+// The overview's figures, repainted only when they read differently.
+const patchFigures = () => patchChanged('figures', figuresHTML);
+
+// A request usually changes one minute's bar. While the hour's minutes and the scale stay
+// the same only the bars that changed are redrawn; a new minute or a new peak redraws all.
+const barsPainted = new WeakMap();
+function patchBars() {
+  const el = document.getElementById('bars');
+  if (!el) return;
+  const series = S.overview.series;
+  const max = barsMax(series);
+  const now = Math.floor(Date.now() / 60000);
+  const shape = `${max}:${now}:${series.map((b) => b.minute).join(',')}`;
+  const bars = series.map((b) => barHTML(b, max, now));
+  const prev = barsPainted.get(el);
+  if (prev && prev.shape === shape && el.children.length === bars.length + 1) {
+    bars.forEach((html, i) => { if (html !== prev.bars[i]) replaceHTML(el.children[i + 1], html); });
+    const total = barsTotalHTML(series);
+    if (total !== prev.total) replaceHTML(el.firstElementChild, total);
+    barsPainted.set(el, { shape, bars, total });
+    return;
+  }
+  const total = barsTotalHTML(series);
+  el.innerHTML = total + bars.join('');
+  barsPainted.set(el, { shape, bars, total });
 }
 
 const ROUTING_TEXT = {
@@ -1014,6 +1324,85 @@ function ovSubsHTML() {
     <div class="card rivets table subs" role="table" aria-label="Subscriptions">
       <div class="th" role="row"><span class="c-idx">#</span><span>Account</span><span>Limits · ${quotaWord()}</span><span>Status</span><span class="c-req r">Requests</span><span class="r">Activity</span></div>
       ${rows}</div>`;
+}
+
+// The weekly windows of each provider with two or more subscriptions, taken together: the
+// accounts' average use, weighted equally, and the average of where each would be at even
+// pace. Windows renew at different times, so each account's pace comes from its own reset.
+// A window that has renewed, or not started, counts as unused and at the start of its week.
+// Disabled accounts and accounts that have not reported a weekly window are left out.
+function weeklyPools(accounts, now = Date.now()) {
+  const byProvider = new Map();
+  for (const a of accounts) {
+    if (a.disabled || !metered(a)) continue;
+    if (!byProvider.has(a.provider)) byProvider.set(a.provider, []);
+    byProvider.get(a.provider).push(a);
+  }
+  const pools = [];
+  for (const list of byProvider.values()) {
+    if (list.length < 2) continue;
+    let reported = 0;
+    let used = 0;
+    let elapsed = 0;
+    let paced = true;
+    for (const a of list) {
+      const w = ((a.quota && a.quota.windows) || []).find((x) => x.name === 'week' && !x.model && Number.isFinite(x.used));
+      if (!w) continue;
+      reported++;
+      const q = quotaOf(w, now);
+      if (!q) continue;
+      const t = windowElapsed(w, now) ?? (q.used === 0 ? 0 : null);
+      used += q.used;
+      if (t == null) paced = false;
+      else elapsed += t;
+    }
+    if (reported) pools.push({ account: list[0], accounts: list.length, reported, used: used / reported, pace: paced ? elapsed / reported : null });
+  }
+  return pools;
+}
+
+// How far the combined use is from even pace, in percentage points of the week.
+function poolGap(p) {
+  if (p.pace == null) return null;
+  const d = Math.round(p.used - p.pace * 100);
+  if (!d) return { text: 'On pace', cls: '' };
+  return { text: `${plural(Math.abs(d), 'point')} ${d < 0 ? 'under' : 'over'} pace`, cls: d > 0 ? 'warn' : '' };
+}
+
+const POOL_PACE = 'Even pace: where these accounts would be by now if each spread its use evenly over its own week';
+
+function poolMeterHTML(p) {
+  const q = quotaOf({ used: p.used });
+  const pace = p.pace == null ? '' : quotaPercent(S.quotaDisplay === 'used' ? p.pace * 100 : 100 - p.pace * 100);
+  return `<div class="meters"><div class="mrow"><span class="capsm">WK</span>${meterHTML(q, p.pace, `${provName(p.account)} combined weekly`)}<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span><span class="rst"${pace ? ` title="${esc(POOL_PACE)}"` : ''}>${pace ? `pace ${pace}` : ''}</span></div></div>`;
+}
+
+const poolCount = (p) => (p.reported < p.accounts ? `${fmt(p.reported)} of ${plural(p.accounts, 'account')} reporting` : plural(p.accounts, 'account'));
+function poolGapHTML(p) {
+  const gap = poolGap(p);
+  return gap ? `<span class="pool-gap ${gap.cls}">${gap.text}</span>` : '';
+}
+
+// One bar per provider with several subscriptions, under the Subscriptions table, in its
+// columns: all of a provider's weekly quota together, with the pace mark where it should be.
+function ovPoolHTML() {
+  const pools = weeklyPools(S.accounts || []);
+  if (!pools.length) return '';
+  if (mob()) {
+    const items = pools.map((p) => `<div class="item">
+        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${poolCount(p)}</span></div>${poolGapHTML(p)}</div>
+        <div class="indent">${poolMeterHTML(p)}</div>
+      </div>`).join('');
+    return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2></div><div class="card stack-list pool">${items}</div>`;
+  }
+  const rows = pools.map((p) => `<div class="tr">
+      <span class="c-idx"></span>
+      <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${poolCount(p)}</span></div></div>
+      ${poolMeterHTML(p)}
+      <div class="c-status">${poolGapHTML(p)}</div>
+    </div>`).join('');
+  return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2><span class="meta">Each provider’s subscriptions together, weighted equally</span></div>
+    <div class="card table subs pool">${rows}</div>`;
 }
 
 function ovOtherHTML() {
@@ -1313,7 +1702,8 @@ function openDrawer(id) {
   drawerOpener = document.activeElement;
   S.drawer = id;
   S.confirm = null;
-  loadActivity(id);
+  loadActivity(id, true);
+  loadRequests();
   renderDrawer();
   document.body.style.overflow = 'hidden';
   $('#drawer [data-act="close-drawer"]')?.focus();
@@ -1528,8 +1918,7 @@ function closeFaults() {
   if (opener && document.contains(opener) && !S.drawer) opener.focus({ preventScroll: true });
 }
 
-function renderFaultsMenu() {
-  const list = alertsList();
+function renderFaultsMenu(list = faultsList()) {
   const btn = $$('[data-faults-slot] .faults').find((b) => b.offsetParent);
   let style = '';
   if (btn && !mob()) {
@@ -1538,7 +1927,11 @@ function renderFaultsMenu() {
   }
   const items = list.map((al, i) => {
     const a = accountById(al.id);
-    return `<button class="fault-item" type="button" data-act="alert-open" data-id="${i}"><span class="dot ${al.lvl}"></span><span class="cell2"><b>${esc(al.title)}</b><span class="mono">${esc(a ? provName(a) : '')} · ${esc(a ? acctLabel(a) : '')}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
+    // A pace warning's detail names the client that used most of the window.
+    const tip = (al.kind === 'pace' || al.kind === 'storage') && al.detail ? ` title="${esc(S.private && al.kind === 'pace' ? al.detail.split(/(?<=\.) /)[0] : al.detail)}"` : '';
+    // The usage database's faults belong to no account.
+    const where = al.kind === 'storage' ? esc(al.provider || 'Usage') : `${esc(a ? provName(a) : al.provider || '')} · ${esc(a ? acctLabel(a) : al.label ? who(al.label) : '')}`;
+    return `<button class="fault-item" type="button" data-act="alert-open" data-id="${i}"${tip}><span class="dot ${al.lvl}"></span><span class="cell2"><b>${esc(al.title)}</b><span class="mono">${where}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
   }).join('');
   $('#lay-faults').innerHTML = `<div class="scrim menu" data-act="close-faults"></div><div class="faults-menu" id="faults-menu" role="dialog" aria-label="Faults"${style}>${items || '<p class="pal-none">Nothing tripped. Every account is in rotation.</p>'}</div>`;
 }
@@ -1553,7 +1946,7 @@ function closeLayers() {
 
 const ACCT_FILTERS = [['all', 'All', 'All'], ['subs', 'Subscriptions', 'Subs'], ['signins', 'Other sign-ins', 'Sign-ins'], ['keys', 'API keys', 'Keys'], ['attention', 'Needs attention', 'Attention']];
 function acctGroups() {
-  const attention = new Set(alertsList().map((al) => al.id));
+  const attention = new Set(faultsList().map((al) => al.id));
   return {
     all: () => true,
     subs: (a) => metered(a),
@@ -1723,7 +2116,7 @@ function detailBodyHTML() {
        ${a.last_error ? `<div class="banner err"><span class="dot err"></span><span class="errtext">${esc(hideEmails(a.last_error))}</span><span class="meta" style="font-size:12px">${liveAgo(a.last_used)}</span></div>` : ''}`;
   const limits = metered(a) ? `<section class="card pad block" style="gap:20px" aria-label="Limits">
       <div class="card-head"><span class="label">Limits · ${quotaWord()}</span>${quotaControlsHTML(mob(), false)}</div>
-      <div class="windows">${windowHTML(a, true, 'xl')}${windowHTML(a, false, 'xl')}</div>
+      <div class="windows">${windowHTML(a, true, 'xl')}${windowHTML(a, false, 'xl')}${scopedWindows(a).map((w) => windowBlockHTML(a, w, scopedTitle(w), 'xl')).join('')}</div>
       ${detBankedHTML(a)}</section>` : '';
   const cds = Object.entries(a.cooldowns || {}).sort((x, y) => Date.parse(x[1]) - Date.parse(y[1]));
   const reasonOf = (m) => ({ quota: 'Usage limit used up', rate_limit: 'Rate limited', checking: 'Checking quota' })[(a.cooldown_kinds || {})[m]] || 'Rate limited';
@@ -1852,8 +2245,22 @@ function detSessionsHTML() {
     const since = s.since ? `since ${hm(s.since)}` : `seen ${ago(s.last_seen)}`;
     const coverage = usageCoverageText(s);
     const meta = s.requests ? `<span class="mono">${esc(s.model || '')}</span><span>· ${plural(s.requests, 'recent req', 'recent req')} · ${aggregateTokensHTML(s, 'cache_tokens')} cached${coverage ? ` · usage: ${coverage}` : ''}</span>` : '<span>No requests in the last 300</span>';
-    return `<div class="sess"><div class="sess-top">${fp}<span class="fg2">${esc(client)}</span>${s.active ? '<span class="dot s6 ok" title="A request is in flight"></span>' : ''}<span class="grow"></span><span class="dim" style="font-size:12px">${since}</span></div><div class="sess-meta">${meta}</div></div>`;
+    const quota = sessionQuotaText(a, s);
+    return `<div class="sess"><div class="sess-top">${fp}<span class="fg2">${esc(client)}</span>${s.active ? '<span class="dot s6 ok" title="A request is in flight"></span>' : ''}<span class="grow"></span><span class="dim" style="font-size:12px">${since}</span></div><div class="sess-meta">${meta}</div>${quota ? `<div class="sess-quota" title="Estimated from quota readings">${esc(quota)}</div>` : ''}</div>`;
   }).join('');
+}
+
+// What a session used of the account's current windows: "4% of week · 11% of 5h".
+function sessionQuotaText(a, s) {
+  const quota = s.quota || {};
+  const keys = Object.keys(quota).filter((k) => quota[k] > 0);
+  if (!keys.length) return '';
+  const order = (a.quota_attribution?.current || []).map((x) => x.key);
+  const rank = (k) => (order.includes(k) ? order.indexOf(k) : order.length);
+  return keys.sort((x, y) => rank(x) - rank(y)).map((k) => {
+    const share = currentShare(a, k);
+    return `${sharePercent(quota[k])} of ${share ? windowName(share.name, share.model) : k.replace(' · ', ' ')}`;
+  }).join(' · ');
 }
 
 // connect, sign-in and API key panels ------------------------------------
@@ -2172,29 +2579,41 @@ function textMatches(r) {
   ].some((s) => s != null && String(s).toLowerCase().includes(q));
 }
 
+// The account, session and text filters (the chips come on top).
+const requestFilter = (r) => (!S.reqAcc || r.account_id === S.reqAcc || accountOf(r)?.id === S.reqAcc)
+  && (!S.reqSess || r.session_id === S.reqSess)
+  && textMatches(r);
 // Requests on screen: newest first, minus any that arrived while paused.
-function visibleRequests() {
-  return S.requests.slice(S.paused ? S.pending : 0).filter((r) =>
-    (!S.reqAcc || r.account_id === S.reqAcc || accountOf(r)?.id === S.reqAcc)
-    && (!S.reqSess || r.session_id === S.reqSess)
-    && textMatches(r));
-}
+const visibleRequests = () => S.requests.slice(S.paused ? S.pending : 0).filter(requestFilter);
 const CHIPS = { all: () => true, errors: isErr, cancelled: (r) => r.status === 499, rerouted: isRerouted };
-const shownRequests = () => visibleRequests().filter(CHIPS[S.reqChip] || CHIPS.all);
+const chipFilter = () => CHIPS[S.reqChip] || CHIPS.all;
+const shownRequests = (base = visibleRequests()) => base.filter(chipFilter());
+
+// How many requests each chip would show, in one pass.
+function chipCounts(base) {
+  const n = { all: 0, errors: 0, cancelled: 0, rerouted: 0 };
+  for (const r of base) {
+    n.all++;
+    if (isErr(r)) n.errors++;
+    if (r.status === 499) n.cancelled++;
+    if (isRerouted(r)) n.rerouted++;
+  }
+  return n;
+}
 
 function pauseHTML() {
   const label = S.paused ? (S.pending ? (mob() ? `${S.pending} new` : `Resume · ${S.pending} new`) : 'Resume') : 'Pause';
   return `<button class="btn pause" type="button" data-act="pause" aria-pressed="${S.paused}"${mob() ? ' style="height:44px;font-size:14px;padding:0 14px"' : ''}><span class="dot s7 ${S.paused ? 'warn' : 'ok'}"></span>${label}</button>`;
 }
 
-function reqToolsHTML() {
-  const base = visibleRequests();
-  const chips = [['all', 'All'], ['errors', 'Errors'], ['cancelled', 'Cancelled'], ['rerouted', 'Rerouted']].map(([id, label]) => `<button class="chip" type="button" data-act="req-chip" data-id="${id}" aria-pressed="${S.reqChip === id}">${label} <span class="n">${base.filter(CHIPS[id]).length}</span></button>`).join('');
+function reqToolsHTML(base = visibleRequests()) {
+  const counts = chipCounts(base);
+  const chips = [['all', 'All'], ['errors', 'Errors'], ['cancelled', 'Cancelled'], ['rerouted', 'Rerouted']].map(([id, label]) => `<button class="chip" type="button" data-act="req-chip" data-id="${id}" aria-pressed="${S.reqChip === id}">${label} <span class="n">${counts[id]}</span></button>`).join('');
   const acct = S.reqAcc && accountById(S.reqAcc);
   const pills = [];
   if (S.reqAcc) pills.push(['acc', 'Account', acct ? acctLabel(acct) : S.reqAcc.slice(0, 12)]);
   if (S.reqSess) pills.push(['sess', 'Session', S.reqSess.slice(0, 8)]);
-  const shown = shownRequests().length;
+  const shown = counts[S.reqChip] ?? counts.all;
   if (mob()) {
     return `<div class="m-filters">${chips}${pills.map(([k, , v]) => `<button class="pill" type="button" data-act="clear-pill" data-id="${k}" aria-label="Remove filter ${esc(v)}"><span class="v">${esc(v)}</span><span class="dim">×</span></button>`).join('')}</div>
       <span class="meta" style="font-size:12px;text-wrap:pretty;display:block;margin-top:12px">${fmt(shown)} shown, newest first. Tap a row to see why it went where it did.</span>`;
@@ -2210,11 +2629,14 @@ function requestsHTML() {
     ? `<div style="display:flex;gap:8px">${search}<span id="req-pause" style="display:contents">${pauseHTML()}</span></div>`
     : `<div class="page-head"><div><h1 class="h-page">Requests</h1><p class="meta">The last 300 since the server started, newest first. Click a row to see why it went where it did.</p></div>
         <span class="grow"></span>${search}<span id="req-pause" style="display:contents">${pauseHTML()}</span></div>`;
-  return `${head}<div id="req-tools">${reqToolsHTML()}</div><div id="req-list">${reqListHTML()}</div>`;
+  const base = visibleRequests();
+  return `${head}<div id="req-tools">${reqToolsHTML(base)}</div><div id="req-list">${reqListHTML(base)}</div>`;
 }
 
-function reqListHTML() {
-  const rows = shownRequests();
+function reqListHTML(base = visibleRequests()) {
+  // The whole log is on its way (the first paint fetched only the newest few).
+  if (!S.requestsFull) return skeletonHTML();
+  const rows = shownRequests(base);
   const none = S.requests.length ? 'No requests match.' : 'No requests yet. They appear here the moment a client sends one.';
   if (mob()) return `<div class="card lines" id="req-body">${rows.map(reqMobileHTML).join('') || `<p class="empty-line" style="padding:20px 12px">${none}</p>`}</div>`;
   return `<div class="card table req-table" role="table" aria-label="Requests">
@@ -2286,21 +2708,26 @@ function reqMobileHTML(r) {
   </div>`;
 }
 
-// A live arrival goes on top without re-rendering the list.
-function insertRequest(log) {
-  patch('req-tools', reqToolsHTML);
+// A live arrival goes on top without re-rendering the list (a frame's worth at a
+// time, oldest first).
+function insertRequests(logs) {
+  patchChanged('req-tools', reqToolsHTML);
   const body = $('#req-body');
   if (!body) return;
-  if (!shownRequests().some((r) => r.id === log.id)) return;
+  const chip = chipFilter();
+  const kept = new Set(S.requests);
+  const rows = logs.filter((log) => kept.has(log) && requestFilter(log) && chip(log) && !body.querySelector(`[data-req="${log.id}"]`));
+  if (!rows.length) return;
   $('#req-empty')?.remove();
   body.querySelector('.empty-line')?.remove();
-  body.insertAdjacentHTML('afterbegin', mob() ? reqMobileHTML(log) : reqItemHTML(log));
+  body.insertAdjacentHTML('afterbegin', rows.reverse().map(mob() ? reqMobileHTML : reqItemHTML).join(''));
   while (body.children.length > 300) body.lastElementChild.remove();
 }
 
 function refreshRequests() {
-  patch('req-tools', reqToolsHTML);
-  patch('req-list', reqListHTML);
+  const base = visibleRequests();
+  patch('req-tools', reqToolsHTML, base);
+  patch('req-list', reqListHTML, base);
   patch('req-pause', pauseHTML);
 }
 
@@ -2622,6 +3049,7 @@ async function removeModel(id, provider) {
 }
 
 function modelsCountText() {
+  if (!S.routes) return '';
   const accounts = new Set(Object.values(S.routes?.models || {}).flatMap((steps) => steps.map((s) => s.account)));
   return `${plural(S.models.length, 'model id')} from ${plural(accounts.size, 'account')}. Clients ask for a model by name; Fusebox picks the account. Click an id to copy it.`;
 }
@@ -2642,39 +3070,52 @@ function modelsHeadHTML() {
 function modelsBodyHTML() {
   const count = $('#models-count');
   if (count) count.textContent = modelsCountText();
+  // Route order arrives on its own the first time the page opens (loadRoutes).
+  if (!S.routes) return skeletonHTML();
   const q = S.modelFilter.trim().toLowerCase();
   const fails = failuresByModel();
-  const fams = modelFamilies().map((f) => {
-    const route = famRoute(f);
-    // A failed request doesn't take an account out of rotation; an expired sign-in does.
-    const usable = route.rows.some((r) => r.state === 'ready' && !acctState(accountById(r.account)).signin);
-    const chips = f.ids.map((id) => {
-      const { prefix, added, provider } = modelInfo(id);
-      const base = unprefixed(id);
-      const target = routeSteps(id).map((s) => s.upstream).find((u) => u && u.toLowerCase() !== base.toLowerCase() && !(f.key === 'kimi' && !f.compat));
-      const only = prefix ? routeSteps(id).map((s) => accountById(s.account)).filter(Boolean) : [];
-      const bad = (fails[id] || []).length >= 3;
-      return { id, prefix, added, provider, base, only, target, bad, match: !q || `${id} ${target || ''}`.toLowerCase().includes(q) };
-    }).filter((c) => c.match);
-    let note = null;
-    const worst = Object.entries(fails).filter(([m, l]) => f.ids.includes(m) && l.length >= 3).sort((x, y) => y[1].length - x[1].length)[0];
-    if (worst) {
-      const [m, l] = worst;
-      const e = l[0].error ? `, ${String(hideEmails(l[0].error)).replace(/^\d{3}[^:]*:\s*/, '').slice(0, 90).replace(/[.\s]+$/, '')}` : '';
-      note = { cls: 'err', text: `${m} failed ${l.length} times in the last hour: ${l[0].status}${e}.`, act: 'View requests', data: `data-act="view-model" data-id="${esc(m)}"` };
-    } else if (!usable && route.rows.length) {
-      const signin = route.rows.map((r) => accountById(r.account)).find((a) => acctState(a).signin);
-      const cooling = route.rows.filter((r) => r.state === 'cooling' && r.until).sort((x, y) => Date.parse(x.until) - Date.parse(y.until))[0];
-      if (signin) note = { cls: 'err', text: 'Unavailable until the account signs in again.', act: 'Sign in', data: `data-act="signin-again" data-id="${esc(signin.id)}"` };
-      else if (cooling) note = { cls: 'warn', text: `Every account for these models is cooling down. Back at ${when(cooling.until)}.` };
-      else note = { cls: '', text: 'Every account that serves these models is turned off.' };
-    }
-    return { ...f, route, chips, note, off: !usable };
-  }).filter((f) => f.chips.length);
+  modelFails = failureMarks(fails);
+  const fams = modelFamilies().map((f) => famView(f, fails, q)).filter((f) => f.chips.length);
   if (!fams.length) {
     const empty = q ? `No model matches “${esc(S.modelFilter)}”.` : 'No models yet. Connect an account to see what it serves.';
     return mob() ? `<p class="empty-line">${empty}</p>` : `<div class="card rivets table"><div class="empty" style="border-top:0">${empty}</div></div>`;
   }
+  if (mob()) return fams.map((f) => famHTML(f, q)).join('');
+  return `<div class="card rivets table fams" role="table" aria-label="Model families">
+    <div class="th" role="row"><span>Family</span><span>Model ids</span><span class="c-route-h">Route order · ${quotaWord()}</span></div>
+    ${fams.map((f) => famHTML(f, q)).join('')}</div>`;
+}
+
+// One family with its route, the ids that match the filter and what is wrong with it.
+function famView(f, fails, q) {
+  const route = famRoute(f);
+  // A failed request doesn't take an account out of rotation; an expired sign-in does.
+  const usable = route.rows.some((r) => r.state === 'ready' && !acctState(accountById(r.account)).signin);
+  const chips = f.ids.map((id) => {
+    const { prefix, added, provider } = modelInfo(id);
+    const base = unprefixed(id);
+    const target = routeSteps(id).map((s) => s.upstream).find((u) => u && u.toLowerCase() !== base.toLowerCase() && !(f.key === 'kimi' && !f.compat));
+    const only = prefix ? routeSteps(id).map((s) => accountById(s.account)).filter(Boolean) : [];
+    const bad = (fails[id] || []).length >= 3;
+    return { id, prefix, added, provider, base, only, target, bad, match: !q || `${id} ${target || ''}`.toLowerCase().includes(q) };
+  }).filter((c) => c.match);
+  let note = null;
+  const worst = Object.entries(fails).filter(([m, l]) => f.ids.includes(m) && l.length >= 3).sort((x, y) => y[1].length - x[1].length)[0];
+  if (worst) {
+    const [m, l] = worst;
+    const e = l[0].error ? `, ${String(hideEmails(l[0].error)).replace(/^\d{3}[^:]*:\s*/, '').slice(0, 90).replace(/[.\s]+$/, '')}` : '';
+    note = { cls: 'err', text: `${m} failed ${l.length} times in the last hour: ${l[0].status}${e}.`, act: 'View requests', data: `data-act="view-model" data-id="${esc(m)}"` };
+  } else if (!usable && route.rows.length) {
+    const signin = route.rows.map((r) => accountById(r.account)).find((a) => acctState(a).signin);
+    const cooling = route.rows.filter((r) => r.state === 'cooling' && r.until).sort((x, y) => Date.parse(x.until) - Date.parse(y.until))[0];
+    if (signin) note = { cls: 'err', text: 'Unavailable until the account signs in again.', act: 'Sign in', data: `data-act="signin-again" data-id="${esc(signin.id)}"` };
+    else if (cooling) note = { cls: 'warn', text: `Every account for these models is cooling down. Back at ${when(cooling.until)}.` };
+    else note = { cls: '', text: 'Every account that serves these models is turned off.' };
+  }
+  return { ...f, route, chips, note, off: !usable };
+}
+
+function famHTML(f, q) {
   const onlyText = (c) => (c.only.length === 1 ? acctLabel(c.only[0]) : plural(c.only.length, 'account'));
   const chipTitle = (c) => [
     c.prefix ? `${c.id} only goes to ${c.only.length ? c.only.map(acctLabel).join(', ') : `accounts with the ${c.prefix}/ prefix`}` : '',
@@ -2682,11 +3123,11 @@ function modelsBodyHTML() {
     c.bad ? `${c.id} is failing` : '',
     c.added ? 'You added this model; it goes once Fusebox knows it' : '',
   ].filter(Boolean).join('. ') || `Copy ${c.id}`;
-  const chipHTML = (f, c) => (c.added ? `<span class="idchip-pair">${idChipHTML(f, c)}<button class="idchip-x" type="button" data-act="remove-model" data-id="${esc(c.id)}" data-provider="${esc(c.provider)}" aria-label="Remove ${esc(c.id)}" title="Remove ${esc(c.id)}">×</button></span>` : idChipHTML(f, c));
+  const idChipHTML = (c) => `<button class="idchip${c.target ? ' alias' : ''}${c.added ? ' added' : ''}${c.bad ? ' bad' : ''}${f.off ? ' off' : ''}${q ? ' hit' : ''}" type="button" data-act="copy-model" data-id="${esc(c.id)}" title="${esc(chipTitle(c))}">${c.prefix ? `<span><span class="pfx">${esc(c.prefix)}/</span>${esc(c.base)}</span>` : esc(c.id)}${c.target ? `<span class="to">→ ${esc(c.target)}</span>` : ''}${c.prefix && c.only.length ? `<span class="to">only ${esc(onlyText(c))}</span>` : ''}${c.added ? '<span class="tag">added</span>' : ''}${c.bad ? '<span class="dot s6 err"></span>' : ''}</button>`;
+  const chipHTML = (c) => (c.added ? `<span class="idchip-pair">${idChipHTML(c)}<button class="idchip-x" type="button" data-act="remove-model" data-id="${esc(c.id)}" data-provider="${esc(c.provider)}" aria-label="Remove ${esc(c.id)}" title="Remove ${esc(c.id)}">×</button></span>` : idChipHTML(c));
   // Families of a provider that takes added models end with a "+ Add" chip.
-  const addChip = (f) => (!q && !f.compat && addModelProviders().includes(f.logoKey[0]) ? `<button class="idchip add" type="button" data-act="add-model" data-provider="${f.logoKey[0]}" title="Add a ${esc(f.name)} model Fusebox doesn't list yet">+ Add</button>` : '');
-  const idChipHTML = (f, c) => `<button class="idchip${c.target ? ' alias' : ''}${c.added ? ' added' : ''}${c.bad ? ' bad' : ''}${f.off ? ' off' : ''}${q ? ' hit' : ''}" type="button" data-act="copy-model" data-id="${esc(c.id)}" title="${esc(chipTitle(c))}">${c.prefix ? `<span><span class="pfx">${esc(c.prefix)}/</span>${esc(c.base)}</span>` : esc(c.id)}${c.target ? `<span class="to">→ ${esc(c.target)}</span>` : ''}${c.prefix && c.only.length ? `<span class="to">only ${esc(onlyText(c))}</span>` : ''}${c.added ? '<span class="tag">added</span>' : ''}${c.bad ? '<span class="dot s6 err"></span>' : ''}</button>`;
-  const stepHTML = (f, r, i, short) => {
+  const addChip = !q && !f.compat && addModelProviders().includes(f.logoKey[0]) ? `<button class="idchip add" type="button" data-act="add-model" data-provider="${f.logoKey[0]}" title="Add a ${esc(f.name)} model Fusebox doesn't list yet">+ Add</button>` : '';
+  const stepHTML = (r, i, short) => {
     const a = accountById(r.account);
     const t = routeStepText(r, a);
     const sub = `${provName(a)}${planName(a) ? ` ${planName(a)}` : ''}${r.serves < f.route.models ? ` · ${r.serves} of ${f.route.models} models` : ''}`;
@@ -2694,21 +3135,50 @@ function modelsBodyHTML() {
       <span class="nm"><span${a.disabled ? ' class="off"' : ''}>${esc(acctLabel(a))}</span>${short ? '' : `<span>${esc(sub)}</span>`}</span>
       <span class="txt ${t.cls}">${r.next ? '<span class="next-tag">Next</span>' : ''}${esc(short ? t.short : t.txt)}</span></button>`;
   };
-  const countLabel = (f) => (q ? `${f.chips.length} of ${f.ids.length} ids` : plural(f.ids.length, 'id'));
-  const noteHTML2 = (f) => (f.note ? `<div class="fam-note ${f.note.cls}"><span>${esc(f.note.text)}</span>${f.note.act ? `<button class="btn sm" type="button" ${f.note.data}>${esc(f.note.act)}</button>` : ''}</div>` : '');
+  const countLabel = q ? `${f.chips.length} of ${f.ids.length} ids` : plural(f.ids.length, 'id');
+  const note = f.note ? `<div class="fam-note ${f.note.cls}"><span>${esc(f.note.text)}</span>${f.note.act ? `<button class="btn sm" type="button" ${f.note.data}>${esc(f.note.act)}</button>` : ''}</div>` : '';
+  const chips = `<div class="chipset" style="gap:6px">${f.chips.map(chipHTML).join('')}${addChip}</div>${note}`;
   if (mob()) {
-    return fams.map((f) => `<section class="card m-fam" aria-label="${esc(f.name)}">
-      <div class="m-fam-head">${logo(f.logoKey[0], f.logoKey[1], null, 18)}<span class="nm">${esc(f.name)}</span><span class="pat">${esc(famPattern(f))}</span><span class="grow"></span><span class="meta" style="font-size:12px">${countLabel(f)}</span></div>
-      ${f.route.rows.length ? `<div class="m-route">${f.route.rows.map((r, i) => stepHTML(f, r, i, true)).join('')}</div>` : ''}
-      <div class="chipset" style="gap:6px">${f.chips.map((c) => chipHTML(f, c)).join('')}${addChip(f)}</div>${noteHTML2(f)}</section>`).join('');
+    return `<section class="card m-fam" data-fam="${esc(f.key)}" aria-label="${esc(f.name)}">
+      <div class="m-fam-head">${logo(f.logoKey[0], f.logoKey[1], null, 18)}<span class="nm">${esc(f.name)}</span><span class="pat">${esc(famPattern(f))}</span><span class="grow"></span><span class="meta" style="font-size:12px">${countLabel}</span></div>
+      ${f.route.rows.length ? `<div class="m-route">${f.route.rows.map((r, i) => stepHTML(r, i, true)).join('')}</div>` : ''}
+      ${chips}</section>`;
   }
-  return `<div class="card rivets table fams" role="table" aria-label="Model families">
-    <div class="th" role="row"><span>Family</span><span>Model ids</span><span class="c-route-h">Route order · ${quotaWord()}</span></div>
-    ${fams.map((f) => `<div class="fam" role="row">
-      <div class="fam-name">${logo(f.logoKey[0], f.logoKey[1])}<div class="cell2"><span>${esc(f.name)}</span><span class="pat">${esc(famPattern(f))}</span><span class="meta" style="font-size:12px">${countLabel(f)}</span></div></div>
-      <div class="fam-ids"><div class="chipset" style="gap:6px">${f.chips.map((c) => chipHTML(f, c)).join('')}${addChip(f)}</div>${noteHTML2(f)}</div>
-      <div class="route-col"><span class="capsm">Route order · ${quotaWord()}</span>${f.route.rows.map((r, i) => stepHTML(f, r, i, false)).join('') || '<span class="dim" style="font-size:12px">No account serves these right now.</span>'}</div>
-    </div>`).join('')}</div>`;
+  return `<div class="fam" role="row" data-fam="${esc(f.key)}">
+      <div class="fam-name">${logo(f.logoKey[0], f.logoKey[1])}<div class="cell2"><span>${esc(f.name)}</span><span class="pat">${esc(famPattern(f))}</span><span class="meta" style="font-size:12px">${countLabel}</span></div></div>
+      <div class="fam-ids">${chips}</div>
+      <div class="route-col"><span class="capsm">Route order · ${quotaWord()}</span>${f.route.rows.map((r, i) => stepHTML(r, i, false)).join('') || '<span class="dim" style="font-size:12px">No account serves these right now.</span>'}</div>
+    </div>`;
+}
+
+// What the model list shows of the last hour's failures: each model failing three or
+// more times, with how often and its latest error.
+let modelFails = new Map();
+function failureMarks(fails) {
+  const marks = new Map();
+  for (const [m, l] of Object.entries(fails)) if (l.length >= 3) marks.set(m, `${l.length}\u0000${l[0].status}\u0000${l[0].error || ''}`);
+  return marks;
+}
+
+// A live request reaches the model list only through those failures: when they change,
+// only the families of the models concerned are redrawn.
+function patchModelFailures() {
+  const root = $('#models-root');
+  if (!root || !S.routes) return;
+  const fails = failuresByModel();
+  const marks = failureMarks(fails);
+  const changed = new Set([...marks.keys(), ...modelFails.keys()].filter((m) => marks.get(m) !== modelFails.get(m)));
+  if (!changed.size) return;
+  const q = S.modelFilter.trim().toLowerCase();
+  for (const f of modelFamilies()) {
+    if (!f.ids.some((id) => changed.has(id))) continue;
+    const v = famView(f, fails, q);
+    if (!v.chips.length) continue;
+    const el = root.querySelector(`[data-fam="${CSS.escape(f.key)}"]`);
+    if (!el) return patch('models-root', modelsBodyHTML);
+    replaceHTML(el, famHTML(v, q));
+  }
+  modelFails = marks;
 }
 
 // ---------------------------------------------------------------- notifications
@@ -3189,8 +3659,9 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'req-filter') {
     S.filter = e.target.value;
     S.openReq = null;
-    patch('req-tools', reqToolsHTML);
-    patch('req-list', reqListHTML);
+    const base = visibleRequests();
+    patch('req-tools', reqToolsHTML, base);
+    patch('req-list', reqListHTML, base);
   } else if (e.target.closest('form[data-form="add-model"]') && S.addModel) {
     // Pick the provider from the name until one is chosen by hand.
     S.addModel.model = e.target.value;
@@ -3304,6 +3775,7 @@ function onRoute() {
   closeLayers();
   const { route, sub, query } = parseHash();
   const from = S.route;
+  const prevSub = S.sub;
   S.route = route;
   S.sub = route === 'accounts' || route === 'config' ? sub : null;
   S.confirm = null;
@@ -3315,39 +3787,59 @@ function onRoute() {
   if (route === 'config') {
     if (S.sub && CONFIG_SECTIONS.some(([id]) => id === S.sub) && !(S.config.section === 'yaml' && S.sub !== 'yaml' && rawDirty())) S.config.section = S.sub;
   } else Object.assign(S.config, { msg: null, reveal: false, named: namedIdle() });
+  // Reopening an account's page shows its activity afresh.
+  if (route === 'accounts' && S.sub && (from !== 'accounts' || prevSub !== S.sub) && S.overview) loadActivity(S.sub, true);
+  if (route === 'models' && S.overview && (S.routesStale || !S.routes)) loadRoutes();
   render();
+  if (S.overview && needsLog()) loadRequests();
   if (route === 'accounts' && !S.sub && S.panel === 'key') $('#acct-panel input')?.focus();
   view.focus({ preventScroll: true });
   window.scrollTo(0, 0);
 }
 
-setInterval(() => {
+// Countdowns, "ago" times, reset deadlines and expiring quota windows, once a second in
+// one sweep. Nothing runs while the page is hidden; resume() catches up.
+const TIMED = '[data-until], [data-reset-deadline], [data-ago], [data-quota-reset]';
+const timerText = new WeakMap();
+function setTimerText(el, text) {
+  if ((timerText.get(el) ?? el.textContent) === text) return;
+  timerText.set(el, text);
+  el.textContent = text;
+}
+function tickTimers() {
+  const now = Date.now();
   let expired = false;
-  for (const el of $$('[data-until]')) {
-    if (Date.parse(el.dataset.until) <= Date.now()) expired = true;
-    el.textContent = el.dataset.countdown === 'compact' ? compactLeft(el.dataset.until) : left(el.dataset.until);
+  let quota = false;
+  for (const el of document.querySelectorAll(TIMED)) {
+    const d = el.dataset;
+    if (d.until != null) {
+      if (Date.parse(d.until) <= now) expired = true;
+      setTimerText(el, d.countdown === 'compact' ? compactLeft(d.until) : left(d.until));
+    }
+    if (d.resetDeadline != null && Date.parse(d.resetDeadline) <= now) el.disabled = true;
+    if (d.ago != null) setTimerText(el, ago(d.ago));
+    if (d.quotaReset != null && Date.parse(d.quotaReset) <= now) quota = true;
   }
-  for (const el of $$('[data-reset-deadline]')) {
-    if (Date.parse(el.dataset.resetDeadline) <= Date.now()) el.disabled = true;
-  }
-  for (const el of $$('[data-ago]')) el.textContent = ago(el.dataset.ago);
-  if ($$('[data-quota-reset]').some((el) => Date.parse(el.dataset.quotaReset) <= Date.now())) {
+  if (quota) {
     refreshViews();
     syncResetModal();
     expired = true;
   }
   if (expired) refreshAccounts();
-}, 1000);
+}
+setInterval(() => { if (!document.hidden) tickTimers(); }, 1000);
 
-// Resync the hour of load once a minute (rolls the window forward).
-setInterval(async () => {
-  if (S.locked || !S.overview) return;
+// Resync the hour of load once a minute (rolls the window forward), while the page shows.
+async function pollOverview() {
+  if (S.locked || !S.overview || refreshing.accounts) return;
+  overviewAt = Date.now();
   try {
     S.overview = await api('/overview');
-    if (S.route === 'overview') { patch('figures', figuresHTML); patch('bars', barsHTML); }
+    if (S.route === 'overview') { patchFigures(); patchBars(); }
     if (S.route === 'accounts' && S.sub) loadActivity(S.sub, true);
   } catch {}
-}, 60000);
+}
+setInterval(() => { if (!document.hidden && Date.now() - overviewAt >= 30000) pollOverview(); }, 60000);
 
 window.addEventListener('beforeunload', (e) => {
   if (configDirty() || rawDirty()) e.preventDefault();

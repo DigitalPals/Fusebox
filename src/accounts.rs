@@ -339,9 +339,17 @@ pub struct AccountState {
     pub counters: Counters,
     /// Subscription usage windows (Claude, ChatGPT).
     pub quota: crate::quota::Quota,
+    /// Which clients and sessions used those windows.
+    pub attribution: crate::attribution::Attribution,
 }
 
 impl AccountState {
+    /// A quota reading: the windows, and the attribution of whatever rose since the last one.
+    pub fn set_quota(&mut self, windows: Vec<crate::quota::Window>, plan: Option<String>) {
+        self.attribution.reading(&windows, Utc::now());
+        self.quota.set(windows, plan);
+    }
+
     /// What pauses the account, per model ("*" = every model): until when, and why
     /// (`rate_limit`, spent subscription `quota`, or a quota check, `checking`).
     pub fn pauses(&self, now: DateTime<Utc>) -> BTreeMap<String, (DateTime<Utc>, &'static str)> {
@@ -520,6 +528,25 @@ impl Account {
             Credential::ApiKey { base_url, .. } => base_url.as_ref().is_some_and(|b| !b.trim().is_empty()),
             Credential::OAuth(_) => false,
         }
+    }
+
+    /// Whether `model` is one of `public_models()`, without building the list. The
+    /// list keeps the first spelling of each name, so only that entry decides.
+    pub fn lists(&self, model: &str) -> bool {
+        let same = |m: &str| m.eq_ignore_ascii_case(model);
+        if !self.models.is_empty() {
+            return self.models.iter().any(|m| same(m.public()) && !self.excludes(&m.name));
+        }
+        let shown =
+            |m: &str| !self.excludes(m) && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork);
+        let first = match self.provider.builtin_models().iter().find(|m| same(m)) {
+            Some(m) => Some(shown(m)),
+            None => match self.discovered.read().iter().find(|m| same(m)) {
+                Some(m) => Some(shown(m)),
+                None => self.extra.iter().find(|m| same(m)).map(|m| shown(m)),
+            },
+        };
+        first == Some(true) || self.aliases.iter().any(|a| same(&a.alias) && !self.excludes(&a.name))
     }
 
     pub fn public_models(&self) -> Vec<String> {
@@ -1103,6 +1130,7 @@ impl Pool {
                         last_used: st.last_used,
                         counters: st.counters.clone(),
                         quota: st.quota.clone(),
+                        attribution: st.attribution.clone(),
                         ..Default::default()
                     }
                 })
@@ -1167,8 +1195,7 @@ impl Pool {
             .filter(|a| !a.state.lock().disabled)
             .collect();
         // A listed model beats one that only matches a family (`gpt-*` takes anything).
-        let listed: Vec<String> = usable.iter().flat_map(|a| a.public_models()).collect();
-        let known = |m: &str| listed.iter().any(|l| l.eq_ignore_ascii_case(m));
+        let known = |m: &str| usable.iter().any(|a| a.lists(m));
         let forced = matches!(only, Some(Only::Provider(_)));
         let served = |m: &str| usable.iter().any(|a| a.resolve_with(m, forced).is_some());
         if known(model) {
@@ -1498,6 +1525,29 @@ impl Pool {
             }
         }
         Cooldowns(out)
+    }
+
+    /// Every account's attribution worth saving, and whether any changed since the last call.
+    pub fn attributions(&self) -> (crate::attribution::Saved, bool) {
+        let mut changed = false;
+        let mut out = BTreeMap::new();
+        for a in self.accounts.read().iter() {
+            let mut st = a.state.lock();
+            changed |= std::mem::take(&mut st.attribution.dirty);
+            if !st.attribution.current.is_empty() || !st.attribution.previous.is_empty() {
+                out.insert(a.id.clone(), st.attribution.for_disk());
+            }
+        }
+        (crate::attribution::Saved(out), changed)
+    }
+
+    pub fn restore_attributions(&self, saved: crate::attribution::Saved) {
+        let mut saved = saved.0;
+        for a in self.accounts.read().iter() {
+            if let Some(attribution) = saved.remove(&a.id) {
+                a.state.lock().attribution = attribution;
+            }
+        }
     }
 
     /// Puts saved cooldowns back, keeping whichever of two deadlines is later.
@@ -1913,6 +1963,53 @@ extra-models:
         assert!(!pool.knows(Provider::Claude, "mythos-1") && !pool.knows(Provider::Codex, "mythos-1"));
         pool.all()[0].discovered.write().push("mythos-1".into());
         assert!(pool.knows(Provider::Claude, "mythos-1"));
+    }
+
+    #[test]
+    fn listing_checks_agree_with_the_public_model_lists() {
+        let text = r#"
+auth-dir: /nonexistent
+claude-api-key:
+  - api-key: k
+codex-api-key:
+  - api-key: k2
+    excluded-models: [gpt-6-*]
+openai-compatibility:
+  - name: local
+    base-url: http://127.0.0.1:1/v1
+    models:
+      - name: qwen3-coder:30b
+        alias: qwen
+      - name: hidden-model
+    excluded-models: [hidden-*]
+extra-models:
+  claude: [mythos-1, CLAUDE-OPUS-5-5]
+oauth-model-alias:
+  claude:
+    - name: claude-sonnet-5-5
+      alias: sonnet
+"#;
+        let cfg = Config::parse(text).unwrap();
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        pool.all()[0].discovered.write().extend(["Claude-Opus-5-5".to_string(), "discovered-1".to_string()]);
+        for acct in pool.all() {
+            let listed = acct.public_models();
+            let mut names: Vec<String> = listed.clone();
+            names.extend(listed.iter().map(|m| m.to_ascii_uppercase()));
+            names.extend(
+                ["sonnet", "claude-sonnet-5-5", "gpt-6-astra", "qwen", "hidden-model", "mythos-1", "nothing", ""]
+                    .map(String::from),
+            );
+            for name in names {
+                assert_eq!(
+                    acct.lists(&name),
+                    listed.iter().any(|m| m.eq_ignore_ascii_case(&name)),
+                    "{} lists {name}",
+                    acct.label
+                );
+            }
+        }
     }
 
     #[test]

@@ -130,6 +130,7 @@ impl Tracker {
         self.log.client_app = client_app(headers);
         if let Some(a) = &mut self.analytics {
             a.client(headers);
+            a.program(self.log.client_app);
             if crate::policy::named_client(&self.app.cfg(), headers).is_some() {
                 a.track_limits(self.app.clients.clone());
             }
@@ -155,11 +156,21 @@ impl Tracker {
             }
         };
         if self.log.routing_warning == Some("missing_session_id") {
-            tracing::warn!(
-                request_id = self.log.id,
-                transport = self.log.transport,
-                "request has no stable session identifier; send x-fusebox-session-id to preserve its subscription across requests"
-            );
+            // Once per program and transport every ten minutes; the request log marks each one.
+            let key = format!("session:{}:{}", self.log.client_app.unwrap_or("unknown"), self.log.transport);
+            if crate::diagnostics::warn_once(&key, std::time::Duration::from_secs(600)) {
+                tracing::warn!(
+                    request_id = self.log.id,
+                    transport = self.log.transport,
+                    "request has no stable session identifier; send x-fusebox-session-id to preserve its subscription across requests (repeats are logged at debug for ten minutes)"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = self.log.id,
+                    transport = self.log.transport,
+                    "request has no stable session identifier"
+                );
+            }
         }
     }
 
@@ -626,27 +637,17 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     let session = call.session.clone();
     let lease = session.as_deref().map(|s| app.sessions.hold(s, app.cfg().session_affinity_idle_seconds));
     let end_session = crate::affinity::ends_session(&headers);
-    let full = capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default();
+    let mut full = capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default();
     match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
-                use crate::formats::StreamParser;
-                let mut parser = formats::responses::Parser::default();
-                let mut aggregate = Aggregate::default();
-                let mut events = Vec::new();
+                let mut history = History::default();
                 let _lease = lease;
                 while let Some(frame) = frames.next().await {
                     if let Some(session) = &capture
-                        && let Ok(mut value) = serde_json::from_str::<Value>(&frame.data)
+                        && let Some(response) = history.observe(&frame)
                     {
-                        let sse = crate::sse::SseEvent { event: frame.event.as_ref().map(|e| e.to_string()), data: String::new() };
-                        parser.feed_value(&sse, Some(&value), &mut events);
-                        for event in events.drain(..) { aggregate.push(&event); }
-                        if matches!(value["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.done")) {
-                            let mut response = value["response"].take();
-                            crate::affinity::complete_output(&mut response, &aggregate);
-                            app.sessions.remember(&headers, session, &response, &full);
-                        }
+                        app.sessions.remember(&headers, session, &response, std::mem::take(&mut full));
                     }
                     yield frame;
                 }
@@ -659,7 +660,7 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         }
         Reply::Json(v) => {
             if let Some(session) = capture {
-                app.sessions.remember(&headers, &session, &v, &full);
+                app.sessions.remember(&headers, &session, &v, full);
             }
             if end_session && let Some(session) = &session {
                 app.sessions.end(session);
@@ -668,6 +669,86 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
             Reply::Json(v)
         }
         other => other,
+    }
+}
+
+/// Builds a Responses turn's continuation history from the frames sent to the client.
+///
+/// The terminal response normally carries the output. Some Codex backends leave it
+/// empty: most then sent each finished item, which is kept; for a backend that sent
+/// only deltas, the turn is rebuilt from them as before. Named deltas are buffered
+/// unparsed (until the first finished item makes them unnecessary) and parsed only
+/// when that rebuild is needed, so ordinary turns parse just a few frames.
+#[derive(Default)]
+struct History {
+    items: Vec<(u64, Value)>,
+    deltas: Vec<Frame>,
+    buffered: usize,
+    overflow: bool,
+}
+
+impl History {
+    /// The rebuild is bounded like a stored history entry; past it, deltas are dropped.
+    const LIMIT: usize = 8 << 20;
+
+    /// The finished response to remember, once the terminal frame arrives.
+    fn observe(&mut self, frame: &Frame) -> Option<Value> {
+        let named = frame.event.as_deref();
+        let wanted = named.is_none_or(|e| {
+            matches!(e, "response.output_item.done" | "response.completed" | "response.incomplete" | "response.done")
+        });
+        if !wanted {
+            if self.items.is_empty() && !self.overflow {
+                self.buffered += frame.data.len();
+                self.overflow = self.buffered > Self::LIMIT;
+                if self.overflow {
+                    self.deltas = Vec::new();
+                } else {
+                    self.deltas.push(Frame { event: frame.event.clone(), data: frame.data.clone() });
+                }
+            }
+            return None;
+        }
+        let mut value = serde_json::from_str::<Value>(&frame.data).ok()?;
+        match value["type"].as_str() {
+            Some("response.output_item.done") => {
+                let index = value["output_index"].as_u64().unwrap_or(self.items.len() as u64);
+                self.items.push((index, value["item"].take()));
+                self.deltas = Vec::new();
+                None
+            }
+            Some("response.completed" | "response.incomplete" | "response.done") => {
+                let mut response = value["response"].take();
+                if response["output"].as_array().is_none_or(|o| o.is_empty()) {
+                    if !self.items.is_empty() {
+                        self.items.sort_by_key(|(index, _)| *index);
+                        response["output"] = Value::Array(self.items.drain(..).map(|(_, item)| item).collect());
+                    } else if !self.deltas.is_empty() {
+                        use crate::formats::StreamParser;
+                        let mut parser = formats::responses::Parser::default();
+                        let mut aggregate = Aggregate::default();
+                        let mut events = Vec::new();
+                        for delta in self.deltas.drain(..) {
+                            let parsed = serde_json::from_str::<Value>(&delta.data).ok();
+                            let sse =
+                                crate::sse::SseEvent { event: delta.event.map(|e| e.into_owned()), data: delta.data };
+                            parser.feed_value(&sse, parsed.as_ref(), &mut events);
+                            for event in events.drain(..) {
+                                aggregate.push(&event);
+                            }
+                        }
+                        crate::affinity::complete_output(&mut response, &aggregate);
+                    }
+                }
+                Some(response)
+            }
+            _ => {
+                if self.items.is_empty() && !self.overflow {
+                    self.deltas.push(Frame { event: frame.event.clone(), data: frame.data.clone() });
+                }
+                None
+            }
+        }
     }
 }
 
@@ -814,6 +895,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     let mut tracker = Tracker::new(&app, call.format, call.stream, call.transport, &model);
     tracker.client_app(&call.headers);
     tracker.session(call.session.as_deref(), call.session_source, &cfg);
+    let requested_cache = crate::cache::Requested::of(&call.body);
 
     let mut parsed: Option<Request> = None;
     let mut shortened: Option<(Request, HashMap<String, String>)> = None;
@@ -909,11 +991,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             break;
         }
         tracker.selected(&selected);
-        // An inferred assignment is a best guess: it is written in the background, not
-        // before the request, so requests without a session id never wait for the disk.
-        if !inferred {
-            app.sessions.persist_selection(&selected).await;
-        }
+        // An inferred assignment is a best guess: it is written in the background, so
+        // requests without a session id never wait for the disk. Other new assignments
+        // are written while the provider is contacted, and are durable before the
+        // client sees any of the answer.
+        let mut durable = if inferred { None } else { app.sessions.begin_persist(&selected) };
         let (acct, upstream_model) = (selected.account, selected.model);
 
         if let Err(e) = crate::oauth::ensure_ready(&app, &acct).await {
@@ -1019,8 +1101,13 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             match formats::preserve_cache_hints(call.format, native, &call.body, &mut body) {
                 Ok(downgrade) => downgrade,
                 Err(message) => {
-                    let mut policy =
-                        crate::cache::Policy::new(&call.body, &body, native, cache_scope, Some(message.clone()));
+                    let mut policy = crate::cache::Policy::for_request(
+                        &requested_cache,
+                        &body,
+                        native,
+                        cache_scope,
+                        Some(message.clone()),
+                    );
                     policy.applied = "rejected";
                     policy.key_scope = "not_sent";
                     tracker.cache_policy(policy);
@@ -1031,8 +1118,13 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         };
         if let Some(reason) = &cache_downgrade {
             if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject {
-                let mut policy =
-                    crate::cache::Policy::new(&call.body, &body, native, cache_scope, cache_downgrade.clone());
+                let mut policy = crate::cache::Policy::for_request(
+                    &requested_cache,
+                    &body,
+                    native,
+                    cache_scope,
+                    cache_downgrade.clone(),
+                );
                 policy.applied = "rejected";
                 policy.key_scope = "not_sent";
                 tracker.cache_policy(policy);
@@ -1041,7 +1133,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
                 && provider == Provider::Claude
-                && crate::cache::has_markers(&call.body)
+                && requested_cache.markers
                 && !crate::cache::has_markers(&body)
             {
                 // The caller explicitly opted into provider defaults after a lost
@@ -1057,7 +1149,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             return error_reply(call.format, 400, &message);
         }
         if !passthrough && provider == Provider::Claude {
-            formats::claude::apply_translated_cache_policy(&call.body, &mut body);
+            formats::claude::apply_translated_cache_policy_with(
+                requested_cache.explicit_mode,
+                requested_cache.markers,
+                &mut body,
+            );
         }
 
         // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
@@ -1077,7 +1173,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             body,
         );
         let mut cache_policy =
-            crate::cache::Policy::new(&call.body, &prepared.body, native, cache_scope, cache_downgrade);
+            crate::cache::Policy::for_request(&requested_cache, &prepared.body, native, cache_scope, cache_downgrade);
         if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
             cache_policy.key_scope = cache_scope;
         }
@@ -1137,6 +1233,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 continue;
             }
         };
+        if let Some(durable) = durable.take() {
+            let _ = durable.await;
+        }
 
         let status = resp.status().as_u16();
         if let Some(c) = tracker.usage_tap() {

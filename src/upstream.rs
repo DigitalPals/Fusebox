@@ -178,23 +178,27 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
         betas = cc.into_iter().map(String::from).collect();
         betas.extend(caller);
         cloak_body(&mut body, t.acct, account_uuid.as_deref(), t.count_tokens);
+        // The newest Claude Code release known, with the runtime headers the user's
+        // own installation sends (see `clients`).
+        let profile = crate::clients::claude_profile();
+        let learned = |name: &str| profile.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap_or_default();
         headers.extend(
             [
-                ("anthropic-version", "2023-06-01"),
-                ("anthropic-dangerous-direct-browser-access", "true"),
-                ("x-app", "cli"),
-                ("user-agent", CC_USER_AGENT),
-                ("x-stainless-lang", "js"),
-                ("x-stainless-package-version", "0.128.0"),
-                ("x-stainless-os", "MacOS"),
-                ("x-stainless-arch", "arm64"),
-                ("x-stainless-runtime", "node"),
-                ("x-stainless-runtime-version", "v26.3.0"),
-                ("x-stainless-retry-count", "0"),
-                ("x-stainless-timeout", "600"),
-                ("x-claude-code-session-id", t.acct.session_id.as_str()),
+                ("anthropic-version", "2023-06-01".to_string()),
+                ("anthropic-dangerous-direct-browser-access", "true".to_string()),
+                ("x-app", "cli".to_string()),
+                ("user-agent", crate::clients::claude_user_agent()),
+                ("x-stainless-lang", "js".to_string()),
+                ("x-stainless-package-version", learned("x-stainless-package-version")),
+                ("x-stainless-os", learned("x-stainless-os")),
+                ("x-stainless-arch", learned("x-stainless-arch")),
+                ("x-stainless-runtime", "node".to_string()),
+                ("x-stainless-runtime-version", learned("x-stainless-runtime-version")),
+                ("x-stainless-retry-count", "0".to_string()),
+                ("x-stainless-timeout", "600".to_string()),
+                ("x-claude-code-session-id", t.acct.session_id.clone()),
             ]
-            .map(|(k, v)| (k.to_string(), v.to_string())),
+            .map(|(k, v)| (k.to_string(), v)),
         );
     } else {
         let version = header(t.client_headers, "anthropic-version").unwrap_or_else(|| "2023-06-01".into());
@@ -239,7 +243,8 @@ fn strip_foreign_thinking(body: &mut Value) {
 fn cc_fingerprint(message: &str) -> String {
     let units: Vec<u16> = message.encode_utf16().collect();
     let sampled: Vec<u16> = [4usize, 7, 20].iter().map(|&i| units.get(i).copied().unwrap_or(b'0' as u16)).collect();
-    let input = format!("{CC_FINGERPRINT_SALT}{}{CC_VERSION}", String::from_utf16_lossy(&sampled));
+    let version = crate::clients::version(crate::clients::CLAUDE_CODE);
+    let input = format!("{CC_FINGERPRINT_SALT}{}{version}", String::from_utf16_lossy(&sampled));
     hex::encode(Sha256::digest(input.as_bytes()))[..3].to_string()
 }
 
@@ -287,8 +292,11 @@ fn cloak_body(body: &mut Value, acct: &Account, account_uuid: Option<&str>, coun
         .collect();
 
     let (first_user, text) = first_user_text(body);
-    let billing =
-        format!("x-anthropic-billing-header: cc_version={CC_VERSION}.{}; cc_entrypoint=cli;", cc_fingerprint(&text));
+    let billing = format!(
+        "x-anthropic-billing-header: cc_version={}.{}; cc_entrypoint=cli;",
+        crate::clients::version(crate::clients::CLAUDE_CODE),
+        cc_fingerprint(&text)
+    );
     body["system"] = json!([
         { "type": "text", "text": billing },
         { "type": "text", "text": CC_IDENTITY }
@@ -541,9 +549,9 @@ pub fn codex_headers(client: &HeaderMap, token: &str, account_id: Option<&str>, 
         }
     } else if oauth {
         if !h.iter().any(|(k, _)| k == "version") {
-            h.push(("version".into(), CODEX_VERSION.into()));
+            h.push(("version".into(), crate::clients::codex_version()));
         }
-        h.push(("user-agent".into(), CODEX_USER_AGENT.into()));
+        h.push(("user-agent".into(), crate::clients::codex_user_agent()));
         h.push(("originator".into(), CODEX_ORIGINATOR.into()));
         if let Some(a) = account_id {
             h.push(("chatgpt-account-id".into(), a.into()));
@@ -787,11 +795,14 @@ fn responses_api(t: &Target, mut body: Value) -> Prepared {
             headers.extend(
                 [
                     ("x-xai-token-auth", "xai-grok-cli".to_string()),
-                    ("x-grok-client-version", device::xai::CLIENT_VERSION.to_string()),
+                    ("x-grok-client-version", crate::clients::version(crate::clients::GROK)),
                     // The interactive CLI: its pager names itself and the shell it runs.
                     (
                         "user-agent",
-                        format!("grok-pager/{v} grok-shell/{v} (macos; aarch64)", v = device::xai::CLIENT_VERSION),
+                        format!(
+                            "grok-pager/{v} grok-shell/{v} (macos; aarch64)",
+                            v = crate::clients::version(crate::clients::GROK)
+                        ),
                     ),
                     ("x-grok-client-identifier", "grok-shell".to_string()),
                     ("x-grok-client-mode", "interactive".to_string()),

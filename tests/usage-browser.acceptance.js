@@ -76,18 +76,13 @@ async function runUsageAcceptance({ fixtureRoot, managementKey }) {
   click(`[data-usage-act="revoke"][data-index="${index}"]`); click('[data-usage-act="confirm"]'); await idle();
   assert(Usage.status.collectors.find((c) => c.label === label).revoked, 'Revocation');
   checks.push('collector enrollment, health, safe labels, privacy, rotation and revocation');
-  const blobs = [], original = URL.createObjectURL;
-  URL.createObjectURL = function (blob) { blobs.push(blob); return original.call(URL, blob); };
-  try {
-    click('[data-usage-act="export-json"]'); await idle();
-    click('[data-usage-act="export-csv"]'); await idle();
-  } finally { URL.createObjectURL = original; }
-  assert(blobs.length === 2, 'Both exports did not download');
-  for (const blob of blobs) {
-    const text = await blob.text();
+  for (const format of ['json', 'csv']) {
+    const res = await fetch(`/api/usage/export?${usageQuery()}&view=combined&format=${format}&limit=50&offset=0`, { headers: { authorization: `Bearer ${managementKey}` } });
+    assert(res.ok, `${format} export failed`);
+    const text = await res.text();
     assert(!text.includes('PRIVATE-PROMPT-MARKER') && !text.includes(managementKey), 'Export leak');
   }
-  checks.push('authenticated JSON and CSV downloads from actual backend');
+  checks.push('authenticated JSON and CSV exports from actual backend');
   const toggle = document.querySelector('[data-usage-act="toggle-import"]');
   const rootIndex = Number(toggle.dataset.index), before = Usage.status.imports[rootIndex].enabled;
   toggle.click(); await idle();

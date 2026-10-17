@@ -2,6 +2,9 @@ mod accounts;
 mod admission;
 mod affinity;
 mod antigravity;
+mod attribution;
+#[cfg(test)]
+mod attribution_tests;
 mod banked_resets;
 mod cache;
 mod clients;
@@ -97,8 +100,40 @@ enum Cmd {
     Check,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    tune_allocator();
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().context("start the runtime")?.block_on(run())
+}
+
+/// glibc gives each thread that allocates under contention its own heap arena (up
+/// to eight per core) and keeps freed memory in them. With large request bodies
+/// on many threads that holds on to a lot: under sixteen 1 MB streams on a
+/// 64-thread runtime, four arenas and a fixed 256 KiB mmap threshold (so big
+/// buffers go back to the system when freed) took RSS from about 210 MiB to 110 MiB
+/// for about 7% more CPU per request at 4,000 requests a second, and changed
+/// nothing measurable on a two-core server. Runs before any thread starts; glibc's
+/// own MALLOC_ARENA_MAX and MALLOC_MMAP_THRESHOLD_ still win when set.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        const M_MMAP_THRESHOLD: std::ffi::c_int = -3;
+        const M_ARENA_MAX: std::ffi::c_int = -8;
+        // SAFETY: mallopt only adjusts allocator parameters; called before other threads exist.
+        unsafe {
+            if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+                mallopt(M_ARENA_MAX, 4);
+            }
+            if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+                mallopt(M_MMAP_THRESHOLD, 256 << 10);
+            }
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     // CLIProxyAPI's Go-style flags (-config, -claude-login, ...) work too.
     let cli = Cli::parse_from(compat::translate_args(std::env::args().collect()));
     let command = match cli.cmd {
@@ -111,6 +146,29 @@ async fn main() -> Result<()> {
                 }
             };
             return tokio::task::spawn_blocking(move || usage::store::backup(&database, &to)).await?;
+        }
+        Some(Cmd::Usage {
+            command:
+                command @ (usage::imports::UsageCommand::Compact { .. } | usage::imports::UsageCommand::Downgrade { .. }),
+        }) => {
+            let (database, downgrade) = match command {
+                usage::imports::UsageCommand::Compact { database } => (database, false),
+                usage::imports::UsageCommand::Downgrade { database } => (database, true),
+                _ => unreachable!(),
+            };
+            let database = match database {
+                Some(d) => d,
+                None => {
+                    let path = config_path(cli.config, |n| std::env::var(n).ok());
+                    usage::database_path(&Config::load(&path)?, &path)
+                }
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                if downgrade { usage::store::downgrade(&database) } else { usage::store::compact(&database) }
+            })
+            .await??;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
         }
         Some(Cmd::Usage { command }) => return usage::imports::run_command(command).await,
         Some(Cmd::Collector { command }) => return usage::collector::run_command(command).await,
@@ -302,6 +360,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     app.refresh_tasks.shutdown().await;
     app.sessions.save_async().await;
     save_cooldowns(&app);
+    save_attribution(&app, true);
     if let Some(store) = &app.usage
         && store.shutdown().await.is_err()
     {
@@ -312,6 +371,25 @@ async fn serve(app: Arc<App>) -> Result<()> {
 
 /// How long requests in flight get to finish once Fusebox is asked to stop.
 const DRAIN: Duration = Duration::from_secs(10);
+
+/// Keeps quota attribution across restarts (at most every 30 seconds, and at
+/// shutdown).
+fn save_attribution(app: &App, force: bool) {
+    static LAST: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+    let mut last = LAST.lock();
+    if !force && last.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+        return;
+    }
+    let (saved, changed) = app.pool.attributions();
+    if !changed && !force {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    let path = app.cfg().auth_dir().join(attribution::FILE);
+    if let Err(e) = saved.save(&path) {
+        tracing::warn!("could not save quota attribution: {e:#}");
+    }
+}
 
 /// Keeps cooldowns across restarts; written only when they changed.
 fn save_cooldowns(app: &App) {
@@ -368,6 +446,7 @@ async fn watch(app: Arc<App>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
         app.sessions.flush(app.cfg().session_affinity_idle_seconds);
         save_cooldowns(&app);
+        save_attribution(&app, false);
         let t = mtime(&app.cfg_path);
         if t != cfg_time {
             cfg_time = t;
@@ -486,6 +565,10 @@ fn check(path: &Path) -> Result<()> {
     if !cfg.proxy_url.is_empty() {
         println!("  proxy        {}", cfg.proxy_url);
     }
+    crate::clients::configure(&cfg.client_identities);
+    let identities: Vec<String> =
+        clients::CONFIGURABLE.iter().map(|c| format!("{c} {}", clients::version(c))).collect();
+    println!("  speaks as    {}", identities.join(", "));
     let dir = cfg.auth_dir();
     println!("  auth dir     {}", dir.display());
 

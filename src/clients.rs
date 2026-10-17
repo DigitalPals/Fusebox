@@ -1,14 +1,19 @@
-//! The Claude Code and Codex releases Fusebox speaks as.
+//! The client releases Fusebox speaks as.
 //!
-//! Requests Fusebox builds for other clients (translated requests, cloaking) match one
-//! release of each: the constants in `upstream`, listed in `client-versions.json` and
-//! compared with the latest releases by the daily CI check. Real clients passing
-//! through keep their own identity. Fusebox's own small requests (usage, model lists,
-//! limit resets) claim the newest release seen from the user's own clients, so a
-//! model list matches what those clients are offered.
+//! Requests Fusebox builds for other clients (translated requests, cloaking) and its
+//! own small requests (usage, model lists, limit resets) claim the newest release it
+//! knows of each client: the built-in one (the constants listed in
+//! `client-versions.json`, which the daily CI check compares with the latest
+//! releases), a newer one set in `client-identities`, or, for Claude Code and Codex,
+//! the newest one the user's real clients sent through Fusebox. A version-only
+//! release therefore needs no Fusebox release for anyone who runs the real client
+//! through it. Claude Code's runtime headers (package and Node versions, OS and
+//! architecture) are learned the same way, so cloaked requests look like the
+//! user's own installation. Real clients passing through keep their own identity.
+//! A release that changes the request shape still needs a code change; the
+//! identity tests in `upstream` catch that.
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
 use axum::http::HeaderMap;
 use parking_lot::RwLock;
@@ -17,9 +22,47 @@ use crate::upstream::{CC_USER_AGENT, CC_VERSION, CODEX_USER_AGENT, CODEX_VERSION
 
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CODEX: &str = "codex";
+pub const GROK: &str = "grok-build";
+pub const DEVIN: &str = "devin-cli";
+pub const ANTIGRAVITY: &str = "antigravity";
+/// The clients `client-identities` can name. Muse Code's identity includes the
+/// build's commit hash, so a version number alone can't stand in for it.
+pub const CONFIGURABLE: [&str; 5] = [CLAUDE_CODE, CODEX, GROK, DEVIN, ANTIGRAVITY];
 
-/// Newest version seen per client, never older than the built-in one.
-static SEEN: LazyLock<RwLock<BTreeMap<&'static str, String>>> = LazyLock::new(Default::default);
+/// Claude Code's runtime headers, and what the cloak sends before any is learned.
+const PROFILE: [(&str, &str); 4] = [
+    ("x-stainless-package-version", "0.128.0"),
+    ("x-stainless-os", "MacOS"),
+    ("x-stainless-arch", "arm64"),
+    ("x-stainless-runtime-version", "v26.3.0"),
+];
+
+#[derive(Default)]
+struct State {
+    /// Newest version seen per client, never older than the built-in one.
+    seen: BTreeMap<&'static str, String>,
+    /// From `client-identities`.
+    configured: BTreeMap<&'static str, String>,
+    /// Claude Code's runtime headers from its newest release seen, with that version.
+    profile: Option<(String, Vec<String>)>,
+}
+
+#[cfg(not(test))]
+static STATE: std::sync::LazyLock<RwLock<State>> = std::sync::LazyLock::new(Default::default);
+
+// Tests run in parallel and each checks exact identities, so each test thread
+// learns on its own.
+#[cfg(test)]
+thread_local! {
+    static STATE: &'static RwLock<State> = Box::leak(Box::default());
+}
+
+fn state() -> &'static RwLock<State> {
+    #[cfg(not(test))]
+    return &STATE;
+    #[cfg(test)]
+    return STATE.with(|s| *s);
+}
 
 fn parse(v: &str) -> Option<(u32, u32, u32)> {
     let mut it = v.trim().splitn(3, '.');
@@ -40,7 +83,57 @@ fn plausible(builtin: &str, v: &str) -> bool {
 }
 
 fn builtin(client: &str) -> &'static str {
-    if client == CODEX { CODEX_VERSION } else { CC_VERSION }
+    match client {
+        CODEX => CODEX_VERSION,
+        GROK => crate::device::xai::CLIENT_VERSION,
+        DEVIN => crate::devin::CLIENT_VERSION,
+        ANTIGRAVITY => crate::antigravity::FALLBACK_VERSION,
+        _ => CC_VERSION,
+    }
+}
+
+fn id(client: &str) -> Option<&'static str> {
+    CONFIGURABLE.into_iter().find(|c| c.eq_ignore_ascii_case(client.trim()))
+}
+
+/// Checks a `client-identities` entry: a known client and a plain `x.y.z` version.
+pub fn validate(client: &str, version: &str) -> Result<(), String> {
+    let Some(id) = id(client) else {
+        return Err(format!("client-identities: unknown client {client}; use one of {}", CONFIGURABLE.join(", ")));
+    };
+    if parse(version).is_none() {
+        return Err(format!("client-identities: {id} needs a version like {}", builtin(id)));
+    }
+    Ok(())
+}
+
+/// Applies `client-identities`. Entries older than the built-in release are kept
+/// but never win, so a forgotten entry can't hold Fusebox back.
+pub fn configure(identities: &BTreeMap<String, String>) {
+    let configured = identities
+        .iter()
+        .filter_map(|(client, version)| Some((id(client)?, version.trim().to_string())))
+        .filter(|(_, version)| parse(version).is_some())
+        .collect();
+    state().write().configured = configured;
+}
+
+/// The release Fusebox claims for a client: the newest of the built-in one, the
+/// configured one and the newest seen.
+pub fn version(client: &'static str) -> String {
+    newest(client, builtin(client).to_string())
+}
+
+/// `current`, or a newer configured or seen release of the client.
+pub fn newest(client: &'static str, current: String) -> String {
+    let state = state().read();
+    let mut best = current;
+    for candidate in [state.configured.get(client), state.seen.get(client)].into_iter().flatten() {
+        if parse(candidate) > parse(&best) {
+            best = candidate.clone();
+        }
+    }
+    best
 }
 
 /// The version of a request's client, when it is Claude Code or Codex.
@@ -56,53 +149,102 @@ fn version_of(headers: &HeaderMap) -> Option<(&'static str, String)> {
     }
 }
 
-/// Remembers a newer Claude Code or Codex release from a client's request.
-/// True when that changed what Fusebox claims (worth saving).
+/// A header value worth repeating: short, plain and printable.
+fn sane(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 32 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+}
+
+/// Remembers a newer Claude Code or Codex release from a client's request, and
+/// Claude Code's runtime headers from its newest release. True when that changed
+/// what Fusebox claims (worth saving).
 pub fn observe(headers: &HeaderMap) -> bool {
     let Some((client, version)) = version_of(headers) else { return false };
-    if !plausible(builtin(client), &version) {
+    let mut changed = false;
+    if plausible(builtin(client), &version)
+        && state().read().seen.get(client).is_none_or(|seen| parse(seen) < parse(&version))
+    {
+        tracing::info!("{client} {version} seen; Fusebox's own and cloaked requests now say so");
+        state().write().seen.insert(client, version.clone());
+        changed = true;
+    }
+    if client == CLAUDE_CODE {
+        changed |= learn_profile(headers, &version);
+    }
+    changed
+}
+
+fn learn_profile(headers: &HeaderMap, version: &str) -> bool {
+    // Only the release the cloak claims (or a newer one) may describe it.
+    if parse(version) < parse(&self::version(CLAUDE_CODE)) {
         return false;
     }
-    if SEEN.read().get(client).is_some_and(|seen| parse(seen) >= parse(&version)) {
+    let values: Option<Vec<String>> = PROFILE
+        .iter()
+        .map(|(name, _)| headers.get(*name).and_then(|v| v.to_str().ok()).filter(|v| sane(v)).map(String::from))
+        .collect();
+    let Some(values) = values else { return false };
+    let mut state = state().write();
+    if state.profile.as_ref().is_some_and(|(v, old)| parse(v) > parse(version) || (v == version && *old == values)) {
         return false;
     }
-    tracing::info!("{client} {version} seen; Fusebox's own requests now say so");
-    SEEN.write().insert(client, version);
+    state.profile = Some((version.to_string(), values));
     true
+}
+
+/// Claude Code's runtime headers for cloaked requests.
+pub fn claude_profile() -> Vec<(&'static str, String)> {
+    let state = state().read();
+    match &state.profile {
+        Some((_, values)) => PROFILE.iter().zip(values).map(|((name, _), v)| (*name, v.clone())).collect(),
+        None => PROFILE.iter().map(|(name, v)| (*name, v.to_string())).collect(),
+    }
 }
 
 /// What to save, so a restart keeps claiming the newest release.
 pub fn seen() -> BTreeMap<String, String> {
-    SEEN.read().iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    let state = state().read();
+    let mut out: BTreeMap<String, String> = state.seen.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    if let Some((version, values)) = &state.profile {
+        out.insert(format!("{CLAUDE_CODE}/profile"), version.clone());
+        for ((name, _), value) in PROFILE.iter().zip(values) {
+            out.insert(format!("{CLAUDE_CODE}/{name}"), value.clone());
+        }
+    }
+    out
 }
 
 pub fn restore(saved: &BTreeMap<String, String>) {
-    let mut seen = SEEN.write();
+    let mut state = state().write();
     for client in [CLAUDE_CODE, CODEX] {
         if let Some(v) = saved.get(client).filter(|v| plausible(builtin(client), v))
-            && seen.get(client).is_none_or(|old| parse(old) < parse(v))
+            && state.seen.get(client).is_none_or(|old| parse(old) < parse(v))
         {
-            seen.insert(client, v.clone());
+            state.seen.insert(client, v.clone());
         }
+    }
+    if state.profile.is_none()
+        && let Some(version) = saved.get(&format!("{CLAUDE_CODE}/profile"))
+    {
+        let values: Option<Vec<String>> = PROFILE
+            .iter()
+            .map(|(name, _)| saved.get(&format!("{CLAUDE_CODE}/{name}")).filter(|v| sane(v)).cloned())
+            .collect();
+        state.profile = values.map(|values| (version.clone(), values));
     }
 }
 
-fn current(client: &'static str) -> String {
-    SEEN.read().get(client).cloned().unwrap_or_else(|| builtin(client).to_string())
-}
-
-/// For Fusebox's own requests to Anthropic.
+/// Claude Code's user agent, for Fusebox's own requests to Anthropic and for cloaking.
 pub fn claude_user_agent() -> String {
-    CC_USER_AGENT.replace(CC_VERSION, &current(CLAUDE_CODE))
+    CC_USER_AGENT.replace(CC_VERSION, &version(CLAUDE_CODE))
 }
 
-/// For Fusebox's own requests to the Codex backend: `client_version` and `version`.
+/// For Fusebox's own and cloaked requests to the Codex backend: `client_version` and `version`.
 pub fn codex_version() -> String {
-    current(CODEX)
+    version(CODEX)
 }
 
 pub fn codex_user_agent() -> String {
-    CODEX_USER_AGENT.replace(CODEX_VERSION, &current(CODEX))
+    CODEX_USER_AGENT.replace(CODEX_VERSION, &version(CODEX))
 }
 
 /// A real Codex client: its own user agent and originator go upstream unchanged.
@@ -187,5 +329,63 @@ mod tests {
         assert_eq!(seen().get(CLAUDE_CODE), Some(&newer));
         restore(&BTreeMap::from([(CLAUDE_CODE.to_string(), CC_VERSION.to_string())]));
         assert_eq!(seen().get(CLAUDE_CODE), Some(&newer), "an older saved release changes nothing");
+    }
+
+    #[test]
+    fn configured_identities_win_only_when_newer() {
+        let (major, minor, patch) = parse(crate::devin::CLIENT_VERSION).unwrap();
+        let ahead = format!("{major}.{minor}.{}", patch + 1);
+        configure(&BTreeMap::from([
+            ("devin-cli".to_string(), ahead.clone()),
+            ("Codex".to_string(), "0.1.0".to_string()),
+            ("unknown".to_string(), "9.9.9".to_string()),
+        ]));
+        assert_eq!(version(DEVIN), ahead);
+        assert_eq!(version(CODEX), CODEX_VERSION, "an older configured release never wins");
+        assert_eq!(version(GROK), crate::device::xai::CLIENT_VERSION);
+        assert!(validate("unknown", "1.0.0").is_err());
+        assert!(validate("claude-code", "2.1").is_err());
+        assert!(validate("antigravity", "2.30.0").is_ok());
+        // A configured Claude Code release reaches the cloak's user agent and billing version.
+        let (major, minor, _) = parse(CC_VERSION).unwrap();
+        let configured = format!("{major}.{minor}.9000");
+        configure(&BTreeMap::from([("claude-code".to_string(), configured.clone())]));
+        assert_eq!(claude_user_agent(), CC_USER_AGENT.replace(CC_VERSION, &configured));
+        configure(&BTreeMap::new());
+        assert_eq!(version(DEVIN), crate::devin::CLIENT_VERSION);
+    }
+
+    #[test]
+    fn claude_codes_runtime_headers_are_learned_from_its_newest_release() {
+        assert_eq!(claude_profile()[1], ("x-stainless-os", "MacOS".to_string()));
+        let linux = |version: &str, runtime: &str| {
+            headers(&[
+                ("user-agent", &format!("claude-cli/{version} (external, cli)")),
+                ("x-stainless-package-version", "0.131.0"),
+                ("x-stainless-os", "Linux"),
+                ("x-stainless-arch", "x64"),
+                ("x-stainless-runtime-version", runtime),
+            ])
+        };
+        // An older release than the one claimed describes nothing.
+        assert!(!observe(&linux("2.0.1", "v24.1.0")));
+        assert!(observe(&linux(CC_VERSION, "v24.11.1")));
+        let profile = claude_profile();
+        assert_eq!(profile[1], ("x-stainless-os", "Linux".to_string()));
+        assert_eq!(profile[3], ("x-stainless-runtime-version", "v24.11.1".to_string()));
+        assert!(!observe(&linux(CC_VERSION, "v24.11.1")), "nothing new");
+        // Odd values are not repeated upstream.
+        assert!(!observe(&headers(&[
+            ("user-agent", &format!("claude-cli/{CC_VERSION} (external, cli)")),
+            ("x-stainless-package-version", "0.131.0"),
+            ("x-stainless-os", "Linux; rm -rf"),
+            ("x-stainless-arch", "x64"),
+            ("x-stainless-runtime-version", "v24.11.1"),
+        ])));
+        let saved = seen();
+        assert_eq!(saved.get("claude-code/x-stainless-arch"), Some(&"x64".to_string()));
+        state().write().profile = None;
+        restore(&saved);
+        assert_eq!(claude_profile(), profile, "a restart keeps the learned headers");
     }
 }

@@ -203,9 +203,18 @@ pub struct UsageConfig {
     pub retention_days: u32,
     pub queue_capacity: usize,
     pub pricing_overrides: Option<String>,
+    /// A fault says so when the database grows past this many MiB; 0 turns it off.
+    pub warn_database_mb: u64,
 }
 impl Default for UsageConfig {
     fn default() -> Self {
-        Self { enabled: true, database: None, retention_days: 90, queue_capacity: 1024, pricing_overrides: None }
+        Self {
+            enabled: true,
+            database: None,
+            retention_days: 90,
+            queue_capacity: 1024,
+            pricing_overrides: None,
+            warn_database_mb: 2048,
+        }
     }
 }

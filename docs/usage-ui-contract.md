@@ -200,7 +200,10 @@ aggregate shape (`observations`, `estimated_cost_nanos`,
   no split by source. Each row adds `id` (may be null), `accounts` (distinct
   known accounts) and `provider` (lowest provider id in the group, for
   sub-lines). Client ids include `collector:<id>` origins. At most 500 rows per
-  dimension, ordered by estimated cost, then observations, then id.
+  dimension, ordered by estimated cost, then observations, then id. Client rows
+  also carry `models`: up to 50 of `{id, observations, unpriced,
+  estimated_cost_nanos}` in the same order, which the page's Top clients shows as
+  badges.
 
 Usage older than the pricing catalogue is priced at today's rates; its
 `pricing_snapshot.backdated` is true and the UI labels it a current-rate
@@ -288,9 +291,9 @@ these nested categories are added again by the UI.
 
 Missing timestamps/counts are shown as Not reported/Unknown. Health state
 and counts come from the backend; last contact is never inferred to mean
-synchronized. Imports are disabled unless explicitly enabled. Existing
-`S.accounts` is reused for provider allowances, including quota windows and
-`quota.updated_at`, and is not converted into money or token estimates.
+synchronized. Imports are disabled unless explicitly enabled. Subscription
+quota windows stay on the Accounts page and are never converted into money or
+token estimates.
 
 ## Source controls
 
@@ -301,7 +304,7 @@ synchronized. Imports are disabled unless explicitly enabled. Existing
 - `POST /api/usage/collectors/:id/rotate`: returns the same one-time credential shape.
 - `POST /api/usage/collectors/:id/revoke`: returns any JSON success object.
 
-After any successful mutation the UI refreshes all three reads. Rotate and
+After any successful mutation the UI refreshes both reads. Rotate and
 revoke have explicit consequence confirmations. Another enrollment/rotation
 cannot overwrite an un-dismissed one-time credential. The credential remains
 in browser memory until dismissed, and is never saved to browser storage.
@@ -312,10 +315,10 @@ No quota reset, credit purchase, or retention deletion controls are included.
 Adds `format=csv|json&limit=50&offset=<current page>` to the same query,
 including `view=combined|raw`.
 The response is downloadable metadata for the same page/filter/range, with
-correct content type. Every button and success message explicitly says “this
-page”; this is not a full-dataset export. Server CSV must neutralize formula
-cells. Client fetches a Blob with Authorization then creates a temporary local
-object URL. The management key is never a query parameter or download URL.
+correct content type; this is not a full-dataset export. Server CSV must
+neutralize formula cells. The management key goes in the Authorization header,
+never in a query parameter or download URL. The Usage page has no export or
+record list of its own; both endpoints serve API clients.
 
 ## Privacy, failures and polling
 

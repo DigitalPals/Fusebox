@@ -252,8 +252,8 @@ impl Clients {
                    SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
                    SUM(COALESCE(cost_nanos,0)),
                    SUM(CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
-                       AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(payload,'$.status') < 400) THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(payload,'$.status') < 400) THEN 1 ELSE 0 END)
+                       AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END)
                  FROM usage_observations
                  WHERE source = 'proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2
                  GROUP BY client_id",
@@ -502,6 +502,59 @@ mod tests {
             assert_eq!(clients.spend("laptop"), both);
         }
         assert!(clients.spend.lock().pending.is_empty());
+        store.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn budget_totals_read_compressed_records() {
+        let dir = std::env::temp_dir().join(format!("fusebox-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("usage.sqlite3"), 64, 90, None).unwrap();
+        // Enough records to train a dictionary, with failed and incomplete ones whose
+        // status only the stored document holds.
+        let records: Vec<Observation> = (0..1200)
+            .map(|i| {
+                let mut o = observation(if i % 3 == 0 { 0 } else { 100 });
+                if i % 3 == 0 {
+                    o.tokens.output = None;
+                    o.status = Some(if i % 2 == 0 { 500 } else { 200 });
+                }
+                o
+            })
+            .collect();
+        store.call(move |c| crate::usage::store::insert_batch(c, &records).map(|_| ())).await.unwrap();
+        let clients = Clients::new(Some(store.clone()));
+        let totals = || {
+            let (clients, store) = (clients.clone(), store.clone());
+            async move {
+                let writer = clients.clone();
+                store.call(move |conn| writer.reconcile(conn)).await.unwrap();
+                let t = clients.spend.lock().by_client["laptop"];
+                (t.tokens_today, t.cost_nanos, t.unknown_tokens, t.unpriced)
+            }
+        };
+        let before = totals().await;
+        assert_eq!(before.0, 800 * 100);
+        assert_eq!(before.2, 200, "only the incomplete records that succeeded");
+        let mut compressed = false;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let text: i64 = store
+                .call(|c| {
+                    Ok(c.query_row("SELECT COUNT(*) FROM usage_observations WHERE typeof(payload)='text'", [], |r| {
+                        r.get(0)
+                    })?)
+                })
+                .await
+                .unwrap();
+            if text == 0 {
+                compressed = true;
+                break;
+            }
+        }
+        assert!(compressed, "the writer did not compress the records");
+        assert_eq!(totals().await, before);
         store.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -130,7 +130,7 @@ impl Quota {
         self.live(model).filter(|w| w.used >= 100.0).filter_map(|w| w.resets_at).max()
     }
 
-    fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
+    pub(crate) fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
         if windows.is_empty() {
             return;
         }
@@ -205,7 +205,7 @@ pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64)
     }
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
-        st.quota.set(windows, plan);
+        st.set_quota(windows, plan);
     }
 }
 
@@ -234,7 +234,7 @@ pub fn observe_codex_event(acct: &Account, v: &Value, epoch: u64) {
         .collect();
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
-        st.quota.set(windows, v["plan_type"].as_str().map(String::from));
+        st.set_quota(windows, v["plan_type"].as_str().map(String::from));
     }
 }
 
@@ -339,7 +339,7 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
         })
         .cloned()
         .collect();
-    st.quota.set(windows, plan);
+    st.set_quota(windows, plan);
     st.quota.refreshed_at = st.quota.updated_at;
     let quota = &st.quota;
     st.quota_cooldowns.retain(|model, _| {

@@ -49,9 +49,14 @@ pub fn current_id(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
+/// The IDE release from Google's update manifest (or the built-in fallback), unless
+/// `client-identities` names a newer one.
 pub fn version() -> String {
-    let v = VERSION.read();
-    if v.is_empty() { FALLBACK_VERSION.to_string() } else { v.clone() }
+    let fetched = {
+        let v = VERSION.read();
+        if v.is_empty() { FALLBACK_VERSION.to_string() } else { v.clone() }
+    };
+    crate::clients::newest(crate::clients::ANTIGRAVITY, fetched)
 }
 
 pub fn user_agent() -> String {

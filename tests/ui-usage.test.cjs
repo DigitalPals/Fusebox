@@ -70,44 +70,29 @@ test('custom dates reject invalid days and reversed boundaries', () => {
 });
 
 test('filters are allowlisted, encoded, and use exclusive date endpoints', () => {
-  const result = new URLSearchParams(helpers.query({ start: '2026-10-01', end: '2026-10-08' }, { provider: 'anthropic', model: 'model/a & b', account: 'account-1', client: 'collector-2', source: 'codex', key: 'should-not-be-sent' }, 'Europe/Amsterdam', { limit: 50, offset: 100 }, { view: 'combined', stack: 'model', key: 'nope' }));
+  const result = new URLSearchParams(helpers.query({ start: '2026-10-01', end: '2026-10-08' }, { provider: 'anthropic', model: 'model/a & b', account: 'account-1', client: 'collector-2', source: 'codex', key: 'should-not-be-sent' }, 'Europe/Amsterdam'));
   assert.equal(result.get('end'), '2026-10-08');
   assert.equal(result.get('timezone'), 'Europe/Amsterdam');
   assert.equal(result.get('model'), 'model/a & b');
   assert.equal(result.get('client'), 'collector-2');
-  assert.equal(result.get('limit'), '50');
-  assert.equal(result.get('offset'), '100');
   assert.equal(result.has('key'), false);
   assert.equal(result.has('source'), false);
-  assert.equal(result.get('view'), 'combined');
-  assert.equal(result.get('stack'), 'model');
 });
 
 test('unknown pricing remains unpriced and small backend estimates retain precision', () => {
-  assert.equal(helpers.money(null), 'Unpriced');
-  assert.equal(helpers.money(undefined), 'Unpriced');
-  assert.equal(helpers.money(0), '$0.00');
-  assert.equal(helpers.money(12345000), '$0.0123');
-});
-
-test('exports authenticate only by header and explicitly include current pagination', () => {
-  const r = helpers.exportRequest('start=2026-10-01&end=2026-10-08&timezone=UTC', 'csv', 'fbx_sensitive-management-key', 100, 50);
-  assert.equal(r.options.headers.authorization, 'Bearer fbx_sensitive-management-key');
-  assert.equal(r.url.includes('fbx_sensitive-management-key'), false);
-  const q = new URL('http://localhost' + r.url).searchParams;
-  assert.equal(q.get('format'), 'csv');
-  assert.equal(q.get('limit'), '50');
-  assert.equal(q.get('offset'), '100');
+  assert.equal(helpers.dollars(null), 'Unpriced');
+  assert.equal(helpers.dollars(undefined), 'Unpriced');
+  assert.equal(helpers.dollars(0), '$0.00');
+  assert.equal(helpers.dollars(12345000), '$0.0123');
 });
 
 test('privacy hides all labels, IDs, paths, credentials and draft values in rendered markup', () => {
   const d = dashboard();
   d.context.S.private = true;
   d.seed({
-    loaded: true, drawerOpen: true, dim: 'account', openRecord: 1, collectorDraft: 'private draft laptop', roots: { codex: '/private/draft/root' }, credential: 'fbxc_one-time-private-secret', credentialFor: 'private-collector-label',
-    summary: { combined: { totals: {}, trend: [], breakdowns: { account: [{ id: 'private-account-id', observations: 1 }] } }, facets: { accounts: [{ id: 'private-account-id', label: 'private-account-label' }], clients: [{ id: 'private-client-id', label: 'private-client-label' }] } },
+    loaded: true, drawerOpen: true, dim: 'account', collectorDraft: 'private draft laptop', roots: { codex: '/private/draft/root' }, credential: 'fbxc_one-time-private-secret', credentialFor: 'private-collector-label',
+    summary: { combined: { totals: {}, trend: [], breakdowns: { account: [{ id: 'private-account-id', observations: 1 }], client: [{ id: 'private-client-id', observations: 1, tokens: {}, models: [{ id: 'model-a', observations: 1 }] }, { id: 'collector:private-collector-id', observations: 1, tokens: {}, models: [] }] } }, facets: { accounts: [{ id: 'private-account-id', label: 'private-account-label' }], clients: [{ id: 'private-client-id', label: 'private-client-label' }, { id: 'collector:private-collector-id', label: 'private-collector-label' }] } },
     filters: { provider: '', model: '', account: 'private-account-id', client: 'private-client-id' },
-    observations: { total: 2, items: [{ source: 'proxy', account_id: 'private-account-id', account_label: 'private-account-label', client_id: 'private-client-id', client_label: 'private-client-label', origin_id: 'local', tokens: {} }, { source: 'codex', origin_id: 'collector:private-collector-id', origin_label: 'private-collector-label', tokens: {} }] },
     status: { health: { message: '/private/health/error' }, imports: [{ source: 'codex', root: '/private/saved/root', last_error: '/private/import/error' }], collectors: [{ id: 'private-collector-id', label: 'private-collector-label' }] },
   });
   const html = d.run('usageHTML()');
@@ -116,30 +101,48 @@ test('privacy hides all labels, IDs, paths, credentials and draft values in rend
   assert.match(html, /data-usage-act="filter-row" data-index="0"/);
   d.context.S.private = false;
   const visible = d.run('usageHTML()');
-  assert.match(visible, /private-account-label/);
+  assert.match(visible, /Top clients[\s\S]*private-client-label/);
   assert.match(visible, /private-collector-label/);
   assert.match(visible, /fbxc_one-time-private-secret/);
 });
 
-test('all server supplied strings are escaped and token subsets remain separate', () => {
+test('top clients name each client with its share, cost, tokens and models, escaped', () => {
   const d = dashboard();
-  d.seed({ openRecord: 0, observations: { total: 1, items: [{ actual_model: '<script>alert("x")</script>', account_label: '<img src=x onerror=evil()>', account_id: 'x', source: 'codex', origin_id: 'local', origin_label: 'This server', pricing_snapshot: { backdated: true }, estimated_cost_nanos: 1000, tokens: { input: 100, output: 20, cache_read: 300, cache_write: 40, write_5m: 10, write_1h: 30, reasoning: 5 } }] }, summary: { pricing: { verified_at: '2026-10-07' }, combined: {} } });
-  const html = d.run('usageObservationsHTML()');
+  const models = ['<script>alert("x")</script>', 'gpt-6.1-sol', 'claude-opus-5-5', 'claude-haiku-5-5'].map((id, i) => ({ id, observations: 4 - i, estimated_cost_nanos: (4 - i) * 3e9 }));
+  const client = (id, cost, extra = {}) => ({ id, observations: 10, estimated_cost_nanos: cost, tokens: { input: 1000, output: 200, cache_read: 9000, cache_write: 300, reasoning: 50 }, models: [], ...extra });
+  d.seed({ summary: {
+    combined: { totals: { estimated_cost_nanos: 40e9 }, breakdowns: { client: [client('laptop', 30e9, { models }), client('agent', 10e9), client(null, null)] } },
+    facets: { clients: [{ id: 'laptop', label: '<img src=x onerror=evil()>' }, { id: 'agent', label: 'The agent' }] },
+  } });
+  const html = d.run('usageClientsHTML()');
+  assert.match(html, /Top clients/);
   assert.equal(html.includes('<script>'), false);
   assert.equal(html.includes('<img src=x'), false);
-  assert.match(html, /&lt;script&gt;/);
-  for (const label of ['Write 5m', 'Write 1h', 'Reasoning', 'Cache read', 'Cache write']) assert.match(html, new RegExp(label));
-  assert.match(html, /Input excludes cache reads and writes/);
-  assert.match(html, /Codex history · This server/);
-  assert.match(html, /from Codex history, This server · not seen by the proxy/);
-  assert.match(html, /Priced at today&#39;s rate \(catalogue 2026-10-07\)/);
-  assert.match(html, /exports contain this page only/);
+  assert.match(html, /&lt;img src=x onerror=evil\(\)&gt;/);
+  assert.match(html, /CLIENT<\/span><span>SHARE OF COST<\/span><span class="r">EST. COST<\/span><span class="r">TOKENS<\/span><span>MODELS/);
+  // 75% of the cost, $30.00, and 10.5k tokens: reasoning is part of output.
+  assert.match(html, /The agent[\s\S]*25%/);
+  assert.match(html, /75%<\/span><\/span><span class="r u-bd-cost">\$30\.00<\/span><span class="r mono fg2" title="1,000 input, 200 output, 9,000 read from the cache, 300 written to the cache">10\.5k</);
+  assert.match(html, /title="\$12\.00 · 4 calls · 40% of this client">&lt;script&gt;/);
+  assert.match(html, /claude-opus-5-5<\/span><span class="idchip static" title="claude-haiku-5-5">\+1</);
+  assert.match(html, /No client reported[\s\S]*u-bd-cost dim">Unpriced/);
+  assert.match(html, /No model reported/);
+  for (const gone of ['account', 'window', 'Renew']) assert.equal(html.includes(gone), false, gone);
 });
 
-test('a proxy record matched to imported history says it is counted once', () => {
+test('top clients show eight at first and can expand', () => {
   const d = dashboard();
-  d.seed({ openRecord: 0, observations: { total: 1, items: [{ source: 'proxy', provider: 'anthropic', actual_model: 'claude-opus-5-5', matched_sources: ['claude_code'], tokens: {}, estimated_cost_nanos: 5 }] } });
-  assert.match(d.run('usageObservationsHTML()'), /also in Claude Code history with the same message ID, counted once/);
+  const rows = Array.from({ length: 9 }, (_, i) => ({ id: `client-${i}`, observations: 1, estimated_cost_nanos: 1e9, tokens: {}, models: [] }));
+  d.seed({ summary: { combined: { totals: { estimated_cost_nanos: 9e9 }, breakdowns: { client: rows } } } });
+  let html = d.run('usageClientsHTML()');
+  assert.match(html, /Show all 9/);
+  assert.equal(html.includes('client-8'), false);
+  d.run('Usage.clientsAll = true');
+  html = d.run('usageClientsHTML()');
+  assert.match(html, /Show top 8/);
+  assert.match(html, /client-8/);
+  d.seed({ summary: { combined: { totals: {}, breakdowns: { client: [] } } } });
+  assert.match(d.run('usageClientsHTML()'), /No records match these filters\./);
 });
 
 test('the combined total is the headline and coverage leaves out zero parts', () => {
@@ -284,7 +287,7 @@ test('late responses from a superseded filter do not replace current results', a
   let resolveFirst;
   let call = 0;
   const first = new Promise((resolve) => { resolveFirst = resolve; });
-  const d = dashboard({ api: () => { call++; return call <= 3 ? first : Promise.resolve({ marker: 'new-result', items: [], total: 0 }); } });
+  const d = dashboard({ api: () => { call++; return call <= 2 ? first : Promise.resolve({ marker: 'new-result' }); } });
   const oldLoad = d.run('usageLoad()');
   const newLoad = d.run('usageLoad()');
   await newLoad;
@@ -298,64 +301,28 @@ test('full refresh and filter changes abort superseded reads without exposing ca
   const pending = pendingApi();
   const d = dashboard({ api: pending.api });
   const first = d.run('usageLoad()');
-  assert.equal(pending.calls.length, 3);
+  assert.deepEqual(pending.calls.map((call) => call.endpoint.split('?')[0]), ['/usage/dashboard', '/usage/status'], 'no records are read');
   const refresh = d.run('usageLoad()');
-  assert.ok(pending.calls.slice(0, 3).every((call) => call.signal.aborted));
-  assert.ok(pending.calls.slice(3).every((call) => !call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 2).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(2).every((call) => !call.signal.aborted));
   await first;
   assert.equal(d.run('Usage.loading'), true);
-  assert.equal(d.run('Usage.recordsLoading'), true);
   assert.equal(d.run('Usage.error'), '');
-  d.run('Usage.filters.model = "new-model"; Usage.offset = 100');
+  d.run('Usage.filters.model = "new-model"');
   const filtered = d.run('usageReload()');
-  assert.ok(pending.calls.slice(0, 6).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 4).every((call) => call.signal.aborted));
   await refresh;
   assert.equal(d.run('Usage.loading'), true);
   assert.equal(d.run('Usage.error'), '');
-  assert.equal(d.run('Usage.offset'), 0);
-  const active = pending.calls.slice(6);
-  assert.equal(active.length, 3);
-  assert.ok(active.slice(0, 2).every((call) => call.endpoint.includes('model=new-model')));
-  active.forEach((call) => call.resolve({ marker: 'filtered', items: [], total: 0 }));
+  const active = pending.calls.slice(4);
+  assert.equal(active.length, 2);
+  assert.match(active[0].endpoint, /model=new-model/);
+  active.forEach((call) => call.resolve({ marker: 'filtered' }));
   await filtered;
-  for (const field of ['summary', 'observations', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
+  for (const field of ['summary', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
   assert.equal(d.run('Usage.loading'), false);
-  assert.equal(d.run('Usage.recordsLoading'), false);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('usageReads.size'), 0);
-});
-
-test('paging aborts only the superseded records read while independent sections finish', async () => {
-  const pending = pendingApi();
-  const d = dashboard({ api: pending.api });
-  const full = d.run('usageLoad()');
-  d.run('Usage.offset = 50');
-  const firstPage = d.run('usageLoadRecords()');
-  assert.equal(pending.calls.length, 4);
-  assert.equal(pending.calls[0].signal.aborted, false);
-  assert.equal(pending.calls[1].signal.aborted, true);
-  assert.equal(pending.calls[2].signal.aborted, false);
-  pending.calls[0].resolve({ marker: 'counts' });
-  pending.calls[2].resolve({ marker: 'status' });
-  await full;
-  assert.equal(d.run('Usage.summary.marker'), 'counts');
-  assert.equal(d.run('Usage.status.marker'), 'status');
-  assert.equal(d.run('Usage.loading'), false);
-  assert.equal(d.run('Usage.recordsLoading'), true);
-  d.run('Usage.offset = 100');
-  const secondPage = d.run('usageLoadRecords()');
-  assert.equal(pending.calls.length, 5);
-  assert.equal(pending.calls[3].signal.aborted, true);
-  assert.match(pending.calls[4].endpoint, /offset=100/);
-  await firstPage;
-  assert.equal(d.run('Usage.recordsLoading'), true);
-  assert.equal(d.run('Usage.error'), '');
-  pending.calls[4].resolve({ marker: 'latest-page', items: [], total: 101 });
-  await secondPage;
-  assert.equal(d.run('Usage.observations.marker'), 'latest-page');
-  assert.equal(d.run('Usage.summary.marker'), 'counts');
-  assert.equal(d.run('Usage.status.marker'), 'status');
-  assert.equal(d.run('Usage.recordsLoading'), false);
 });
 
 test('same-section replacement ignores late transport completion even within one load sequence', async () => {
@@ -389,86 +356,54 @@ test('route exit and pagehide cancel reads, and re-entry and restored pages resu
   listeners.get('hashchange')();
   assert.ok(pending.calls.every((call) => call.signal.aborted));
   assert.equal(d.run('Usage.loading'), false);
-  assert.equal(d.run('Usage.recordsLoading'), false);
   assert.equal(d.run('Usage.loaded'), false);
   d.context.location.hash = '#/usage';
   d.run('bindUsage()');
-  assert.equal(pending.calls.length, 6);
-  pending.calls.slice(0, 3).forEach((call) => call.resolve({ marker: 'stale-route' }));
+  assert.equal(pending.calls.length, 4);
+  pending.calls.slice(0, 2).forEach((call) => call.resolve({ marker: 'stale-route' }));
   await first;
   assert.equal(d.run('Usage.summary'), null);
   assert.equal(d.run('Usage.loading'), true);
   listeners.get('pagehide')();
   assert.ok(pending.calls.every((call) => call.signal.aborted));
   listeners.get('pageshow')({ persisted: true });
-  assert.equal(pending.calls.length, 9);
-  pending.calls.slice(3, 6).forEach((call) => call.reject(new Error('late failure')));
+  assert.equal(pending.calls.length, 6);
+  pending.calls.slice(2, 4).forEach((call) => call.reject(new Error('late failure')));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('Usage.loading'), true);
-  pending.calls.slice(6).forEach((call) => call.resolve({ marker: 'restored', items: [], total: 0 }));
+  pending.calls.slice(4).forEach((call) => call.resolve({ marker: 'restored' }));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.summary.marker'), 'restored');
-  assert.equal(d.run('Usage.observations.marker'), 'restored');
+  assert.equal(d.run('Usage.status.marker'), 'restored');
   assert.equal(d.run('Usage.loading'), false);
-  assert.equal(d.run('Usage.recordsLoading'), false);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('usageReads.size'), 0);
 });
 
-test('a status failure preserves successful summary and observation reads with visible error', async () => {
-  const d = dashboard({ api: (endpoint) => endpoint === '/usage/status' ? Promise.reject(new Error('database unavailable')) : Promise.resolve({ marker: 'loaded', items: [], total: 0 }) });
+test('a status failure preserves a successful summary read with visible error', async () => {
+  const d = dashboard({ api: (endpoint) => endpoint === '/usage/status' ? Promise.reject(new Error('database unavailable')) : Promise.resolve({ marker: 'loaded' }) });
   await d.run('usageLoad()');
   assert.equal(d.run('Usage.summary.marker'), 'loaded');
-  assert.equal(d.run('Usage.observations.marker'), 'loaded');
   assert.match(d.run('Usage.error'), /database unavailable/);
   assert.equal(d.run('Usage.loading'), false);
 });
 
-test('counts render immediately while status and records are still pending', async () => {
-  let finishStatus, finishRecords;
+test('counts render immediately while status is still pending', async () => {
+  let finishStatus;
   const status = new Promise((resolve) => { finishStatus = resolve; });
-  const records = new Promise((resolve) => { finishRecords = resolve; });
   let renders = 0;
-  const d = dashboard({ api: (endpoint) => endpoint === '/usage/status' ? status : endpoint.includes('/observations?') ? records : Promise.resolve({ marker: 'counts-ready' }) });
+  const d = dashboard({ api: (endpoint) => endpoint === '/usage/status' ? status : Promise.resolve({ marker: 'counts-ready' }) });
   d.context.markRender = () => { renders++; };
   d.run('usageRender = markRender');
   const loading = d.run('usageLoad()');
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.summary.marker'), 'counts-ready');
   assert.equal(d.run('Usage.loading'), true);
-  assert.equal(d.run('Usage.recordsLoading'), true);
   assert.ok(renders >= 2);
-  finishRecords({ items: [], total: 0 });
-  await new Promise(setImmediate);
-  assert.equal(d.run('Usage.recordsLoading'), false);
   finishStatus({ health: {} });
   await loading;
   assert.equal(d.run('Usage.loading'), false);
-});
-
-test('paging reads only records and cannot replace results from newer filters', async () => {
-  let finishOld;
-  const oldPage = new Promise((resolve) => { finishOld = resolve; });
-  const calls = [];
-  const d = dashboard({ api: (endpoint) => {
-    calls.push(endpoint);
-    return calls.length === 1 ? oldPage : Promise.resolve({ marker: 'new-filter', items: [], total: 0 });
-  } });
-  d.seed({ summary: { marker: 'existing-counts' }, status: { marker: 'existing-status' }, offset: 50 });
-  const paging = d.run('usageLoadRecords()');
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], /\/usage\/observations\?.*&offset=50/);
-  assert.equal(d.run('Usage.summary.marker'), 'existing-counts');
-  assert.equal(d.run('Usage.status.marker'), 'existing-status');
-  d.run('Usage.filters.provider = "openai"');
-  await d.run('usageReload()');
-  finishOld({ marker: 'old-page', items: [], total: 0 });
-  await paging;
-  assert.equal(d.run('Usage.summary.marker'), 'new-filter');
-  assert.equal(d.run('Usage.observations.marker'), 'new-filter');
-  assert.equal(d.run('Usage.offset'), 0);
-  assert.equal(d.run('Usage.recordsLoading'), false);
 });
 
 test('chart stacking uses the loaded snapshot without another request, including during initial load', async () => {
@@ -477,7 +412,7 @@ test('chart stacking uses the loaded snapshot without another request, including
   const response = { combined: { stack: 'provider', trend: [{ marker: 'provider' }], trends: { provider: [{ marker: 'provider' }], model: [{ marker: 'model' }] } } };
   const d = dashboard({ api: (endpoint) => {
     calls++;
-    return endpoint.includes('/dashboard?') ? new Promise((resolve) => { finishSummary = resolve; }) : Promise.resolve({ items: [], total: 0 });
+    return endpoint.includes('/dashboard?') ? new Promise((resolve) => { finishSummary = resolve; }) : Promise.resolve({});
   } });
   const loading = d.run('usageLoad()');
   d.run('Usage.stack = "model"; usageLoadStack()');
@@ -487,5 +422,41 @@ test('chart stacking uses the loaded snapshot without another request, including
   assert.equal(d.run('Usage.summary.combined.stack'), 'model');
   d.run('Usage.stack = "provider"; usageLoadStack()');
   assert.equal(d.run('Usage.summary.combined.trend[0].marker'), 'provider');
-  assert.equal(calls, 3);
+  assert.equal(calls, 2);
+});
+
+test('the page is drawn once; a read or an account change repaints only the sections that changed', () => {
+  const writes = [];
+  const elements = new Map();
+  const element = (id) => {
+    let html = '';
+    const el = { id, contains: () => false, setAttribute() {}, get innerHTML() { return html; }, set innerHTML(value) { html = value; writes.push(id); } };
+    elements.set(id, el);
+    return el;
+  };
+  const body = { closest: () => null };
+  const document = { body, documentElement: { dataset: {} }, activeElement: body, getElementById: (id) => elements.get(id) || null, querySelector: () => null, contains: () => true, addEventListener() {} };
+  const d = dashboard({ document, addEventListener() {}, setInterval() {}, render: () => writes.push('render'), accountById: (id) => d.context.S.accounts.find((a) => a.id === id) });
+  const clients = Array.from({ length: 9 }, (_, i) => ({ id: `client-${i}`, observations: 1, tokens: {}, models: [] }));
+  d.seed({ loaded: true, dim: 'account', summary: { combined: { totals: { observations: 1 }, trend: [], breakdowns: { account: [{ id: 'a', observations: 1 }], client: clients } } }, status: { health: {} } });
+  d.run('S.route = "usage"; usageHTML()');
+  element('usage-results');
+  for (const name of ['head', 'notices', 'cost', 'breakdown', 'clients', 'drawer']) element(`usage-part-${name}`);
+  d.run('bindUsage()');
+  d.run('usageRender()');
+  assert.deepEqual(writes, [], 'nothing changed, nothing is written');
+  d.run('Usage.clientsAll = true; usageRender(undefined, ["clients"])');
+  assert.deepEqual(writes, ['usage-part-clients']);
+  assert.match(elements.get('usage-part-clients').innerHTML, /client-8/);
+  writes.length = 0;
+  d.run('S.accounts = [{ id: "a", label: "work@example.com", provider: "claude", kind: "oauth" }]; usageAccountsChanged()');
+  assert.deepEqual(writes, ['usage-part-breakdown'], 'an account name reaches the breakdown');
+  assert.match(elements.get('usage-part-breakdown').innerHTML, /work@example\.com/);
+  writes.length = 0;
+  d.run('Usage.dim = "provider"; usageRender()');
+  assert.deepEqual(writes, ['usage-part-breakdown'], 'a breakdown tab repaints the breakdown only');
+  elements.delete('usage-results');
+  writes.length = 0;
+  d.run('usageRender()');
+  assert.deepEqual(writes, ['render'], 'without the page, it is drawn whole');
 });

@@ -338,7 +338,7 @@ async fn cache_estimate_preserves_evidence_prices_and_indexes_and_is_idempotent(
             .any(|a| a == "historical_cache_write_lifetime_5_minutes_assumed")
     );
     assert_eq!(snapshot["historical_estimate"]["original_snapshot_sha256"], hash(original.2.as_bytes()));
-    for table in ["usage_observations", "usage_entries", "usage_source_entries"] {
+    for table in ["usage_observations", "usage_entries"] {
         let row: (i64,Option<i64>,Option<i64>) = c.query_row(&format!("SELECT cost_nanos,write_5m,write_1h FROM {table} WHERE pricing_basis='historical_cache_write_estimate'"),[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(row, (1_126_000, None, None));
     }

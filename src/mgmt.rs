@@ -559,15 +559,82 @@ async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
                 let mut snapshot = a.snapshot();
                 snapshot["banked_reset_plan"] =
                     serde_json::to_value(crate::banked_resets::plan(a, &cfg)).unwrap_or_default();
+                snapshot["quota_attribution"] = attribution_json(&a.state.lock().attribution, &cfg);
                 snapshot
             })
             .collect(),
     ))
 }
 
-async fn requests(State(app): State<Arc<App>>) -> Json<Value> {
+/// A client key as people know it: the named client's label, the program, or neither.
+pub fn client_label(cfg: &Config, key: &str) -> String {
+    if let Some(program) = key.strip_prefix("app:") {
+        return program.to_string();
+    }
+    if let Some(prefix) = key.strip_prefix("key:") {
+        return format!("Shared key {prefix}…");
+    }
+    match cfg.named_clients.iter().find(|c| c.id == key) {
+        Some(c) if !c.label.trim().is_empty() => c.label.clone(),
+        Some(c) => c.id.clone(),
+        None if key.is_empty() => "Other requests".into(),
+        None if key == "dashboard" => "Dashboard playground".into(),
+        // A shared key's usage id is a hash of the key.
+        None if key.len() >= 16 && key.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!("Shared key {}…", &key[..8])
+        }
+        None => key.to_string(),
+    }
+}
+
+fn ranked(map: &std::collections::BTreeMap<String, f64>, limit: usize, label: impl Fn(&str) -> String) -> Vec<Value> {
+    let mut items: Vec<(&String, &f64)> = map.iter().filter(|(_, p)| **p > 0.0).collect();
+    items.sort_by(|a, b| b.1.total_cmp(a.1).then(a.0.cmp(b.0)));
+    items
+        .into_iter()
+        .take(limit)
+        .map(|(id, points)| json!({ "id": id, "label": label(id), "points": points }))
+        .collect()
+}
+
+fn share_json(s: &crate::attribution::Share, cfg: &Config) -> Value {
+    json!({
+        "key": crate::attribution::window_key(s),
+        "name": s.name,
+        "model": s.model,
+        "resets_at": s.resets_at,
+        "since": s.since,
+        "used": s.used,
+        "before": s.before,
+        "attributed": s.attributed(),
+        "outside": s.outside,
+        "by_tokens": s.by_tokens,
+        "clients": ranked(&s.clients, 50, |id| client_label(cfg, id)),
+        "models": ranked(&s.models, 20, |m| m.to_string()),
+        "sessions": s.sessions.len(),
+    })
+}
+
+/// Which clients used an account's subscription windows: the current windows and
+/// the ones that renewed last, in percentage points of each window.
+pub fn attribution_json(a: &crate::attribution::Attribution, cfg: &Config) -> Value {
+    json!({
+        "basis": "estimate",
+        "current": a.current.iter().map(|s| share_json(s, cfg)).collect::<Vec<_>>(),
+        "previous": a.previous.iter().take(4).map(|s| share_json(s, cfg)).collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Deserialize)]
+struct RequestsQuery {
+    limit: Option<usize>,
+}
+
+/// The request log, newest first; `limit` keeps a first paint small.
+async fn requests(State(app): State<Arc<App>>, Query(q): Query<RequestsQuery>) -> Json<Value> {
     let recent = app.stats.recent.lock();
-    Json(serde_json::to_value(recent.iter().rev().collect::<Vec<_>>()).unwrap_or_default())
+    let limit = q.limit.unwrap_or(usize::MAX);
+    Json(serde_json::to_value(recent.iter().rev().take(limit).collect::<Vec<_>>()).unwrap_or_default())
 }
 
 /// What has tripped: expired sign-ins, used-up limits, rate limits, account errors,
@@ -580,9 +647,9 @@ async fn faults(State(app): State<Arc<App>>) -> Json<Value> {
 /// One account's last hour, and the coding sessions pinned to it. Session details
 /// (client, model, requests) come from the recent request log, so older ones show none.
 async fn account_activity(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
-    if app.pool.get(&id).is_none() {
+    let Some(account) = app.pool.get(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown account");
-    }
+    };
     #[derive(Default)]
     struct Seen {
         session: String,
@@ -614,7 +681,10 @@ async fn account_activity(State(app): State<Arc<App>>, Path(id): Path<String>) -
         .into_iter()
         .map(|p| {
             let s = seen.remove(&p.owner).unwrap_or_default();
+            // What this session used of each current window, in points.
+            let quota = account.state.lock().attribution.session(&s.session);
             json!({
+                "quota": quota,
                 "session": Some(s.session).filter(|s| !s.is_empty()),
                 "last_seen": chrono::DateTime::from_timestamp(p.last_seen, 0).map(|t| t.to_rfc3339()),
                 "active": p.active,
@@ -666,16 +736,21 @@ async fn routes(State(app): State<Arc<App>>) -> Json<Value> {
 /// Public models; `prefix` marks ids that only reach the accounts carrying that prefix,
 /// `added` the ones added from the dashboard that Fusebox doesn't know yet.
 async fn models(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(model_list(&app))
+}
+
+/// What `/api/models` returns; its fingerprint decides when dashboards refetch it.
+pub fn model_list(app: &App) -> Value {
     let models = app.pool.models().into_iter().map(|(m, p)| {
         let mut v = json!({ "id": m, "provider": p });
         match app.pool.route(&m) {
             (Some(Only::Prefix(prefix)), _) => v["prefix"] = prefix.into(),
-            (_, base) if crate::discovery::added(&app, p, &base) => v["added"] = true.into(),
+            (_, base) if crate::discovery::added(app, p, &base) => v["added"] = true.into(),
             _ => {}
         }
         v
     });
-    Json(Value::Array(models.collect()))
+    Value::Array(models.collect())
 }
 
 #[derive(Deserialize)]
@@ -1135,44 +1210,72 @@ fn account_load(app: &App) -> Value {
     Value::Object(load)
 }
 
+fn live_tick(app: &App) -> String {
+    json!({ "type": "tick", "data": {
+        "active": app.stats.active.load(Ordering::Relaxed),
+        "totals": *app.stats.totals.lock(),
+    }})
+    .to_string()
+}
+
+fn live_load(app: &App) -> String {
+    format!(r#"{{"type":"load","data":{}}}"#, account_load(app))
+}
+
+fn live_faults(app: &App) -> String {
+    format!(r#"{{"type":"faults","data":{}}}"#, crate::push::current_faults(app))
+}
+
+/// One ticker for every dashboard: account load and faults are checked each second
+/// and totals every five, computed once and broadcast only when they change. It
+/// starts with the first dashboard connection and idles while none is connected.
+async fn live_ticker(app: Arc<App>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let (mut load, mut faults, mut tick) = (String::new(), String::new(), String::new());
+    let mut seconds = 0_u64;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = app.shutdown.cancelled() => return,
+        }
+        if app.live.receiver_count() == 0 {
+            continue;
+        }
+        seconds += 1;
+        let send = |last: &mut String, next: String| {
+            if *last != next {
+                let _ = app.live.send(next.clone());
+                *last = next;
+            }
+        };
+        send(&mut load, live_load(&app));
+        send(&mut faults, live_faults(&app));
+        if seconds.is_multiple_of(5) {
+            send(&mut tick, live_tick(&app));
+        }
+    }
+}
+
 async fn live(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response {
+    if !app.live_ticker.swap(true, Ordering::AcqRel) {
+        tokio::spawn(live_ticker(app.clone()));
+    }
     ws.on_upgrade(move |mut socket| async move {
         let mut rx = app.live.subscribe();
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
-        // Account load and faults are checked every second but only sent when they
-        // change. Faults carry no countdown text, so time passing alone sends nothing.
-        let mut load_tick = tokio::time::interval(Duration::from_secs(1));
-        load_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut sent_load = String::new();
-        let mut sent_faults = String::new();
+        // The current state first; the ticker only broadcasts changes.
+        for msg in [live_load(&app), live_faults(&app), live_tick(&app)] {
+            if socket.send(Message::Text(msg.into())).await.is_err() {
+                return;
+            }
+        }
         loop {
             tokio::select! {
-                _ = load_tick.tick() => {
-                    let load = account_load(&app).to_string();
-                    if load != sent_load {
-                        let msg = format!(r#"{{"type":"load","data":{load}}}"#);
-                        if socket.send(Message::Text(msg.into())).await.is_err() { break }
-                        sent_load = load;
-                    }
-                    let faults = crate::push::current_faults(&app).to_string();
-                    if faults != sent_faults {
-                        let msg = format!(r#"{{"type":"faults","data":{faults}}}"#);
-                        if socket.send(Message::Text(msg.into())).await.is_err() { break }
-                        sent_faults = faults;
-                    }
-                }
                 msg = rx.recv() => match msg {
                     Ok(m) => if socket.send(Message::Text(m.into())).await.is_err() { break },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 },
-                _ = tick.tick() => {
-                    let msg = json!({ "type": "tick", "data": {
-                        "active": app.stats.active.load(Ordering::Relaxed),
-                        "totals": *app.stats.totals.lock(),
-                    }}).to_string();
-                    if socket.send(Message::Text(msg.into())).await.is_err() { break }
-                }
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     _ => {}

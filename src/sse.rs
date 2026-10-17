@@ -85,13 +85,6 @@ impl SseDecoder {
     }
 }
 
-pub fn frame(event: Option<&str>, data: &str) -> String {
-    match event {
-        Some(e) => format!("event: {e}\ndata: {data}\n\n"),
-        None => format!("data: {data}\n\n"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
