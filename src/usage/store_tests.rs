@@ -14,11 +14,31 @@ fn event(source: &str, id: &str) -> Observation {
     };
     o
 }
-fn path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("fusebox-usage-test-{}-{}-{name}.sqlite", std::process::id(), rand_id()))
+/// A database path inside its own temporary directory, removed with any SQLite sidecar files on drop.
+struct TempDb {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
 }
-fn rand_id() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+impl std::ops::Deref for TempDb {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+impl AsRef<std::path::Path> for TempDb {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+fn path(name: &str) -> TempDb {
+    let dir = std::env::temp_dir().join(format!("fusebox-usage-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    TempDb { path: dir.join(format!("{name}.sqlite")), dir }
 }
 fn all() -> Query {
     Query {
@@ -100,7 +120,8 @@ async fn persists_more_than_ring_after_restart() {
 #[tokio::test]
 async fn reconcile_priority_order_and_equal_tokens_distinct() {
     for reverse in [false, true] {
-        let store = Store::open(&path("reconcile"), 8, 90, None).unwrap();
+        let p = path("reconcile");
+        let store = Store::open(&p, 8, 90, None).unwrap();
         let mut trusted = event("proxy", "p");
         trusted.response_id = Some("r".into());
         trusted.account_id = Some("actual".into());
@@ -121,7 +142,8 @@ async fn reconcile_priority_order_and_equal_tokens_distinct() {
 }
 #[tokio::test]
 async fn copy_revision_purge_and_atomic_checkpoint() {
-    let store = Store::open(&path("copy"), 8, 90, None).unwrap();
+    let p = path("copy");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let a = event("claude_code", "msg-stable");
     let mut b = a.clone();
     b.origin_id = "collector:copy".into();
@@ -180,7 +202,8 @@ fn exact_price_cache_reasoning_thresholds_and_historical() {
 }
 #[tokio::test]
 async fn bounds_and_dst() {
-    let store = Store::open(&path("bounds"), 8, 90, None).unwrap();
+    let p = path("bounds");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut o = event("proxy", "invalid");
     o.tokens.output = Some(1);
     assert!(!store.enqueue(o));
@@ -227,7 +250,8 @@ async fn disk_failure_visible_and_migration_fail_closed() {
 
 #[tokio::test]
 async fn bounded_queue_nonblocking_and_durable_ordering() {
-    let store = Store::open(&path("queue"), 2, 90, None).unwrap();
+    let p = path("queue");
+    let store = Store::open(&p, 2, 90, None).unwrap();
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let blocker = store.clone();
@@ -256,7 +280,8 @@ async fn bounded_queue_nonblocking_and_durable_ordering() {
 }
 #[tokio::test]
 async fn durable_transaction_rollback_and_request_id_namespace() {
-    let store = Store::open(&path("atomic"), 8, 90, None).unwrap();
+    let p = path("atomic");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let a = event("proxy", "rollback");
     assert!(
         store
@@ -325,7 +350,7 @@ async fn ingestion_metadata_only_and_price_snapshot_immutable() {
         rate.input_nanos_per_token = 99;
     }
     std::fs::write(&override_file, serde_json::to_vec(&c).unwrap()).unwrap();
-    let reopened = Store::open(&p, 8, 90, Some(&override_file)).unwrap();
+    let reopened = Store::open(&p, 8, 90, Some(&*override_file)).unwrap();
     let after = reopened.details(all()).await.unwrap();
     assert_eq!(before["items"][0]["pricing_snapshot"], after["items"][0]["pricing_snapshot"]);
     let mut invalid = serde_json::to_value(event("codex", "bad")).unwrap();
@@ -406,7 +431,7 @@ async fn generated_history_measurement() {
     let page = start.elapsed();
     println!(
         "SYNTHETIC 100000 records: insert={ingest:?}; summary={query:?}; dashboard={dashboard_query:?}; empty={empty_query:?}; narrow2={narrow_query:?}; concurrent1000_dropped=0; details100={page:?}; database_bytes={}; proxy_entries={}",
-        std::fs::metadata(p).unwrap().len(),
+        std::fs::metadata(&p).unwrap().len(),
         summary["proxy"]["observations"]
     );
 }
@@ -451,7 +476,8 @@ async fn admin_preserves_settings_and_suppression_is_origin_scoped() {
 }
 #[tokio::test]
 async fn bad_queries_and_reads_never_corrupt_writer_health() {
-    let store = Store::open(&path("health"), 8, 90, None).unwrap();
+    let p = path("health");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     assert!(store.reference_summary(Query { timezone: Some("Invalid".into()), ..Default::default() }).await.is_err());
     assert!(
         store
@@ -473,7 +499,8 @@ async fn bad_queries_and_reads_never_corrupt_writer_health() {
 }
 #[tokio::test]
 async fn distinct_known_accounts_never_collapse_shared_response_claim() {
-    let store = Store::open(&path("accounts"), 8, 90, None).unwrap();
+    let p = path("accounts");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut a = event("proxy", "a");
     a.response_id = Some("same".into());
     a.account_id = Some("account-a".into());
@@ -487,7 +514,8 @@ async fn distinct_known_accounts_never_collapse_shared_response_claim() {
 }
 #[tokio::test]
 async fn logical_requests_and_attempts_are_independent_of_replayed_charges() {
-    let store = Store::open(&path("lifecycle"), 8, 90, None).unwrap();
+    let p = path("lifecycle");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut a = event("proxy", "first-client");
     a.response_id = Some("idempotent-response".into());
     a.account_id = Some("same-account".into());
@@ -523,7 +551,8 @@ async fn logical_requests_and_attempts_are_independent_of_replayed_charges() {
 }
 #[tokio::test]
 async fn replay_lifecycle_counts_respect_raw_date_and_client_filters() {
-    let store = Store::open(&path("lifecycle-range"), 8, 90, None).unwrap();
+    let p = path("lifecycle-range");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut a = event("proxy", "first-day");
     a.response_id = Some("shared-response".into());
     a.account_id = Some("same-account".into());
@@ -603,7 +632,7 @@ async fn durable_gaps_and_unclean_or_concurrent_sessions_survive_restart() {
 #[tokio::test]
 async fn shutdown_closes_the_writer_before_returning() {
     let p = path("shutdown-closes");
-    let mut wal = p.clone().into_os_string();
+    let mut wal = p.to_path_buf().into_os_string();
     wal.push("-wal");
     let store = Store::open(&p, 8, 90, None).unwrap();
     assert!(store.enqueue(event("proxy", "a")));
@@ -623,7 +652,8 @@ async fn shutdown_closes_the_writer_before_returning() {
 }
 #[tokio::test]
 async fn large_exact_integer_cost_overflow_returns_explicit_null() {
-    let store = Store::open(&path("aggregate-overflow"), 8, 90, None).unwrap();
+    let p = path("aggregate-overflow");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let records = (0..200)
         .map(|i| {
             let mut o = event("codex", &i.to_string());
@@ -683,7 +713,8 @@ async fn assert_dashboard_matches(store: &Store, q: Query) {
 }
 #[tokio::test]
 async fn dashboard_matches_full_summary_with_overlap_revisions_filters_and_fresh_writes() {
-    let store = Store::open(&path("dashboard-equivalence"), 64, 3650, None).unwrap();
+    let p = path("dashboard-equivalence");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
     let enrollment = super::super::collector::enroll(&store, "Test laptop".into()).await.unwrap();
     let origin = format!("collector:{}", enrollment["collector"]["id"].as_str().unwrap());
     let mut records = Vec::new();
@@ -756,7 +787,8 @@ async fn dashboard_matches_full_summary_with_overlap_revisions_filters_and_fresh
 }
 #[tokio::test]
 async fn dashboard_groups_dst_days_and_bounds_facets_and_breakdowns() {
-    let store = Store::open(&path("dashboard-bounds-dst"), 64, 3650, None).unwrap();
+    let p = path("dashboard-bounds-dst");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
     let mut records = Vec::new();
     for i in 0..520 {
         let mut o = event("proxy", &format!("dst-{i}"));
@@ -791,7 +823,8 @@ async fn dashboard_groups_dst_days_and_bounds_facets_and_breakdowns() {
 async fn simultaneous_publishers_share_ingress_gate_without_artificial_drops() {
     const PRODUCERS: usize = 32;
     const EVENTS_PER_PRODUCER: usize = 8;
-    let store = Store::open(&path("simultaneous-publishers"), 512, 90, None).unwrap();
+    let p = path("simultaneous-publishers");
+    let store = Store::open(&p, 512, 90, None).unwrap();
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let blocker = store.clone();
@@ -840,7 +873,8 @@ async fn simultaneous_publishers_share_ingress_gate_without_artificial_drops() {
 
 #[tokio::test]
 async fn sqlite_full_rolls_back_records_and_exposes_proxy_loss() {
-    let store = Store::open(&path("sqlite-full"), 512, 90, None).unwrap();
+    let p = path("sqlite-full");
+    let store = Store::open(&p, 512, 90, None).unwrap();
     store
         .call(|conn| {
             let pages: i64 = conn.pragma_query_value(None, "page_count", |row| row.get(0))?;
@@ -904,7 +938,8 @@ async fn sqlite_full_rolls_back_records_and_exposes_proxy_loss() {
 
 #[tokio::test]
 async fn collector_filter_retains_raw_evidence_when_local_copy_wins_accounting() {
-    let store = Store::open(&path("collector-filter-evidence"), 8, 90, None).unwrap();
+    let p = path("collector-filter-evidence");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut local = event("claude_code", "native-copied-message");
     local.provider = "anthropic".into();
     local.actual_model = Some("claude-sonnet-4-6".into());
@@ -941,7 +976,8 @@ fn anthropic(source: &str, id: &str, response: Option<&str>, at: &str) -> Observ
 }
 #[tokio::test]
 async fn combined_set_counts_shared_response_once_and_proxy_wins() {
-    let store = Store::open(&path("combined"), 8, 90, None).unwrap();
+    let p = path("combined");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let mut p1 = anthropic("proxy", "p1", Some("r1"), "2026-10-01T10:00:00Z");
     p1.account_id = Some("acct".into());
     let mut c1 = anthropic("claude_code", "c1", Some("r1"), "2026-10-01T10:00:00Z");
@@ -995,7 +1031,8 @@ async fn combined_set_counts_shared_response_once_and_proxy_wins() {
 }
 #[tokio::test]
 async fn combined_trend_groups_by_provider_and_model_across_dst() {
-    let store = Store::open(&path("combined-dst"), 8, 3650, None).unwrap();
+    let p = path("combined-dst");
+    let store = Store::open(&p, 8, 3650, None).unwrap();
     // Amsterdam moves from CET (+1) to CEST (+2) at 2026-03-29T01:00Z.
     let a = anthropic("claude_code", "a", Some("ra"), "2026-03-28T22:30:00Z");
     let mut b = event("proxy", "b");
@@ -1042,7 +1079,8 @@ async fn combined_trend_groups_by_provider_and_model_across_dst() {
 }
 #[tokio::test]
 async fn combined_observations_report_matched_sources_and_origin_label() {
-    let store = Store::open(&path("combined-records"), 8, 90, None).unwrap();
+    let p = path("combined-records");
+    let store = Store::open(&p, 8, 90, None).unwrap();
     let enrolled = super::super::collector::enroll(&store, "Work laptop".into()).await.unwrap();
     let origin = format!("collector:{}", enrolled["collector"]["id"].as_str().unwrap());
     let mut p1 = anthropic("proxy", "p1", Some("r1"), "2026-10-01T10:00:00Z");
