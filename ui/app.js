@@ -1999,7 +1999,7 @@ function bankedLabel(a) {
 }
 function bankedPolicyText(a) {
   const plan = a.banked_reset_plan;
-  if (plan?.auto_redeem) return `${plan.prioritized ? 'Prioritized for new work. ' : ''}${plan.message}`;
+  if (plan?.auto_redeem) return `${plan.prioritized ? 'Prioritized for new work. ' : ''}${plan.message}${plan.expiry_redeem_at ? ` Expiry redemption starts ${when(plan.expiry_redeem_at)}.` : ''}`;
   return 'Manual use asks for confirmation. Automatic redemption is off for this account.';
 }
 // "↻ 2 resets banked" under an account's status: only resets you have, or one that needs a decision.
@@ -2057,7 +2057,7 @@ function bankedResetsHTML(a) {
     const reason = a.disabled ? 'Enable this account to apply a reset.' : stale || expiryChanged ? 'Refresh to check availability.' : inv?.reason;
     const message = uncertain ? '<p class="warn">A reset may have been used. New resets are blocked until resolved.</p>' : op ? `<p class="${['applied', 'reconciled_used'].includes(op.status) ? 'ok' : 'sub'}" role="status">${esc(op.message)}</p>` : '';
     const plan = a.banked_reset_plan;
-    const policy = plan ? `<p class="sub">${plan.prioritized ? 'Prioritized for new work. ' : ''}${esc(plan.message)}</p>` : '';
+    const policy = plan ? `<p class="sub">${esc(bankedPolicyText(a))}</p>` : '';
     const automatic = op?.automatic ? '<p class="sub">This reset was requested automatically under your routing policy.</p>' : '';
     content = `<p class="reset-count">${esc(bankedLabel(a))}${a.provider === 'claude' && inv?.applicable != null && inv.applicable !== inv.available && !r?.error ? `<span class="sub"> · ${inv.applicable} usable now</span>` : ''}</p>${grants ? `<ul class="reset-grants">${grants}</ul>` : ''}${policy}${reason && !r?.error ? `<p class="sub">${esc(reason)}</p>` : ''}${message}${automatic}`;
     controls = `${resetButton(a, 'banked-refresh', local.busy ? 'Checking…' : 'Refresh', local.busy)}${resetButton(a, 'banked-open', 'Use 1 reset', !usable, r?.checked_at ? `data-reset-deadline="${esc(new Date(Date.parse(r.checked_at) + 5 * 60 * 1000).toISOString())}"` : '')}`;

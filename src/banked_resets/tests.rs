@@ -128,7 +128,7 @@ fn automatic_fixture(weekly: f64, short: f64, hours: i64) -> (Temp, Arc<App>, Ar
 }
 
 #[test]
-fn automatic_policy_uses_weekly_consumption_and_real_expiry_value() {
+fn automatic_policy_uses_weekly_consumption_until_the_expiry_deadline() {
     let (_temp, app, acct, _) = automatic_fixture(3.0, 0.0, 120);
     let cfg = app.cfg();
     let due = |usage: Value| {
@@ -139,11 +139,12 @@ fn automatic_policy_uses_weekly_consumption_and_real_expiry_value() {
     };
     assert!(!due(expiring_usage(94.0, 100.0, 120)), "a short limit must not waste a weekly reset days early");
     assert!(due(expiring_usage(95.0, 100.0, 120)));
-    assert!(due(expiring_usage(20.0, 0.0, 5)), "rescue a partly used weekly allowance before expiry");
+    assert!(!due(expiring_usage(20.0, 0.0, 5)));
     assert!(!due(expiring_usage(19.0, 0.0, 5)));
-    assert!(!due(expiring_usage(0.0, 0.0, 1)), "never consume a reset that restores nothing");
+    assert!(due(expiring_usage(0.0, 0.0, 1)), "redeem at the one-hour deadline even with no usage");
     assert!(!due(expiring_usage(3.0, 100.0, 5)), "short allowance renews before the credit expires");
-    assert!(due(expiring_usage(3.0, 100.0, 2)), "short allowance cannot renew before credit expiry");
+    assert!(!due(expiring_usage(3.0, 100.0, 2)), "the expiry fallback starts one hour before expiry");
+    assert!(due(expiring_usage(3.0, 0.0, 1)), "low usage still redeems at the expiry deadline");
     assert!(!due(expiring_usage(100.0, 100.0, 200)), "outside the configured expiry window");
     assert!(!due(expiring_usage(100.0, 100.0, -1)));
     let mut usage = expiring_usage(100.0, 100.0, 120);
@@ -159,6 +160,93 @@ fn automatic_policy_uses_weekly_consumption_and_real_expiry_value() {
     usage["cedar_ember"]["grants"][0]["ends_at"] = Value::Null;
     assert!(!due(usage), "an unknown expiry cannot authorize expiry-based spending");
     assert!(plan(&acct, &cfg).unwrap().auto_redeem);
+}
+
+#[test]
+fn expiry_deadline_is_exact_and_ignores_missing_usage_and_natural_renewal() {
+    let (_temp, app, _, _) = automatic_fixture(0.0, 0.0, 1);
+    let cfg = app.cfg();
+    let now = Utc::now();
+    let mut usage = expiring_usage(0.0, 0.0, 1);
+    usage["seven_day"]["resets_at"] = json!(now + chrono::Duration::minutes(5));
+    let mut fresh = crate::accounts::AccountState::default();
+    crate::quota::usage(&mut fresh, Provider::Claude, &usage);
+    let claude = provider::claude(&usage, now).unwrap();
+    let codex = provider::codex(
+        &json!({}),
+        &json!({"available_count":1,"credits":[{
+            "id":"credit-1","status":"available","reset_type":"codex_rate_limits",
+            "expires_at":now + chrono::Duration::hours(1)
+        }]}),
+        now,
+    )
+    .unwrap();
+    for mut inv in [claude, codex] {
+        for (seconds, expected) in
+            [(3601, false), (3600, true), (3599, true), (30, true), (1, true), (0, false), (-1, false)]
+        {
+            inv.grants[0].expires_at = Some(now + chrono::Duration::seconds(seconds));
+            for quota in [&fresh.quota, &crate::quota::Quota::default()] {
+                let decision = automation::decision(&cfg, quota, &inv, now);
+                assert_eq!(decision.is_some(), expected, "{seconds} seconds before expiry");
+                if let Some(d) = decision {
+                    assert!(d.expiry_due);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn expiry_redemption_uses_fresh_inventory_without_requiring_usage() {
+    let (temp, app, acct, mut mock) = automatic_fixture(0.0, 0.0, 1);
+    mock.usage.as_object_mut().unwrap().remove("five_hour");
+    mock.usage.as_object_mut().unwrap().remove("seven_day");
+    let plan = plan(&acct, &app.cfg()).unwrap();
+    assert!(plan.due);
+    assert_eq!(plan.expiry_redeem_at, plan.expires_at - chrono::Duration::hours(1));
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "applied");
+    assert_eq!(mock.calls.lock().len(), 1);
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1, "the deadline cannot override duplicate-credit protection");
+    // Older/manual operations have no automatic credit marker, so retain their
+    // recent-success pause until a distinct next credit can safely be evaluated.
+    for op in ledger.journal.operations.values_mut() {
+        op.automatic = false;
+        op.auto_credit = None;
+    }
+    mock.inventory.grants[0].remaining = 1;
+    mock.inventory.available = Some(1);
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1, "recent manual redemption still pauses automatic spending");
+}
+
+#[tokio::test]
+async fn expiry_deadline_rechecks_refusals_after_five_minutes_and_can_use_distinct_credits() {
+    let (temp, app, acct, mut mock) = automatic_fixture(0.0, 0.0, 1);
+    *mock.outcomes.lock() = VecDeque::from([Outcome::Refused("Rate limited"), Outcome::Applied, Outcome::Applied]);
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "refused");
+    assert!(execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.is_err());
+    assert_eq!(mock.calls.lock().len(), 1);
+    for op in ledger.journal.operations.values_mut() {
+        op.updated_at -= chrono::Duration::minutes(6);
+    }
+    ledger.save().unwrap();
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "applied");
+    mock.inventory.grants[0].remaining = 1;
+    mock.inventory.available = Some(1);
+    let result =
+        execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert_eq!(result.operation.unwrap().status, "applied");
+    assert_eq!(mock.calls.lock().len(), 3, "fresh inventory confirms the next distinct credit");
 }
 
 #[tokio::test]
@@ -196,7 +284,7 @@ async fn automatic_redemption_rechecks_usage_and_persists_duplicate_protection()
 
 #[tokio::test]
 async fn automatic_unknown_outcome_blocks_after_restart_and_opt_out_prevents_spending() {
-    let (temp, app, acct, mock) = automatic_fixture(98.0, 0.0, 120);
+    let (temp, app, acct, mock) = automatic_fixture(0.0, 0.0, 1);
     let mut cfg = (*app.cfg()).clone();
     cfg.banked_reset_policy.auto_redeem = false;
     app.set_config(cfg.clone());
@@ -362,7 +450,7 @@ async fn automatic_worker_serializes_duplicate_credentials_and_refreshes_restore
             if b.posts.load(Ordering::SeqCst) > 0 {
                 usage["five_hour"]["utilization"] = json!(0);
                 usage["seven_day"]["utilization"] = json!(0);
-                usage["cedar_ember"]["grants"][0]["resets_left"] = json!(1);
+                usage["cedar_ember"]["grants"][0]["resets_left"] = json!(0);
             }
             return axum::Json(usage).into_response();
         }
@@ -378,8 +466,10 @@ async fn automatic_worker_serializes_duplicate_credentials_and_refreshes_restore
         StatusCode::NOT_FOUND.into_response()
     }
     let (temp, app, acct) = fixture(Provider::Claude, 2);
-    let b =
-        Backend { usage: expiring_usage(96.0, 100.0, 120), posts: Arc::new(AtomicUsize::new(0)), root: temp.0.clone() };
+    let mut usage = expiring_usage(0.0, 0.0, 1);
+    usage["cedar_ember"]["grants"][0]["resets_total"] = json!(1);
+    usage["cedar_ember"]["grants"][0]["resets_left"] = json!(1);
+    let b = Backend { usage, posts: Arc::new(AtomicUsize::new(0)), root: temp.0.clone() };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     *app.reset_test_origin.lock() = Some(format!("http://{}", listener.local_addr().unwrap()));
     let server =
@@ -398,7 +488,7 @@ async fn automatic_worker_serializes_duplicate_credentials_and_refreshes_restore
         let st = account.state.lock();
         assert_eq!(st.quota.weekly_remaining("claude-opus-5-5"), Some(100.0));
         assert_eq!(st.quota.five_hour_remaining("claude-opus-5-5"), Some(100.0));
-        assert_eq!(st.banked_resets.as_ref().unwrap().inventory.as_ref().unwrap().available, Some(1));
+        assert_eq!(st.banked_resets.as_ref().unwrap().inventory.as_ref().unwrap().available, Some(0));
         assert!(!st.quota_refreshing);
     }
     assert!(!automatic_check(&app, &acct).await);

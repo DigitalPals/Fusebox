@@ -5,8 +5,7 @@ use crate::quota::{Quota, Window};
 use provider::Grant;
 
 const WEEKLY_USED: f64 = 95.0;
-const EXPIRY_USED: f64 = 20.0;
-const EXPIRY_SAFETY_HOURS: i64 = 6;
+const EXPIRY_REDEEM_HOURS: i64 = 1;
 const INVENTORY_MAX_AGE_MINUTES: i64 = 35;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +96,11 @@ pub fn priority_expiry(acct: &Account, model: &str, cfg: &Config) -> Option<Date
 pub(super) struct Decision {
     pub grant_id: String,
     pub credit_key: String,
+    pub expiry_due: bool,
+}
+
+fn expiry_due(grant: &Grant, now: DateTime<Utc>) -> bool {
+    grant.expires_at.is_some_and(|expiry| expiry <= now + chrono::Duration::hours(EXPIRY_REDEEM_HOURS))
 }
 
 pub(super) fn decision(cfg: &Config, quota: &Quota, inv: &Inventory, now: DateTime<Utc>) -> Option<Decision> {
@@ -107,9 +111,10 @@ pub(super) fn decision(cfg: &Config, quota: &Quota, inv: &Inventory, now: DateTi
         .iter()
         .filter(|g| g.usable && within_horizon(cfg, g, now))
         .filter(|g| {
-            let expiry = g.expires_at.unwrap();
-            if expiry <= now + chrono::Duration::seconds(30) {
-                return false;
+            // The expiry deadline takes precedence over consumption and natural
+            // renewal: redeem even at zero usage or with no quota observations.
+            if expiry_due(g, now) {
+                return true;
             }
             let affected: Vec<_> = quota
                 .windows
@@ -117,18 +122,16 @@ pub(super) fn decision(cfg: &Config, quota: &Quota, inv: &Inventory, now: DateTi
                 .filter(|w| clears(g, w) && w.used.is_finite() && w.resets_at.is_none_or(|r| r > now))
                 .collect();
             let weekly = g.clears.iter().any(|s| s.starts_with("week") || s == "subscription limits");
-            let drained = affected.iter().any(|w| {
+            affected.iter().any(|w| {
                 (!weekly || w.name.starts_with("week"))
                     && w.used >= WEEKLY_USED
                     && w.resets_at.is_none_or(|r| r > now + chrono::Duration::minutes(10))
-            });
-            let expiring = expiry <= now + chrono::Duration::hours(EXPIRY_SAFETY_HOURS)
-                && affected.iter().any(|w| w.used >= EXPIRY_USED && w.resets_at.is_none_or(|r| r > expiry));
-            drained || expiring
+            })
         })
         .min_by_key(|g| (g.expires_at, &g.id))
         .map(|g| Decision {
             grant_id: g.id.clone(),
+            expiry_due: expiry_due(g, now),
             // Another grant arriving or expiring must not release this marker.
             // Only this grant's identity, expiry and remaining count identify
             // the next credit. Anonymous Codex credits conservatively share it.
@@ -141,13 +144,15 @@ pub(super) fn check_journal(journal: &ledger::Journal, decision: &Decision, now:
     for operation in journal.operations.values() {
         let success = matches!(operation.status.as_str(), "applied" | "already_used" | "reconciled_used");
         ensure!(
-            !(success && now - operation.updated_at < chrono::Duration::minutes(10)),
+            !(success
+                && (!decision.expiry_due || operation.auto_credit.is_none())
+                && now - operation.updated_at < chrono::Duration::minutes(10)),
             "A reset was recently applied"
         );
         if operation.auto_credit.as_deref() == Some(&decision.credit_key) {
             ensure!(!success, "Provider inventory has not confirmed the previous automatic spend");
             ensure!(
-                now - operation.updated_at >= chrono::Duration::hours(1),
+                now - operation.updated_at >= chrono::Duration::minutes(if decision.expiry_due { 5 } else { 60 }),
                 "Automatic reset is backing off after refusal"
             );
         }
@@ -168,12 +173,6 @@ pub async fn automatic_check(app: &Arc<App>, acct: &Arc<Account>) -> bool {
         }
         let Some(view) = st.banked_resets.as_ref() else { return false };
         let Some(inv) = inventory(view, Utc::now()) else { return false };
-        if let Some(o) = &view.operation {
-            let delay = if o.automatic && o.status == "refused" { 3600 } else { 600 };
-            if (Utc::now() - o.created_at).num_seconds() < delay {
-                return false;
-            }
-        }
         // A grant waiting for a limit may become usable on the authoritative preflight.
         let mut planned = inv.clone();
         for g in &mut planned.grants {
@@ -182,8 +181,20 @@ pub async fn automatic_check(app: &Arc<App>, acct: &Arc<Account>) -> bool {
                 planned.eligible = true;
             }
         }
-        if decision(&cfg, &st.quota, &planned, Utc::now()).is_none() {
-            return false;
+        let Some(decision) = decision(&cfg, &st.quota, &planned, Utc::now()) else { return false };
+        if let Some(o) = &view.operation {
+            let delay = if o.status == "refused" && decision.expiry_due {
+                300
+            } else if o.automatic && o.status == "refused" {
+                3600
+            } else if decision.expiry_due && o.automatic {
+                0
+            } else {
+                600
+            };
+            if (Utc::now() - o.created_at).num_seconds() < delay {
+                return false;
+            }
         }
     }
     let result = async {
@@ -205,6 +216,7 @@ pub async fn automatic_check(app: &Arc<App>, acct: &Arc<Account>) -> bool {
 #[derive(Serialize)]
 pub struct Plan {
     pub expires_at: DateTime<Utc>,
+    pub expiry_redeem_at: DateTime<Utc>,
     pub prioritized: bool,
     pub auto_redeem: bool,
     pub due: bool,
@@ -223,11 +235,12 @@ pub fn plan(acct: &Account, cfg: &Config) -> Option<Plan> {
     let auto = enabled(cfg) && !st.disabled;
     Some(Plan {
         expires_at,
+        expiry_redeem_at: expires_at - chrono::Duration::hours(EXPIRY_REDEEM_HOURS),
         prioritized: prioritized && !st.disabled,
         auto_redeem: auto,
         due: auto && decision(cfg, &st.quota, inv, now).is_some(),
         message: if auto {
-            "Automatic reset at 95% weekly use, or in the final 6 hours with at least 20% quota to restore. Short limits normally wait for their own renewal."
+            "Automatic reset at 95% weekly use, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies."
         } else {
             "Automatic redemption is off. Use a reset manually before it expires."
         },
