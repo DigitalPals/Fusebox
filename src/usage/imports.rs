@@ -17,7 +17,7 @@ use std::{
     sync::OnceLock,
 };
 
-const PARSER: &str = "native-2026-10-07-v2";
+const PARSER: &str = "native-2026-10-18-v3";
 const MAX_FILES: usize = 4096;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FILE: u64 = 256 * 1024 * 1024;
@@ -82,7 +82,8 @@ pub enum UsageCommand {
         #[arg(long)]
         source: Option<String>,
     },
-    /// Retry unpriced rows affected by corrected date or region semantics.
+    /// Apply current bundled prices to recoverable unpriced rows and documented corrections.
+    /// Organization overrides are preserved; previous snapshots remain in the audit trail.
     Reprice {
         #[arg(long)]
         database: PathBuf,
@@ -139,7 +140,11 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         }
     };
     let database = database.clone();
-    let store = tokio::task::spawn_blocking(move || Store::open_existing(&database, 128)).await??;
+    let refresh_rates = matches!(command, UsageCommand::Reprice { .. });
+    let store = tokio::task::spawn_blocking(move || {
+        if refresh_rates { Store::open_for_reprice(&database, 128) } else { Store::open_existing(&database, 128) }
+    })
+    .await??;
     let result = match command {
         UsageCommand::Status { .. } => status(&store).await,
         UsageCommand::Enable { source, root, .. } => configure(&store, &source, &root.to_string_lossy(), true).await,
@@ -285,6 +290,8 @@ struct Root {
 }
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct Context {
+    #[serde(default)]
+    parser_version: String,
     session: Option<String>,
     #[serde(default)]
     thread: Option<String>,
@@ -300,6 +307,8 @@ pub(crate) struct Context {
     legacy_reset: bool,
     #[serde(default)]
     legacy_emitted: Vec<String>,
+    #[serde(default)]
+    legacy_totals: BTreeMap<String, String>,
     #[serde(skip)]
     superseded: Vec<String>,
     #[serde(default)]
@@ -320,6 +329,29 @@ struct NativeTokens {
     reasoning: Option<u64>,
 }
 impl NativeTokens {
+    fn matches_key(&self, key: &str) -> bool {
+        let fields: Vec<_> = key.split(':').collect();
+        if fields.len() != 5 {
+            return false;
+        }
+        let Some(values) = fields[..4].iter().map(|s| s.parse::<u64>().ok()).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let reasoning = if fields[4] == "?" {
+            None
+        } else if let Ok(n) = fields[4].parse() {
+            Some(n)
+        } else {
+            return false;
+        };
+        self.same_billed_usage(&Self {
+            input: values[0],
+            read: values[1],
+            write: values[2],
+            output: values[3],
+            reasoning,
+        })
+    }
     fn same_billed_usage(&self, other: &Self) -> bool {
         self.input == other.input
             && self.read == other.read
@@ -597,9 +629,26 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
                 let key = total.key();
                 if let Some(thread) = &context.thread {
                     let fallback = format!("counter:{}", hash(format!("thread:{thread}:{key}").as_bytes()));
-                    if let Some(index) = context.legacy_emitted.iter().position(|id| id == &fallback) {
-                        context.legacy_emitted.remove(index);
-                        context.superseded.push(fallback);
+                    // Older checkpoints kept only IDs; their latest cumulative total
+                    // still lets an optional reasoning field reconcile safely.
+                    if let Some(previous) = &context.cumulative {
+                        let id = format!("counter:{}", hash(format!("thread:{thread}:{}", previous.key()).as_bytes()));
+                        if context.legacy_emitted.contains(&id) {
+                            context.legacy_totals.insert(id, previous.key());
+                        }
+                    }
+                    let superseded: Vec<_> = context
+                        .legacy_emitted
+                        .iter()
+                        .filter(|id| {
+                            *id == &fallback || context.legacy_totals.get(*id).is_some_and(|k| total.matches_key(k))
+                        })
+                        .cloned()
+                        .collect();
+                    for id in superseded {
+                        context.legacy_emitted.retain(|old| old != &id);
+                        context.legacy_totals.remove(&id);
+                        context.superseded.push(id);
                     }
                 }
                 if context.modern_totals.len() >= 64 {
@@ -660,13 +709,17 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
                 bail!("inconsistent last-response categories")
             }
             context.cumulative = Some(total.clone());
-            if context.modern_totals.contains(&total.key()) {
+            if context.modern_totals.iter().any(|key| total.matches_key(key)) {
+                // Also suppress an already stored fallback on a corrective rescan.
+                context.superseded.push(o.source_event_id);
                 return Ok(None);
             }
             if context.legacy_emitted.len() >= 64 {
-                context.legacy_emitted.remove(0);
+                let removed = context.legacy_emitted.remove(0);
+                context.legacy_totals.remove(&removed);
             }
             context.legacy_emitted.push(o.source_event_id.clone());
+            context.legacy_totals.insert(o.source_event_id.clone(), total.key());
             // A first snapshot after resume can contain the thread's entire old
             // history. Its last response is the only per-request observation.
             // Later last values must reconcile with cumulative growth; a jump
@@ -778,6 +831,9 @@ fn read_file(path: &Path, root: &Root, checkpoint: Option<&Checkpoint>, remainin
     let signature = file_signature(&fs::metadata(path)?);
     let mut cp = checkpoint.cloned().unwrap_or_default();
     let expected = checkpoint.map(|c| c.offset);
+    if cp.context.parser_version != PARSER {
+        cp = Checkpoint::default();
+    }
     let mut input = BufReader::new(reader(path)?.take(MAX_FILE + 1));
     let mut prefix = vec![0; cp.prefix_len.min(4096) as usize];
     let n = input.read(&mut prefix)?;
@@ -795,6 +851,7 @@ fn read_file(path: &Path, root: &Root, checkpoint: Option<&Checkpoint>, remainin
             prefix.clear();
         }
     }
+    cp.context.parser_version = PARSER.into();
     let mut observations = BTreeMap::<String, Observation>::new();
     let mut counts = Counts::default();
     let start = cp.offset;

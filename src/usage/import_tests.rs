@@ -596,3 +596,86 @@ async fn imported_claude_history_is_priced_on_its_original_local_date() {
     assert!(day["estimated_cost_nanos"].as_i64().unwrap() > 0);
     store.shutdown().await.unwrap();
 }
+
+#[test]
+fn optional_reasoning_deduplicates_in_either_order_and_checkpoint_format() {
+    for modern_first in [false, true] {
+        for missing_modern in [false, true] {
+            for old_checkpoint in [false, true] {
+                let mut m = modern();
+                let mut l = legacy();
+                if missing_modern {
+                    m["payload"]["thread_token_usage"].as_object_mut().unwrap().remove("reasoning_output_tokens");
+                } else {
+                    l["payload"]["info"]["total_token_usage"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("reasoning_output_tokens");
+                }
+                let mut state = Context::default();
+                parse_record("codex", &meta("openai"), &mut state).unwrap();
+                parse_record("codex", &context(), &mut state).unwrap();
+                let first = parse_record("codex", if modern_first { &m } else { &l }, &mut state).unwrap().unwrap();
+                let mut saved = serde_json::to_value(&state).unwrap();
+                if old_checkpoint {
+                    saved.as_object_mut().unwrap().remove("legacy_totals");
+                }
+                state = serde_json::from_value(saved).unwrap();
+                let second = parse_record("codex", if modern_first { &l } else { &m }, &mut state).unwrap();
+                if modern_first {
+                    assert!(second.is_none());
+                    assert_eq!(state.superseded.len(), 1);
+                } else {
+                    assert_eq!(second.unwrap().source_event_id, "response:resp-one");
+                    assert_eq!(state.superseded, vec![first.source_event_id]);
+                }
+            }
+        }
+    }
+    // A positive disagreement is evidence of different cumulative snapshots.
+    let mut state = Context::default();
+    parse_record("codex", &meta("openai"), &mut state).unwrap();
+    parse_record("codex", &modern(), &mut state).unwrap();
+    let mut l = legacy();
+    l["payload"]["info"]["total_token_usage"]["reasoning_output_tokens"] = json!(81);
+    assert!(parse_record("codex", &l, &mut state).unwrap().is_some());
+    assert!(state.superseded.is_empty());
+}
+
+#[tokio::test]
+async fn upgraded_parser_repairs_stored_duplicate_and_resumes_once() {
+    for modern_first in [false, true] {
+        let dir = TestDir::new();
+        let logs = dir.0.join("logs");
+        fs::create_dir(&logs).unwrap();
+        let file = logs.join("rollout.jsonl");
+        let m = modern();
+        let mut l = legacy();
+        l["payload"]["info"]["total_token_usage"].as_object_mut().unwrap().remove("reasoning_output_tokens");
+        let mut state = Context::default();
+        parse_record("codex", &meta("openai"), &mut state).unwrap();
+        parse_record("codex", &context(), &mut state).unwrap();
+        let fallback = parse_record("codex", &l, &mut state).unwrap().unwrap();
+        let response = parse_record("codex", &m, &mut state).unwrap().unwrap();
+        let store = dir.store();
+        store.call(move |c| store::insert_batch(c, &[fallback, response])).await.unwrap();
+        assert_eq!(count(&store).await, 2);
+        let rows =
+            if modern_first { vec![meta("openai"), context(), m, l] } else { vec![meta("openai"), context(), l, m] };
+        write_rows(&file, &rows);
+        configure(&store, "codex", logs.to_str().unwrap(), true).await.unwrap();
+        scan(&store, None).await.unwrap();
+        assert_eq!(count(&store).await, 1);
+        store.call(|c| {
+            c.execute("UPDATE usage_import_checkpoints SET context=json_remove(context,'$.parser_version','$.legacy_totals')", [])?;
+            Ok(())
+        }).await.unwrap();
+        let repaired = scan(&store, None).await.unwrap();
+        assert_eq!(count(&store).await, 1);
+        assert!(repaired["scans"][0]["report"]["counts"]["duplicate"].as_u64().unwrap() >= 1);
+        let resumed = scan(&store, None).await.unwrap();
+        assert_eq!(resumed["scans"][0]["report"]["counts"]["duplicate"], 0);
+        assert_eq!(resumed["scans"][0]["report"]["counts"]["imported"], 0);
+        store.shutdown().await.unwrap();
+    }
+}

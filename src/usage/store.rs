@@ -186,11 +186,19 @@ impl Store {
     }
     /// Admin/import access preserves the configured retention horizon and catalogue.
     pub fn open_existing(path: &Path, queue_capacity: usize) -> Result<Self> {
+        Self::open_saved(path, queue_capacity, false)
+    }
+    /// Explicit repricing refreshes bundled rates while preserving organization overrides.
+    pub fn open_for_reprice(path: &Path, queue_capacity: usize) -> Result<Self> {
+        Self::open_saved(path, queue_capacity, true)
+    }
+    fn open_saved(path: &Path, queue_capacity: usize, refresh_rates: bool) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let retention: String =
             conn.query_row("SELECT value FROM usage_meta WHERE key='retention_days'", [], |r| r.get(0))?;
         let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
-        let catalogue: Catalogue = serde_json::from_str(&raw)?;
+        let saved: Catalogue = serde_json::from_str(&raw)?;
+        let catalogue = if refresh_rates && !saved.local_override { Catalogue::load(None)? } else { saved };
         Self::start(path, queue_capacity, retention.parse().context("stored retention invalid")?, catalogue, None)
     }
     fn start(
@@ -245,7 +253,7 @@ impl Store {
         // Collector outboxes only forward evidence; the server prices it on ingestion.
         let startup_repriced = if byte_limit.is_none() { reprice(&mut conn)? } else { 0 };
         if startup_repriced > 0 {
-            tracing::info!(repriced = startup_repriced, "updated previously unpriced usage estimates");
+            tracing::info!(repriced = startup_repriced, "repaired usage price estimates; previous snapshots retained");
         }
         let (tx, mut rx) = mpsc::channel(queue_capacity);
         let (historical_dropped,historical_rejected,historical_errors,prior_unclosed):(u64,u64,u64,u64)=conn.query_row("SELECT COALESCE(SUM(dropped),0),COALESCE(SUM(rejected),0),COALESCE(SUM(writer_errors),0),COALESCE(SUM(clean=0),0) FROM usage_writer_sessions",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
@@ -773,9 +781,17 @@ pub fn backup(database: &Path, to: &Path) -> Result<()> {
     result
 }
 
-/// Retry unpriced observations affected by corrected date/region semantics.
-/// Rows that already carry a price are never touched; safe to repeat.
+/// Retry recoverable unpriced estimates and the identified bundled Sonnet 5.5 error.
+/// Every revision preserves its previous snapshot in the same transaction as rollups.
 pub fn reprice(conn: &mut Connection) -> Result<u64> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_price_revisions(
+        id INTEGER PRIMARY KEY,observation_id INTEGER NOT NULL REFERENCES usage_observations(id) ON DELETE CASCADE,
+        changed_at_ms INTEGER NOT NULL,reason TEXT NOT NULL,previous_cost_nanos INTEGER,
+        previous_catalogue_version TEXT NOT NULL,previous_snapshot TEXT NOT NULL,
+        catalogue_version TEXT NOT NULL,cost_nanos INTEGER);
+        CREATE INDEX IF NOT EXISTS usage_price_revisions_observation ON usage_price_revisions(observation_id,id);",
+    )?;
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let (mut cursor, mut repriced) = (0_i64, 0_u64);
@@ -783,20 +799,42 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
         // Take the write lock first: a read that later upgrades fails at once (SQLITE_BUSY_SNAPSHOT)
         // when another connection wrote in between, where waiting for the lock just works.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let rows = tx.prepare("SELECT id,payload,canonical_key,pricing_basis FROM usage_observations WHERE id>?1 AND cost_nanos IS NULL AND pricing_basis IN ('outside_effective_period','local_override:outside_effective_period','unsupported_inference_region','local_override:unsupported_inference_region') ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = tx.prepare("SELECT id,payload,canonical_key,pricing_basis,cost_nanos,snapshot_json,catalogue_version
+            FROM usage_observations WHERE id>?1 AND (
+              (cost_nanos IS NULL AND REPLACE(pricing_basis,'local_override:','') IN
+                ('outside_effective_period','unsupported_inference_region','unknown_model','unsupported_service_tier',
+                 'unsupported_service_tier_context','unsupported_regional_model','unsupported_rate_or_overflow'))
+              OR (model='claude-sonnet-5-5' AND catalogue_version='2026-10-07.3' AND cache_read>0 AND cost_nanos IS NOT NULL))
+            ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,rusqlite::types::Value>(5)?,r.get::<_,String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let Some(last) = rows.last() else { break };
         cursor = last.0;
         let mut documents = Documents::new(&tx)?;
         let mut groups = BTreeSet::new();
-        for (id, payload, key, basis) in rows {
+        for (id, payload, key, basis, old_cost, old_snapshot, old_catalogue) in rows {
             // Payloads written by an incompatible build stay as stored rather than guessed.
             let Ok(payload) = codec::decode(&tx, (&payload).into()) else { continue };
             let Ok(o) = serde_json::from_str::<Observation>(&payload) else { continue };
+            let old_snapshot = codec::decode(&tx, (&old_snapshot).into())?;
+            if old_cost.is_some() {
+                let old: super::pricing::Snapshot = serde_json::from_str(&old_snapshot)?;
+                if catalogue.local_override
+                    || old.local_override
+                    || old.rate.is_none_or(|r| r.cache_read_nanos_per_token != Some(200))
+                {
+                    continue;
+                }
+            }
             let snapshot = catalogue.price(&o);
-            if snapshot.cost_nanos.is_none() && snapshot.basis == basis {
+            if snapshot.cost_nanos == old_cost && (old_cost.is_some() || snapshot.basis == basis) {
                 continue;
             }
-            tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,catalogue_version=?4,snapshot_json=?5,pricing_partial=?6 WHERE id=?1 AND cost_nanos IS NULL",params![id,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,i64::from(snapshot.partial)])?;
+            // A catalogue change must never remove an established price.
+            if old_cost.is_some() && snapshot.cost_nanos.is_none() {
+                continue;
+            }
+            tx.execute("INSERT INTO usage_price_revisions(observation_id,changed_at_ms,reason,previous_cost_nanos,previous_catalogue_version,previous_snapshot,catalogue_version,cost_nanos)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![id,Utc::now().timestamp_millis(),if old_cost.is_some(){"sonnet_5_5_cache_read_correction"}else{"recoverable_unpriced_estimate"},old_cost,old_catalogue,old_snapshot,snapshot.catalogue_version,snapshot.cost_nanos])?;
+            tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,catalogue_version=?4,snapshot_json=?5,pricing_partial=?6 WHERE id=?1",params![id,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,i64::from(snapshot.partial)])?;
             groups.insert(key);
             repriced += 1;
         }
@@ -1071,6 +1109,11 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
         ))
     })?;
     let mut items = Vec::new();
+    let has_revisions: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_price_revisions')",
+        [],
+        |r| r.get(0),
+    )?;
     for row in rows {
         read::check()?;
         let (id, payload, cost, basis, snapshot, key, ingested, suppressed, association) = row?;
@@ -1080,6 +1123,29 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
         value["estimated_cost_nanos"] = json!(cost);
         value["pricing_basis"] = json!(basis);
         value["pricing_snapshot"] = serde_json::from_str(&codec::decode(conn, (&snapshot).into())?)?;
+        if has_revisions {
+            let mut revisions = conn.prepare_cached("SELECT changed_at_ms,reason,previous_cost_nanos,previous_catalogue_version,previous_snapshot,catalogue_version,cost_nanos FROM usage_price_revisions WHERE observation_id=?1 ORDER BY id")?;
+            let records = revisions
+                .query_map([id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !records.is_empty() {
+                value["pricing_revisions"] = json!(records.into_iter().map(|(at,reason,previous_cost,previous_catalogue,previous_snapshot,catalogue,cost)| {
+                    Ok(json!({"changed_at_ms":at,"reason":reason,"previous_cost_nanos":previous_cost,
+                        "previous_catalogue_version":previous_catalogue,"previous_snapshot":serde_json::from_str::<Value>(&previous_snapshot)?,
+                        "catalogue_version":catalogue,"cost_nanos":cost}))
+                }).collect::<Result<Vec<_>>>()?);
+            }
+        }
         value["canonical_key"] = json!(key);
         value["superseded"] = json!(suppressed);
         if let Some(origin) = value["origin_id"].as_str()

@@ -1319,3 +1319,109 @@ async fn migrations_chain_to_the_current_schema_and_keep_existing_rows() {
         store.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn refreshed_catalogue_repairs_known_prices_and_keeps_an_audit() {
+    let p = path("rate-correction");
+    let mut old = Catalogue::load(None).unwrap();
+    old.version = "2026-10-07.3".into();
+    old.rates.retain(|r| !r.models.iter().any(|m| m == "claude-haiku-5-5"));
+    for r in &mut old.rates {
+        if r.models.iter().any(|m| m == "claude-sonnet-5-5") {
+            r.cache_read_nanos_per_token = Some(200);
+        }
+        if r.models.iter().any(|m| m == "gpt-6.1-sol") {
+            r.tier_multipliers.remove("ultrafast");
+        }
+    }
+    let store = Store::start(&p, 8, 3650, old, None).unwrap();
+    let mut sonnet = event("proxy", "sonnet");
+    sonnet.provider = "anthropic".into();
+    sonnet.actual_model = Some("claude-sonnet-5-5".into());
+    sonnet.tokens.cache_read = Some(1_000_000);
+    let mut haiku = event("proxy", "haiku");
+    haiku.provider = "anthropic".into();
+    haiku.actual_model = Some("claude-haiku-5-5".into());
+    let mut ultra = event("proxy", "ultra");
+    ultra.service_tier = Some("ultrafast".into());
+    store.call(move |c| insert_batch(c, &[sonnet, haiku, ultra, event("proxy", "unchanged")])).await.unwrap();
+    assert_eq!(store.reference_summary(all()).await.unwrap()["proxy"]["unpriced"], 2);
+    store.shutdown().await.unwrap();
+    drop(store);
+    let store = Store::open_for_reprice(&p, 8).unwrap();
+    assert_eq!(store.startup_repriced(), 3);
+    store
+        .call(|c| {
+            let cost = |id| {
+                c.query_row("SELECT cost_nanos FROM usage_observations WHERE source_event_id=?1", [id], |r| {
+                    r.get::<_, i64>(0)
+                })
+            };
+            assert_eq!(cost("sonnet")?, 103_000_000);
+            assert_eq!(cost("haiku")?, 151_000);
+            assert_eq!(cost("ultra")?, 18_060_000);
+            assert_eq!(cost("unchanged")?, 3_010_000);
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM usage_price_revisions", [], |r| r.get::<_, i64>(0))?, 3);
+            let previous: String = c.query_row(
+                "SELECT previous_snapshot FROM usage_price_revisions WHERE reason='sonnet_5_5_cache_read_correction'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(serde_json::from_str::<Value>(&previous)?["cost_nanos"], 203_000_000);
+            assert_eq!(reprice(c)?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let range = all();
+    let scanned = store.dashboard_scan(range.clone()).await.unwrap();
+    let dashboard = store.dashboard(range).await.unwrap();
+    assert_eq!(dashboard, scanned);
+    let page = store.details(all()).await.unwrap();
+    let item = page["items"].as_array().unwrap().iter().find(|o| o["source_event_id"] == "sonnet").unwrap();
+    assert_eq!(item["pricing_revisions"][0]["previous_cost_nanos"], 203_000_000);
+    store.shutdown().await.unwrap();
+    drop(store);
+    let store = Store::open_for_reprice(&p, 8).unwrap();
+    assert_eq!(store.startup_repriced(), 0);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn repricing_preserves_organization_catalogue_and_established_prices() {
+    let p = path("override-correction");
+    let mut old = Catalogue::load(None).unwrap();
+    old.version = "2026-10-07.3".into();
+    old.local_override = true;
+    for r in &mut old.rates {
+        if r.models.iter().any(|m| m == "claude-sonnet-5-5") {
+            r.cache_read_nanos_per_token = Some(200);
+        }
+    }
+    let store = Store::start(&p, 8, 3650, old, None).unwrap();
+    let mut sonnet = event("proxy", "organization-sonnet");
+    sonnet.provider = "anthropic".into();
+    sonnet.actual_model = Some("claude-sonnet-5-5".into());
+    sonnet.tokens.cache_read = Some(1_000_000);
+    store.call(move |c| insert_batch(c, &[sonnet])).await.unwrap();
+    store.shutdown().await.unwrap();
+    drop(store);
+    let store = Store::open_for_reprice(&p, 8).unwrap();
+    assert_eq!(store.startup_repriced(), 0);
+    store
+        .call(|c| {
+            let raw: String = c.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
+            let catalogue: Catalogue = serde_json::from_str(&raw)?;
+            assert!(catalogue.local_override);
+            assert_eq!(catalogue.version, "2026-10-07.3");
+            assert_eq!(
+                c.query_row("SELECT cost_nanos FROM usage_observations", [], |r| r.get::<_, i64>(0))?,
+                203_000_000
+            );
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM usage_price_revisions", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.shutdown().await.unwrap();
+}

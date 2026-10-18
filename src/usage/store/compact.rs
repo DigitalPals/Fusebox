@@ -365,6 +365,28 @@ pub fn downgrade(path: &Path) -> Result<Value> {
         tx.commit()?;
     }
     let tx = conn.transaction()?;
+    // Old releases reject unknown rate fields. Retain the full catalogue for
+    // audit, and omit rate combinations their calculator cannot represent.
+    let catalogue: String = tx.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
+    let mut legacy: Value = serde_json::from_str(&catalogue)?;
+    let rates = legacy["rates"].as_array_mut().ok_or_else(|| anyhow!("invalid saved catalogue"))?;
+    let before_rates = rates.len();
+    rates.retain(|r| {
+        r.get("above_threshold_write_5m_nanos_per_token").is_none()
+            && r.get("above_threshold_write_1h_nanos_per_token").is_none()
+    });
+    let omitted_rates = before_rates - rates.len();
+    for rate in rates {
+        if let Some(excluded) = rate.as_object_mut().and_then(|r| r.remove("long_context_excluded_tiers")) {
+            for tier in excluded.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if let Some(tiers) = rate["tier_multipliers"].as_object_mut() {
+                    tiers.remove(tier);
+                }
+            }
+        }
+    }
+    tx.execute("INSERT OR REPLACE INTO usage_meta(key,value) VALUES('catalogue_before_downgrade',?1)", [&catalogue])?;
+    tx.execute("UPDATE usage_meta SET value=?1 WHERE key='catalogue'", [serde_json::to_string(&legacy)?])?;
     for trigger in rollup::TRIGGERS {
         tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
     }
@@ -392,5 +414,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     tx.commit()?;
     let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     ensure!(check == "ok", "the downgraded database failed its check: {check}");
-    Ok(json!({"database":path,"schema":LEGACY_VERSION,"decompressed_rows":decompressed}))
+    Ok(
+        json!({"database":path,"schema":LEGACY_VERSION,"decompressed_rows":decompressed,"omitted_unsupported_rates":omitted_rates}),
+    )
 }

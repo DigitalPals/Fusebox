@@ -366,7 +366,21 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
         rows.iter().map(|r| (r.0.clone(), r.1.clone())).collect::<Vec<_>>(),
         latest.iter().map(|d| (d.1.clone(), d.2.clone())).collect::<Vec<_>>()
     );
-    // The objects a schema-3 release relies on, and nothing it does not know.
+    let raw: String = c.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0)).unwrap();
+    let legacy: Value = serde_json::from_str(&raw).unwrap();
+    for rate in legacy["rates"].as_array().unwrap() {
+        assert!(rate.get("above_threshold_write_5m_nanos_per_token").is_none());
+        assert!(rate.get("above_threshold_write_1h_nanos_per_token").is_none());
+        assert!(rate.get("long_context_excluded_tiers").is_none());
+        if rate["models"].as_array().unwrap().iter().any(|m| m == "gpt-5.5" || m == "gpt-5.4") {
+            assert!(rate["tier_multipliers"].get("fast").is_none());
+        }
+    }
+    assert_eq!(result["omitted_unsupported_rates"], 1);
+    let original: String =
+        c.query_row("SELECT value FROM usage_meta WHERE key='catalogue_before_downgrade'", [], |r| r.get(0)).unwrap();
+    assert!(original.contains("above_threshold_write_5m_nanos_per_token"));
+    // Schema-3 objects plus an additive audit table older releases can ignore.
     let names: BTreeSet<String> = c
         .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         .unwrap()
@@ -376,6 +390,8 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
         .unwrap();
     let expected: BTreeSet<String> = [
         "usage_meta",
+        "usage_price_revisions",
+        "usage_price_revisions_observation",
         "usage_observations",
         "usage_suppressed",
         "usage_event_time",

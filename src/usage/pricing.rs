@@ -40,8 +40,14 @@ pub struct Rate {
     pub above_threshold_read_nanos_per_token: Option<i64>,
     #[serde(default)]
     pub above_threshold_write_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above_threshold_write_5m_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above_threshold_write_1h_nanos_per_token: Option<i64>,
     #[serde(default)]
     pub above_threshold_output_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub long_context_excluded_tiers: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -111,6 +117,8 @@ impl Catalogue {
                 rate.above_threshold_input_nanos_per_token,
                 rate.above_threshold_read_nanos_per_token,
                 rate.above_threshold_write_nanos_per_token,
+                rate.above_threshold_write_5m_nanos_per_token,
+                rate.above_threshold_write_1h_nanos_per_token,
                 rate.above_threshold_output_nanos_per_token,
             ]
             .into_iter()
@@ -129,6 +137,10 @@ impl Catalogue {
             }
             if rate.threshold_input_tokens.is_some() != rate.above_threshold_input_nanos_per_token.is_some()
                 || rate.threshold_input_tokens.is_some() != rate.above_threshold_output_nanos_per_token.is_some()
+                || (rate.threshold_input_tokens.is_none()
+                    && (rate.above_threshold_write_5m_nanos_per_token.is_some()
+                        || rate.above_threshold_write_1h_nanos_per_token.is_some()
+                        || !rate.long_context_excluded_tiers.is_empty()))
             {
                 bail!("invalid price threshold");
             }
@@ -160,10 +172,17 @@ impl Catalogue {
             local_override: self.local_override,
             backdated: false,
         };
-        let Some(model) = o.actual_model.as_ref() else {
+        let Some(actual_model) = o.actual_model.as_ref() else {
             return snapshot;
         };
-        let mut rates = self.rates.iter().filter(|r| r.provider == o.provider && r.models.contains(model));
+        let model = normalize_model(actual_model);
+        // Custom identifiers retain their exact match before display-only aliases are normalized.
+        let exact = self.rates.iter().any(|r| r.provider == o.provider && r.models.contains(actual_model));
+        let matches = |r: &Rate| {
+            r.provider == o.provider
+                && r.models.iter().any(|m| if exact { m == actual_model } else { normalize_model(m) == model })
+        };
+        let mut rates = self.rates.iter().filter(|r| matches(r));
         let Some(rate) = rates.find(|r| {
             r.start().is_ok_and(|s| s <= o.event_at_ms)
                 && r.effective_until
@@ -172,12 +191,8 @@ impl Catalogue {
                     .transpose()
                     .is_ok_and(|end| end.is_none_or(|e| o.event_at_ms < e))
         }) else {
-            snapshot.basis = if self.rates.iter().any(|r| r.provider == o.provider && r.models.contains(model)) {
-                "outside_effective_period"
-            } else {
-                "unknown_model"
-            }
-            .into();
+            snapshot.basis =
+                if self.rates.iter().any(matches) { "outside_effective_period" } else { "unknown_model" }.into();
             return snapshot;
         };
         snapshot.rate = Some(rate.clone());
@@ -255,6 +270,10 @@ impl Catalogue {
             return snapshot;
         };
         let above = rate.threshold_input_tokens.is_some_and(|n| total_input > n);
+        if above && rate.long_context_excluded_tiers.iter().any(|t| t == tier) {
+            snapshot.basis = "unsupported_service_tier_context".into();
+            return snapshot;
+        }
         let input_rate =
             if above { rate.above_threshold_input_nanos_per_token.unwrap() } else { rate.input_nanos_per_token };
         let output_rate =
@@ -262,6 +281,10 @@ impl Catalogue {
         let read_rate = if above { rate.above_threshold_read_nanos_per_token } else { rate.cache_read_nanos_per_token };
         let write_rate =
             if above { rate.above_threshold_write_nanos_per_token } else { rate.cache_write_nanos_per_token };
+        let short_write_rate =
+            if above { rate.above_threshold_write_5m_nanos_per_token } else { rate.cache_write_5m_nanos_per_token };
+        let long_write_rate =
+            if above { rate.above_threshold_write_1h_nanos_per_token } else { rate.cache_write_1h_nanos_per_token };
         let cost = (|| -> Option<i64> {
             let mul = |n: u64, r: i64| i64::try_from(n).ok()?.checked_mul(r);
             let mut sum = mul(input, input_rate)?.checked_add(mul(output, output_rate)?)?;
@@ -277,10 +300,10 @@ impl Catalogue {
                     return None;
                 }
                 if short > 0 {
-                    sum = sum.checked_add(mul(short, rate.cache_write_5m_nanos_per_token?)?)?;
+                    sum = sum.checked_add(mul(short, short_write_rate?)?)?;
                 }
                 if long > 0 {
-                    sum = sum.checked_add(mul(long, rate.cache_write_1h_nanos_per_token?)?)?;
+                    sum = sum.checked_add(mul(long, long_write_rate?)?)?;
                 }
             }
             let numerator = tier_n.checked_mul(if regional { 11 } else { 1 })?;
@@ -308,6 +331,11 @@ impl Catalogue {
         }
         snapshot
     }
+}
+
+fn normalize_model(model: &str) -> String {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.strip_suffix("[1m]").unwrap_or(&lower).trim().to_owned()
 }
 impl Rate {
     /// A rate without `effective_from` has no start date and applies to any earlier event.
@@ -369,11 +397,89 @@ mod tier_tests {
         let c = Catalogue::load(None).unwrap();
         let mut o = event("anthropic", "claude-sonnet-5-5");
         o.service_tier = Some("batch".into());
-        assert_eq!(c.price(&o).cost_nanos, Some(1_682_500));
+        assert_eq!(c.price(&o).cost_nanos, Some(1_672_500));
         o.service_tier = Some("priority".into());
         assert_eq!(c.price(&o).cost_nanos, None);
         o.actual_model = None;
         o.requested_model = Some("claude-sonnet-5-5".into());
+        assert_eq!(c.price(&o).basis, "unknown_model");
+    }
+    #[test]
+    fn sonnet_cache_discount_is_model_specific() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("anthropic", "claude-sonnet-5-5");
+        o.service_tier = Some("standard".into());
+        o.tokens = Tokens {
+            input: Some(0),
+            cache_read: Some(1_000_000),
+            cache_write: Some(0),
+            output: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(c.price(&o).cost_nanos, Some(100_000_000));
+        o.actual_model = Some("claude-sonnet-5".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(200_000_000));
+    }
+    #[test]
+    fn haiku_threshold_prices_each_cache_ttl_and_includes_cached_input() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("anthropic", "claude-haiku-5-5");
+        o.service_tier = Some("standard".into());
+        o.tokens = Tokens {
+            input: Some(99_000),
+            cache_read: Some(500),
+            cache_write: Some(500),
+            write_5m: Some(200),
+            write_1h: Some(300),
+            output: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(c.price(&o).cost_nanos, Some(10_040_000));
+        o.tokens.input = Some(99_001);
+        assert_eq!(c.price(&o).cost_nanos, Some(50_200_500));
+        o.inference_geo = Some("us".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(55_220_550));
+        o.service_tier = Some("batch".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(27_610_275));
+        o.tokens.write_1h = None;
+        assert_eq!(c.price(&o).basis, "unknown_cache_write_ttl");
+    }
+    #[test]
+    fn published_speed_multipliers_and_context_restrictions_are_model_specific() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("openai", "gpt-6.1-sol");
+        o.service_tier = Some("ultrafast".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(19_620_000));
+        o.tokens.cache_write = Some(0);
+        o.tokens.write_5m = None;
+        o.tokens.write_1h = None;
+        o.actual_model = Some("gpt-5.5".into());
+        o.service_tier = Some("fast".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(20_250_000));
+        o.tokens.input = Some(272_001);
+        assert_eq!(c.price(&o).basis, "unsupported_service_tier_context");
+        o.service_tier = Some("flex".into());
+        assert!(c.price(&o).cost_nanos.is_some());
+        o.actual_model = Some("gpt-5-mini".into());
+        o.tokens.input = Some(1_000);
+        o.service_tier = Some("priority".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(819_000));
+    }
+    #[test]
+    fn display_aliases_match_without_guessing_unknown_models_or_losing_exact_overrides() {
+        let mut c = Catalogue::load(None).unwrap();
+        let mut o = event("anthropic", "  CLAUDE-SONNET-5-5 [1M]  ");
+        o.service_tier = Some("standard".into());
+        let alias = c.price(&o).cost_nanos;
+        o.actual_model = Some("claude-sonnet-5-5".into());
+        assert_eq!(alias, c.price(&o).cost_nanos);
+        let mut custom = c.rates.iter().find(|r| r.models.contains(&"claude-sonnet-5-5".into())).unwrap().clone();
+        custom.models = vec!["CLAUDE-SONNET-5-5".into()];
+        custom.input_nanos_per_token = 10_000;
+        c.rates.push(custom);
+        o.actual_model = Some("CLAUDE-SONNET-5-5".into());
+        assert_eq!(c.price(&o).cost_nanos, alias.map(|n| n + 8_000_000));
+        o.actual_model = Some("claude-sonnet-5-5-unknown".into());
         assert_eq!(c.price(&o).basis, "unknown_model");
     }
     #[test]
@@ -424,7 +530,7 @@ mod tier_tests {
         assert_eq!(p.basis, "current_rate_equivalent");
         assert_eq!(serde_json::to_value(&p).unwrap()["backdated"], true);
         assert!(p.assumptions.is_empty() && !p.partial);
-        o.event_at_ms = date_ms("2026-10-07").unwrap();
+        o.event_at_ms = date_ms(&c.verified_at).unwrap();
         let p = c.price(&o);
         assert_eq!((p.cost_nanos.is_some(), p.basis.as_str()), (true, "current_rate_equivalent"));
         assert_eq!(serde_json::to_value(&p).unwrap()["backdated"], false);

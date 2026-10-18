@@ -59,7 +59,9 @@ Confidence boundary: official SDK proves envelope and API docs prove `message.us
 
 ## Pricing and provenance
 
-**Current verification date is not rate effective date.** The fetched current tables mostly do not state historical effective dates. Store `verified_at=2026-10-07`, `effective_from=null` (or explicitly labeled assumed current estimate), source URL, currency USD, unit 1M tokens, model/tier/context/region, and rate-card version. Do not backdate new current prices over historical imports and claim historical actual spend. (Fusebox prices such older usage only as a labelled current-rate equivalent with `backdated: true`; see [usage-costs.md](usage-costs.md).) Unknown models/tiers/categories should remain unpriced, not $0. Local USD estimates are not subscription-plan charges, invoices, or provider truth.
+Pricing tables were rechecked against both official pricing pages on **2026-10-18** for catalogue `2026-10-18.1`. The comparison also used [T3 Code pricing](https://github.com/pingdotgg/t3code/blob/6a6ebb278dc70dd859439a3c28960a7d23a1e645/apps/server/src/usage/usagePricing.ts). Provider tables govern model-specific context thresholds, cache TTLs and tiers. The native format evidence above retains its original verification date.
+
+**Current verification date is not rate effective date.** The fetched current tables mostly do not state historical effective dates. Store `verified_at=2026-10-18`, `effective_from=null` (or explicitly labeled assumed current estimate), source URL, currency USD, unit 1M tokens, model/tier/context/region, and rate-card version. Do not backdate new current prices over historical imports and claim historical actual spend. (Fusebox prices such older usage only as a labelled current-rate equivalent with `backdated: true`; see [usage-costs.md](usage-costs.md).) Unknown models/tiers/categories should remain unpriced, not $0. Local USD estimates are not subscription-plan charges, invoices, or provider truth.
 
 ### OpenAI official current API pricing
 
@@ -86,7 +88,7 @@ Standard USD/MTok. Columns `input / cache-read / cache-write / output`:
 | gpt-5-mini | 0.25 / 0.025 / n/a / 2 | no separate rate established |
 | gpt-5-nano | 0.05 / 0.005 / n/a / 0.4 | no separate rate established |
 
-For GPT-5.6+ and GPT-6 family above, Batch/Flex are half Standard, Fast is twice Standard; **model-specific rows govern** older families (do not multiply all models blindly). Astra Ultrafast is six times standard. Priority renamed Fast on **2026-07-30**; store alias semantics, not an invented universal rate. GPT-5.6 Sol promo table is stated available at least through **2026-11-21**, not its effective start.
+For GPT-5.6+ and GPT-6 family above, Batch/Flex are half Standard, Fast is twice Standard; **model-specific rows govern** older families (do not multiply all models blindly). GPT-6 Astra and GPT-6.1 Sol Ultrafast are six times standard. Confirmed older Fast/Priority multipliers are 2.5x for GPT-5.5, 1.8x for GPT-5 mini, and 2x for GPT-5.4, GPT-5.4 mini, GPT-5.3 Codex, GPT-5.2, GPT-5.1 and GPT-5. GPT-5.5 and GPT-5.4 have no published Fast long-context rate; that combination remains unpriced. Batch/Flex coverage follows the listed model rows; no Batch/Flex rate was established for GPT-5.3 Codex. Priority renamed Fast on **2026-07-30**; store alias semantics, not an invented universal rate. GPT-5.6 Sol promo table is stated available at least through **2026-11-21**, not its effective start.
 
 Long-context threshold uses **individual request total input**, never cumulative session totals or model_context_window. Threshold applies premium to **whole request**, not marginal tokens beyond threshold. Regional processing for models released on/after **2026-03-05** and FedRAMP add 10% where eligible; model capability/context window is not proof this premium occurred.
 
@@ -104,13 +106,16 @@ Source fetched: https://platform.claude.com/docs/en/about-claude/pricing and htt
 | Claude Fable 5, Mythos 5 | 10 / 50 / 12.5 / 20 / 1 |
 | Claude Opus 5.5 | 4 / 20 / 5 / 8 / 0.2 |
 | Claude Opus 5, 4.8, 4.7, 4.6, 4.5 | 5 / 25 / 6.25 / 10 / 0.5 |
-| Claude Sonnet 5.5, 5 | 2 / 10 / 2.5 / 4 / 0.2 |
+| Claude Sonnet 5.5 | 2 / 10 / 2.5 / 4 / 0.1 |
+| Claude Sonnet 5 | 2 / 10 / 2.5 / 4 / 0.2 |
+| Claude Haiku 5.5, ≤100k input | 0.1 / 0.5 / 0.125 / 0.2 / 0.01 |
+| Claude Haiku 5.5, >100k input | 0.5 / 2.5 / 0.625 / 1 / 0.05 |
 | Claude Sonnet 4.6, 4.5, 4 | 3 / 15 / 3.75 / 6 / 0.3 |
 | Claude Haiku 4.5 | 1 / 5 / 1.25 / 2 / 0.1 |
 | Claude Haiku 3.5 | 0.8 / 4 / 1 / 1.6 / 0.08 |
 | Claude Opus 4.1, 4 | 15 / 75 / 18.75 / 30 / 1.5 |
 
-**Claude 4.6 and later** include full 1M context at standard pricing, including 900k requests. Do not retain a blanket >200k premium from older prices. Historical >200k prices for older models were not established from the current table; use explicit historical/override rate cards.
+**Claude 4.6 and later, except Haiku 5.5,** include full 1M context at standard pricing, including 900k requests. Haiku 5.5 applies fivefold prices to every category strictly above 100,000 total request input tokens, including cache reads and writes. Do not retain a blanket >200k premium from older prices. Historical >200k prices for older models were not established from the current table; use explicit historical/override rate cards.
 
 Cache 5m write=1.25x input, 1h write=2x; cache reads are **model-specific** (Opus 5.5 .05x; Fable/Mythos 5.1 .025x; most others .1x). Batch discount is 50% input/output, and cache modifiers stack. US-only inference_geo on Claude 4.6+ adds 1.1x to all categories. Priority tiers may be contracted; unknown actual rate remains unknown. Fast is currently Opus 5.5 input/output 8/40 and Opus 5/4.8 10/50, all context; cache/region modifiers stack; no Batch+Fast. Opus 4.7 fast errors, Opus 4.6 runs standard. Don't apply old Opus 4.6 Fast assumptions.
 

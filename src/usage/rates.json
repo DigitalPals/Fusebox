@@ -1,6 +1,6 @@
 {
-  "version": "2026-10-07.3",
-  "verified_at": "2026-10-07",
+  "version": "2026-10-18.1",
+  "verified_at": "2026-10-18",
   "rates": [
     {
       "provider": "openai",
@@ -78,6 +78,10 @@
         ],
         "priority": [
           2,
+          1
+        ],
+        "ultrafast": [
+          6,
           1
         ]
       }
@@ -290,7 +294,29 @@
       "above_threshold_input_nanos_per_token": 10000,
       "above_threshold_read_nanos_per_token": 1000,
       "above_threshold_write_nanos_per_token": null,
-      "above_threshold_output_nanos_per_token": 45000
+      "above_threshold_output_nanos_per_token": 45000,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          5,
+          2
+        ],
+        "priority": [
+          5,
+          2
+        ]
+      },
+      "long_context_excluded_tiers": [
+        "fast",
+        "priority"
+      ]
     },
     {
       "provider": "openai",
@@ -310,7 +336,29 @@
       "above_threshold_input_nanos_per_token": 5000,
       "above_threshold_read_nanos_per_token": 500,
       "above_threshold_write_nanos_per_token": null,
-      "above_threshold_output_nanos_per_token": 22500
+      "above_threshold_output_nanos_per_token": 22500,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      },
+      "long_context_excluded_tiers": [
+        "fast",
+        "priority"
+      ]
     },
     {
       "provider": "openai",
@@ -325,7 +373,25 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 4500,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      }
     },
     {
       "provider": "openai",
@@ -340,12 +406,46 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 1250,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ]
+      }
     },
     {
       "provider": "openai",
       "models": [
-        "gpt-5.3-codex",
+        "gpt-5.3-codex"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 1750,
+      "cache_read_nanos_per_token": 175,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 14000,
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      }
+    },
+    {
+      "provider": "openai",
+      "models": [
         "gpt-5.2"
       ],
       "effective_from": null,
@@ -356,7 +456,25 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 14000,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      }
     },
     {
       "provider": "openai",
@@ -372,7 +490,25 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 10000,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      }
     },
     {
       "provider": "openai",
@@ -387,7 +523,25 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 2000,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          9,
+          5
+        ],
+        "priority": [
+          9,
+          5
+        ]
+      }
     },
     {
       "provider": "openai",
@@ -402,7 +556,17 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 400,
-      "cache_write_nanos_per_token": null
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ]
+      }
     },
     {
       "provider": "anthropic",
@@ -499,7 +663,27 @@
     {
       "provider": "anthropic",
       "models": [
-        "claude-sonnet-5-5",
+        "claude-sonnet-5-5"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 100,
+      "cache_write_5m_nanos_per_token": 2500,
+      "cache_write_1h_nanos_per_token": 4000,
+      "output_nanos_per_token": 10000,
+      "cache_write_nanos_per_token": null,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "provider": "anthropic",
+      "models": [
         "claude-sonnet-5"
       ],
       "effective_from": null,
@@ -630,6 +814,34 @@
           1
         ]
       }
+    },
+    {
+      "provider": "anthropic",
+      "models": [
+        "claude-haiku-5-5"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "input_nanos_per_token": 100,
+      "cache_read_nanos_per_token": 10,
+      "cache_write_nanos_per_token": null,
+      "cache_write_5m_nanos_per_token": 125,
+      "cache_write_1h_nanos_per_token": 200,
+      "output_nanos_per_token": 500,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ]
+      },
+      "threshold_input_tokens": 100000,
+      "above_threshold_input_nanos_per_token": 500,
+      "above_threshold_read_nanos_per_token": 50,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_write_5m_nanos_per_token": 625,
+      "above_threshold_write_1h_nanos_per_token": 1000,
+      "above_threshold_output_nanos_per_token": 2500
     }
   ],
   "currency": "USD"
