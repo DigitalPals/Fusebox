@@ -24,6 +24,8 @@
     strings: {
       "Combined weekly limits": "每周额度合计",
       "Each provider’s subscriptions together, weighted equally": "每个提供商的订阅合并计算，各账号权重相同",
+      "Each provider’s subscriptions together, weighted by plan price": "每个提供商的订阅合并计算，按套餐价格加权",
+      "Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10": "每个账号按套餐月费计权：Claude Pro 1、Max 5x 5、Max 20x 10",
       "Even pace: where these accounts would be by now if each spread its use evenly over its own week": "均匀用量：如果每个账号都在自己的一周内平均使用，这些账号此刻应达到的位置",
       "On pace": "符合均匀用量",
       "Expiring reset": "即将到期的重置",
@@ -974,6 +976,7 @@
       [/^pace ([<>]?\d+%)$/, '均匀 $1'],
       [/^(\d+) points? (under|over) pace$/, (m, n, d) => `${d === 'under' ? '低于' : '高于'}均匀用量 ${n} 个百分点`],
       [/^(.+) combined weekly$/, (m, p) => `${p} 每周合计`],
+      [/^(.+) weighted by plan price, (.+) equally$/, (m, a, b) => `${a} 按套餐价格加权，${b} 权重相同`],
       [/^(.+) quota (used|remaining)$/, (m, w, mode) => `${T(w)}额度${mode === 'used' ? '已用' : '剩余'}`],
       [/^(.+): not reported$/, (m, w) => `${T(w)}：未报告`],
       [/^(5-hour|Weekly|Daily|Week|Day) window resets (.+?)(?: · using ([\d.]+)% an hour)?$/, (m, w, t, r) => `${WINDOW[w]}窗口将于 ${full(t)} 重置${r ? ` · 每小时用掉 ${r}%` : ''}`],

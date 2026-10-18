@@ -898,6 +898,7 @@ async fn refresh_quota(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
     if crate::quota::poll(&app, &acct).await.is_err() {
         return err(StatusCode::BAD_GATEWAY, "Could not refresh provider usage");
     }
+    let _ = crate::quota::poll_plan(&app, &acct).await;
     app.broadcast("accounts", Value::Null);
     if !app.cfg().banked_resets {
         return ok();

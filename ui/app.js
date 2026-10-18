@@ -1326,9 +1326,27 @@ function ovSubsHTML() {
       ${rows}</div>`;
 }
 
+// Each plan's monthly price, relative to the provider's cheapest paid plan. Claude doesn't
+// publish its weekly limits, and they don't grow with the 5x and 20x in Max's names (those
+// are for the 5-hour window); prices come closest to the weekly sizes people have measured.
+const PLAN_PRICE = { claude: { pro: 1, max_5x: 5, max_20x: 10 } };
+const PLAN_PRICE_NOTE = 'Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10';
+const planWeight = (a) => (a.quota && PLAN_PRICE[a.provider]?.[a.quota.plan]) || null;
+
+// How many accounts are on each known plan, most first: [["Max 20x", 2], ["Pro", 1]].
+function planCounts(list) {
+  const counts = new Map();
+  for (const a of list) {
+    const name = planName(a);
+    if (name) counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
+}
+
 // The weekly windows of each provider with two or more subscriptions, taken together: the
-// accounts' average use, weighted equally, and the average of where each would be at even
-// pace. Windows renew at different times, so each account's pace comes from its own reset.
+// accounts' average use and the average of where each would be at even pace. When every
+// reporting account's plan has a price, each counts by it (`priced`); otherwise they count
+// equally. Windows renew at different times, so each account's pace comes from its own reset.
 // A window that has renewed, or not started, counts as unused and at the start of its week.
 // Disabled accounts and accounts that have not reported a weekly window are left out.
 function weeklyPools(accounts, now = Date.now()) {
@@ -1341,22 +1359,26 @@ function weeklyPools(accounts, now = Date.now()) {
   const pools = [];
   for (const list of byProvider.values()) {
     if (list.length < 2) continue;
-    let reported = 0;
+    const weeks = list
+      .map((a) => [a, ((a.quota && a.quota.windows) || []).find((x) => x.name === 'week' && !x.model && Number.isFinite(x.used))])
+      .filter(([, w]) => w);
+    if (!weeks.length) continue;
+    const priced = weeks.every(([a]) => planWeight(a));
+    let weight = 0;
     let used = 0;
     let elapsed = 0;
     let paced = true;
-    for (const a of list) {
-      const w = ((a.quota && a.quota.windows) || []).find((x) => x.name === 'week' && !x.model && Number.isFinite(x.used));
-      if (!w) continue;
-      reported++;
+    for (const [a, w] of weeks) {
+      const k = priced ? planWeight(a) : 1;
+      weight += k;
       const q = quotaOf(w, now);
       if (!q) continue;
       const t = windowElapsed(w, now) ?? (q.used === 0 ? 0 : null);
-      used += q.used;
+      used += k * q.used;
       if (t == null) paced = false;
-      else elapsed += t;
+      else elapsed += k * t;
     }
-    if (reported) pools.push({ account: list[0], accounts: list.length, reported, used: used / reported, pace: paced ? elapsed / reported : null });
+    pools.push({ account: list[0], accounts: list.length, reported: weeks.length, used: used / weight, pace: paced ? elapsed / weight : null, priced, plans: planCounts(list) });
   }
   return pools;
 }
@@ -1377,7 +1399,26 @@ function poolMeterHTML(p) {
   return `<div class="meters"><div class="mrow"><span class="capsm">WK</span>${meterHTML(q, p.pace, `${provName(p.account)} combined weekly`)}<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span><span class="rst"${pace ? ` title="${esc(POOL_PACE)}"` : ''}>${pace ? `pace ${pace}` : ''}</span></div></div>`;
 }
 
-const poolCount = (p) => (p.reported < p.accounts ? `${fmt(p.reported)} of ${plural(p.accounts, 'account')} reporting` : plural(p.accounts, 'account'));
+// "3 accounts · Max 20x" when they share a plan, "2 Max 20x, 1 Pro" when every plan is known
+// and they differ, and the count first whenever some plan or weekly window is missing.
+function poolCount(p) {
+  const count = p.reported < p.accounts ? `${fmt(p.reported)} of ${plural(p.accounts, 'account')} reporting` : plural(p.accounts, 'account');
+  const plans = p.plans || [];
+  const known = plans.reduce((sum, [, n]) => sum + n, 0);
+  if (plans.length === 1 && known === p.accounts) return `${count} · ${plans[0][0]}`;
+  const mix = plans.map(([name, n]) => `${fmt(n)} ${name}`).join(', ');
+  if (mix && known === p.accounts && p.reported === p.accounts) return mix;
+  return [count, mix].filter(Boolean).join(' · ');
+}
+
+// How the accounts of each pool count: by plan price, or equally when a plan is unknown.
+function poolBasis(pools) {
+  const names = (priced) => pools.filter((p) => !!p.priced === priced).map((p) => provName(p.account)).join(', ');
+  const [priced, equal] = [names(true), names(false)];
+  if (!equal) return 'Each provider’s subscriptions together, weighted by plan price';
+  if (!priced) return 'Each provider’s subscriptions together, weighted equally';
+  return `${priced} weighted by plan price, ${equal} equally`;
+}
 function poolGapHTML(p) {
   const gap = poolGap(p);
   return gap ? `<span class="pool-gap ${gap.cls}">${gap.text}</span>` : '';
@@ -1390,18 +1431,19 @@ function ovPoolHTML() {
   if (!pools.length) return '';
   if (mob()) {
     const items = pools.map((p) => `<div class="item">
-        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${poolCount(p)}</span></div>${poolGapHTML(p)}</div>
+        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div>${poolGapHTML(p)}</div>
         <div class="indent">${poolMeterHTML(p)}</div>
       </div>`).join('');
     return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2></div><div class="card stack-list pool">${items}</div>`;
   }
   const rows = pools.map((p) => `<div class="tr">
       <span class="c-idx"></span>
-      <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${poolCount(p)}</span></div></div>
+      <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${esc(poolCount(p))}</span></div></div>
       ${poolMeterHTML(p)}
       <div class="c-status">${poolGapHTML(p)}</div>
     </div>`).join('');
-  return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2><span class="meta">Each provider’s subscriptions together, weighted equally</span></div>
+  const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_PRICE_NOTE)}"` : '';
+  return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>
     <div class="card table subs pool">${rows}</div>`;
 }
 

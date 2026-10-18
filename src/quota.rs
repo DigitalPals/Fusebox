@@ -24,6 +24,8 @@ const POLL_EVERY: i64 = 5 * 60;
 const BUSY_POLL_EVERY: i64 = 30 * 60;
 /// Banked resets change rarely; opening the dashboard panel checks on demand.
 const RESET_POLL_EVERY: i64 = 30 * 60;
+/// A Claude account's plan changes only with an upgrade or a downgrade.
+const PLAN_EVERY: i64 = 6 * 3600;
 const POLL_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -52,6 +54,11 @@ pub struct Quota {
     pub(crate) check_failures: u32,
     #[serde(skip)]
     pub(crate) checked_at: Option<DateTime<Utc>>,
+    /// Claude profile reads in a row that failed, and when the last one ran.
+    #[serde(skip)]
+    pub(crate) plan_failures: u32,
+    #[serde(skip)]
+    pub(crate) plan_checked_at: Option<DateTime<Utc>>,
 }
 
 impl Quota {
@@ -123,6 +130,28 @@ impl Quota {
     fn checked(&mut self, now: DateTime<Utc>, refreshed: bool) {
         self.checked_at = Some(now);
         self.check_failures = if refreshed { 0 } else { self.check_failures.saturating_add(1) };
+    }
+
+    /// The plan is read every 6 hours; after a failed read, again after 5, 10, 20 ...
+    /// minutes, up to the same 6 hours.
+    fn plan_due(&self, now: DateTime<Utc>) -> bool {
+        let Some(at) = self.plan_checked_at else { return true };
+        let wait = match self.plan_failures {
+            0 => PLAN_EVERY,
+            n => (300i64 << (n - 1).min(7)).min(PLAN_EVERY),
+        };
+        (now - at).num_seconds() >= wait
+    }
+
+    fn plan_read(&mut self, now: DateTime<Utc>, plan: Option<Option<String>>) {
+        self.plan_checked_at = Some(now);
+        match plan {
+            Some(plan) => {
+                self.plan = plan;
+                self.plan_failures = 0;
+            }
+            None => self.plan_failures = self.plan_failures.saturating_add(1),
+        }
     }
 
     /// A window that is used up, and when it resets.
@@ -322,6 +351,27 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads which plan a Claude account is on (Max 20x, Max 5x, Pro ...) from its profile,
+/// which costs no tokens. ChatGPT names its plan in every usage reading instead.
+pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
+    if acct.provider != Provider::Claude {
+        return Ok(());
+    }
+    let epoch = acct.quota_epoch();
+    let token = match &*acct.cred.read() {
+        Credential::OAuth(o) if o.base_url.is_none() => o.access_token.clone(),
+        _ => return Ok(()),
+    };
+    let http = app.http.control(acct.proxy_url.as_deref());
+    let profile = crate::oauth::claude_profile(&http, &token).await;
+    let mut st = acct.state.lock();
+    // A different account signed in to this file while the profile was read.
+    if st.quota_epoch == epoch {
+        st.quota.plan_read(Utc::now(), profile.as_ref().ok().map(crate::oauth::claude_plan));
+    }
+    profile.map(drop)
+}
+
 /// Provider usage is authoritative, but absent windows cannot prove a cooldown has ended.
 pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window>, plan: Option<String>) {
     if windows.is_empty() {
@@ -404,6 +454,19 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         changed = true;
     }
     changed |= crate::banked_resets::automatic_check(app, &acct).await;
+    let plan_due = acct.provider == Provider::Claude
+        && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none())
+        && {
+            let st = acct.state.lock();
+            !st.disabled && st.quota.plan_due(Utc::now())
+        };
+    if plan_due && crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_ok() {
+        let before = acct.state.lock().quota.plan.clone();
+        if let Err(e) = poll_plan(app, &acct).await {
+            tracing::debug!(account = %acct.label, "plan check failed: {e:#}");
+        }
+        changed |= acct.state.lock().quota.plan != before;
+    }
     let stale = {
         let st = acct.state.lock();
         !st.disabled && st.quota.needs_refresh(Utc::now())
@@ -571,6 +634,40 @@ mod tests {
         assert!(q.needs_refresh(now + chrono::Duration::seconds(POLL_EVERY)));
         q.refreshed_at = None;
         assert!(q.needs_refresh(now));
+    }
+
+    #[test]
+    fn the_plan_is_read_every_six_hours_and_failed_reads_back_off() {
+        let now = Utc::now();
+        let secs = chrono::Duration::seconds;
+        let mut q = Quota::default();
+        assert!(q.plan_due(now));
+        q.plan_read(now, None);
+        assert!(!q.plan_due(now + secs(299)));
+        assert!(q.plan_due(now + secs(300)));
+        q.plan_read(now, None);
+        assert!(!q.plan_due(now + secs(599)));
+        assert!(q.plan_due(now + secs(600)));
+        for _ in 0..20 {
+            q.plan_read(now, None);
+        }
+        assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
+        assert!(q.plan_due(now + secs(PLAN_EVERY)));
+        // A good read ends the backoff, and its plan replaces the last one, even with none.
+        q.plan_read(now, Some(Some("max_20x".into())));
+        assert_eq!((q.plan.as_deref(), q.plan_failures), (Some("max_20x"), 0));
+        assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
+        q.plan_read(now, None);
+        assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
+        q.plan_read(now, Some(None));
+        assert_eq!(q.plan, None);
+        // Usage readings without a plan (Claude's) leave it alone.
+        q.plan = Some("max_5x".into());
+        q.set(vec![Window { name: "week".into(), used: 10.0, resets_at: None, model: None }], None);
+        assert_eq!(q.plan.as_deref(), Some("max_5x"));
+        let shown = serde_json::to_value(&q).unwrap();
+        assert_eq!(shown["plan"], "max_5x");
+        assert!(shown.get("plan_checked_at").is_none() && shown.get("plan_failures").is_none());
     }
 
     #[test]

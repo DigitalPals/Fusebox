@@ -220,7 +220,7 @@ pub async fn exchange(
                 ..Default::default()
             };
             if o.email.is_none()
-                && let Ok(p) = claude_profile(app, &o.access_token).await
+                && let Ok(p) = claude_profile(&http, &o.access_token).await
             {
                 o.email = p["account"]["email"].as_str().map(String::from);
                 o.account_id = o.account_id.or_else(|| p["account"]["uuid"].as_str().map(String::from));
@@ -302,9 +302,35 @@ pub async fn exchange(
     }
 }
 
-async fn claude_profile(app: &App, token: &str) -> Result<Value> {
-    let resp = claude_headers(app.http.control(None).get(claude::PROFILE_URL)).bearer_auth(token).send().await?;
+/// The signed-in account and its organization, which says the subscription plan.
+pub(crate) async fn claude_profile(http: &reqwest::Client, token: &str) -> Result<Value> {
+    let resp = claude_headers(http.get(claude::PROFILE_URL)).bearer_auth(token).send().await?;
     read_json(resp).await
+}
+
+/// The plan a Claude profile names, written the way ChatGPT names its plans: `max_20x`,
+/// `max_5x`, `pro`, `team`, `enterprise`. The multiple comes from the organization's rate
+/// limit tier (`default_claude_max_20x`); without one, Max is just `max`.
+pub fn claude_plan(profile: &Value) -> Option<String> {
+    let org = &profile["organization"];
+    let account = &profile["account"];
+    let kind = match org["organization_type"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(kind) => kind.to_ascii_lowercase(),
+        None if account["has_claude_max"] == true => "claude_max".into(),
+        None if account["has_claude_pro"] == true => "claude_pro".into(),
+        None => return None,
+    };
+    let base = kind.strip_prefix("claude_").unwrap_or(&kind);
+    let multiple = org["rate_limit_tier"]
+        .as_str()
+        .and_then(|tier| tier.rsplit('_').next())
+        .and_then(|last| last.strip_suffix('x'))
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let plan = match multiple {
+        Some(n) => format!("{base}_{n}x"),
+        None => base.to_string(),
+    };
+    Some(plan.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect())
 }
 
 pub fn file_safe(s: &str) -> String {
@@ -750,5 +776,29 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), shutdown).await.unwrap().unwrap();
         tasks.shutdown().await;
         assert!(tasks.register().is_err());
+    }
+
+    #[test]
+    fn claude_profiles_name_their_plan() {
+        let profile = |org: Value, account: Value| json!({ "organization": org, "account": account });
+        let max =
+            |tier: &str| profile(json!({ "organization_type": "claude_max", "rate_limit_tier": tier }), json!({}));
+        assert_eq!(claude_plan(&max("default_claude_max_20x")).as_deref(), Some("max_20x"));
+        assert_eq!(claude_plan(&max("default_claude_max_5x")).as_deref(), Some("max_5x"));
+        assert_eq!(claude_plan(&max("default_claude_ai")).as_deref(), Some("max"), "a tier without a multiple");
+        assert_eq!(claude_plan(&max("")).as_deref(), Some("max"));
+        let pro = profile(json!({ "organization_type": "claude_pro", "rate_limit_tier": null }), json!({}));
+        assert_eq!(claude_plan(&pro).as_deref(), Some("pro"));
+        let team = profile(json!({ "organization_type": "claude_team", "seat_tier": "premium" }), json!({}));
+        assert_eq!(claude_plan(&team).as_deref(), Some("team"));
+        let odd = profile(json!({ "organization_type": "Claude Enterprise" }), json!({}));
+        assert_eq!(claude_plan(&odd).as_deref(), Some("claude_enterprise"), "only plain names lose the prefix");
+        // Older profiles only flag the account.
+        let flagged = profile(json!({}), json!({ "has_claude_max": true, "has_claude_pro": false }));
+        assert_eq!(claude_plan(&flagged).as_deref(), Some("max"));
+        let flagged = profile(json!(null), json!({ "has_claude_max": false, "has_claude_pro": true }));
+        assert_eq!(claude_plan(&flagged).as_deref(), Some("pro"));
+        assert_eq!(claude_plan(&profile(json!({}), json!({ "has_claude_max": false }))), None);
+        assert_eq!(claude_plan(&json!({})), None);
     }
 }
