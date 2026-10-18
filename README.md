@@ -20,7 +20,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 
 <br>
 
-<img src="assets/screenshots/overview.png" alt="Fusebox dashboard: the main line, an hour of load, and every subscription's 5-hour and weekly limits side by side" width="100%">
+<img src="assets/screenshots/overview.png" alt="Fusebox dashboard: an hour of load, every subscription's 5-hour and weekly limits with its plan, and each provider's combined weekly limit" width="100%">
 
 <br>
 
@@ -241,8 +241,22 @@ Everything is served from the binary at `/`, with no external requests.
 <td width="50%" valign="top"><img src="assets/screenshots/requests.png" alt="Live request log with one row expanded to show why the request went to its account"></td>
 </tr>
 <tr>
-<td valign="top"><b>Accounts:</b> used or remaining 5-hour and weekly quota as segmented meters, token expiry, cooldowns per model, and a breaker for each account: refresh, switch off, remove. Each account has its own page with its hour of load and the coding sessions pinned to it.</td>
+<td valign="top"><b>Accounts:</b> used or remaining 5-hour and weekly quota as segmented meters, when each would run out at its pace, token expiry, cooldowns per model, and a breaker for each account: refresh, switch off, remove. Above them, every subscription's next weekly reset on one seven-day line.</td>
 <td valign="top"><b>Requests:</b> every request as it happens, showing which client format went to which provider, time to first token and tokens. Click a row to see why it went to that account; click a session to follow it.</td>
+</tr>
+<tr>
+<td width="50%" valign="top"><img src="assets/screenshots/account.png" alt="One Claude account's page: its 5-hour and weekly windows with the clients that used each, its Max 20x plan, its hour of load and its pinned coding sessions"></td>
+<td width="50%" valign="top"><img src="assets/screenshots/usage.png" alt="Usage page: a week of estimated cost by day and provider, a breakdown by provider, and the top clients by name"></td>
+</tr>
+<tr>
+<td valign="top"><b>Each account:</b> its windows with the clients that used them, its plan, whether it takes new sessions first, normally or last, its hour of load, and the coding sessions pinned to it with their share of each window.</td>
+<td valign="top"><b>Usage:</b> what your traffic would cost at API list prices, by day, model, account and provider, and the top clients by name, with their models. Click a row to narrow the page down.</td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/screenshots/clients.png" alt="Config, Clients: the endpoint, a shared key from before waiting to be named, and five clients with their own keys, last use and limits"></td>
+</tr>
+<tr>
+<td colspan="2"><b>A key for every client:</b> name a machine or tool and Fusebox makes its key and shows the setup for Claude Code, Codex and other tools with it. Each client shows when it was last used and what it has used of its limits; shared keys from before wait to be named.</td>
 </tr>
 <tr>
 <td colspan="2"><img src="assets/screenshots/sign-in.png" alt="Connect an account panel listing Claude, ChatGPT, Antigravity, Grok, Kimi, Meta, Devin and Vertex AI"></td>
@@ -254,9 +268,9 @@ Everything is served from the binary at `/`, with no external requests.
 
 The **Models** tab groups every model id by family, shows aliases and model groups, and lists the order in which accounts would take a new session, with the next one marked. **Try a model** sends a prompt through routing like any request and shows which account answered and how fast.
 
-**Who used the quota.** Under each meter, an account's page shows which of your named clients and shared keys used the current window and the last one, in points of the window, plus what was used outside Fusebox (claude.ai, the desktop app). Its coding sessions show their share of the current windows. The Usage page lists each window in the range with every client by name: its share of the window's use, its requests and tokens, and the models it used. Requests, tokens and models are what Fusebox recorded; the points of the window are estimates: each rise in the provider's reported use is split over the attempts that finished since the previous rise, by their API list price ([how](docs/usage-costs.md#who-used-a-subscription-window)).
+**Who used the quota.** Under each meter, an account's page shows which of your named clients and shared keys used the current window and the last one, in points of the window, plus what was used outside Fusebox (claude.ai, the desktop app). Its coding sessions show their share of the current windows. The Usage page's **Top clients** ranks every client by name in the selected range, with its share of the estimated cost, its tokens and the models it used. Tokens and models are what Fusebox recorded; the points of a window are estimates: each rise in the provider's reported use is split over the attempts that finished since the previous rise, by their API list price ([how](docs/usage-costs.md#who-used-a-subscription-window)).
 
-Each quota meter has a thin mark where usage would be if spread evenly over the window. When the pace so far would use a window up before it resets, the meter says when (`out 1h 40m`). The Accounts page lines up every subscription's next weekly reset over seven days, and each account page sets whether it takes new sessions **First**, **Normal** or **Last**.
+Each quota meter has a thin mark where usage would be if spread evenly over the window. When the pace so far would use a window up before it resets, the meter says when (`out 1h 40m`). Claude subscriptions show their plan (Max 20x, Max 5x, Pro), and the overview's **Combined weekly limits** puts each provider's subscriptions on one weekly meter with its own pace mark, counting Claude accounts by plan price (Pro 1, Max 5x 5, Max 20x 10) when every plan is known and equally otherwise. The Accounts page lines up every subscription's next weekly reset over seven days, and each account page sets whether it takes new sessions **First**, **Normal** or **Last**.
 
 Sharing a screenshot or your screen? The eye button in the top bar (or <kbd>.</kbd>) hides every email and API key on the page, and copy buttons still copy the real values.
 
