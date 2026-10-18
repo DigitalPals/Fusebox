@@ -263,3 +263,29 @@ fn a_large_usage_database_or_a_full_disk_is_a_fault() {
     assert_eq!(faults::badge(std::slice::from_ref(&full)), 1);
     assert_eq!(full.json()["badge"], true);
 }
+
+#[test]
+fn a_used_up_account_is_not_an_error_once_its_limit_renews() {
+    let cfg = Config {
+        auth_dir: "/nonexistent".into(),
+        claude_api_key: vec![crate::config::KeyEntry { api_key: "mock-only".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let app = App::new(cfg, "/nonexistent/config.yaml".into());
+    let account = app.pool.all()[0].clone();
+    let kinds = || -> Vec<String> {
+        let faults = current_faults(&app);
+        faults.as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect()
+    };
+    let spent = "subscription quota exhausted: This request would exceed your account's rate limit.";
+    account.exhaust("claude-sonnet-5-5", Utc::now() + Span::hours(1), spent);
+    assert_eq!(kinds(), ["quota"]);
+    // The limit renewed and no request has reached the account since.
+    account.exhaust("claude-sonnet-5-5", Utc::now() - Span::seconds(1), spent);
+    assert!(kinds().is_empty(), "a renewed limit is not an account error");
+    assert_eq!(account.snapshot()["last_error"], Value::Null);
+    account.rate_limit("claude-sonnet-5-5", Utc::now() - Span::seconds(1), "429: slow down");
+    assert!(kinds().is_empty(), "nor is an ended rate limit");
+    account.cool(None, Utc::now() - Span::seconds(1), "403: forbidden");
+    assert_eq!(kinds(), ["error"], "other errors stay after their cooldown");
+}

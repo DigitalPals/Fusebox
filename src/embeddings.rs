@@ -124,7 +124,12 @@ pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outco
             Err(Failure { error: (status, err), completed: false })
                 if status != 504 && (status == 429 || status >= 500) =>
             {
-                acct.cool(Some(&model), Utc::now() + chrono::Duration::seconds(30), &format!("{status}: embeddings"));
+                let (until, reason) = (Utc::now() + chrono::Duration::seconds(30), format!("{status}: embeddings"));
+                if status == 429 {
+                    acct.rate_limit(&model, until, &reason);
+                } else {
+                    acct.cool(Some(&model), until, &reason);
+                }
                 last = Some((status, err));
             }
             Err(Failure { error: (status, err), .. }) => {

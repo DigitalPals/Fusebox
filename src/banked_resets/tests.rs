@@ -823,6 +823,7 @@ fn a_reset_clears_exhaustion_the_proxy_detected() {
     crate::proxy::mark_quota_exhausted(&acct, "claude-sonnet-5-5", &reqwest::header::HeaderMap::new(), body);
     assert!(acct.exhausted_until("claude-sonnet-5-5").is_some());
     assert!(acct.cooling_until("claude-sonnet-5-5").is_some());
+    assert!(acct.state.lock().last_error(Utc::now()).is_some());
     // Applying a reset and reading fresh usage makes the account routable again.
     let guard = QuotaGuard::new(&app, &acct, "account-1");
     guard.invalidate(&["5h".into()]);
@@ -831,6 +832,7 @@ fn a_reset_clears_exhaustion_the_proxy_detected() {
     reconcile(&app, &acct, "account-1", &usage);
     assert!(acct.exhausted_until("claude-sonnet-5-5").is_none());
     assert!(acct.cooling_until("claude-sonnet-5-5").is_none());
+    assert_eq!(acct.state.lock().last_error(Utc::now()), None, "the reset ends the quota error");
 }
 
 #[test]

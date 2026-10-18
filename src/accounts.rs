@@ -332,6 +332,23 @@ impl Counters {
     }
 }
 
+/// An account's latest problem, as the dashboard and notifications show it.
+#[derive(Debug, Clone)]
+struct AccountError {
+    message: String,
+    /// Set when the problem is only a pause (spent quota or a rate limit): it ends
+    /// with that pause instead of waiting for a request to succeed.
+    pause: Option<ErrorPause>,
+}
+
+#[derive(Debug, Clone)]
+struct ErrorPause {
+    quota: bool,
+    /// The paused model, as the cooldown is keyed ("*" = every model).
+    model: String,
+    until: DateTime<Utc>,
+}
+
 #[derive(Debug, Default)]
 pub struct AccountState {
     /// Shared across account reloads so in-flight requests remain counted.
@@ -353,7 +370,7 @@ pub struct AccountState {
     pub quota_refreshing: bool,
     pub banked_resets: Option<crate::banked_resets::View>,
     pub strikes: u32,
-    pub last_error: Option<String>,
+    last_error: Option<AccountError>,
     pub last_used: Option<DateTime<Utc>>,
     pub counters: Counters,
     /// Subscription usage windows (Claude, ChatGPT).
@@ -367,6 +384,37 @@ impl AccountState {
     pub fn set_quota(&mut self, windows: Vec<crate::quota::Window>, plan: Option<String>) {
         self.attribution.reading(&windows, Utc::now());
         self.quota.set(windows, plan);
+    }
+
+    /// The latest problem, unless it was a pause that has ended since.
+    pub fn last_error(&self, now: DateTime<Utc>) -> Option<&str> {
+        let error = self.last_error.as_ref()?;
+        error.pause.as_ref().is_none_or(|p| p.until > now).then_some(error.message.as_str())
+    }
+
+    /// Records a problem that stays until a request succeeds or the account is reset.
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.last_error = Some(AccountError { message: message.into(), pause: None });
+    }
+
+    pub fn clear_error(&mut self) {
+        self.last_error = None;
+    }
+
+    fn pause_error(&mut self, message: &str, quota: bool, model: &str, until: DateTime<Utc>) {
+        let pause = Some(ErrorPause { quota, model: model.to_string(), until });
+        self.last_error = Some(AccountError { message: message.to_string(), pause });
+    }
+
+    /// Ends a spent-quota error early once nothing keeps that model paused for quota,
+    /// as when a usage reading or a banked reset shows the allowance is back.
+    pub fn settle_quota_error(&mut self, now: DateTime<Utc>) {
+        let Some(p) = self.last_error.as_ref().and_then(|e| e.pause.as_ref()).filter(|p| p.quota) else { return };
+        let paused = [p.model.as_str(), "*"].iter().any(|m| self.quota_cooldowns.get(*m).is_some_and(|t| *t > now));
+        let spent = self.quota.exhausted_until(if p.model == "*" { "" } else { &p.model }).is_some();
+        if !paused && !spent {
+            self.last_error = None;
+        }
     }
 
     /// What pauses the account, per model ("*" = every model): until when, and why
@@ -634,10 +682,19 @@ impl Account {
         self.cool_quota(model, until, reason, epoch);
     }
 
+    /// Pauses the account (or one model) for a problem that stays shown until a
+    /// request succeeds: sign-in, permission, a stalled upstream.
     pub fn cool(&self, model: Option<&str>, until: DateTime<Utc>, reason: &str) {
         let mut st = self.state.lock();
         st.cooldowns.insert(model.unwrap_or("*").to_string(), until);
-        st.last_error = Some(reason.to_string());
+        st.set_error(reason);
+    }
+
+    /// Pauses a model for a rate limit; the error ends with the pause.
+    pub fn rate_limit(&self, model: &str, until: DateTime<Utc>, reason: &str) {
+        let mut st = self.state.lock();
+        st.cooldowns.insert(model.to_string(), until);
+        st.pause_error(reason, false, model, until);
     }
 
     pub fn quota_epoch(&self) -> u64 {
@@ -648,19 +705,20 @@ impl Account {
         let mut st = self.state.lock();
         if st.quota_epoch == epoch && !st.quota_refreshing {
             st.quota_cooldowns.insert(model.to_string(), until);
-            st.last_error = Some(reason.to_string());
+            st.pause_error(reason, true, model, until);
         }
     }
 
     pub fn record_ok(&self) {
         let mut st = self.state.lock();
         st.strikes = 0;
-        st.last_error = None;
+        st.clear_error();
     }
 
     pub fn snapshot(&self) -> Value {
         let st = self.state.lock();
-        let pauses = st.pauses(Utc::now());
+        let now = Utc::now();
+        let pauses = st.pauses(now);
         let cooldowns: BTreeMap<&str, String> = pauses.iter().map(|(k, (t, _))| (k.as_str(), t.to_rfc3339())).collect();
         let kinds: BTreeMap<&str, &str> = pauses.iter().map(|(k, (_, kind))| (k.as_str(), *kind)).collect();
         let (kind, expires, email) = match &*self.cred.read() {
@@ -679,7 +737,7 @@ impl Account {
             "disabled": st.disabled,
             "cooldowns": cooldowns,
             "cooldown_kinds": kinds,
-            "last_error": st.last_error,
+            "last_error": st.last_error(now),
             "last_used": st.last_used.map(|t| t.to_rfc3339()),
             "expires_at": expires,
             "counters": st.counters,
@@ -1129,8 +1187,8 @@ impl Pool {
                 if same_shape {
                     let mut st = prev.state.lock();
                     st.disabled = s.disabled || s.problem.is_some();
-                    if s.problem.is_some() {
-                        st.last_error = s.problem.clone();
+                    if let Some(problem) = &s.problem {
+                        st.set_error(problem.clone());
                     }
                     drop(st);
                     next.push(prev.clone());
@@ -1160,8 +1218,8 @@ impl Pool {
                 .unwrap_or_default();
             state.disabled = s.disabled || s.problem.is_some();
             state.credential_identity = s.cred.identity(s.provider);
-            if s.problem.is_some() {
-                state.last_error = s.problem.clone();
+            if let Some(problem) = &s.problem {
+                state.set_error(problem.clone());
             }
             let cred = old.get(&s.id).map(|prev| prev.cred.clone()).unwrap_or_else(|| Arc::new(RwLock::new(s.cred)));
             let refresh_lock = old.get(&s.id).map(|prev| prev.refresh_lock.clone()).unwrap_or_default();
@@ -1672,6 +1730,34 @@ fn least_used_score(a: &Account, model: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_that_explain_a_pause_end_with_it() {
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "one".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let acct = &pool.all()[0];
+        let (model, now) = ("claude-sonnet-5-5", Utc::now());
+        let at = |t: DateTime<Utc>| acct.state.lock().last_error(t).map(String::from);
+        let later = now + chrono::Duration::hours(1);
+        acct.exhaust(model, later, "subscription quota exhausted: try again later");
+        assert_eq!(acct.snapshot()["last_error"], "subscription quota exhausted: try again later");
+        assert_eq!(at(later), None, "the error ends when the limit renews");
+        acct.rate_limit(model, now + chrono::Duration::seconds(15), "429: slow down");
+        assert_eq!(at(now).as_deref(), Some("429: slow down"));
+        assert_eq!(at(now + chrono::Duration::seconds(15)), None);
+        // Problems that may need attention stay until a request succeeds.
+        acct.cool(None, now + chrono::Duration::minutes(10), "403: forbidden");
+        assert_eq!(at(later).as_deref(), Some("403: forbidden"));
+        acct.state.lock().set_error("500: upstream exploded");
+        assert_eq!(at(later).as_deref(), Some("500: upstream exploded"));
+        acct.record_ok();
+        assert_eq!(acct.snapshot()["last_error"], Value::Null);
+    }
 
     #[test]
     fn route_order_lists_every_account_without_taking_a_turn() {

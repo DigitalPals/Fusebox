@@ -1216,7 +1216,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 tracker.diagnostic_failure(failure.clone());
                 tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                     failure_kind = failure.kind, error_causes = ?failure.causes, "upstream connection failed");
-                acct.state.lock().last_error = Some(msg.clone());
+                acct.state.lock().set_error(msg.clone());
                 // A connection that never opened is a blip worth one more try on the same
                 // account. Once the request went out, the provider may have run it, so it
                 // moves on rather than running it twice on one account.
@@ -1285,9 +1285,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 }
                 // Still busy: step aside briefly, without the escalating backoff.
                 if status == 429 {
-                    acct.cool(Some(&model), Utc::now() + Duration::seconds(15), &format!("429: {msg}"));
+                    acct.rate_limit(&model, Utc::now() + Duration::seconds(15), &format!("429: {msg}"));
                 } else {
-                    acct.state.lock().last_error = Some(format!("{status}: {msg}"));
+                    acct.state.lock().set_error(format!("{status}: {msg}"));
                 }
                 app.broadcast("accounts", Value::Null);
                 tried.push(acct.id.clone());
@@ -1298,7 +1298,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 429 => {
                     // Quota exhaustion was handled above; this is a rate limit.
                     let until = reset_after(&headers, &text).unwrap_or_else(|| backoff(&acct));
-                    acct.cool(Some(&model), until, &format!("429: {msg}"));
+                    acct.rate_limit(&model, until, &format!("429: {msg}"));
                     app.broadcast("accounts", Value::Null);
                 }
                 401 | 403 if acct.is_oauth() && !refreshed.contains(&acct.id) && !forbidden_for_good(&text) => {
@@ -1314,12 +1314,12 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
                 // A gateway timeout may still be generating upstream: answer, don't repeat.
                 400 | 404 | 413 | 422 | 504 => {
-                    acct.state.lock().last_error = Some(format!("{status}: {msg}"));
+                    acct.state.lock().set_error(format!("{status}: {msg}"));
                     tracker.finish(status, &Usage::default(), Some(msg));
                     return Reply::Error(status, client_body);
                 }
                 _ => {
-                    acct.state.lock().last_error = Some(format!("{status}: {msg}"));
+                    acct.state.lock().set_error(format!("{status}: {msg}"));
                 }
             }
             tried.push(acct.id.clone());
@@ -1356,9 +1356,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     if status == 429 && quota_exhausted(&acct, &model, status, &message) {
                         mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
                     } else if status == 429 {
-                        acct.cool(Some(&model), Utc::now() + Duration::seconds(30), &format!("429: {message}"));
+                        acct.rate_limit(&model, Utc::now() + Duration::seconds(30), &format!("429: {message}"));
                     } else {
-                        acct.state.lock().last_error = Some(format!("{status}: {message}"));
+                        acct.state.lock().set_error(format!("{status}: {message}"));
                     }
                     app.broadcast("accounts", Value::Null);
                     tried.push(acct.id.clone());

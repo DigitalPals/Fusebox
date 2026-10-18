@@ -378,7 +378,7 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
         let result = refresh_locked(&acct, http, old).await;
         if let Err(error) = &result {
             tracing::warn!(account = %acct.label, "token refresh failed: {error:#}");
-            acct.state.lock().last_error = Some(format!("refresh failed: {error}"));
+            acct.state.lock().set_error(format!("refresh failed: {error}"));
         }
         result
     })
@@ -536,16 +536,15 @@ fn retry_pending_save(acct: &Account, force: bool) {
             *pending = None;
             let mut state = acct.state.lock();
             if state
-                .last_error
-                .as_deref()
+                .last_error(Utc::now())
                 .is_some_and(|message| message.starts_with("saving refreshed credentials failed:"))
             {
-                state.last_error = None;
+                state.clear_error();
             }
         }
         Err(error) => {
             tracing::warn!(account = %acct.label, "refreshed credentials remain in memory; saving will be retried: {error}");
-            acct.state.lock().last_error = Some(format!("saving refreshed credentials failed: {error}"));
+            acct.state.lock().set_error(format!("saving refreshed credentials failed: {error}"));
             pending.as_mut().unwrap().retry_at = std::time::Instant::now() + Duration::from_secs(30);
         }
     }
@@ -578,7 +577,7 @@ pub async fn refresher(app: Arc<App>) {
                     }
                     if let Err(e) = ensure_fresh(app, &acct, chrono::Duration::minutes(10), false).await {
                         tracing::warn!(account = %acct.label, "token refresh failed: {e:#}");
-                        acct.state.lock().last_error = Some(format!("refresh failed: {e}"));
+                        acct.state.lock().set_error(format!("refresh failed: {e}"));
                     }
                 }
             })

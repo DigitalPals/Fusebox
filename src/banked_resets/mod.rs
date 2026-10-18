@@ -491,6 +491,7 @@ impl QuotaGuard {
                 st.quota_cooldowns.remove(&model);
             }
             st.quota.windows.retain(|w| !affected(w));
+            st.settle_quota_error(Utc::now());
             st.quota.updated_at = None;
             st.quota.refreshed_at = None;
             // Keep cooldowns whose scope cannot be proven to match this grant.

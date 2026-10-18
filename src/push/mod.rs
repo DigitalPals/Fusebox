@@ -343,7 +343,7 @@ fn views(app: &App) -> Vec<AccountView> {
                 api_key,
                 disabled: st.disabled,
                 pauses: st.pauses(now),
-                last_error: st.last_error.clone(),
+                last_error: st.last_error(now).map(String::from),
                 windows: st.quota.windows.clone(),
                 failures,
                 top_clients: st

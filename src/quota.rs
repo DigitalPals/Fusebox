@@ -114,7 +114,8 @@ impl Quota {
         Some(100.0 - used.clamp(0.0, 100.0))
     }
 
-    fn needs_refresh(&self, now: DateTime<Utc>) -> bool {
+    /// `pauses`: when the account's quota pauses end.
+    fn needs_refresh(&self, now: DateTime<Utc>, pauses: impl IntoIterator<Item = DateTime<Utc>>) -> bool {
         // A check that brought no data waits 2, 4, 8 ... up to 30 minutes before the next.
         if self.check_failures > 0
             && let Some(at) = self.checked_at
@@ -123,6 +124,12 @@ impl Quota {
             return false;
         }
         let Some(refreshed) = self.refreshed_at else { return true };
+        // A window renewed or a quota pause ended since the last reading: confirm it at
+        // the next round rather than up to five minutes later.
+        let ended = |t: DateTime<Utc>| t > refreshed && t <= now;
+        if self.windows.iter().filter_map(|w| w.resets_at).chain(pauses).any(ended) {
+            return true;
+        }
         let busy = self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
         (now - refreshed).num_seconds() >= if busy { BUSY_POLL_EVERY } else { POLL_EVERY }
     }
@@ -395,6 +402,7 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
     st.quota_cooldowns.retain(|model, _| {
         !covered.contains(model) || quota.pressure(if model == "*" { "" } else { model }).is_none_or(|u| u >= 100.0)
     });
+    st.settle_quota_error(Utc::now());
 }
 
 pub fn usage(st: &mut crate::accounts::AccountState, provider: Provider, value: &Value) {
@@ -469,7 +477,7 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     }
     let stale = {
         let st = acct.state.lock();
-        !st.disabled && st.quota.needs_refresh(Utc::now())
+        !st.disabled && st.quota.needs_refresh(Utc::now(), st.quota_cooldowns.values().copied())
     };
     if !stale || crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
         return changed;
@@ -584,15 +592,15 @@ mod tests {
             (reqwest::header::HeaderName::from_static("x-codex-primary-used-percent"), "20".parse().unwrap()),
         ]);
         observe(acct, &headers, acct.quota_epoch());
-        assert!(acct.state.lock().quota.needs_refresh(Utc::now())); // headers cannot replace the first poll
+        assert!(acct.state.lock().quota.needs_refresh(Utc::now(), [])); // headers cannot replace the first poll
         let usage_value = json!({"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":20}}});
         let refreshed;
         {
             let mut st = acct.state.lock();
             usage(&mut st, Provider::Codex, &usage_value);
             refreshed = st.quota.refreshed_at.unwrap();
-            assert!(!st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY - 1)));
-            assert!(st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY)));
+            assert!(!st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY - 1), []));
+            assert!(st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY), []));
         }
         observe(acct, &headers, acct.quota_epoch());
         let event = json!({"type":"codex.rate_limits","primary":{"window_minutes":300,"used_percent":95,"reset_after_seconds":3600}});
@@ -601,8 +609,8 @@ mod tests {
             let st = acct.state.lock();
             assert_eq!(st.quota.refreshed_at, Some(refreshed));
             // A busy account still refreshes its model-specific windows, just less often.
-            assert!(!st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY)));
-            assert!(st.quota.needs_refresh(refreshed + chrono::Duration::seconds(BUSY_POLL_EVERY)));
+            assert!(!st.quota.needs_refresh(refreshed + chrono::Duration::seconds(POLL_EVERY), []));
+            assert!(st.quota.needs_refresh(refreshed + chrono::Duration::seconds(BUSY_POLL_EVERY), []));
             assert_eq!(st.quota.windows.len(), 2); // WebSocket update also retains the weekly window
             assert_eq!(st.quota.five_hour_remaining("gpt-6.1-sol"), Some(5.0));
         }
@@ -611,29 +619,75 @@ mod tests {
         assert_eq!(st.quota.refreshed_at, Some(refreshed)); // empty data does not claim a refresh
         st.quota.refreshed_at = Some(refreshed - chrono::Duration::seconds(POLL_EVERY));
         usage(&mut st, Provider::Codex, &usage_value);
-        assert!(!st.quota.needs_refresh(Utc::now()));
+        assert!(!st.quota.needs_refresh(Utc::now(), []));
         assert_eq!(st.quota.five_hour_remaining("gpt-6.1-sol"), Some(5.0));
+    }
+
+    #[test]
+    fn a_usage_reading_with_headroom_ends_a_quota_error() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "a".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = &pool.all()[0];
+        let model = "claude-sonnet-5-5";
+        acct.exhaust(model, Utc::now() + chrono::Duration::hours(2), "subscription quota exhausted: x");
+        let reading = |used: f64| json!({ "five_hour": { "utilization": used, "resets_at": "2099-01-01T00:00:00Z" } });
+        let mut st = acct.state.lock();
+        usage(&mut st, Provider::Claude, &reading(100.0));
+        assert_eq!(st.last_error(Utc::now()), Some("subscription quota exhausted: x"), "still spent");
+        usage(&mut st, Provider::Claude, &reading(0.0));
+        assert!(st.quota_cooldowns.is_empty());
+        assert_eq!(st.last_error(Utc::now()), None, "the allowance is back before the planned reset");
+        // Other errors are not the usage reading's to clear.
+        st.set_error("500: upstream exploded");
+        usage(&mut st, Provider::Claude, &reading(0.0));
+        assert_eq!(st.last_error(Utc::now()), Some("500: upstream exploded"));
+    }
+
+    #[test]
+    fn a_renewed_window_or_an_ended_pause_is_read_at_the_next_round() {
+        let now = Utc::now();
+        let secs = chrono::Duration::seconds;
+        let renews = now + secs(120);
+        let mut q = Quota::default();
+        q.set(vec![Window { name: "5h".into(), used: 100.0, resets_at: Some(renews), model: None }], None);
+        q.refreshed_at = Some(now);
+        assert!(!q.needs_refresh(renews - secs(1), []));
+        assert!(q.needs_refresh(renews, []), "the window renewed after the last reading");
+        q.refreshed_at = Some(renews + secs(1));
+        assert!(!q.needs_refresh(renews + secs(60), []), "read once after the renewal");
+        // A quota pause that ended since the last reading counts the same.
+        let ended = renews + secs(30);
+        assert!(!q.needs_refresh(ended - secs(1), [ended]));
+        assert!(q.needs_refresh(ended, [ended]));
+        // A check that brought no data still backs off.
+        q.checked(ended, false);
+        assert!(!q.needs_refresh(ended + secs(60), [ended]));
     }
 
     #[test]
     fn usage_checks_that_bring_no_data_back_off() {
         let now = Utc::now();
         let mut q = Quota::default();
-        assert!(q.needs_refresh(now));
+        assert!(q.needs_refresh(now, []));
         q.checked(now, false);
-        assert!(!q.needs_refresh(now + chrono::Duration::seconds(119)));
-        assert!(q.needs_refresh(now + chrono::Duration::seconds(120)));
+        assert!(!q.needs_refresh(now + chrono::Duration::seconds(119), []));
+        assert!(q.needs_refresh(now + chrono::Duration::seconds(120), []));
         for _ in 0..10 {
             q.checked(now, false);
         }
-        assert!(!q.needs_refresh(now + chrono::Duration::seconds(BUSY_POLL_EVERY - 1)));
-        assert!(q.needs_refresh(now + chrono::Duration::seconds(BUSY_POLL_EVERY)));
+        assert!(!q.needs_refresh(now + chrono::Duration::seconds(BUSY_POLL_EVERY - 1), []));
+        assert!(q.needs_refresh(now + chrono::Duration::seconds(BUSY_POLL_EVERY), []));
         // A successful check ends the backoff; a banked reset can still force the next one.
         q.refreshed_at = Some(now);
         q.checked(now, true);
-        assert!(q.needs_refresh(now + chrono::Duration::seconds(POLL_EVERY)));
+        assert!(q.needs_refresh(now + chrono::Duration::seconds(POLL_EVERY), []));
         q.refreshed_at = None;
-        assert!(q.needs_refresh(now));
+        assert!(q.needs_refresh(now, []));
     }
 
     #[test]

@@ -455,13 +455,13 @@ where
                     continue;
                 }
                 match status {
-                    429 => acct.cool(Some(&model), Utc::now() + Duration::seconds(60), &format!("429: {msg}")),
+                    429 => acct.rate_limit(&model, Utc::now() + Duration::seconds(60), &format!("429: {msg}")),
                     401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
                     400 | 404 | 413 | 422 => {
                         tracker.finish(status, &Usage::default(), Some(msg));
                         return Err((status, body));
                     }
-                    _ => acct.state.lock().last_error = Some(format!("{status}: {msg}")),
+                    _ => acct.state.lock().set_error(format!("{status}: {msg}")),
                 }
                 last = Some((status, body));
             }

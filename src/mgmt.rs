@@ -854,7 +854,7 @@ async fn reset_account(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
     st.cooldowns.clear();
     st.quota_cooldowns.clear();
     st.strikes = 0;
-    st.last_error = None;
+    st.clear_error();
     drop(st);
     app.broadcast("accounts", Value::Null);
     ok()
@@ -1471,7 +1471,7 @@ mod tests {
         };
         let app = App::new(cfg, "/nonexistent/config.yaml".into());
         let account = app.pool.all()[0].clone();
-        account.state.lock().last_error = Some("upstream exploded".into());
+        account.state.lock().set_error("upstream exploded");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let service = router(app.clone()).with_state(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
@@ -1510,7 +1510,7 @@ mod tests {
             }
         };
         assert_eq!(next_faults().await, listed, "a new socket starts with every fault");
-        account.state.lock().last_error = None;
+        account.state.lock().clear_error();
         assert_eq!(next_faults().await, json!([]), "a cleared fault is sent at once");
         server.abort();
     }
