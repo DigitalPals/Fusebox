@@ -904,15 +904,23 @@ h1, h2, h3, p { margin: 0; }
 
 .cfg-layout { display: flex; gap: 28px; align-items: flex-start; }
 .cfg-nav { flex: none; width: 188px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 84px; }
-.cfg-nav button { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px; background: transparent; border: 0; border-radius: 6px; color: var(--fg-2); font-size: 14px; text-align: left; }
+.cfg-nav button { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px 0 3px; background: transparent; border: 0; border-radius: 6px; color: var(--fg-2); font-size: 14px; text-align: left; }
 .cfg-nav button:hover { color: var(--fg); }
-.cfg-nav button[aria-current="page"] { color: var(--fg); background: var(--icon-hover); box-shadow: inset 2px 0 0 var(--brand); }
-.cfg-nav button span:first-child { flex: 1; }
+.cfg-nav button[aria-current="page"] { color: var(--fg); }
+.cfg-nav .cfg-dot { margin-left: auto; }
+/* The current section sits in brackets like [fusebox]. They hang from the baseline and centre
+   on the capital height, so the capital beside the left bracket has equal room above and below. */
+.cfg-label { flex: none; }
+.cfg-label::before, .cfg-label::after { content: ""; display: inline-block; box-sizing: border-box; width: 7px; height: 22px; vertical-align: calc(.349em - 11px); border: 2px solid transparent; }
+.cfg-label::before { border-right: 0; margin-right: 2px; }
+.cfg-label::after { border-left: 0; margin-left: 2px; }
+button:hover > .cfg-label::before, button:hover > .cfg-label::after { border-color: var(--card-hover); }
+button[aria-current="page"] > .cfg-label::before, button[aria-current="page"] > .cfg-label::after { border-color: var(--brand); }
 .cfg-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .cfg-dot.on { background: var(--brand); }
 .cfg-chips { display: none; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.cfg-chips button { display: flex; align-items: center; gap: 6px; flex: none; height: 36px; padding: 0 12px; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--fg-2); font-size: 13px; }
-.cfg-chips button[aria-current="page"] { border-color: var(--line-hover); color: var(--fg); }
+.cfg-chips button { display: flex; align-items: center; gap: 6px; flex: none; height: 36px; padding: 0 6px 0 3px; background: transparent; border: 0; border-radius: 6px; color: var(--fg-2); font-size: 13px; }
+.cfg-chips button[aria-current="page"] { color: var(--fg); }
 @media (max-width: 979px) {
   .cfg-nav { display: none; }
   .cfg-chips { display: flex; }

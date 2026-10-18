@@ -143,7 +143,7 @@ Mode: Operate. Familiar controls, dense tables, tabular numbers, keyboard shortc
 - `bg` #0b0b0a for the page, header, phone tab bar, inputs and code. `surface` #121210 for panels and the drawer; `surface-pop` for the command palette and faults menu; `surface-inset` for an expanded request.
 - Text ramp: `fg` for primary text and values, `fg-2` for body copy in rows, `fg-3` (4.9:1 on `bg`) for labels, headers and metadata. Never dimmer than `fg-3` for text; `idle` is only for a disabled dot.
 - State: `ok` ready and live, `warn` cooling, 75–94% used and routing detours, `err` errors, 95%+ used and failed requests. Dots, short words and meter segments only, never large fills.
-- `brand` amber #F3B52F is the fuse. It appears in four places only: the active tab's underline, the current minute's load bar, link hover and the phone tab indicator (plus the selected option ring, the unsaved-section dot and the `NEXT` route tag). Never a fill, never body text.
+- `brand` amber #F3B52F is the fuse. It appears in four places only: the active tab's underline, the current minute's load bar, link hover and the phone tab indicator (plus the selected option ring, the brackets around the current Config section, the unsaved-section dot and the `NEXT` route tag). Never a fill, never body text.
 - Providers are identified by their real logos (`ui/logos.svg`, LobeHub Icons, MIT) through `<use>`; one-colour marks take `fg`.
 
 ## Typography
@@ -183,6 +183,7 @@ Flat. Panels are `surface` with a 1px `line` hairline. The only shadow is on flo
 - **Breaker.** Each account row ends with refresh, an on/off switch (`role="switch"`, square knob, `meter` track when on) and remove.
 - **Segmented control.** 2px padding inside a 1px `line-strong` border; the selected segment is `seg-on` with `fg` text.
 - **Filter chips.** 13px with a DM Mono count; selected chips have a `line-hover` border.
+- **Section nav.** Config's sections. The current one sits in amber square brackets like the wordmark, `[Routing]`: 22px tall, 7px wide, a 2px stroke, 2px from the label and centred on the capital height. Hover shows them in `card-hover`. The chips below 980px work the same way.
 - **Command palette.** ⌘K / Ctrl K or `/`: actions, accounts and models, ↑↓ to move, ↵ to run, Esc to close.
 - **Faults.** Derived from account state and the request log: expired sign-ins, used-up limits, rate limits, account errors and three or more failed requests in an hour.
 - **Toast.** Bottom centre, `fg` on `bg`, for 1.6s.
