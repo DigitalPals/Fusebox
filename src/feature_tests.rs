@@ -458,6 +458,109 @@ async fn websocket_handshakes_are_free_and_turns_are_counted() {
     assert_eq!(s.mock.calls.lock().len(), 1);
 }
 
+type TestSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn websocket_turn(socket: &mut TestSocket) -> Value {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    socket
+        .send(Message::Text(json!({"type":"response.create","model":"gpt-up","input":"hi"}).to_string().into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message {
+                let event: Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "response.completed" || event["type"] == "error" {
+                    break event;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn websocket_turns_revalidate_named_keys_after_rotation_or_removal() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    for (path, query) in [("/v1/responses", false), ("/backend-api/codex/responses", true)] {
+        for remove in [false, true] {
+            let s = setup(|cfg, _| {
+                cfg.codex_websockets = false;
+                cfg.named_clients = vec![NamedClient {
+                    id: "laptop".into(),
+                    label: "Laptop".into(),
+                    key: "fbx_old".into(),
+                    ..Default::default()
+                }];
+            })
+            .await;
+            let url =
+                format!("{}{path}{}", s.proxy.url.replace("http://", "ws://"), if query { "?key=fbx_old" } else { "" });
+            let mut request = url.into_client_request().unwrap();
+            if !query {
+                request.headers_mut().insert("authorization", "Bearer fbx_old".parse().unwrap());
+            }
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            assert_eq!(websocket_turn(&mut socket).await["type"], "response.completed");
+            // A rename keeps the same identity and credential and must not revoke access.
+            let mut cfg = (*s.app.cfg()).clone();
+            cfg.named_clients[0].label = "Renamed laptop".into();
+            s.app.set_config(cfg);
+            assert_eq!(websocket_turn(&mut socket).await["type"], "response.completed");
+            let mut cfg = (*s.app.cfg()).clone();
+            if remove {
+                cfg.named_clients.clear();
+            } else {
+                cfg.named_clients[0].key = "fbx_replacement".into();
+            }
+            s.app.set_config(cfg);
+            assert_eq!(ask(&s, "fbx_old", "gpt-up", &[]).await.0, 401);
+            let event = websocket_turn(&mut socket).await;
+            assert_eq!(event["type"], "error", "{event}");
+            assert_eq!(event["status"], 401, "{event}");
+            assert_eq!(s.mock.calls.lock().len(), 2, "revoked turns must not reach a provider");
+            if !remove {
+                let mut request =
+                    format!("{}{path}", s.proxy.url.replace("http://", "ws://")).into_client_request().unwrap();
+                request.headers_mut().insert("x-api-key", "fbx_replacement".parse().unwrap());
+                let (mut replacement, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+                assert_eq!(websocket_turn(&mut replacement).await["type"], "response.completed");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn shared_and_anonymous_websockets_revalidate_their_access() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    for anonymous in [false, true] {
+        let s = setup(|cfg, _| {
+            cfg.codex_websockets = false;
+            if anonymous {
+                cfg.api_keys.clear();
+            }
+        })
+        .await;
+        let mut request =
+            format!("{}/v1/responses", s.proxy.url.replace("http://", "ws://")).into_client_request().unwrap();
+        if !anonymous {
+            request.headers_mut().insert("x-api-key", "client".parse().unwrap());
+        }
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(websocket_turn(&mut socket).await["type"], "response.completed");
+        let mut cfg = (*s.app.cfg()).clone();
+        cfg.api_keys = vec!["replacement".into()];
+        s.app.set_config(cfg);
+        let event = websocket_turn(&mut socket).await;
+        assert_eq!(event["type"], "error", "{event}");
+        assert_eq!(event["status"], 401, "{event}");
+        assert_eq!(s.mock.calls.lock().len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn unavailable_accounting_blocks_budget_keys() {
     for enabled in [false, true] {

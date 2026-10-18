@@ -69,8 +69,8 @@ pub struct RequestUsage {
     session: Option<String>,
     current: Option<Capture>,
     clients: Option<crate::policy::Clients>,
-    /// The account of the current attempt, for quota attribution.
-    account: Option<Arc<Account>>,
+    /// The account and its identity epoch when the attempt began.
+    account: Option<(Arc<Account>, u64)>,
     /// The client program, for a request without a key.
     program: Option<&'static str>,
 }
@@ -105,7 +105,7 @@ impl RequestUsage {
     }
     pub fn attempt(&mut self, acct: &Arc<Account>) {
         let _ = self.finish(None, None, false);
-        self.account = Some(acct.clone());
+        self.account = Some((acct.clone(), acct.state.lock().identity_epoch));
         let id = uuid::Uuid::new_v4().to_string();
         let provider = match acct.provider {
             crate::accounts::Provider::Claude => "anthropic",
@@ -141,13 +141,16 @@ impl RequestUsage {
         }
         // Subscription windows are what run out; remember the attempt so the next
         // quota reading can say who used them.
-        if let Some(acct) = self.account.as_ref().filter(|a| a.is_oauth()) {
+        if let Some((acct, epoch)) = self.account.as_ref().filter(|(a, _)| a.is_oauth()) {
             let cost = match &self.store {
                 Some(store) => store.price(&o).cost_nanos,
                 None => super::pricing::Catalogue::bundled_catalogue().and_then(|c| c.price(&o).cost_nanos),
             };
             if let Some(used) = crate::attribution::Use::from_observation(&o, cost, self.program) {
-                acct.state.lock().attribution.record(used);
+                let mut state = acct.state.lock();
+                if state.identity_epoch == *epoch {
+                    state.attribution.record(used);
+                }
             }
         }
         if let Some(store) = &self.store {

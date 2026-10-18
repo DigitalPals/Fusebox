@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -68,6 +68,27 @@ pub fn router(app: Arc<App>) -> Router {
 }
 
 // ------------------------------------------------------------------------ auth
+
+/// The access granted at the handshake. A socket must reconnect if its key or
+/// client identity changes, so stale headers cannot bypass a client's limits.
+#[derive(Clone)]
+pub(crate) enum ClientAuth {
+    Open,
+    Shared(String),
+    Named { id: String, key: String },
+}
+
+impl ClientAuth {
+    pub(crate) fn valid(&self, cfg: &crate::config::Config) -> bool {
+        match self {
+            Self::Open => cfg.api_keys.is_empty() && cfg.named_clients.is_empty(),
+            Self::Shared(key) => cfg.api_keys.iter().any(|k| crate::mgmt::constant_eq(k, key)),
+            Self::Named { id, key } => {
+                cfg.named_clients.iter().any(|c| &c.id == id && crate::mgmt::constant_eq(&c.key, key))
+            }
+        }
+    }
+}
 
 async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
     let cfg = app.cfg();
@@ -141,6 +162,12 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
         }
         req.headers_mut().remove(crate::affinity::LEGACY_SCOPE_HEADER);
         req.headers_mut().insert(crate::affinity::SCOPE_HEADER, HeaderValue::from_str(&scope).unwrap());
+        let auth = match named {
+            Some(client) => ClientAuth::Named { id: client.id.clone(), key: client.key.clone() },
+            None if open => ClientAuth::Open,
+            None => ClientAuth::Shared(provided.unwrap()),
+        };
+        req.extensions_mut().insert(auth);
         return next.run(req).await;
     }
     let format = format_for_path(req.uri().path());
@@ -209,10 +236,15 @@ async fn responses(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes)
     run(app, Format::Responses, headers, body).await
 }
 
-async fn responses_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn responses_ws(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     ws.max_message_size(256 << 20)
         .max_frame_size(256 << 20)
-        .on_upgrade(move |socket| crate::ws::handle(app, headers, socket))
+        .on_upgrade(move |socket| crate::ws::handle(app, headers, auth, socket))
 }
 
 fn outcome(o: crate::media::Outcome) -> Response {

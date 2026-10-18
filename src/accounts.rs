@@ -261,6 +261,20 @@ pub enum Credential {
     ApiKey { key: String, base_url: Option<String> },
 }
 
+impl Credential {
+    /// A stable fingerprint for subscription state; access and refresh tokens
+    /// change routinely and must not reset attribution.
+    fn identity(&self, provider: Provider) -> String {
+        use sha2::{Digest, Sha256};
+        let (kind, owner, base_url) = match self {
+            Self::OAuth(o) => ("oauth", o.account_id.as_deref().or(o.email.as_deref()), o.base_url.as_deref()),
+            Self::ApiKey { key, base_url } => ("api-key", Some(key.as_str()), base_url.as_deref()),
+        };
+        let bytes = serde_json::to_vec(&(provider, kind, owner, base_url)).unwrap();
+        hex::encode(Sha256::digest(bytes))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct OAuth {
     pub access_token: String,
@@ -331,6 +345,11 @@ pub struct AccountState {
     /// banked reset or a fresh usage poll clears it; sessions move off it.
     pub quota_cooldowns: HashMap<String, DateTime<Utc>>,
     pub quota_epoch: u64,
+    /// Fingerprint bound to the quota and attribution under this same lock.
+    pub credential_identity: String,
+    /// Changes only when the credential's identity changes, so old attempts and
+    /// upstream sockets cannot be reused for another subscription.
+    pub identity_epoch: u64,
     pub quota_refreshing: bool,
     pub banked_resets: Option<crate::banked_resets::View>,
     pub strikes: u32,
@@ -1080,17 +1099,26 @@ impl Pool {
                         s.cred = Credential::OAuth(oauth);
                     }
                 }
-                let identity_changed = match (&*prev.cred.read(), &s.cred) {
-                    (Credential::OAuth(old), Credential::OAuth(new)) => {
-                        old.account_id != new.account_id || old.base_url != new.base_url
-                    }
-                    _ => false,
-                };
+                let identity = s.cred.identity(s.provider);
+                let identity_changed = prev.state.lock().credential_identity != identity;
                 if guard.is_ok() && pending.is_none() {
                     *prev.cred.write() = s.cred.clone();
                 }
+                if identity_changed {
+                    let mut st = prev.state.lock();
+                    st.quota_epoch += 1;
+                    st.identity_epoch += 1;
+                    st.credential_identity = identity;
+                    st.quota_refreshing = false;
+                    st.quota = Default::default();
+                    st.quota_cooldowns.clear();
+                    st.banked_resets = None;
+                    st.attribution = Default::default();
+                    st.attribution.dirty = true;
+                }
                 // Keep counters and cooldowns; refresh credentials from disk/config.
-                let same_shape = prev.models.len() == s.models.len()
+                let same_shape = prev.provider == s.provider
+                    && prev.models.len() == s.models.len()
                     && prev.headers == s.headers
                     && prev.proxy_url == s.proxy_url
                     && prev.prefix == s.prefix
@@ -1103,13 +1131,6 @@ impl Pool {
                     st.disabled = s.disabled || s.problem.is_some();
                     if s.problem.is_some() {
                         st.last_error = s.problem.clone();
-                    }
-                    if identity_changed {
-                        st.quota_epoch += 1;
-                        st.quota_refreshing = false;
-                        st.quota = Default::default();
-                        st.quota_cooldowns.clear();
-                        st.banked_resets = None;
                     }
                     drop(st);
                     next.push(prev.clone());
@@ -1125,6 +1146,8 @@ impl Pool {
                         active_requests: st.active_requests.clone(),
                         cooldowns: st.cooldowns.clone(),
                         quota_cooldowns: st.quota_cooldowns.clone(),
+                        quota_epoch: st.quota_epoch,
+                        identity_epoch: st.identity_epoch,
                         strikes: st.strikes,
                         last_error: st.last_error.clone(),
                         last_used: st.last_used,
@@ -1136,6 +1159,7 @@ impl Pool {
                 })
                 .unwrap_or_default();
             state.disabled = s.disabled || s.problem.is_some();
+            state.credential_identity = s.cred.identity(s.provider);
             if s.problem.is_some() {
                 state.last_error = s.problem.clone();
             }
@@ -1535,7 +1559,13 @@ impl Pool {
             let mut st = a.state.lock();
             changed |= std::mem::take(&mut st.attribution.dirty);
             if !st.attribution.current.is_empty() || !st.attribution.previous.is_empty() {
-                out.insert(a.id.clone(), st.attribution.for_disk());
+                out.insert(
+                    a.id.clone(),
+                    crate::attribution::SavedAccount {
+                        identity: Some(st.credential_identity.clone()),
+                        attribution: st.attribution.for_disk(),
+                    },
+                );
             }
         }
         (crate::attribution::Saved(out), changed)
@@ -1544,8 +1574,15 @@ impl Pool {
     pub fn restore_attributions(&self, saved: crate::attribution::Saved) {
         let mut saved = saved.0;
         for a in self.accounts.read().iter() {
-            if let Some(attribution) = saved.remove(&a.id) {
-                a.state.lock().attribution = attribution;
+            if let Some(saved) = saved.remove(&a.id) {
+                let mut st = a.state.lock();
+                if saved.identity.as_ref().is_none_or(|old| old == &st.credential_identity) {
+                    st.attribution = saved.attribution;
+                    st.attribution.dirty |= saved.identity.is_none();
+                } else {
+                    // Also remove the stale entry from the next state-file save.
+                    st.attribution.dirty = true;
+                }
             }
         }
     }

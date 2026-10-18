@@ -691,6 +691,18 @@ impl History {
     /// The rebuild is bounded like a stored history entry; past it, deltas are dropped.
     const LIMIT: usize = 8 << 20;
 
+    fn buffer_delta(&mut self, frame: &Frame) {
+        if self.items.is_empty() && !self.overflow {
+            self.buffered = self.buffered.saturating_add(frame.data.len());
+            self.overflow = self.buffered > Self::LIMIT;
+            if self.overflow {
+                self.deltas = Vec::new();
+            } else {
+                self.deltas.push(Frame { event: frame.event.clone(), data: frame.data.clone() });
+            }
+        }
+    }
+
     /// The finished response to remember, once the terminal frame arrives.
     fn observe(&mut self, frame: &Frame) -> Option<Value> {
         let named = frame.event.as_deref();
@@ -698,15 +710,7 @@ impl History {
             matches!(e, "response.output_item.done" | "response.completed" | "response.incomplete" | "response.done")
         });
         if !wanted {
-            if self.items.is_empty() && !self.overflow {
-                self.buffered += frame.data.len();
-                self.overflow = self.buffered > Self::LIMIT;
-                if self.overflow {
-                    self.deltas = Vec::new();
-                } else {
-                    self.deltas.push(Frame { event: frame.event.clone(), data: frame.data.clone() });
-                }
-            }
+            self.buffer_delta(frame);
             return None;
         }
         let mut value = serde_json::from_str::<Value>(&frame.data).ok()?;
@@ -743,9 +747,7 @@ impl History {
                 Some(response)
             }
             _ => {
-                if self.items.is_empty() && !self.overflow {
-                    self.deltas.push(Frame { event: frame.event.clone(), data: frame.data.clone() });
-                }
+                self.buffer_delta(frame);
                 None
             }
         }
@@ -1932,6 +1934,53 @@ pub fn estimate_tokens(body: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuation_deltas_are_bounded_with_or_without_named_sse_events() {
+        for named in [false, true] {
+            let mut history = History::default();
+            let mut frame =
+                Frame::data(json!({"type":"response.output_text.delta","delta":"x".repeat(1 << 20)}).to_string());
+            if named {
+                frame.event = Some("response.output_text.delta".into());
+            }
+            for _ in 0..7 {
+                assert!(history.observe(&frame).is_none());
+            }
+            assert!(!history.deltas.is_empty());
+            assert_eq!(history.buffered, 7 * frame.data.len());
+            assert!(!history.overflow);
+            for _ in 0..3 {
+                history.observe(&frame);
+            }
+            assert!(history.overflow, "named: {named}");
+            assert!(history.deltas.is_empty(), "oversized history must be discarded");
+            // Once discarded, later small deltas must not produce a partial history.
+            history.observe(&Frame::data(json!({"type":"response.output_text.delta","delta":"tail"}).to_string()));
+            assert!(history.deltas.is_empty());
+        }
+    }
+
+    #[test]
+    fn bounded_continuation_deltas_still_rebuild_the_completed_output() {
+        for named in [false, true] {
+            let mut history = History::default();
+            for delta in ["hello", " world"] {
+                let mut frame = Frame::data(
+                    json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":delta})
+                        .to_string(),
+                );
+                if named {
+                    frame.event = Some("response.output_text.delta".into());
+                }
+                history.observe(&frame);
+            }
+            let response = history
+                .observe(&Frame::data(json!({"type":"response.completed","response":{"output":[]}}).to_string()))
+                .unwrap();
+            assert_eq!(response["output"][0]["content"][0]["text"], "hello world", "named: {named}");
+        }
+    }
 
     #[tokio::test]
     async fn retry_budget_bounds_soft_retries_models_and_waits() {

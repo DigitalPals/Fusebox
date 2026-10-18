@@ -187,3 +187,125 @@ async fn subscription_windows_say_which_client_used_them() {
         store.shutdown().await.unwrap();
     }
 }
+
+fn identity_fixture() -> (Directory, Config, std::path::PathBuf) {
+    let dir = Directory(std::env::temp_dir().join(format!("fusebox-attribution-identity-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut cfg = Config { auth_dir: dir.0.to_string_lossy().into(), ..Default::default() };
+    cfg.usage.enabled = false;
+    let file = dir.0.join("codex.json");
+    write_identity(&file, "first-account", "first-token", false);
+    (dir, cfg, file)
+}
+
+fn write_identity(file: &std::path::Path, id: &str, token: &str, metadata_change: bool) {
+    std::fs::write(
+        file,
+        json!({"type":"codex","access_token":token,"account_id":id,"email":"test@example.invalid",
+            "priority":if metadata_change { 10 } else { 0 }})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn seed_attribution(pool: &crate::accounts::Pool) {
+    use chrono::{Duration, Utc};
+    let account = pool.all().pop().unwrap();
+    let mut state = account.state.lock();
+    let window = |used, days| crate::quota::Window {
+        name: "week".into(),
+        model: None,
+        used,
+        resets_at: Some(Utc::now() + Duration::days(days)),
+    };
+    state.set_quota(vec![window(70.0, 3)], None);
+    state.set_quota(vec![window(0.0, 10)], None);
+    state.attribution.record(crate::attribution::Use {
+        at: Utc::now() + Duration::seconds(1),
+        cost: Some(1.0),
+        tokens: 10.0,
+        client: "old-client".into(),
+        session: Some("old-session".into()),
+        model: Some("gpt-6.1-sol".into()),
+    });
+    assert_eq!(state.attribution.current.len(), 1);
+    assert_eq!(state.attribution.previous.len(), 1);
+}
+
+#[test]
+fn replacing_an_oauth_identity_clears_attribution_on_reload_and_restart() {
+    for restart in [false, true] {
+        for metadata_change in [false, true] {
+            let (_dir, cfg, file) = identity_fixture();
+            let mut pool = crate::accounts::Pool::default();
+            pool.reload(&cfg);
+            seed_attribution(&pool);
+            let path = cfg.auth_dir().join(crate::attribution::FILE);
+            pool.attributions().0.save(&path).unwrap();
+            let mut inflight = crate::usage::capture::RequestUsage::new(None, "gpt-6.1-sol");
+            inflight.attempt(&pool.all()[0]);
+            write_identity(&file, "different-account", "different-token", metadata_change);
+            if restart {
+                pool = crate::accounts::Pool::default();
+            }
+            pool.reload(&cfg);
+            if restart {
+                pool.restore_attributions(crate::attribution::Saved::load(&path));
+            }
+            // A late completion from the old subscription must not refill the new state.
+            inflight.finish(Some(200), Some(&crate::ir::Usage { input: 100, ..Default::default() }), true);
+            let account = pool.all().pop().unwrap();
+            let state = account.state.lock();
+            assert!(state.quota.windows.is_empty());
+            assert!(state.attribution.current.is_empty(), "restart: {restart}, metadata: {metadata_change}");
+            assert!(state.attribution.previous.is_empty());
+            assert_eq!(serde_json::to_value(&state.attribution).unwrap()["uses"], json!([]));
+            drop(state);
+            // Clearing must be persisted even if the new account has no readings yet.
+            let (saved, changed) = pool.attributions();
+            assert!(changed);
+            assert!(saved.0.is_empty());
+            saved.save(&path).unwrap();
+            assert!(crate::attribution::Saved::load(&path).0.is_empty());
+        }
+    }
+}
+
+#[test]
+fn refreshing_tokens_preserves_attribution_and_its_saved_identity() {
+    for metadata_change in [false, true] {
+        let (_dir, cfg, file) = identity_fixture();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        seed_attribution(&pool);
+        let (before, _) = pool.attributions();
+        write_identity(&file, "first-account", "refreshed-token", metadata_change);
+        pool.reload(&cfg);
+        let (after, changed) = pool.attributions();
+        assert!(!changed);
+        assert_eq!(after, before);
+        let text = serde_json::to_string(&after).unwrap();
+        assert!(!text.contains("first-token") && !text.contains("refreshed-token") && !text.contains("first-account"));
+        let restored = crate::accounts::Pool::default();
+        restored.reload(&cfg);
+        restored.restore_attributions(serde_json::from_str(&text).unwrap());
+        assert_eq!(restored.attributions().0, after);
+    }
+}
+
+#[test]
+fn legacy_attribution_is_preserved_and_bound_to_an_identity_on_save() {
+    let (_dir, cfg, _file) = identity_fixture();
+    let pool = crate::accounts::Pool::default();
+    pool.reload(&cfg);
+    seed_attribution(&pool);
+    let (saved, _) = pool.attributions();
+    let mut legacy = serde_json::to_value(&saved).unwrap();
+    legacy["file:codex.json"].as_object_mut().unwrap().remove("identity");
+    let restored = crate::accounts::Pool::default();
+    restored.reload(&cfg);
+    restored.restore_attributions(serde_json::from_value(legacy).unwrap());
+    let (migrated, changed) = restored.attributions();
+    assert!(changed, "legacy state must be rewritten with its identity");
+    assert_eq!(migrated, saved);
+}

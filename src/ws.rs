@@ -122,6 +122,8 @@ struct Session {
     upstream_responses: HashSet<String>,
     /// Epoch of the last turn, so late quota events cannot undo a newer quota refresh.
     upstream_quota_epoch: u64,
+    /// Credential identity used by the upstream handshake, independent of quota polls.
+    upstream_identity_epoch: u64,
     key: Option<String>,
     source: Option<&'static str>,
     pending_selection: Option<crate::affinity::Selected>,
@@ -136,6 +138,7 @@ impl Default for Session {
             upstream: None,
             upstream_responses: HashSet::new(),
             upstream_quota_epoch: 0,
+            upstream_identity_epoch: 0,
             key: None,
             source: None,
             pending_selection: None,
@@ -149,6 +152,7 @@ impl Session {
     fn discard_upstream(&mut self) -> Option<(Arc<Account>, Upstream)> {
         self.upstream_responses.clear();
         self.upstream_quota_epoch = 0;
+        self.upstream_identity_epoch = 0;
         self.upstream.take()
     }
 
@@ -271,7 +275,7 @@ fn input_items(body: &Value) -> Vec<Value> {
     crate::affinity::input_items(body)
 }
 
-pub async fn handle(app: Arc<App>, headers: HeaderMap, socket: WebSocket) {
+pub async fn handle(app: Arc<App>, headers: HeaderMap, auth: crate::server::ClientAuth, socket: WebSocket) {
     if crate::clients::observe(&headers) {
         app.models.save_clients();
     }
@@ -349,7 +353,7 @@ pub async fn handle(app: Arc<App>, headers: HeaderMap, socket: WebSocket) {
         let downstream = crate::diagnostics::Downstream::default();
         let running = crate::diagnostics::downstream_scope(downstream.clone(), async {
             drain_idle_upstream(&mut sess).await;
-            turn(&app, &headers, &mut sess, body, &mut tx).await
+            turn(&app, &headers, &auth, &mut sess, body, &mut tx).await
         });
         tokio::pin!(running);
         loop {
@@ -412,10 +416,17 @@ async fn next_interrupt(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Str
 async fn turn(
     app: &Arc<App>,
     headers: &HeaderMap,
+    auth: &crate::server::ClientAuth,
     sess: &mut Session,
     mut body: Value,
     tx: &mut ClientTx,
 ) -> Result<(), ClientGone> {
+    let cfg = app.cfg();
+    if !auth.valid(&cfg) {
+        let err = crate::formats::error_body(Format::Responses, 401, "invalid or missing API key");
+        send(tx, error_event(401, &err)).await?;
+        return Err(ClientGone);
+    }
     let mut request_headers = headers.clone();
     request_headers.insert(crate::usage::capture::REQUEST_HEADER, uuid::Uuid::new_v4().to_string().parse().unwrap());
     let headers = &request_headers;
@@ -445,7 +456,6 @@ async fn turn(
         items.extend(input_items(&body));
     }
 
-    let cfg = app.cfg();
     // Each turn counts against a named client's limits, as an HTTP request would.
     if let Some(client) = crate::policy::named_client(&cfg, headers)
         && let Err(d) = app.clients.admit(client, headers, true)
@@ -602,7 +612,9 @@ async fn native_turn(
     }
     let (cache_key, cache_scope) =
         crate::cache::key(headers, body, sess.key.as_deref(), sess.source, &cfg.prompt_cache);
-    let reuse = sess.upstream.as_ref().is_some_and(|(a, _)| a.id == acct.id);
+    let identity_epoch = acct.state.lock().identity_epoch;
+    let reuse =
+        sess.upstream.as_ref().is_some_and(|(a, _)| a.id == acct.id) && sess.upstream_identity_epoch == identity_epoch;
     if !reuse {
         sess.close_upstream("account_changed").await;
         if crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
@@ -619,6 +631,7 @@ async fn native_turn(
         match connect(&acct, &upstream_headers).await {
             Ok(ws) => {
                 sess.upstream_quota_epoch = acct.quota_epoch();
+                sess.upstream_identity_epoch = identity_epoch;
                 sess.upstream = Some((acct, ws));
             }
             Err(e) => {

@@ -299,7 +299,17 @@ pub const FILE: &str = ".quota-attribution.state";
 
 /// Every account's attribution, for the state file.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct Saved(pub BTreeMap<String, Attribution>);
+pub struct Saved(pub BTreeMap<String, SavedAccount>);
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct SavedAccount {
+    /// Credential identity, independent of the filename and token refreshes.
+    /// Older state files have no identity and are bound on their next save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(flatten)]
+    pub attribution: Attribution,
+}
 
 impl Saved {
     pub fn load(path: &std::path::Path) -> Self {
@@ -445,9 +455,11 @@ mod tests {
         let saved = a.for_disk();
         assert_eq!(saved.uses.len(), 1, "only the attempt after the last rise");
         assert_eq!(saved.current, a.current);
+        let saved = SavedAccount { identity: Some("identity".into()), attribution: saved };
         let text = serde_json::to_string(&Saved(BTreeMap::from([("acct".to_string(), saved)]))).unwrap();
         let back: Saved = serde_json::from_str(&text).unwrap();
-        let mut restored = back.0["acct"].clone();
+        assert_eq!(back.0["acct"].identity.as_deref(), Some("identity"));
+        let mut restored = back.0["acct"].attribution.clone();
         restored.reading(&[window("week", 7.0, 5000)], at(4));
         assert_eq!(restored.current[0].clients.get("agent"), Some(&1.0));
     }

@@ -860,6 +860,38 @@ async fn native_websocket_idle_ping_is_answered_before_next_turn_and_reuses_conn
 }
 
 #[tokio::test]
+async fn native_websocket_reconnects_for_a_new_account_but_keeps_token_refreshes() {
+    let fixture = Fixture::new(Routing::RoundRobin, true).await;
+    let mut socket = fixture.socket("account-identity").await;
+    let first = turn(&mut socket, prompt()).await;
+    assert_eq!(fixture.mock.calls.lock()[0].0, "a");
+    client_ping(&mut socket).await;
+    let file = fixture.directory.join("a.json");
+    let credentials = |token: &str, id: Option<&str>| {
+        json!({"type":"codex","access_token":token,"account_id":id,"email":"a",
+            "base_url":format!("{}/v1", fixture.provider.url)})
+        .to_string()
+    };
+    std::fs::write(&file, credentials("refreshed", None)).unwrap();
+    fixture.app.reload_accounts();
+    let second =
+        turn(&mut socket, json!({"model":"gpt-6.1-sol","previous_response_id":first["id"],"input":"next"})).await;
+    assert_eq!(fixture.mock.calls.lock()[1].0, "a");
+    assert_eq!(fixture.mock.ws_connections.load(Ordering::Relaxed), 1);
+    client_ping(&mut socket).await;
+    std::fs::write(&file, credentials("replacement", Some("different-account"))).unwrap();
+    fixture.app.reload_accounts();
+    turn(&mut socket, json!({"model":"gpt-6.1-sol","previous_response_id":second["id"],"input":"next"})).await;
+    assert_eq!(fixture.mock.ws_connections.load(Ordering::Relaxed), 2);
+    let calls = fixture.mock.calls.lock();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[2].0, "replacement");
+    assert!(calls.iter().all(|(_, _, transport)| *transport == "ws"));
+    assert!(calls[2].1.get("previous_response_id").is_none(), "the new account must receive local history");
+    assert!(calls[2].1["input"].as_array().unwrap().len() > 1);
+}
+
+#[tokio::test]
 async fn native_websocket_idle_disconnects_reconnect_and_replay_tool_and_reasoning_history() {
     for command in [WsCommand::Close, WsCommand::Drop] {
         let fixture = Fixture::new(Routing::RoundRobin, true).await;
