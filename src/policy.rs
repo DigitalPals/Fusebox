@@ -26,6 +26,9 @@ pub struct Clients {
     /// Requests in the current minute (UTC minute number, count).
     rate: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     spend: Arc<Mutex<Spends>>,
+    /// When each client key was last used since Fusebox started, by its usage id: a
+    /// named client's id or a shared key's hash. Only accepted keys get here.
+    seen: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     store: Option<Store>,
 }
 
@@ -200,10 +203,28 @@ impl Clients {
         s.by_client.get(id).copied().unwrap_or_default().spend()
     }
 
+    /// Notes that a client key was used just now.
+    pub fn touch(&self, id: &str) {
+        let now = Utc::now();
+        let mut seen = self.seen.lock();
+        match seen.get_mut(id) {
+            Some(at) => *at = now,
+            None => {
+                seen.insert(id.to_string(), now);
+            }
+        }
+    }
+
+    pub fn last_used(&self, id: &str) -> Option<DateTime<Utc>> {
+        self.seen.lock().get(id).copied()
+    }
+
     /// Counts each provider attempt, including partial work before a retry.
     /// Called before its observation enters the writer queue.
     pub fn record(&self, o: &Observation, store: Option<&Store>) {
         let Some(id) = &o.client_id else { return };
+        // A WebSocket is admitted once; each turn that finishes shows it is still in use.
+        self.touch(id);
         let now = Local::now();
         let (day_ms, month_ms) = period_starts(now);
         if o.event_at_ms < month_ms {

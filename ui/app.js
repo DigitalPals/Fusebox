@@ -1462,12 +1462,11 @@ function ovOtherHTML() {
     <div class="circuits">${cards}</div>`;
 }
 
-function snippet(kind) {
+// A tool's setup with a client's key; without one, a placeholder when Fusebox asks for keys.
+function snippet(kind, key = null) {
   const origin = location.origin;
-  const key = S.overview.client_keys[0];
-  // Without a shared key, named clients still need their own, so the snippet asks for one.
-  const named = !key && S.overview.named_clients > 0;
-  const token = key || (named ? 'your-client-key' : 'fbx_local');
+  const keyed = !!key || S.overview.client_keys.length > 0 || S.overview.named_clients > 0;
+  const token = key || (keyed ? 'your-client-key' : 'fbx_local');
   const shown = key ? secret(key) : token; // what the page shows; copy gets the real token
   const pick = (prefix, fallback) => (S.models.find((m) => m.id.startsWith(prefix)) || {}).id || fallback;
   const any = (S.models[0] || {}).id || 'claude-sonnet-5-5';
@@ -1477,7 +1476,6 @@ function snippet(kind) {
   const gpt = pick('gpt-', 'gpt-6-astra');
   // The text with the endpoint, key and model ids marked, and the key hidden when private.
   const marked = (text, models) => [origin, token, ...models].reduce((html, value) => html.split(esc(value)).join(v(value === token ? shown : value)), esc(text));
-  const keyEnv = key || named ? '\nexport FUSEBOX_KEY=your-key' : '';
   const plain = (text, models, note) => ({ text, html: marked(text, models), note });
   switch (kind) {
     case 'opencode':
@@ -1494,7 +1492,7 @@ function snippet(kind) {
         [claude], 'Add one entry per model you want in the picker.');
     case 'zed':
       return plain(`// settings.json\n"language_models": {\n  "openai_compatible": {\n    "Fusebox": {\n      "api_url": "${origin}/v1",\n      "available_models": [{ "name": "${claude}", "max_tokens": 200000 }]\n    }\n  }\n}`,
-        [claude], `Then enter the key in the Agent panel's settings for Fusebox.${key || named ? '' : ' No key is required, so any value works.'}`);
+        [claude], `Then enter the key in the Agent panel's settings for Fusebox.${keyed ? '' : ' No key is required, so any value works.'}`);
     case 'cline':
       return plain(`API Provider   OpenAI Compatible\nBase URL       ${origin}/v1\nAPI Key        ${token}\nModel ID       ${claude}`,
         [claude], 'The same settings work in Cline, Roo Code and Kilo Code.');
@@ -1503,15 +1501,15 @@ function snippet(kind) {
         [], 'Cursor sends custom-endpoint requests from its own servers, so Fusebox must be reachable over public HTTPS (a tunnel works); localhost does not.');
     case 'codex':
       return {
-        text: `# ~/.codex/config.toml\nmodel = "${pick('gpt-', 'gpt-6-astra')}"\nmodel_provider = "fusebox"\n\n[model_providers.fusebox]\nname = "Fusebox"\nbase_url = "${origin}/v1"\nwire_api = "responses"${key || named ? '\nenv_key = "FUSEBOX_KEY"' : ''}`,
-        html: `${k('# ~/.codex/config.toml')}\nmodel = ${v(`"${pick('gpt-', 'gpt-6-astra')}"`)}\nmodel_provider = ${v('"fusebox"')}\n\n[model_providers.fusebox]\nname = ${v('"Fusebox"')}\nbase_url = ${v(`"${origin}/v1"`)}\nwire_api = ${v('"responses"')}${key || named ? `\nenv_key = ${v('"FUSEBOX_KEY"')}` : ''}`,
-        note: `${key || named ? 'Then export FUSEBOX_KEY with your key. ' : ''}Both HTTP and websocket transports work, and any model your accounts serve can be used.`,
+        text: `# ~/.codex/config.toml\nmodel = "${pick('gpt-', 'gpt-6-astra')}"\nmodel_provider = "fusebox"\n\n[model_providers.fusebox]\nname = "Fusebox"\nbase_url = "${origin}/v1"\nwire_api = "responses"${keyed ? '\nenv_key = "FUSEBOX_KEY"' : ''}`,
+        html: `${k('# ~/.codex/config.toml')}\nmodel = ${v(`"${pick('gpt-', 'gpt-6-astra')}"`)}\nmodel_provider = ${v('"fusebox"')}\n\n[model_providers.fusebox]\nname = ${v('"Fusebox"')}\nbase_url = ${v(`"${origin}/v1"`)}\nwire_api = ${v('"responses"')}${keyed ? `\nenv_key = ${v('"FUSEBOX_KEY"')}` : ''}`,
+        note: `${keyed ? 'Then export FUSEBOX_KEY with your key. ' : ''}Both HTTP and websocket transports work, and any model your accounts serve can be used.`,
       };
     case 'sdk':
       return {
         text: `from openai import OpenAI\n\nclient = OpenAI(base_url="${origin}/v1", api_key="${token}")\nreply = client.chat.completions.create(\n    model="${any}",\n    messages=[{"role": "user", "content": "Hello"}],\n)`,
         html: `from openai import OpenAI\n\nclient = OpenAI(base_url=${v(`"${origin}/v1"`)}, api_key=${v(`"${shown}"`)})\nreply = client.chat.completions.create(\n    model=${v(`"${any}"`)},\n    messages=[{"role": "user", "content": "Hello"}],\n)`,
-        note: `Any model works with any client format; Fusebox translates between OpenAI, Anthropic and Gemini.${key || named ? '' : ' No key is required, so any value works.'}`,
+        note: `Any model works with any client format; Fusebox translates between OpenAI, Anthropic and Gemini.${keyed ? '' : ' No key is required, so any value works.'}`,
       };
     case 'curl':
       return {
@@ -1546,17 +1544,19 @@ function patchMainline() {
 
 const copyBtn = (text, label, note) => `<button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(text)}" data-toast="${note}" aria-label="${label}" title="${label}">${ICON.copy}</button>`;
 
-// The endpoint and the first client key: the overview's main line and Config, Clients.
+// The endpoint: the overview's main line and Config, Clients.
+const endpointItemHTML = () => `<div class="ml-item"><span class="k">Endpoint</span><span class="v" title="${esc(location.origin)}">${esc(location.origin)}</span>${copyBtn(location.origin, 'Copy endpoint', 'Endpoint copied')}</div>`;
+
+// The main line's endpoint and key: each client has its own, made in Config, Clients.
 function connectItemsHTML() {
-  const key = S.overview.client_keys[0];
-  return `<div class="ml-item"><span class="k">Endpoint</span><span class="v" title="${esc(location.origin)}">${esc(location.origin)}</span>${copyBtn(location.origin, 'Copy endpoint', 'Endpoint copied')}</div>
-      <div class="ml-item">${key
-        ? `<span class="k">Key</span><span class="v">${esc(secret(key))}</span>${copyBtn(key, 'Copy client key', 'Key copied')}`
-        : `<span class="k">Key</span><span class="v" style="font-family:var(--sans);font-size:13px;color:var(--fg-2)">${S.overview.named_clients > 0 ? 'Each named client\u2019s own' : 'None required'}</span>`}</div>`;
+  const keyed = S.overview.client_keys.length > 0 || S.overview.named_clients > 0;
+  return `${endpointItemHTML()}
+      <div class="ml-item"><span class="k">Key</span><span class="v" style="font-family:var(--sans);font-size:13px;color:var(--fg-2)">${keyed
+        ? 'Each client\u2019s own, from <a class="linkbtn" href="#/config/clients">Config, Clients</a>' : 'None required'}</span></div>`;
 }
 
 function mainlineHTML() {
-  const setup = (cls) => `<div class="${cls}" id="client-setup">${setupHTML()}</div>`;
+  const setup = (cls) => `<div class="${cls}" data-setup="">${setupHTML()}</div>`;
   return `<div class="card mainline-card"><div class="mainline">
       <span class="label">Main line</span>
       ${connectItemsHTML()}
@@ -1569,18 +1569,27 @@ function mainlineHTML() {
 const SNIPPET_TABS = [['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['sdk', 'OpenAI SDK'], ['curl', 'curl']];
 const SNIPPET_MORE = [['gemini', 'Gemini CLI'], ['aider', 'Aider'], ['continue', 'Continue'], ['zed', 'Zed'], ['cline', 'Cline & Roo Code'], ['cursor', 'Cursor']];
 
-function setupHTML() {
-  const sn = snippet(S.snippet);
+// `uid` keeps ids apart when a page shows more than one setup.
+function setupHTML(key = null, uid = '') {
+  const sn = snippet(S.snippet, key);
   const more = SNIPPET_MORE.some(([id]) => id === S.snippet);
   return `<div class="snip-head">
       <div class="snip-tabs" role="group" aria-label="Client">${SNIPPET_TABS.map(([id, label]) => `<button type="button" data-act="snippet" data-id="${id}" aria-pressed="${S.snippet === id}">${label}</button>`).join('')}
-        <label class="sr-only" for="snip-more">More tools</label>
-        <select id="snip-more" class="snip-more${more ? ' on' : ''}"><option value="">More tools</option>${SNIPPET_MORE.map(([id, label]) => `<option value="${id}"${S.snippet === id ? ' selected' : ''}>${label}</option>`).join('')}</select></div>
+        <label class="sr-only" for="snip-more${uid}">More tools</label>
+        <select id="snip-more${uid}" class="snip-more${more ? ' on' : ''}"><option value="">More tools</option>${SNIPPET_MORE.map(([id, label]) => `<option value="${id}"${S.snippet === id ? ' selected' : ''}>${label}</option>`).join('')}</select></div>
       <span class="grow"></span>
       <button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(sn.text)}" data-toast="Snippet copied" aria-label="Copy snippet" title="Copy snippet">${ICON.copy}</button>
     </div>
     <pre class="code">${sn.html}</pre>
     <p class="note">${esc(sn.note)}</p>`;
+}
+
+// Every setup on the page follows the chosen tool; a client's keeps its key.
+function refreshSetups() {
+  for (const el of $$('[data-setup]')) {
+    const client = (S.config.values?.['named-clients'] || []).find((c) => c.id === el.dataset.setup);
+    writeHTML(el, setupHTML(client?.key, el.dataset.setupUid || ''));
+  }
 }
 
 // ---------------------------------------------------------------- request rows
@@ -3653,7 +3662,7 @@ document.addEventListener('click', (e) => {
     case 'snippet':
       S.snippet = id;
       store.set('snippet', id);
-      return patch('client-setup', setupHTML);
+      return refreshSetups();
     case 'start-login':
       if (S.panel === el.dataset.provider && S.login && S.login.status === 'pending') return;
       return startLogin(el.dataset.provider);
@@ -3713,12 +3722,13 @@ document.addEventListener('input', (e) => {
       for (const b of $$('[data-act="add-model-provider"]')) b.setAttribute('aria-pressed', String(b.dataset.id === guess));
       e.target.placeholder = MODEL_EXAMPLE[guess] || '';
     }
-  } else if (e.target.id === 'snip-more') {
+  } else if (e.target.classList.contains('snip-more')) {
     if (!e.target.value) return;
+    const select = e.target.id;
     S.snippet = e.target.value;
     store.set('snippet', S.snippet);
-    patch('client-setup', setupHTML);
-    $('#snip-more')?.focus();
+    refreshSetups();
+    document.getElementById(select)?.focus();
   } else if (e.target.id === 'model-filter') {
     S.modelFilter = e.target.value;
     patch('models-root', modelsBodyHTML);

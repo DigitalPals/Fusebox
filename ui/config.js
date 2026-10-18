@@ -5,7 +5,7 @@ const CONFIG_SECTIONS = [
   ['providers', 'Providers'], ['models', 'Model rules'], ['notifications', 'Notifications'], ['diagnostics', 'Diagnostics'], ['yaml', 'YAML file'],
 ];
 const CONFIG_DESCRIPTIONS = {
-  clients: 'The endpoint and keys your tools use, and how to set each one up.',
+  clients: 'The endpoint, a key for each machine or tool, and how to set each one up.',
   server: 'Where Fusebox listens and where it keeps sign-in files.',
   access: 'Who can use the proxy and the dashboard.',
   routing: 'How Fusebox picks an account for each request.',
@@ -19,7 +19,7 @@ const CONFIG_DESCRIPTIONS = {
 // Which section shows each setting, for the unsaved-changes dots.
 const CONFIG_KEY_SECTION = {
   host: 'server', port: 'server', 'auth-dir': 'server', tls: 'server',
-  'api-keys': 'access', 'management-key': 'access', 'management-allow-remote': 'access',
+  'api-keys': 'clients', 'management-key': 'access', 'management-allow-remote': 'access',
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'request-limits': 'connections', 'log-format': 'diagnostics',
@@ -114,16 +114,16 @@ function configRemove(path, label = 'Remove row') {
   return `<button type="button" class="btn danger" data-config-act="remove" data-path="${configPath(path)}" aria-label="${esc(label)}">Remove</button>`;
 }
 
-function configListHead(title, help, addLabel, addAttrs) {
+function configListHead(title, help, addLabel, addAttrs, primary = false) {
   return `<div class="cfg-list-head"><div class="cell2"><h3>${esc(title)}</h3>${help ? `<p class="cfg-description">${esc(help)}</p>` : ''}</div>
-    ${addLabel ? `<button type="button" class="btn sm" ${addAttrs}>${esc(addLabel)}</button>` : ''}</div>`;
+    ${addLabel ? `<button type="button" class="btn sm${primary ? ' primary' : ''}" ${addAttrs}>${esc(addLabel)}</button>` : ''}</div>`;
 }
 
 // `words` renames the rows for lists that aren't patterns: { add, item, one, placeholder }.
 function configStrings(path, label, help = '', secret = false, empty = '', words = null) {
   const list = configGet(path) || [];
   const w = words || (secret ? { add: 'Add key', item: 'API key', one: 'API key', placeholder: 'Enter an API key' } : { add: 'Add pattern', item: 'Model pattern', one: 'pattern', placeholder: 'claude-*' });
-  return `<div class="cfg-list wide">${configListHead(label, help, w.add, `data-config-act="add-string" data-path="${configPath(path)}"${secret && path[0] === 'api-keys' ? ' data-generate="true"' : ''}`)}
+  return `<div class="cfg-list wide">${configListHead(label, help, w.add, `data-config-act="add-string" data-path="${configPath(path)}"`)}
     ${list.length ? list.map((_, i) => `<div class="cfg-row">${configField([...path, i], `${w.item} ${i + 1}`, { type: secret ? 'password' : 'text', required: true, bare: true, placeholder: w.placeholder })}${configRemove([...path, i], `Remove ${w.one} ${i + 1}`)}</div>`).join('')
       : `<p class="cfg-empty">${esc(empty || (secret ? 'No keys configured.' : 'No models excluded.'))}</p>`}</div>`;
 }
@@ -150,26 +150,29 @@ function configHeaders(path) {
       <button type="button" class="btn danger" data-config-act="remove-header" data-path="${configPath(path)}" data-key="${esc(key)}" aria-label="Remove ${esc(key)} header">Remove</button></div>`).join('') || '<p class="cfg-empty">No extra headers configured.</p>'}</div>`;
 }
 
-// Shared client keys are set under Access; named clients are added and removed here, saved at once.
+// Config, Clients: the endpoint and a key for each client, each with a name, so the Usage
+// page shows who used what and limits can apply. Shared keys from before (api-keys) are
+// listed until each is named; none are made here. Changes here are saved at once.
 function configClientsHTML() {
   loadClientUsage();
-  const keys = S.overview.client_keys;
-  const named = (configGet(['named-clients']) || []).length;
-  const access = '<button type="button" class="linkbtn" data-config-act="section" data-section="access">Access</button>';
-  const help = keys.length
-    ? `Clients send ${keys.length > 1 ? 'this or another client key' : 'this key'} as their API key. Add or replace keys under ${access}.`
-    : named ? `Each client sends its own key from Named clients below. Add a shared key under ${access}.`
-      : `Any client that can reach the endpoint can use it. Add a key under ${access}.`;
-  return `<div class="cfg-clients">${connectItemsHTML()}<p class="cfg-description">${help}</p></div>
-    <div class="cfg-divider"></div>
-    <div class="setup" id="client-setup">${setupHTML()}</div>
+  const open = !sharedKeys().length && !(configGet(['named-clients']) || []).length;
+  const help = open
+    ? 'Fusebox takes requests without a key until you add a client. Give each machine or tool its own, and the Usage page shows each by name.'
+    : 'Each client sends its own key. Give each machine or tool its own, and the Usage page shows each by name.';
+  return `<div class="cfg-clients">${endpointItemHTML()}<p class="cfg-description">${help}</p></div>
+    ${open ? `<div class="setup" data-setup="">${setupHTML()}</div>` : ''}
+    ${sharedKeys().length ? `<div class="cfg-divider"></div><div class="cfg-list" id="shared-keys">${sharedKeysHTML()}</div>` : ''}
     <div class="cfg-divider"></div>
     <div class="cfg-list" id="named-clients">${namedClientsHTML()}</div>`;
 }
 
-// Named clients: a key per tool, so the Usage page can tell them apart. Other tools
-// (Whombat, for one) add their own through the same settings API.
-const namedIdle = () => ({ adding: false, label: '', error: '', confirm: null, created: null, shown: {}, limits: null, limitsError: '' });
+const sharedKeys = () => configGet(['api-keys']) || [];
+
+// Named clients: a key per machine or tool. Other tools (Whombat, for one) add their own
+// through the same settings API. A row has one thing open at a time.
+const NAMED_ROW = { open: null, setup: null, confirm: null, replace: null, rename: null, renameLabel: '', renameError: '', limits: null, limitsError: '' };
+const namedIdle = () => ({ adding: false, label: '', error: '', created: null, replaced: false, shown: {}, ...NAMED_ROW,
+  shared: { naming: null, label: '', error: '', confirm: null } });
 
 // "Whombat · Cybex BV" → "whombat-cybex-bv": lowercase letters, digits and dashes, at most 40, not taken.
 function namedClientId(label, taken) {
@@ -182,44 +185,99 @@ function namedClientId(label, taken) {
 
 const namedName = (client) => (S.private ? '••••••' : client.label || client.id);
 
+// A client's name must be given, and differ from the others' so the Usage page can tell them apart.
+function namedLabelProblem(label, list, except = null) {
+  if (!label) return 'Enter a name.';
+  const same = (x) => x.id !== except && (x.label || x.id).trim().toLowerCase() === label.toLowerCase();
+  return list.some(same) ? 'Another client already has this name.' : '';
+}
+
+// A name field with its id preview; the add form, and naming a shared key, both use it.
+function namedLabelField(id, value, error, help, placeholder, taken) {
+  const preview = value.trim() ? namedClientId(value.trim(), taken) : '';
+  return `<div class="field"><label for="${id}">Name</label>
+      <input id="${id}" type="${S.private ? 'password' : 'text'}" value="${esc(value)}" placeholder="${S.private ? 'Name hidden' : placeholder}" maxlength="100" autocomplete="off" style="font-family:var(--sans)" aria-describedby="${id}-help ${id}-error"${error ? ' aria-invalid="true"' : ''}${S.config.busy ? ' disabled' : ''}>
+      <small id="${id}-help">${help}${S.private || !taken ? '' : `<span id="${id}-id-line"${preview ? '' : ' hidden'}> Id: <span class="mono" id="${id}-id">${esc(preview)}</span></span>`}</small>
+      <small id="${id}-error" class="cfg-error" data-error-for="${id}">${esc(error)}</small></div>`;
+}
+
 function namedClientsHTML() {
   const c = S.config;
   const n = c.named;
   const list = configGet(['named-clients']) || [];
-  const shared = (configGet(['api-keys']) || []).length > 0;
+  const shared = sharedKeys().length > 0;
   const off = c.busy ? ' disabled' : '';
+  const used = c.clientUsage?.last_used || {};
   const row = (client) => {
     const name = esc(namedName(client));
     const id = esc(client.id);
+    const btn = (act, text, label, cls = '', extra = '') => `<button type="button" class="btn sm${cls}" data-config-act="${act}" data-id="${id}" aria-label="${label}"${extra}${off}>${text}</button>`;
     const shown = !S.private && n.shown[client.id];
     const key = S.private ? secret(client.key) : shown ? client.key : configMask(client.key);
-    const confirming = n.confirm === client.id;
-    const last = list.length === 1 && !shared; // removing it turns client keys off
+    const sub = [used[client.id] ? `Last used ${liveAgo(used[client.id])}` : '', S.private ? '' : `<span class="mono">${id}</span>`].filter(Boolean).join(' · ');
     const limits = namedLimitsText(client);
-    const editing = n.limits === client.id;
-    return `<div class="named-row"><span class="cell2"><span>${name}</span>${S.private ? '' : `<span class="mono">${id}</span>`}${limits ? `<span class="meta named-limits">${esc(limits)}</span>` : ''}</span>
-      <span class="named-key"><span class="mono">${esc(key)}</span>
-        ${S.private ? '' : `<button type="button" class="btn sm ghost" data-config-act="named-reveal" data-id="${id}" aria-label="${shown ? 'Hide' : 'Show'} the key for ${name}">${shown ? 'Hide' : 'Show'}</button>`}
-        ${copyBtn(client.key, `Copy the key for ${name}`, 'Key copied')}</span>
-      ${confirming || editing ? '<span></span>' : `<span class="named-btns"><button type="button" class="btn sm" data-config-act="limits-edit" data-id="${id}" aria-label="Limits for ${name}"${off}>Limits</button><button type="button" class="btn sm danger" data-config-act="named-remove" data-id="${id}" aria-label="Remove ${name}"${off}>Remove</button></span>`}</div>
-      ${editing ? namedLimitsForm(client) : ''}
-      ${confirming ? `<div class="named-confirm${last ? ' keyless' : ''}" role="alert"><span>Remove ${name}? Tools using its key stop working.${last ? ' Fusebox will accept requests without a key again.' : ''}</span>
-        <div class="named-actions"><button type="button" class="btn sm ghost" data-config-act="named-keep" data-id="${id}"${off}>Keep</button><button type="button" class="btn sm danger" data-config-act="named-confirm" data-id="${id}"${off}>${c.busy ? 'Removing…' : 'Remove'}</button></div></div>` : ''}`;
+    const asking = [n.confirm, n.replace, n.rename, n.limits].includes(client.id);
+    const last = list.length === 1 && !shared; // removing it turns client keys off
+    const confirm = (text, keep, act, doing, done, cls = '') => `<div class="named-confirm${cls}" role="alert"><span>${text}</span>
+        <div class="named-actions">${btn(keep, 'Keep', 'Keep', ' ghost')}${btn(act, c.busy ? doing : done, c.busy ? doing : done, ' danger')}</div></div>`;
+    return `<div class="named-row"><span class="cell2"><span>${name}</span>${sub ? `<span class="meta named-sub">${sub}</span>` : ''}${limits ? `<span class="meta named-limits">${esc(limits)}</span>` : ''}</span>
+      <span class="named-key"><span class="mono">${esc(key)}</span>${copyBtn(client.key, `Copy the key for ${name}`, 'Key copied')}</span>
+      ${asking ? '<span></span>' : `<span class="named-btns">${btn('named-setup', 'Set up', `Set up a tool with the key for ${name}`, '', ` aria-expanded="${n.setup === client.id}"`)}${btn('limits-edit', 'Limits', `Limits for ${name}`)}${btn('named-more', 'More', `More for ${name}`, ' ghost', ` aria-expanded="${n.open === client.id}"`)}</span>`}</div>
+      ${n.open === client.id && !asking ? `<div class="named-more" role="group" aria-label="More for ${name}">${S.private ? '' : btn('named-reveal', shown ? 'Hide key' : 'Show key', `${shown ? 'Hide' : 'Show'} the key for ${name}`, ' ghost')}${btn('named-rename', 'Rename', `Rename ${name}`, ' ghost')}${btn('named-replace', 'Replace key', `Replace the key for ${name}`, ' ghost')}${btn('named-remove', 'Remove', `Remove ${name}`, ' danger')}</div>` : ''}
+      ${n.setup === client.id ? `<div class="setup named-setup" data-setup="${id}" data-setup-uid="-row">${setupHTML(client.key, '-row')}</div>` : ''}
+      ${n.rename === client.id ? namedRenameForm(client) : ''}
+      ${n.limits === client.id ? namedLimitsForm(client) : ''}
+      ${n.replace === client.id ? confirm(`Replace the key for ${name}? Tools using the current key stop working until you give them the new one.`, 'named-replace-keep', 'named-replace-confirm', 'Replacing…', 'Replace key') : ''}
+      ${n.confirm === client.id ? confirm(`Remove ${name}? Tools using its key stop working.${last ? ' Fusebox will accept requests without a key again.' : ''}`, 'named-keep', 'named-confirm', 'Removing…', 'Remove', last ? ' keyless' : '') : ''}`;
   };
   const created = list.find((client) => client.id === n.created);
-  const preview = n.label.trim() ? namedClientId(n.label.trim(), list.map((client) => client.id)) : '';
+  const createdName = created && esc(namedName(created));
   const form = `<form class="named-add" id="named-add" novalidate>
-      <div class="field"><label for="named-label">Name</label>
-        <input id="named-label" type="${S.private ? 'password' : 'text'}" value="${esc(n.label)}" placeholder="${S.private ? 'Name hidden' : 'Work laptop'}" maxlength="100" autocomplete="off" style="font-family:var(--sans)" aria-describedby="named-label-help named-label-error"${n.error ? ' aria-invalid="true"' : ''}${off}>
-        <small id="named-label-help">Shown on the Usage page.${S.private ? '' : `<span id="named-id-line"${preview ? '' : ' hidden'}> Id: <span class="mono" id="named-id">${esc(preview)}</span></span>`}${list.length || shared ? '' : '<br>After this, Fusebox only accepts requests with a key.'}</small>
-        <small id="named-label-error" class="cfg-error" data-error-for="named-label">${esc(n.error)}</small></div>
+      ${namedLabelField('named-label', n.label, n.error, `Shown on the Usage page.${list.length || shared ? '' : '<br>After this, Fusebox only accepts requests with a key.'}`, 'Build server', list.map((client) => client.id))}
       <div class="named-actions"><button type="submit" class="btn primary"${off}>${c.busy ? 'Adding…' : 'Add client'}</button><button type="button" class="btn ghost" data-config-act="named-cancel"${off}>Cancel</button></div></form>`;
-  return `${configListHead('Named clients', 'A key per tool, so the Usage page shows each one by name. Some tools, such as Whombat, add their own.', 'Add client', `data-config-act="named-add" aria-expanded="${n.adding}"${off}`)}
-    ${created ? `<div class="named-new" role="status"><span>Key for ${esc(namedName(created))}</span><span class="meta">Copy it into the tool. It works right away.</span>
-      <span class="named-key"><span class="mono">${esc(S.private ? secret(created.key) : created.key)}</span>${copyBtn(created.key, `Copy the key for ${esc(namedName(created))}`, 'Key copied')}</span>
+  return `${configListHead('Clients', 'A key for each machine or tool, so the Usage page shows each by name and limits can apply. Some tools, such as Whombat, add their own.', 'Add client', `data-config-act="named-add" aria-expanded="${n.adding}"${off}`, true)}
+    ${created ? `<div class="named-new" role="status"><span>${n.replaced ? `New key for ${createdName}` : `${createdName} is ready`}</span>
+      <span class="meta">${n.replaced ? 'The old key no longer works. Give this one to the tools that used it.' : 'The key works right away. Copy it, or the setup for your tool.'}</span>
+      <span class="named-key"><span class="mono">${esc(S.private ? secret(created.key) : created.key)}</span>${copyBtn(created.key, `Copy the key for ${createdName}`, 'Key copied')}</span>
+      <div class="setup" data-setup="${esc(created.id)}" data-setup-uid="-new">${setupHTML(created.key, '-new')}</div>
       <div class="named-actions"><button type="button" class="btn sm ghost" data-config-act="named-done">Done</button></div></div>` : ''}
     ${n.adding ? form : ''}
-    ${list.length ? `<div class="named-list">${list.map(row).join('')}</div>` : '<p class="cfg-empty">No named clients yet.</p>'}`;
+    ${list.length ? `<div class="named-list">${list.map(row).join('')}</div>` : '<p class="cfg-empty">No clients yet.</p>'}`;
+}
+
+function namedRenameForm(client) {
+  const n = S.config.named;
+  const off = S.config.busy ? ' disabled' : '';
+  const id = esc(client.id);
+  return `<form class="named-add named-inline" id="named-rename-form" data-id="${id}" novalidate>
+    ${namedLabelField('named-rename', n.renameLabel, n.renameError, `Shown on the Usage page. The id${S.private ? '' : ` <span class="mono">${id}</span>`} stays, so its history and limits stay with it.`, '', null)}
+    <div class="named-actions"><button type="submit" class="btn primary"${off}>${S.config.busy ? 'Saving…' : 'Save name'}</button><button type="button" class="btn ghost" data-config-act="named-rename-cancel" data-id="${id}"${off}>Cancel</button></div></form>`;
+}
+
+// Shared keys: any tool may send them, so the Usage page can't tell who did. Naming one
+// makes it a client with the same key, so whatever uses it keeps working.
+function sharedKeysHTML() {
+  const c = S.config;
+  const s = c.named.shared;
+  const keys = sharedKeys();
+  const off = c.busy ? ' disabled' : '';
+  const used = c.clientUsage?.shared_last_used || [];
+  const last = keys.length === 1 && !(configGet(['named-clients']) || []).length; // removing it turns keys off
+  const row = (key, i) => {
+    const mask = esc(configMask(key));
+    const label = `shared key ${i + 1}`;
+    const btn = (act, text, aria, cls = '') => `<button type="button" class="btn sm${cls}" data-config-act="${act}" data-index="${i}"${aria ? ` aria-label="${aria}"` : ''}${off}>${text}</button>`;
+    const asking = s.naming === key || s.confirm === key;
+    return `<div class="named-row"><span class="mono shared-key">${mask}</span><span class="meta named-used">${used[i] ? `Last used ${liveAgo(used[i])}` : ''}</span>
+      ${asking ? '<span></span>' : `<span class="named-btns">${btn('shared-name', 'Name it', `Name ${label}`)}${btn('shared-remove', 'Remove', `Remove ${label}`, ' danger')}</span>`}</div>
+      ${s.naming === key ? `<form class="named-add named-inline" id="shared-name-form" novalidate>
+        ${namedLabelField('shared-label', s.label, s.error, 'The machine or tool that uses this key. Shown on the Usage page.', 'MacBook Pro', (configGet(['named-clients']) || []).map((x) => x.id))}
+        <div class="named-actions"><button type="submit" class="btn primary"${off}>${c.busy ? 'Saving…' : 'Save name'}</button>${btn('shared-cancel', 'Cancel', '', ' ghost')}</div></form>` : ''}
+      ${s.confirm === key ? `<div class="named-confirm${last ? ' keyless' : ''}" role="alert"><span>Remove ${mask}? Tools using it stop working.${last ? ' Fusebox will accept requests without a key again.' : ''}</span>
+        <div class="named-actions">${btn('shared-keep', 'Keep', '', ' ghost')}${btn('shared-confirm', c.busy ? 'Removing…' : 'Remove', '', ' danger')}</div></div>` : ''}`;
+  };
+  return `${configListHead('Shared keys', 'Keys without a name, from before each client had its own. The Usage page shows them as “Shared key …”, and limits don’t apply to them. Name each one to make it a client. It keeps its value, so whatever uses it keeps working.')}
+    <div class="named-list">${keys.map(row).join('')}</div>`;
 }
 
 // Limits a named client's key can have; each is optional and works on its own.
@@ -267,12 +325,12 @@ function limitsAction(act, id) {
   const n = S.config.named;
   if (act === 'limits-edit') {
     if (namedBlocked()) return;
-    Object.assign(n, { limits: id, limitsError: '', confirm: null, created: null });
+    Object.assign(n, NAMED_ROW, { limits: id, created: null });
     render();
     return $('#limit-models')?.focus();
   }
   if (act === 'limits-cancel') {
-    Object.assign(n, { limits: null, limitsError: '' });
+    Object.assign(n, NAMED_ROW);
     render();
     return $(`[data-config-act="limits-edit"][data-id="${CSS.escape(id)}"]`)?.focus();
   }
@@ -299,27 +357,23 @@ async function saveLimits(form) {
       updated[key] = num;
     }
   }
-  await saveNamedClients(list.map((x) => (x === client ? updated : configClone(x))), `Saved the limits for ${namedName(client)}.`,
+  await saveClients({ 'named-clients': list.map((x) => (x === client ? updated : configClone(x))) }, `Saved the limits for ${namedName(client)}.`,
     () => Object.assign(n, { limits: null, limitsError: '' }));
-  loadClientUsage(true);
 }
 
-document.addEventListener('submit', (e) => {
-  if (e.target.id !== 'limits-form') return;
-  e.preventDefault();
-  saveLimits(e.target);
-});
-
-// What named clients used today and this month, for their limits; refreshed now and then.
+// What named clients used today and this month, for their limits, and when each key was
+// last used; refreshed now and then while the page is open.
 async function loadClientUsage(force = false) {
   const c = S.config;
-  const limited = (configGet(['named-clients']) || []).some((x) => x['tokens-per-day'] || x['usd-per-month']);
-  if (!limited || (!force && c.clientUsageAt && Date.now() - c.clientUsageAt < 15000)) return;
+  if (!force && c.clientUsageAt && Date.now() - c.clientUsageAt < 15000) return;
   c.clientUsageAt = Date.now();
   try {
     c.clientUsage = await api('/clients/usage');
-    if (S.route === 'config' && c.section === 'clients' && !c.named.limits) patch('named-clients', namedClientsHTML);
-  } catch { /* the limits still show without their usage */ }
+    // Forms here keep what is typed in them: the lists wait for the next render.
+    if (S.route !== 'config' || c.section !== 'clients' || c.named.limits || document.activeElement?.closest('#named-clients form, #shared-keys form')) return;
+    patch('named-clients', namedClientsHTML);
+    patch('shared-keys', sharedKeysHTML);
+  } catch { /* the lists still show without their usage */ }
 }
 
 // Other sections' unsaved edits would be lost when this saves, so one kind of edit at a time.
@@ -330,39 +384,70 @@ function namedBlocked() {
   return true;
 }
 
-async function saveNamedClients(list, text, onSaved) {
+async function saveClients(changes, text, onSaved) {
   const c = S.config;
   c.busy = true; c.msg = null; render();
   try {
-    const result = await configPatch({ 'named-clients': list });
+    const result = await configPatch(changes);
     onSaved();
     c.msg = { kind: 'ok', text: configSavedText(result, text) };
     refreshAccounts();
+    loadClientUsage(true);
   } catch (e) { c.msg = { kind: 'err', text: e.message }; }
   c.busy = false; render();
 }
+
+const namedEdit = (list, client, change) => ({ 'named-clients': list.map((x) => (x === client ? { ...configClone(x), ...change } : configClone(x))) });
 
 async function addNamedClient() {
   const n = S.config.named;
   const label = n.label.trim();
   if (S.config.busy || namedBlocked()) return;
-  if (!label) {
-    n.error = 'Enter a name.';
+  const list = configGet(['named-clients']) || [];
+  const problem = namedLabelProblem(label, list);
+  if (problem) {
+    n.error = problem;
     render(); $('#named-label')?.focus(); return;
   }
-  const list = configGet(['named-clients']) || [];
   const client = { id: namedClientId(label, list.map((x) => x.id)), label, key: generateClientKey() };
-  await saveNamedClients([...configClone(list), client], `Added ${namedName(client)}.`,
-    () => Object.assign(S.config.named, { adding: false, label: '', error: '', created: client.id }));
-  if (S.config.named.created === client.id) $('.named-new .copy')?.focus();
+  await saveClients({ 'named-clients': [...configClone(list), client] }, `Added ${namedName(client)}.`,
+    () => Object.assign(n, NAMED_ROW, { adding: false, label: '', error: '', created: client.id, replaced: false }));
+  if (n.created === client.id) $('.named-new .copy')?.focus();
+}
+
+async function renameNamedClient(form) {
+  const n = S.config.named;
+  const list = configGet(['named-clients']) || [];
+  const client = list.find((x) => x.id === form.dataset.id);
+  const label = n.renameLabel.trim();
+  if (!client || S.config.busy || namedBlocked()) return;
+  const problem = label === client.label ? '' : namedLabelProblem(label, list, client.id);
+  if (problem) {
+    n.renameError = problem;
+    render(); $('#named-rename')?.focus(); return;
+  }
+  const done = () => Object.assign(n, NAMED_ROW);
+  if (label === client.label) { done(); render(); } else await saveClients(namedEdit(list, client, { label }), `Renamed it ${namedName({ label })}.`, done);
+  if (!n.rename) $(`[data-config-act="named-more"][data-id="${CSS.escape(client.id)}"]`)?.focus();
+}
+
+// A new key under the same id, so the client keeps its name, limits and history.
+async function replaceNamedKey(id) {
+  const n = S.config.named;
+  const list = configGet(['named-clients']) || [];
+  const client = list.find((x) => x.id === id);
+  if (!client || namedBlocked()) return;
+  await saveClients(namedEdit(list, client, { key: generateClientKey() }), `Replaced the key for ${namedName(client)}.`,
+    () => Object.assign(n, NAMED_ROW, { adding: false, created: id, replaced: true }));
+  if (n.created === id) $('.named-new .copy')?.focus();
 }
 
 async function removeNamedClient(id) {
   const list = configGet(['named-clients']) || [];
   const client = list.find((x) => x.id === id);
   if (!client || namedBlocked()) return;
-  await saveNamedClients(list.filter((x) => x !== client), `Removed ${namedName(client)}.`,
-    () => Object.assign(S.config.named, { confirm: null, created: null }));
+  await saveClients({ 'named-clients': list.filter((x) => x !== client) }, `Removed ${namedName(client)}.`,
+    () => Object.assign(S.config.named, NAMED_ROW, { created: null }));
   if (!S.config.named.confirm) $('[data-config-act="named-add"]')?.focus();
 }
 
@@ -370,35 +455,92 @@ function namedAction(act, id) {
   const n = S.config.named;
   const focus = (selector) => $(selector)?.focus();
   const byId = (a) => `[data-config-act="${a}"][data-id="${CSS.escape(id)}"]`;
+  // Opens one thing in a row and closes whatever else was open there.
+  const row = (state, selector) => { Object.assign(n, NAMED_ROW, state); render(); return focus(selector); };
   if (act === 'named-add') {
     if (namedBlocked()) return;
-    Object.assign(n, { adding: true, confirm: null, error: '' }); render(); return focus('#named-label');
+    Object.assign(n, { adding: true, error: '', created: null }); render(); return focus('#named-label');
   }
   if (act === 'named-cancel') { Object.assign(n, { adding: false, label: '', error: '' }); render(); return focus('[data-config-act="named-add"]'); }
   if (act === 'named-done') { n.created = null; render(); return focus('[data-config-act="named-add"]'); }
+  if (act === 'named-more') return row({ open: n.open === id ? null : id }, byId('named-more'));
+  if (act === 'named-setup') { n.created = null; return row({ setup: n.setup === id ? null : id }, byId('named-setup')); }
   if (act === 'named-reveal') { n.shown[id] = !n.shown[id]; render(); return focus(byId('named-reveal')); }
-  if (act === 'named-remove') {
-    if (namedBlocked()) return;
-    Object.assign(n, { confirm: id, created: null }); render(); return focus(byId('named-keep'));
-  }
-  if (act === 'named-keep') { n.confirm = null; render(); return focus(byId('named-remove')); }
+  if (act === 'named-rename-cancel') return row({ open: id }, byId('named-rename'));
+  if (act === 'named-replace-keep') return row({ open: id }, byId('named-replace'));
+  if (act === 'named-keep') return row({ open: id }, byId('named-remove'));
+  if (act === 'named-replace-confirm') return replaceNamedKey(id);
   if (act === 'named-confirm') return removeNamedClient(id);
+  if (namedBlocked()) return;
+  if (act === 'named-rename') {
+    const client = (configGet(['named-clients']) || []).find((x) => x.id === id);
+    row({ rename: id, renameLabel: client?.label || id });
+    return $('#named-rename')?.select();
+  }
+  if (act === 'named-replace') return row({ replace: id }, byId('named-replace-keep'));
+  if (act === 'named-remove') { n.created = null; return row({ confirm: id }, byId('named-keep')); }
+}
+
+async function nameSharedKey() {
+  const s = S.config.named.shared;
+  const label = s.label.trim();
+  if (S.config.busy || namedBlocked()) return;
+  const keys = sharedKeys();
+  const list = configGet(['named-clients']) || [];
+  const problem = namedLabelProblem(label, list) || (keys.includes(s.naming) ? '' : 'This key changed in the file. Reload, then try again.');
+  if (problem) {
+    s.error = problem;
+    render(); $('#shared-label')?.focus(); return;
+  }
+  const client = { id: namedClientId(label, list.map((x) => x.id)), label, key: s.naming };
+  // One save moves the key, so there's no moment it doesn't work.
+  const named = list.some((x) => x.key === client.key) ? configClone(list) : [...configClone(list), client];
+  await saveClients({ 'api-keys': keys.filter((k) => k !== client.key), 'named-clients': named },
+    `Named it ${namedName(client)}. Whatever uses the key keeps working.`, () => Object.assign(s, { naming: null, label: '', error: '' }));
+  if (!s.naming) $(`[data-config-act="named-more"][data-id="${CSS.escape(client.id)}"]`)?.focus();
+}
+
+async function removeSharedKey(key) {
+  const s = S.config.named.shared;
+  if (namedBlocked() || !sharedKeys().includes(key)) return;
+  await saveClients({ 'api-keys': sharedKeys().filter((k) => k !== key) }, 'Removed the shared key.', () => { s.confirm = null; });
+  if (!s.confirm) ($('[data-config-act="shared-name"]') || $('[data-config-act="named-add"]'))?.focus();
+}
+
+function sharedAction(act, index) {
+  const s = S.config.named.shared;
+  const key = sharedKeys()[index];
+  const focus = (a) => $(`[data-config-act="${a}"][data-index="${index}"]`)?.focus();
+  if (act === 'shared-cancel') { Object.assign(s, { naming: null, label: '', error: '' }); render(); return focus('shared-name'); }
+  if (act === 'shared-keep') { s.confirm = null; render(); return focus('shared-remove'); }
+  if (act === 'shared-confirm') return removeSharedKey(key);
+  if (key == null || namedBlocked()) return;
+  if (act === 'shared-name') { Object.assign(s, { naming: key, label: '', error: '', confirm: null }); render(); return $('#shared-label')?.focus(); }
+  if (act === 'shared-remove') { Object.assign(s, { confirm: key, naming: null }); render(); return focus('shared-keep'); }
 }
 
 document.addEventListener('submit', (e) => {
-  if (e.target.id !== 'named-add') return;
+  const form = e.target;
+  const save = { 'named-add': addNamedClient, 'named-rename-form': renameNamedClient, 'shared-name-form': nameSharedKey, 'limits-form': saveLimits }[form.id];
+  if (!save) return;
   e.preventDefault();
-  addNamedClient();
+  save(form);
 });
+
+// Name fields keep their text in state, so a re-render keeps it; the id preview follows.
+const NAME_FIELDS = { 'named-label': [(n) => n, 'label', 'error'], 'named-rename': [(n) => n, 'renameLabel', 'renameError'], 'shared-label': [(n) => n.shared, 'label', 'error'] };
 document.addEventListener('input', (e) => {
-  if (e.target.id !== 'named-label') return;
-  const n = S.config.named;
-  n.label = e.target.value;
-  if (n.error) { n.error = ''; e.target.removeAttribute('aria-invalid'); $('#named-label-error').textContent = ''; }
-  const label = n.label.trim();
-  const out = $('#named-id');
+  const field = NAME_FIELDS[e.target.id];
+  if (!field) return;
+  const [state, text, error] = field;
+  const s = state(S.config.named);
+  const id = e.target.id;
+  s[text] = e.target.value;
+  if (s[error]) { s[error] = ''; e.target.removeAttribute('aria-invalid'); $(`#${id}-error`).textContent = ''; }
+  const label = s[text].trim();
+  const out = $(`#${id}-id`);
   if (out) out.textContent = label ? namedClientId(label, (configGet(['named-clients']) || []).map((x) => x.id)) : '';
-  $('#named-id-line')?.toggleAttribute('hidden', !label);
+  $(`#${id}-id-line`)?.toggleAttribute('hidden', !label);
 });
 
 function configServerHTML() {
@@ -415,7 +557,9 @@ function configServerHTML() {
 }
 
 function configAccessHTML() {
-  return `<div class="cfg-grid">${configStrings(['api-keys'], 'Client API keys', 'Clients send one of these keys to use the proxy. Leave empty to allow access without a key.', true, 'No keys configured. Any client that can reach the endpoint can use it.')}
+  const clients = '<button type="button" class="linkbtn" data-config-act="section" data-section="clients">Clients</button>';
+  return `<div class="cfg-grid"><div class="cfg-list wide">${configListHead('Client keys', '')}
+      <p class="cfg-description">Each machine or tool has its own key.${sharedKeys().length ? ' Shared keys from before stay listed until you name them.' : ''} Add and manage them under ${clients}.</p></div>
     <div class="cfg-divider wide"></div>
     ${configField(['management-key'], 'Dashboard key', { type: 'password', wide: true, help: 'Protects the dashboard and management API. With no key, access is limited to localhost.' })}
     ${configChoice(['management-allow-remote'], 'Remote dashboard access', [[null, 'Default'], [true, 'Allow'], [false, 'Localhost only']], 'Remote access requires a dashboard key, even when allowed.')}</div>`;
@@ -902,7 +1046,10 @@ function acceptConfig(result) {
   const c = S.config;
   Object.assign(c, { values: result.values, saved: configClone(result.values), defaults: result.defaults, revision: result.revision,
     path: result.path, ignored: result.ignored || [], restart_fields: result.restart_fields || [], errors: {}, secrets: {}, reloadConfirm: false,
-    raw: { text: null, saved: null, revision: '', loading: false }, named: { ...c.named, confirm: null } });
+    raw: { text: null, saved: null, revision: '', loading: false } });
+  // In place: a save's follow-up holds on to this object.
+  Object.assign(c.named, { confirm: null, replace: null });
+  c.named.shared.confirm = null;
 }
 
 async function loadConfig() {
@@ -991,7 +1138,6 @@ function configValidate() {
       }
     });
   }
-  if ('api-keys' in changed) (v['api-keys'] || []).forEach((key, i) => { if (!key.trim()) invalid(['api-keys', i], 'Enter an API key or remove this row.'); });
   if ('oauth-model-alias' in changed) for (const [provider, aliases] of Object.entries(v['oauth-model-alias'] || {})) aliases.forEach((alias, i) => {
     for (const key of ['name', 'alias']) if (!alias[key]?.trim()) invalid(['oauth-model-alias', provider, i, key], `Enter ${key === 'name' ? 'an upstream model name' : 'an alias'}.`);
   });
@@ -1009,8 +1155,7 @@ function configValidate() {
       const provider = CONFIG_PROVIDERS.find(([, , field]) => path[0] === field);
       if (provider) { c.section = 'providers'; c.provider = provider[0];
         for (let i = 0; i < v[provider[2]].length; i++) { c.opens[`${provider[2]}:${i}`] = true; c.opens[`${provider[2]}:${i}:advanced`] = true; }
-      } else if (path[0] === 'api-keys') c.section = 'access';
-      else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent', 'first-token-timeout-seconds', 'model-groups', 'background-model'].includes(path[0])) c.section = 'routing';
+      } else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent', 'first-token-timeout-seconds', 'model-groups', 'background-model'].includes(path[0])) c.section = 'routing';
       else if (path[0] === 'proxy-url') c.section = 'connections';
       else c.section = 'server';
     }
@@ -1023,7 +1168,7 @@ function configValidate() {
 async function configPatch(changes) {
   const result = await api('/config/settings', { method: 'PATCH', body: JSON.stringify({ revision: S.config.revision, changes }) });
   acceptConfig(result);
-  // The main line and Clients read the keys from the overview; keep them current until it refreshes.
+  // The main line and setup snippets read the keys from the overview; keep them current until it refreshes.
   Object.assign(S.overview, { client_keys: result.values['api-keys'] || [], named_clients: (result.values['named-clients'] || []).length });
   return result;
 }
@@ -1154,6 +1299,7 @@ document.addEventListener('click', (e) => {
   if (act === 'save') return saveConfig();
   if (act === 'discard') return discardConfig();
   if (act.startsWith('named-')) return namedAction(act, button.dataset.id);
+  if (act.startsWith('shared-')) return sharedAction(act, Number(button.dataset.index));
   if (act.startsWith('group-')) return groupAction(act, button.dataset.name);
   if (act.startsWith('hook-')) return webhookAction(act, button.dataset.index);
   if (act.startsWith('limits-')) return limitsAction(act, button.dataset.id);
@@ -1203,10 +1349,8 @@ document.addEventListener('click', (e) => {
   }
   if (act === 'add-string' || act === 'add-alias') {
     const list = configGet(path) || [];
-    // New client keys start as a random fbx_ key; replace it to use your own.
-    list.push(act === 'add-string' ? (button.dataset.generate ? generateClientKey() : '') : button.dataset.oauth ? { name: '', alias: '', fork: false } : { name: '', alias: null });
+    list.push(act === 'add-string' ? '' : button.dataset.oauth ? { name: '', alias: '', fork: false } : { name: '', alias: null });
     configSet(path, list);
-    if (button.dataset.generate) c.secrets[JSON.stringify([...path, list.length - 1])] = true;
   }
   if (act === 'remove') {
     const parent = path.slice(0, -1); const index = path[path.length - 1];

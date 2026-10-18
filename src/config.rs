@@ -406,11 +406,12 @@ pub const LEGACY_AUTH_DIR: &str = "~/.cli-proxy-api";
 
 const TEMPLATE: &str = r#"# Fusebox configuration. Changes are picked up automatically.
 
-host: "127.0.0.1"          # use 0.0.0.0 to expose on your network (set api-keys first!)
+host: "127.0.0.1"          # use 0.0.0.0 to expose on your network (add named-clients first!)
 port: 8317
 auth-dir: "~/.fusebox"      # OAuth credentials (CLIProxyAPI's files work too)
 
-# Keys your clients must send. Leave empty to allow anyone who can reach the port.
+# Shared keys from before named clients: any tool may send them. With neither these nor
+# named-clients, anyone who can reach the port can use it.
 api-keys: []
 
 # Protects the dashboard + management API. Empty = only reachable from localhost.
@@ -469,7 +470,8 @@ usage:
 #   fast: { models: [claude-sonnet-5-5, gemini-3.8-flash], balance: true }
 # background-model: gemini-3.8-flash  # Claude Code's quick Haiku calls (titles, summaries)
 
-# Optional named inference credentials; existing api-keys continue to work.
+# A key for each machine or tool, so the Usage page shows each by name and limits can
+# apply. The dashboard's Config, Clients adds them.
 named-clients: []
 #  - id: desktop
 #    label: Work desktop

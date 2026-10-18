@@ -568,20 +568,27 @@ async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
 
 /// A client key as people know it: the named client's label, the program, or neither.
 pub fn client_label(cfg: &Config, key: &str) -> String {
+    let name = |c: &crate::config::NamedClient| if c.label.trim().is_empty() { c.id.clone() } else { c.label.clone() };
+    // A shared key's usage id is a hash of the key. One that has since been named keeps
+    // its value, so its earlier use goes by the client's name too.
+    let named_since = |hash: &str| {
+        cfg.named_clients
+            .iter()
+            .find(|c| crate::affinity::scope_for_key(Some(&c.key)).starts_with(hash))
+            .map(|c| format!("{} (before naming)", name(c)))
+    };
     if let Some(program) = key.strip_prefix("app:") {
         return program.to_string();
     }
     if let Some(prefix) = key.strip_prefix("key:") {
-        return format!("Shared key {prefix}…");
+        return named_since(prefix).filter(|_| prefix.len() >= 8).unwrap_or_else(|| format!("Shared key {prefix}…"));
     }
     match cfg.named_clients.iter().find(|c| c.id == key) {
-        Some(c) if !c.label.trim().is_empty() => c.label.clone(),
-        Some(c) => c.id.clone(),
+        Some(c) => name(c),
         None if key.is_empty() => "Other requests".into(),
         None if key == "dashboard" => "Dashboard playground".into(),
-        // A shared key's usage id is a hash of the key.
         None if key.len() >= 16 && key.bytes().all(|b| b.is_ascii_hexdigit()) => {
-            format!("Shared key {}…", &key[..8])
+            named_since(key).unwrap_or_else(|| format!("Shared key {}…", &key[..8]))
         }
         None => key.to_string(),
     }
@@ -1385,12 +1392,26 @@ fn set_entry_priority(entry: &mut Value, priority: i32) {
     }
 }
 
-/// What each named client used today and this month, beside its limits.
+/// What each named client used today and this month, beside its limits, and when each
+/// client key was last used since Fusebox started; shared keys in `api-keys` order.
 async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
     let cfg = app.cfg();
     let clients: serde_json::Map<String, Value> =
         cfg.named_clients.iter().map(|c| (c.id.clone(), json!(app.clients.spend(&c.id)))).collect();
-    Json(json!({ "clients": clients, "estimates": app.usage.is_some() }))
+    let key_used = |key: &str| app.clients.last_used(&crate::affinity::scope_for_key(Some(key)));
+    // A client named from a shared key was last used under that key's hash until then.
+    let last_used: serde_json::Map<String, Value> = cfg
+        .named_clients
+        .iter()
+        .filter_map(|c| Some((c.id.clone(), json!(app.clients.last_used(&c.id).max(key_used(&c.key))?))))
+        .collect();
+    let shared_last_used: Vec<_> = cfg.api_keys.iter().map(|k| key_used(k)).collect();
+    Json(json!({
+        "clients": clients,
+        "estimates": app.usage.is_some(),
+        "last_used": last_used,
+        "shared_last_used": shared_last_used,
+    }))
 }
 
 #[cfg(test)]
@@ -1641,5 +1662,24 @@ mod tests {
         assert!(!management_key_matches("wrong", &hash));
         assert!(management_key_matches("plain", "plain"));
         assert!(!management_key_matches("plain", "other"));
+    }
+
+    #[test]
+    fn a_shared_key_named_later_keeps_its_history_under_the_name() {
+        let hash = crate::affinity::scope_for_key(Some("fbx_was_shared"));
+        let other = crate::affinity::scope_for_key(Some("fbx_still_shared"));
+        let mut cfg = Config { api_keys: vec!["fbx_still_shared".into()], ..Default::default() };
+        assert_eq!(client_label(&cfg, &hash), format!("Shared key {}…", &hash[..8]));
+        cfg.named_clients = vec![crate::config::NamedClient {
+            id: "macbook".into(),
+            label: "MacBook Pro".into(),
+            key: "fbx_was_shared".into(),
+            ..Default::default()
+        }];
+        assert_eq!(client_label(&cfg, "macbook"), "MacBook Pro");
+        assert_eq!(client_label(&cfg, &hash), "MacBook Pro (before naming)");
+        assert_eq!(client_label(&cfg, &format!("key:{}", &hash[..12])), "MacBook Pro (before naming)");
+        assert_eq!(client_label(&cfg, &other), format!("Shared key {}…", &other[..8]));
+        assert_eq!(client_label(&cfg, "key:"), "Shared key …", "an empty prefix names nobody");
     }
 }

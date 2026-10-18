@@ -133,8 +133,11 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
         let identity = named
             .map(|c| c.id.clone())
             .or_else(|| provided.as_ref().filter(|_| !cfg.api_keys.is_empty()).map(|_| scope.clone()));
-        if let Some(identity) = identity.and_then(|v| HeaderValue::from_str(&v).ok()) {
-            req.headers_mut().insert(crate::usage::capture::CLIENT_HEADER, identity);
+        if let Some(identity) = identity {
+            app.clients.touch(&identity);
+            if let Ok(value) = HeaderValue::from_str(&identity) {
+                req.headers_mut().insert(crate::usage::capture::CLIENT_HEADER, value);
+            }
         }
         req.headers_mut().remove(crate::affinity::LEGACY_SCOPE_HEADER);
         req.headers_mut().insert(crate::affinity::SCOPE_HEADER, HeaderValue::from_str(&scope).unwrap());

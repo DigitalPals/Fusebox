@@ -19,8 +19,9 @@ an answer within a few days.
 
 ## Hardening checklist
 
-- Set `api-keys` (or named clients) and `management-key` whenever anything other than this
-  machine can reach the port, and always behind a reverse proxy.
+- Give each client its own key (`named-clients`, or Config, Clients) and set `management-key`
+  whenever anything other than this machine can reach the port, and always behind a reverse
+  proxy. A key per client can be replaced or removed without touching the others.
 - Keep `auth-dir` and `config.yaml` readable only by the user Fusebox runs as. On Windows,
   keep them inside your user profile, whose permissions already exclude other users.
 - Prefer the `-nonroot` Docker image when you don't need CLIProxyAPI's exact layout.

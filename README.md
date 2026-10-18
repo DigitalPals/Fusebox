@@ -115,7 +115,7 @@ Changes made from the dashboard keep your file's layout, YAML comments, and sett
 
 ```sh
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
-export ANTHROPIC_AUTH_TOKEN=<one of your api-keys, or anything if you set none>
+export ANTHROPIC_AUTH_TOKEN=<this machine's client key, or anything if you have no clients>
 claude
 ```
 
@@ -131,7 +131,7 @@ model_provider = "fusebox"
 name = "Fusebox"
 base_url = "http://127.0.0.1:8317/v1"
 wire_api = "responses"
-env_key = "FUSEBOX_KEY"   # only needed if you set api-keys
+env_key = "FUSEBOX_KEY"   # only needed once you have clients
 ```
 
 **OpenAI SDK**, or any tool with a custom OpenAI base URL
@@ -280,9 +280,9 @@ Retiring an older Redis-based usage collector requires a compatible replacement 
 
 `config.yaml` reloads automatically when it changes, and the dashboard edits the same file.
 
-The dashboard's Config page starts with **Clients**, the endpoint and key with copyable setup for Claude Code, Codex, OpenCode, the OpenAI SDK and curl, and under **More tools** for Gemini CLI, Aider, Continue, Zed, Cline and Roo Code, and Cursor. Then come forms for server and access settings, routing, connections, provider keys, model rules, notifications and diagnostics, plus a **YAML file** section for everything else. Every save first shows the lines it changes in `config.yaml`. Keys stay masked until revealed, and leaving an existing key blank keeps it unchanged. If the file changes elsewhere while you edit, the page asks you to reload before saving. Bind address, port, HTTPS, debug logging and log format changes need a restart; the page shows which are pending.
+The dashboard's Config page starts with **Clients**: the endpoint, a key for each machine or tool, and copyable setup with that key for Claude Code, Codex, OpenCode, the OpenAI SDK and curl, and under **More tools** for Gemini CLI, Aider, Continue, Zed, Cline and Roo Code, and Cursor. Then come forms for server and access settings, routing, connections, provider keys, model rules, notifications and diagnostics, plus a **YAML file** section for everything else. Every save first shows the lines it changes in `config.yaml`. Keys stay masked until revealed, and leaving an existing key blank keeps it unchanged. If the file changes elsewhere while you edit, the page asks you to reload before saving. Bind address, port, HTTPS, debug logging and log format changes need a restart; the page shows which are pending.
 
-**Named clients** (`named-clients`) give each tool its own key and a label, so the Usage page shows which tool sent what. Add and remove them under Config, Clients; other tools, such as Whombat, can add their own with the management key. **Limits** on a client, each optional, refuse what it may not do with a clear error:
+**Clients** (`named-clients`) each have their own key and a name, so the Usage page shows which machine or tool sent what, and limits can apply. Add one under Config, Clients by giving it a name: Fusebox makes its key and shows the setup with it. A client can be renamed, given a new key (keeping its name, limits and history) or removed, and the list shows when each key was last used. Other tools, such as Whombat, can add their own with the management key. Shared keys in `api-keys`, from before, still work, but the dashboard no longer makes them: Config, Clients lists them until you name each one, which makes it a client with the same key, so nothing using it needs changing, and its earlier use shows under the new name. **Limits** on a client, each optional, refuse what it may not do with a clear error:
 
 ```yaml
 named-clients:
@@ -297,13 +297,13 @@ named-clients:
     expires: 2026-12-31               # the last day the key works, server time
 ```
 
-Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it.
+Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it, with when each key was last used since Fusebox started.
 
 ```yaml
-host: "127.0.0.1"             # 0.0.0.0 to expose it (set api-keys first)
+host: "127.0.0.1"             # 0.0.0.0 to expose it (add a client first)
 port: 8317
 auth-dir: "~/.fusebox"        # OAuth credential files (CLIProxyAPI's work too)
-api-keys: ["fbx_pick-anything"] # keys your clients must send; empty = open
+api-keys: []                  # shared keys from before named clients; with neither, it is open
 management-key: ""            # empty = dashboard only from localhost
 proxy-url: ""                 # optional http://, https:// or socks5:// upstream proxy; never falls back to direct
 request-retry: 3              # account/model choices across the whole request (at most 10)
@@ -450,7 +450,7 @@ The dashboard separates cancelled requests from failures. Missing usage appears 
 
 ### Running it on a server
 
-Set `host: "0.0.0.0"`, an `api-keys` entry for your clients, and a `management-key` for the dashboard. In Docker the dashboard also needs a `management-key`, because browser requests reach the container from outside `localhost`. Then keep it running, for example with systemd:
+Set `host: "0.0.0.0"`, a client for each machine or tool (`named-clients`, or Config, Clients), and a `management-key` for the dashboard. In Docker the dashboard also needs a `management-key`, because browser requests reach the container from outside `localhost`. Then keep it running, for example with systemd:
 
 ```ini
 # /etc/systemd/system/fusebox.service
@@ -496,9 +496,9 @@ The default tags keep CLIProxyAPI's layout (root, `/CLIProxyAPI`), so they stay 
 
 ### HTTPS with Tailscale, nginx or Caddy
 
-Installing the dashboard as an app and push notifications need HTTPS. Either give Fusebox a certificate (`tls` in the config above) or keep it on `127.0.0.1` and put an HTTPS proxy in front. **Behind any proxy, set a `management-key`:** a proxy on the same machine connects from `127.0.0.1`, which Fusebox would otherwise trust as local. Fusebox recognises Tailscale, nginx and Caddy by the `X-Forwarded-For` header they add and asks them for the key, but a proxy that forwards raw TCP adds nothing. Set `api-keys` too, unless everyone who can reach the proxy may use your accounts.
+Installing the dashboard as an app and push notifications need HTTPS. Either give Fusebox a certificate (`tls` in the config above) or keep it on `127.0.0.1` and put an HTTPS proxy in front. **Behind any proxy, set a `management-key`:** a proxy on the same machine connects from `127.0.0.1`, which Fusebox would otherwise trust as local. Fusebox recognises Tailscale, nginx and Caddy by the `X-Forwarded-For` header they add and asks them for the key, but a proxy that forwards raw TCP adds nothing. Add clients too, unless everyone who can reach the proxy may use your accounts.
 
-What Fusebox trusts by address alone (the dashboard without a `management-key`, the proxy without `api-keys` on `127.0.0.1`) is refused to web pages: a request whose `Origin` names another site, or that arrives directly with a `Host` naming anything other than this machine, gets a 403, so a site you visit can't reach your accounts or settings. Tools on this machine, and pages served from `localhost`, are unaffected. Five wrong management keys lock that address out, from 30 seconds doubling up to 15 minutes.
+What Fusebox trusts by address alone (the dashboard without a `management-key`, the proxy without client keys on `127.0.0.1`) is refused to web pages: a request whose `Origin` names another site, or that arrives directly with a `Host` naming anything other than this machine, gets a 403, so a site you visit can't reach your accounts or settings. Tools on this machine, and pages served from `localhost`, are unaffected. Five wrong management keys lock that address out, from 30 seconds doubling up to 15 minutes.
 
 **Tailscale.** With [HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) enabled for your tailnet, this serves Fusebox at `https://<machine>.<tailnet>.ts.net` to your tailnet only:
 

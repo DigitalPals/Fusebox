@@ -1051,7 +1051,7 @@ mod tests {
             edit(&source, json!({"request-retry": 7, "tls": {"enable": false, "cert": "cert.pem", "key": "key.pem"}}));
         assert_eq!(cfg.request_retry, 7);
         assert!(out.contains("# API keys (optional)."));
-        assert!(out.contains("# Keys your clients must send."));
+        assert!(out.contains("# Shared keys from before named clients"));
         let (out, _) = edit("# Minimal\nport: 8317\n", json!({"request-retry": 3}));
         assert_eq!(out, "# Minimal\nport: 8317\n");
     }

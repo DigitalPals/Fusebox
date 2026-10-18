@@ -354,6 +354,41 @@ async fn named_client_limits_are_enforced() {
 }
 
 #[tokio::test]
+async fn client_keys_report_when_they_were_last_used() {
+    let s = setup(|cfg, _| {
+        cfg.api_keys = vec!["fbx_shared_one".into(), "fbx_shared_two".into()];
+        let client =
+            |id: &str| NamedClient { id: id.into(), label: id.into(), key: format!("fbx_{id}"), ..Default::default() };
+        cfg.named_clients = vec![client("laptop"), client("idle")];
+    })
+    .await;
+    let usage = || async {
+        reqwest::get(format!("{}/api/clients/usage", s.proxy.url)).await.unwrap().json::<Value>().await.unwrap()
+    };
+    let before = usage().await;
+    assert_eq!(before["last_used"], json!({}));
+    assert_eq!(before["shared_last_used"], json!([null, null]));
+
+    assert_eq!(ask(&s, "fbx_laptop", "gpt-up", &[]).await.0, 200);
+    assert_eq!(ask(&s, "fbx_shared_two", "gpt-up", &[]).await.0, 200);
+    assert_eq!(ask(&s, "fbx_wrong", "gpt-up", &[]).await.0, 401);
+    let after = usage().await;
+    assert!(after["last_used"]["laptop"].is_string(), "{after}");
+    assert!(after["last_used"].get("idle").is_none(), "{after}");
+    assert!(after["shared_last_used"][0].is_null(), "{after}");
+    assert!(after["shared_last_used"][1].is_string(), "{after}");
+
+    // Named from the shared key, the client was last used when the key was.
+    let mut cfg = (*s.app.cfg()).clone();
+    let key = cfg.api_keys.pop().unwrap();
+    cfg.named_clients.push(NamedClient { id: "macbook".into(), label: "MacBook".into(), key, ..Default::default() });
+    s.app.set_config(cfg);
+    let named = usage().await;
+    assert_eq!(named["last_used"]["macbook"], after["shared_last_used"][1], "{named}");
+    assert_eq!(named["shared_last_used"], json!([null]));
+}
+
+#[tokio::test]
 async fn upgrade_headers_cannot_bypass_http_rate_limits() {
     let s = setup(|cfg, _| {
         cfg.api_keys.clear();
