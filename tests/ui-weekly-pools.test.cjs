@@ -26,7 +26,7 @@ function load(S = { quotaDisplay: 'used', accounts: [] }) {
   vm.createContext(context);
   vm.runInContext([
     piece('const esc = (v) =>'), piece('function fmt(n) {'), piece('const plural = (n, word'), piece('const cap = (s)'),
-    piece('const planName = (a)'), piece('function quotaOf(w'),
+    piece('const CODEX_PLAN_NAMES ='), piece('const planName = (a)'), piece('function quotaOf(w'),
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'), piece('const metered ='),
     piece('function windowSeconds(w) {'), piece('function windowElapsed(w'), piece('function meterHTML(q'),
     piece('const PLAN_PRICE ='), piece('const PLAN_PRICE_NOTE ='), piece('const planWeight ='), piece('function planCounts(list) {'),
@@ -48,6 +48,26 @@ const sub = (id, used, left, extra = {}, plan) => ({
   ...extra,
 });
 const on = (plan, id, used, left) => sub(id, used, left, {}, plan);
+
+test('Codex Pro labels use the active SKU and fall back to the broad plan for unknown tiers', () => {
+  const run = load();
+  const account = (sku, provider = 'codex') => ({ provider, quota: { plan: 'pro', subscription_plan: sku } });
+  for (const [sku, label] of [['chatgptprolite', 'Pro 100'], ['chatgptpro', 'Pro 200'], ['chatgptpromax', 'Pro 500']]) {
+    assert.equal(run(`planName(${JSON.stringify(account(sku))})`), label);
+  }
+  for (const sku of [undefined, '', 'future-pro-plan', 'chatgptpro-20x', 'constructor', '__proto__']) {
+    assert.equal(run(`planName(${JSON.stringify(account(sku))})`), 'Pro', 'unknown details do not guess a price or multiplier');
+  }
+  assert.equal(run(`planName(${JSON.stringify(account('chatgptpro', 'claude'))})`), 'Pro', 'Codex SKUs do not relabel Claude');
+  assert.equal(run('planName({ provider: "codex" })'), '');
+  const accounts = ['chatgptprolite', 'chatgptpro', 'chatgptpromax'].map((sku, i) => ({
+    ...sub(String(i), 30, 3.5 * DAY), ...account(sku), kind: 'oauth',
+    quota: { ...sub(String(i), 30, 3.5 * DAY).quota, ...account(sku).quota },
+  }));
+  const [pool] = run(`weeklyPools(${JSON.stringify(accounts)})`);
+  assert.equal(run(`poolCount(${JSON.stringify(pool)})`), '1 Pro 100, 1 Pro 200, 1 Pro 500');
+  assert.equal(pool.priced, false, 'the display tier does not infer quota weighting');
+});
 
 test('each account’s pace comes from its own reset, and use and pace are averaged', () => {
   const run = load();

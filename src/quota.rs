@@ -16,6 +16,7 @@ use crate::state::App;
 
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_SUBSCRIPTION: &str = "https://chatgpt.com/backend-api/subscriptions";
 /// Accounts without quota data count as half used.
 pub const UNKNOWN: f64 = 50.0;
 const POLL_EVERY: i64 = 5 * 60;
@@ -24,7 +25,7 @@ const POLL_EVERY: i64 = 5 * 60;
 const BUSY_POLL_EVERY: i64 = 30 * 60;
 /// Banked resets change rarely; opening the dashboard panel checks on demand.
 const RESET_POLL_EVERY: i64 = 30 * 60;
-/// A Claude account's plan changes only with an upgrade or a downgrade.
+/// Subscription plans change only with an upgrade or a downgrade.
 const PLAN_EVERY: i64 = 6 * 3600;
 const POLL_CONCURRENCY: usize = 4;
 
@@ -49,16 +50,25 @@ pub struct Quota {
     pub refreshed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// The active ChatGPT subscription SKU; `plan` alone does not distinguish Pro tiers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_plan: Option<String>,
     /// Usage-endpoint checks in a row that brought no data, and when the last one ran.
     #[serde(skip)]
     pub(crate) check_failures: u32,
     #[serde(skip)]
     pub(crate) checked_at: Option<DateTime<Utc>>,
-    /// Claude profile reads in a row that failed, and when the last one ran.
+    /// Plan detail reads in a row that failed, and when the last one ran.
     #[serde(skip)]
     pub(crate) plan_failures: u32,
     #[serde(skip)]
     pub(crate) plan_checked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PlanDetails {
+    Claude(Option<String>),
+    Codex(Option<String>),
 }
 
 impl Quota {
@@ -150,11 +160,16 @@ impl Quota {
         (now - at).num_seconds() >= wait
     }
 
-    fn plan_read(&mut self, now: DateTime<Utc>, plan: Option<Option<String>>) {
+    fn plan_read(&mut self, now: DateTime<Utc>, details: Option<PlanDetails>) {
         self.plan_checked_at = Some(now);
-        match plan {
-            Some(plan) => {
-                self.plan = plan;
+        match details {
+            Some(details) => {
+                match details {
+                    PlanDetails::Claude(plan) => self.plan = plan,
+                    // Usage remains the source of the broad Codex plan. The web
+                    // subscription API can use different names for the same tier.
+                    PlanDetails::Codex(plan) => self.subscription_plan = plan,
+                }
                 self.plan_failures = 0;
             }
             None => self.plan_failures = self.plan_failures.saturating_add(1),
@@ -167,6 +182,15 @@ impl Quota {
     }
 
     pub(crate) fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
+        if plan.is_some() {
+            if self.plan.is_some() && self.plan != plan {
+                // A usage response can reveal a downgrade before the next plan check.
+                self.subscription_plan = None;
+                self.plan_checked_at = None;
+                self.plan_failures = 0;
+            }
+            self.plan = plan;
+        }
         if windows.is_empty() {
             return;
         }
@@ -181,9 +205,6 @@ impl Quota {
         self.windows = windows;
         self.windows.extend(retained);
         self.updated_at = Some(Utc::now());
-        if plan.is_some() {
-            self.plan = plan;
-        }
     }
 }
 
@@ -358,30 +379,75 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reads which plan a Claude account is on (Max 20x, Max 5x, Pro ...) from its profile,
-/// which costs no tokens. ChatGPT names its plan in every usage reading instead.
+/// The subscription endpoint is scoped to the signed-in ChatGPT account, not its
+/// default workspace. Only the active entitlement identifies the current paid tier;
+/// past subscriptions and scheduled changes must not label the current account.
+fn codex_plan(value: &Value) -> anyhow::Result<PlanDetails> {
+    let plan = value["plan_type"].as_str().map(str::trim).filter(|s| !s.is_empty());
+    if plan.is_none() {
+        anyhow::bail!("ChatGPT subscription response is missing plan_type")
+    }
+    let entitlement = &value["entitlement"];
+    let subscription_plan = (entitlement["has_active_subscription"] == true)
+        .then(|| entitlement["subscription_plan"].as_str())
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Ok(PlanDetails::Codex(subscription_plan))
+}
+
+/// Reads Claude plan names and ChatGPT subscription SKUs without using model tokens.
 pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
-    if acct.provider != Provider::Claude {
+    if !matches!(acct.provider, Provider::Claude | Provider::Codex) {
         return Ok(());
     }
     let epoch = acct.quota_epoch();
-    let token = match &*acct.cred.read() {
-        Credential::OAuth(o) if o.base_url.is_none() => o.access_token.clone(),
+    let (token, account_id) = match &*acct.cred.read() {
+        Credential::OAuth(o) if o.base_url.is_none() => (o.access_token.clone(), o.account_id.clone()),
         _ => return Ok(()),
     };
     let http = app.http.control(acct.proxy_url.as_deref());
-    let profile = crate::oauth::claude_profile(&http, &token).await;
+    let details = match acct.provider {
+        Provider::Claude => crate::oauth::claude_profile(&http, &token)
+            .await
+            .map(|profile| PlanDetails::Claude(crate::oauth::claude_plan(&profile))),
+        Provider::Codex => {
+            async {
+                let Some(id) = account_id.as_deref().filter(|id| !id.is_empty()) else {
+                    anyhow::bail!("ChatGPT subscription check requires an account ID")
+                };
+                let value: Value = http
+                    .get(CODEX_SUBSCRIPTION)
+                    .query(&[("account_id", id)])
+                    .bearer_auth(&token)
+                    .header("chatgpt-account-id", id)
+                    .header("user-agent", crate::clients::codex_user_agent())
+                    .header("originator", crate::upstream::CODEX_ORIGINATOR)
+                    .timeout(Duration::from_secs(15))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                codex_plan(&value)
+            }
+            .await
+        }
+        _ => unreachable!(),
+    };
     let mut st = acct.state.lock();
-    // A different account signed in to this file while the profile was read.
+    // A different account signed in to this file while the plan was read.
     if st.quota_epoch == epoch {
-        st.quota.plan_read(Utc::now(), profile.as_ref().ok().map(crate::oauth::claude_plan));
+        st.quota.plan_read(Utc::now(), details.as_ref().ok().cloned());
     }
-    profile.map(drop)
+    details.map(drop)
 }
 
 /// Provider usage is authoritative, but absent windows cannot prove a cooldown has ended.
 pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window>, plan: Option<String>) {
     if windows.is_empty() {
+        st.quota.set(windows, plan);
         return;
     }
     let covered: Vec<String> = st
@@ -462,18 +528,22 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         changed = true;
     }
     changed |= crate::banked_resets::automatic_check(app, &acct).await;
-    let plan_due = acct.provider == Provider::Claude
-        && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none())
+    let plan_due = matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
+        && (acct.provider != Provider::Codex || o.account_id.as_ref().is_some_and(|id| !id.is_empty())))
         && {
             let st = acct.state.lock();
             !st.disabled && st.quota.plan_due(Utc::now())
         };
     if plan_due && crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_ok() {
-        let before = acct.state.lock().quota.plan.clone();
+        let before = {
+            let st = acct.state.lock();
+            (st.quota.plan.clone(), st.quota.subscription_plan.clone())
+        };
         if let Err(e) = poll_plan(app, &acct).await {
             tracing::debug!(account = %acct.label, "plan check failed: {e:#}");
         }
-        changed |= acct.state.lock().quota.plan != before;
+        let st = acct.state.lock();
+        changed |= (st.quota.plan.clone(), st.quota.subscription_plan.clone()) != before;
     }
     let stale = {
         let st = acct.state.lock();
@@ -708,12 +778,12 @@ mod tests {
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         assert!(q.plan_due(now + secs(PLAN_EVERY)));
         // A good read ends the backoff, and its plan replaces the last one, even with none.
-        q.plan_read(now, Some(Some("max_20x".into())));
+        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()))));
         assert_eq!((q.plan.as_deref(), q.plan_failures), (Some("max_20x"), 0));
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         q.plan_read(now, None);
         assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
-        q.plan_read(now, Some(None));
+        q.plan_read(now, Some(PlanDetails::Claude(None)));
         assert_eq!(q.plan, None);
         // Usage readings without a plan (Claude's) leave it alone.
         q.plan = Some("max_5x".into());
@@ -722,6 +792,64 @@ mod tests {
         let shown = serde_json::to_value(&q).unwrap();
         assert_eq!(shown["plan"], "max_5x");
         assert!(shown.get("plan_checked_at").is_none() && shown.get("plan_failures").is_none());
+    }
+
+    #[test]
+    fn codex_plan_uses_the_active_subscription_not_past_or_scheduled_tiers() {
+        for sku in ["chatgptprolite", "chatgptpro", "chatgptpromax", "future-plan"] {
+            let mut value = json!({
+                "plan_type": "pro",
+                "entitlement": {
+                    "has_active_subscription": true,
+                    "subscription_plan": sku,
+                    "scheduled_plan_change": { "subscription_plan": "chatgptpromax" }
+                },
+                "last_active_subscription": { "subscription_plan": "chatgptprolite" }
+            });
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(Some(sku.into())));
+            value["entitlement"]["has_active_subscription"] = false.into();
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None));
+        }
+        for value in [
+            json!({ "plan_type": "free" }),
+            json!({ "plan_type": "pro", "entitlement": { "subscription_plan": "chatgptpro" } }),
+            json!({ "plan_type": "pro", "entitlement": { "has_active_subscription": true, "subscription_plan": " " } }),
+        ] {
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None));
+        }
+        assert!(codex_plan(&json!({})).is_err());
+        assert!(codex_plan(&json!({ "plan_type": " " })).is_err());
+    }
+
+    #[test]
+    fn codex_subscription_details_survive_usage_and_failed_reads_but_clear_on_plan_changes() {
+        let now = Utc::now();
+        let mut q = Quota::default();
+        let details = codex_plan(&json!({
+            "plan_type": "pro",
+            "entitlement": { "has_active_subscription": true, "subscription_plan": "chatgptpro" }
+        }))
+        .unwrap();
+        q.plan_read(now, Some(details));
+        let window = Window { name: "week".into(), used: 10.0, resets_at: None, model: None };
+        q.set(vec![window.clone()], Some("pro".into()));
+        q.set(vec![window.clone()], None);
+        assert_eq!(q.subscription_plan.as_deref(), Some("chatgptpro"));
+        assert!(!q.plan_due(now));
+        q.plan_read(now, None);
+        assert_eq!(q.subscription_plan.as_deref(), Some("chatgptpro"));
+        assert_eq!(q.plan.as_deref(), Some("pro"));
+        assert_eq!(serde_json::to_value(&q).unwrap()["subscription_plan"], "chatgptpro");
+        // A downgrade observed through usage must stop displaying the paid tier at once.
+        q.set(vec![], Some("plus".into()));
+        assert_eq!(q.subscription_plan, None);
+        assert!(q.plan_due(now));
+        // A successful subscription read without an active entitlement also clears it.
+        q.subscription_plan = Some("chatgptpro".into());
+        q.plan_read(now, Some(codex_plan(&json!({ "plan_type": "free" })).unwrap()));
+        assert_eq!(q.subscription_plan, None);
+        assert_eq!(q.windows, vec![window], "plan reads do not change quota windows");
+        assert!(serde_json::to_value(&q).unwrap().get("subscription_plan").is_none());
     }
 
     #[test]

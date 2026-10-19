@@ -830,7 +830,10 @@ function authName(a) {
   return DEVICE_CODE.has(a.provider) ? 'Device code' : 'OAuth';
 }
 
-const planName = (a) => (a.quota && a.quota.plan ? cap(String(a.quota.plan).replace(/[_-]+/g, ' ')) : '');
+// ChatGPT's active subscription SKU distinguishes Pro tiers; usage's `pro` does not.
+const CODEX_PLAN_NAMES = new Map([['chatgptprolite', 'Pro 100'], ['chatgptpro', 'Pro 200'], ['chatgptpromax', 'Pro 500']]);
+const planName = (a) => (a.provider === 'codex' && CODEX_PLAN_NAMES.get(a.quota?.subscription_plan))
+  || (a.quota && a.quota.plan ? cap(String(a.quota.plan).replace(/[_-]+/g, ' ')) : '');
 
 // "Claude · OAuth · token valid 5h 11m"
 function acctSub(a) {
