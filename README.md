@@ -9,7 +9,7 @@ Claude, ChatGPT, Gemini, Antigravity, Grok, Kimi, Meta, Devin and Vertex AI.<br>
 Point Claude Code, Codex, your editor or any SDK at one URL and stop caring which account answers.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/DigitalPals/Fusebox/ci.yml?branch=main&style=flat-square&labelColor=0b0b0a&label=ci)](https://github.com/DigitalPals/Fusebox/actions/workflows/ci.yml)
-[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-f2efe8?style=flat-square&labelColor=0b0b0a)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-f2efe8?style=flat-square&labelColor=0b0b0a)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-f2efe8?style=flat-square&labelColor=0b0b0a&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Binary](https://img.shields.io/badge/single%20binary-embedded%20dashboard-f2efe8?style=flat-square&labelColor=0b0b0a)](https://github.com/DigitalPals/Fusebox/releases/latest)
 [![Dashboard](https://img.shields.io/badge/dashboard-built%20in-f2efe8?style=flat-square&labelColor=0b0b0a)](#the-dashboard)
@@ -665,7 +665,11 @@ Fusebox started as [CLIProxyAPI-Rust](https://github.com/IuCC123/CLIProxyAPI-Rus
 
 ## License
 
-[Unlicense](LICENSE): public domain. Copy it, change it, sell it, ship it, no attribution required.
+[MIT](LICENSE): use, modify, distribute and sell it, including in proprietary software, while retaining the copyright and license notices. Unless explicitly stated otherwise, contributions submitted for inclusion are provided under MIT.
+
+Code released through v0.6.1 remains available under the Unlicense. The transition does not revoke that grant or impose MIT's notice requirement on code already released under the Unlicense; see [NOTICE](NOTICE) for the exact commit boundary and original terms.
+
+The bundled IBM Plex and DM Mono fonts remain under the SIL Open Font License 1.1; their notices are in [ui/fonts/OFL-IBMPlex.txt](ui/fonts/OFL-IBMPlex.txt) and [ui/fonts/OFL-DMMono.txt](ui/fonts/OFL-DMMono.txt). Binary archives and container images include these texts in `licenses/` alongside `NOTICE`.
 
 The provider logos in `ui/logos.svg` come from [LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT, notice included in the file) and are trademarks of their owners.
 

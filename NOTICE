@@ -1,0 +1,61 @@
+Fusebox licensing
+=================
+
+Current development is licensed under the MIT License; see LICENSE. Unless
+explicitly stated otherwise, contributions submitted for inclusion are
+provided under the MIT License.
+
+Historical Unlicense grant
+-------------------------
+
+Fusebox through commit 1b08e97be72a957fba9e3eec722e02a71e2aa5db (v0.6.1),
+including the original code from IuCC123/CLIProxyAPI-Rust, was distributed
+under the Unlicense, subject to separately licensed third-party material.
+The MIT transition does not revoke that grant or impose new restrictions
+on code already released under the Unlicense. The MIT copyright notice
+applies to copyrightable contributions offered under MIT and does not
+assert copyright over public-domain material.
+
+The original Unlicense text is preserved below:
+
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <https://unlicense.org>
+
+Third-party assets
+------------------
+
+The bundled IBM Plex and DM Mono fonts remain under the SIL Open Font
+License 1.1. Their copyright notices and complete license texts are in
+ui/fonts/OFL-IBMPlex.txt and ui/fonts/OFL-DMMono.txt in the source tree,
+and licenses/OFL-IBMPlex.txt and licenses/OFL-DMMono.txt alongside this
+notice in binary archives and container images. Container notices are
+installed in /usr/share/doc/fusebox/.
+
+Provider logos are from LobeHub Icons (https://github.com/lobehub/lobe-icons),
+Copyright (c) 2023 LobeHub, under the MIT License. Their complete notice
+is preserved in ui/logos.svg and in the embedded dashboard. The logos are
+trademarks of their respective owners.
+
+Dependencies retain their respective licenses.

@@ -102,6 +102,6 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             --annotation "index:org.opencontainers.image.description=All your AI subscriptions as one fast API. Drop-in for CLIProxyAPI." \
-            --annotation "index:org.opencontainers.image.licenses=Unlicense" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
             $(printf '${{ env.IMAGE }}@sha256:%s ' *)
       - run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}

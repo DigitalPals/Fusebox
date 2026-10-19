@@ -94,6 +94,14 @@ jobs:
           name="fusebox-${TAG}-${{ matrix.target }}"
           mkdir "$name"
           cp README.md LICENSE "$name/"
+          # Older tags can be rebuilt with this workflow and predate NOTICE/fonts.
+          if [[ -f NOTICE ]]; then
+            cp NOTICE "$name/"
+          fi
+          if compgen -G 'ui/fonts/OFL-*.txt' > /dev/null; then
+            mkdir "$name/licenses"
+            cp ui/fonts/OFL-*.txt "$name/licenses/"
+          fi
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             cp "target/${{ matrix.target }}/release/fusebox.exe" "$name/"
             7z a "$name.zip" "$name" > /dev/null
