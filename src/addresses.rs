@@ -30,7 +30,7 @@ const SAVE_EVERY: Duration = Duration::from_secs(30);
 const RECENT: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 /// Notifications about addresses in an hour, at most, whatever happens.
 const ALERTS_PER_HOUR: usize = 10;
-/// Keys and addresses kept on the connected list, at most; idle ones go first.
+/// Keys and addresses kept on the connected list, except when more are still busy.
 const LIVE_MAX: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -223,19 +223,6 @@ impl Addresses {
         if !live.contains_key(slot) {
             // Nothing else may read the list for a while, so a newcomer clears out the stale.
             live.retain(|_, l| l.in_flight > 0 || l.sockets > 0 || now - l.last < RECENT);
-            // Then the oldest idle ones, down to the bound with room for this one. Busy ones
-            // stay: their guards still have to count them down.
-            if live.len() >= LIVE_MAX {
-                let mut idle: Vec<_> = live
-                    .iter()
-                    .filter(|(_, l)| l.in_flight == 0 && l.sockets == 0)
-                    .map(|(k, l)| (l.last, k.clone()))
-                    .collect();
-                idle.sort();
-                for (_, k) in idle.into_iter().take(live.len() + 1 - LIVE_MAX) {
-                    live.remove(&k);
-                }
-            }
         }
         let entry = live.entry(slot.clone()).or_insert_with(|| Live {
             via: source.via,
@@ -250,6 +237,7 @@ impl Addresses {
         }
         entry.last = now;
         count(entry);
+        trim_idle(&mut live);
     }
 
     /// Keys and addresses with requests in flight or open sockets, or seen in the last
@@ -258,6 +246,7 @@ impl Addresses {
         let now = Utc::now();
         let mut live = self.live.lock();
         live.retain(|_, l| l.in_flight > 0 || l.sockets > 0 || now - l.last < RECENT);
+        trim_idle(&mut live);
         let mut list: Vec<Connected> = live
             .iter()
             .map(|((key, ip), l)| Connected {
@@ -293,6 +282,23 @@ impl Addresses {
     }
 }
 
+/// Busy entries belong to guards and must survive until their last request/socket ends.
+/// In normal operation only one idle entry needs removing at a time, so avoid sorting
+/// and copying the whole list for every new address or completed request.
+fn trim_idle(live: &mut HashMap<(String, IpAddr), Live>) {
+    while live.len() > LIVE_MAX {
+        let Some(oldest) = live
+            .iter()
+            .filter(|(_, l)| l.in_flight == 0 && l.sockets == 0)
+            .min_by_key(|(_, l)| l.last)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        live.remove(&oldest);
+    }
+}
+
 /// Keeps a request or socket on the connected list.
 pub struct Guard {
     book: Arc<Addresses>,
@@ -310,6 +316,9 @@ impl Drop for Guard {
                 l.in_flight = l.in_flight.saturating_sub(1);
             }
             l.last = Utc::now();
+            if l.in_flight == 0 && l.sockets == 0 {
+                trim_idle(&mut live);
+            }
         }
     }
 }
@@ -427,14 +436,43 @@ mod tests {
             book.seen(&format!("k{i}"), &source("10.0.0.1", Via::Direct));
         }
         assert!(book.live.lock().len() <= LIVE_MAX);
-        // More busy ones than the bound are all kept; once they are done, the next newcomer
-        // brings the list back under it.
+        // More busy ones than the bound are kept; ending them restores the bound without
+        // a newcomer or even a read of the connected list.
         let busy: Vec<_> =
             (0..(LIVE_MAX + 4)).map(|i| book.begin(&format!("b{i}"), &source("10.0.0.2", Via::Direct), true)).collect();
         assert_eq!(book.live.lock().len(), LIVE_MAX + 4);
         drop(busy);
+        assert_eq!(book.live.lock().len(), LIVE_MAX);
+        for c in book.connected() {
+            book.seen(&c.key, &source(&c.ip.to_string(), c.via));
+        }
+        assert_eq!(book.live.lock().len(), LIVE_MAX, "returning clients keep the bound");
         book.seen("newcomer", &source("10.0.0.3", Via::Direct));
         assert_eq!(book.live.lock().len(), LIVE_MAX);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn overflow_never_evicts_an_entry_with_another_request_or_socket() {
+        let dir = dir();
+        let book = Arc::new(Addresses::load(&dir));
+        let a = source("10.10.0.7", Via::ProxyProtocol);
+        let request = book.begin("beast", &a, false);
+        let other_request = book.begin("beast", &a, false);
+        let socket = book.begin("beast", &a, true);
+        let busy: Vec<_> = (0..LIVE_MAX).map(|i| book.begin(&format!("b{i}"), &a, false)).collect();
+        assert_eq!(book.live.lock().len(), LIVE_MAX + 1);
+        drop(request);
+        drop(socket);
+        let now = book.connected();
+        let beast = now.iter().find(|c| c.key == "beast").unwrap();
+        assert_eq!((beast.in_flight, beast.sockets), (1, 0));
+        assert_eq!(now.len(), LIVE_MAX + 1);
+        drop(other_request);
+        assert_eq!(book.live.lock().len(), LIVE_MAX);
+        assert!(book.connected().iter().all(|c| c.key != "beast" && c.in_flight == 1));
+        drop(busy);
+        assert!(book.connected().iter().all(|c| c.in_flight == 0 && c.sockets == 0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

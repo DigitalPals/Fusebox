@@ -1415,7 +1415,52 @@ async fn an_unreadable_forwarding_header_is_not_the_proxy_itself() {
     let (status, text) = ask(&s, "fbx_local", "gpt-up", &[("x-forwarded-for", "unknown")]).await;
     assert_eq!(status, 403, "a client behind the proxy, spoiling its header: {text}");
     assert!(text.contains("an address the proxy in front didn't give"), "{text}");
-    assert_eq!(ask(&s, "fbx_local", "gpt-up", &[("x-forwarded-for", "10.0.0.1,")]).await.0, 403);
+    for (name, value) in [
+        ("x-forwarded-for", "10.0.0.1,"),
+        ("x-forwarded-for", "unknown, 127.0.0.1"),
+        ("forwarded", "for=unknown, for=127.0.0.1"),
+    ] {
+        assert_eq!(ask(&s, "fbx_local", "gpt-up", &[(name, value)]).await.0, 403, "{name}: {value}");
+    }
+    // A fully readable local client and a direct local tool still work.
+    assert_eq!(ask(&s, "fbx_local", "gpt-up", &[("x-forwarded-for", "127.0.0.1")]).await.0, 200);
+    assert_eq!(ask(&s, "fbx_local", "gpt-up", &[]).await.0, 200);
+}
+
+#[tokio::test]
+async fn beast_cli_requests_keep_their_address_on_the_forwarder_port() {
+    let s = setup(|cfg, _| {
+        cfg.proxy_protocol_port = 1;
+        cfg.api_keys.clear();
+        cfg.named_clients = vec![NamedClient {
+            id: "the-beast".into(),
+            label: "The Beast".into(),
+            key: "fbx_beast".into(),
+            addresses: vec!["10.10.0.7".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let codex = json!({"model":"gpt-up","stream":true,"input":[{"role":"user","content":"hi"}]});
+    let claude = json!({"model":"gpt-up","stream":true,"max_tokens":16,
+        "messages":[{"role":"user","content":"hi"}]});
+    for (path, body, agent, completed) in [
+        ("/v1/responses", &codex, "codex_cli_rs/0.163.0", "response.completed"),
+        ("/v1/messages", &claude, "claude-cli/2.1.304 (external, cli)", "message_stop"),
+    ] {
+        let headers = [
+            ("authorization", "Bearer fbx_beast"),
+            ("user-agent", agent),
+            // A LAN client's own forwarding headers never override its PROXY address.
+            ("x-forwarded-for", "unknown, 127.0.0.1"),
+        ];
+        let (status, text) = raw(gate, &proxy_v1("10.10.0.7"), "POST", path, &headers, Some(body)).await;
+        assert_eq!(status, 200, "{path}: {text}");
+        assert!(text.contains(completed), "{path}: {text}");
+        let source = last_request(&s).source.unwrap();
+        assert_eq!((source.ip.to_string(), source.via), ("10.10.0.7".into(), crate::source::Via::ProxyProtocol));
+    }
 }
 
 #[tokio::test]

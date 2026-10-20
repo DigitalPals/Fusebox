@@ -54,8 +54,8 @@ pub enum Via {
     ProxyProtocol,
     /// A trusted reverse proxy's forwarding header.
     Forwarded,
-    /// A trusted proxy sent a forwarding header with no address that could be read. The
-    /// address is the proxy's own; address lists refuse it.
+    /// A trusted proxy's forwarding chain did not name a readable client. The address is
+    /// the proxy's own; address lists refuse it.
     Unknown,
 }
 
@@ -173,7 +173,7 @@ pub fn allowed(patterns: &[String], ip: Option<IpAddr>) -> bool {
 pub fn resolve(peer: IpAddr, forwarder: bool, headers: &HeaderMap, trusted: &[Cidr]) -> Source {
     let peer = peer.to_canonical();
     if listed(trusted, peer) && ["x-forwarded-for", "forwarded", "x-real-ip"].iter().any(|h| headers.contains_key(*h)) {
-        // A proxy that forwarded a header nobody can read hasn't said who the client is;
+        // A proxy that forwarded a chain without a readable client hasn't named one;
         // that isn't the proxy itself, so it must not pass for it.
         return match forwarded_for(headers, trusted) {
             Some(ip) => Source { ip, via: Via::Forwarded, login: tailscale_login(headers) },
@@ -219,8 +219,9 @@ fn forwarded_for(headers: &HeaderMap, trusted: &[Cidr]) -> Option<IpAddr> {
 fn rightmost(entries: Vec<Option<String>>, trusted: &[Cidr]) -> Option<IpAddr> {
     let mut last = None;
     for entry in entries.iter().rev() {
-        // Anything unreadable from here on was written by someone untrusted.
-        let Some(ip) = entry.as_deref().and_then(address) else { break };
+        // We only reach another entry while the hops to its right are trusted. If it
+        // can't name a client, none of those intermediaries can stand in for that client.
+        let ip = entry.as_deref().and_then(address)?;
         last = Some(ip);
         if !listed(trusted, ip) {
             break;
@@ -550,14 +551,39 @@ mod tests {
         assert_eq!((s.ip, s.via), (ip("127.0.0.1"), Via::Unknown));
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "10.0.0.1,")]), &t);
         assert_eq!(s.via, Via::Unknown, "a trailing comma is an empty entry");
-        // Garbage further left stops at the last readable entry.
+        // Garbage beyond a trusted hop leaves the client unknown.
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "nonsense, 127.0.0.5")]), &t);
-        assert_eq!(s.ip, ip("127.0.0.5"));
+        assert_eq!((s.ip, s.via), (ip("127.0.0.1"), Via::Unknown));
         // Ports and brackets.
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "[2001:db8::7]:4711")]), &t);
         assert_eq!(s.ip, ip("2001:db8::7"));
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "10.1.2.3:55")]), &t);
         assert_eq!(s.ip, ip("10.1.2.3"));
+    }
+
+    #[test]
+    fn trusted_intermediaries_cannot_stand_in_for_an_unreadable_client() {
+        for (name, value) in [
+            ("x-forwarded-for", "unknown, 127.0.0.5"),
+            ("x-forwarded-for", ", ::1, 127.0.0.5"),
+            ("forwarded", "for=unknown, for=127.0.0.5"),
+            ("forwarded", "by=192.0.2.1, for=\"[::1]\", for=127.0.0.5"),
+        ] {
+            let h = headers(&[(name, value), ("tailscale-user-login", "someone@github")]);
+            assert_eq!(
+                resolve(ip("127.0.0.1"), false, &h, &loopback()),
+                Source { ip: ip("127.0.0.1"), via: Via::Unknown, login: None },
+                "{name}: {value}"
+            );
+        }
+        // Once an untrusted client has been named, its earlier claims don't matter.
+        for (name, value) in [
+            ("x-forwarded-for", "unknown, 10.10.0.7, 127.0.0.5"),
+            ("forwarded", "for=unknown, for=10.10.0.7, for=127.0.0.5"),
+        ] {
+            let s = resolve(ip("127.0.0.1"), false, &headers(&[(name, value)]), &loopback());
+            assert_eq!((s.ip, s.via), (ip("10.10.0.7"), Via::Forwarded), "{name}: {value}");
+        }
     }
 
     #[test]
@@ -607,6 +633,10 @@ mod tests {
         let h = raw(&[("forwarded", b"for=\x80"), ("x-real-ip", b"192.0.2.42")]);
         assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
         let h = raw(&[("x-real-ip", b"\x80")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
+        let h = raw(&[("x-forwarded-for", b"\x80, 127.0.0.5")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
+        let h = raw(&[("forwarded", b"for=\x80, for=127.0.0.5")]);
         assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
         // From an untrusted peer the headers mean nothing at all.
         assert_eq!(resolve(ip("10.10.0.7"), false, &h, &t).via, Via::Direct);

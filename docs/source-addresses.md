@@ -18,8 +18,9 @@ this machine (127.0.0.0/8 and ::1); an empty list trusts no one. Forwarding head
 anyone else are ignored, so a client can't claim another address by sending them. Lists are
 read from the right, passing over trusted proxies, because proxies such as nginx add the
 address they saw on the right of whatever the client sent. Of `X-Forwarded-For`,
-`Forwarded` and `X-Real-IP`, the first one present decides. When nothing in it can be read,
-the source is unknown: Fusebox shows the proxy's own address, marked as such, and address
+`Forwarded` and `X-Real-IP`, the first one present decides. If an unreadable entry is reached
+while passing over trusted proxies, the client is unknown, even when a proxy's address in
+the chain was readable. Fusebox shows the proxy's own address, marked as such, and address
 lists refuse it rather than mistake the client for the proxy. A proxy that only sets
 `X-Real-IP` should also drop the `X-Forwarded-For` and `Forwarded` headers clients send.
 
@@ -64,7 +65,9 @@ key that is used through the forwarder.
   count: the 20 most recent are shown, of up to 32 seen in the last half year and kept in
   `<auth-dir>/.client-addresses.state`,
   and **Connected now**: every key and address with requests in flight, open WebSockets, or a
-  request in the last five minutes.
+  request in the last five minutes. Up to 4,096 key/address pairs are kept; busy entries
+  always remain, and the oldest idle entries are removed as soon as connections end or
+  new requests arrive.
 - **New-address notifications:** a named key used from an address it wasn't used from before,
   or refused by its address list, notifies devices and webhooks (`client-new-address`, on by
   default). A key's first address ever is not news. Each key and address notifies once while
