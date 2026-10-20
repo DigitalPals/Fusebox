@@ -113,6 +113,7 @@ fn event_name(e: Event) -> &'static str {
         Event::ProviderExhausted => "provider_exhausted",
         Event::AccountUsedUp => "account_used_up",
         Event::AccountErrors => "account_errors",
+        Event::ClientAddress => "client_new_address",
         Event::Quiet => "quiet",
     }
 }

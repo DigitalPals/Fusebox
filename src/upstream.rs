@@ -68,6 +68,7 @@ const HOP: &[&str] = &[
     "x-forwarded-host",
     "x-forwarded-proto",
     "x-real-ip",
+    "forwarded",
     "origin",
     "referer",
     "sec-websocket-key",
@@ -78,8 +79,12 @@ const HOP: &[&str] = &[
 
 /// Whether a client header may be copied upstream. Fusebox's own headers (session ids,
 /// the client scope, usage tags) are for Fusebox alone, whatever their spelling.
+/// Where a client is (forwarding headers, the Tailscale user) is not the provider's business.
 fn forwardable(name: &str) -> bool {
-    !HOP.contains(&name) && !name.starts_with("x-fusebox-") && !name.starts_with("x-cliproxy-")
+    !HOP.contains(&name)
+        && !name.starts_with("x-fusebox-")
+        && !name.starts_with("x-cliproxy-")
+        && !name.starts_with("tailscale-")
 }
 
 fn header(h: &HeaderMap, name: &str) -> Option<String> {
@@ -841,6 +846,21 @@ fn compat(t: &Target, mut body: Value) -> Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_a_client_is_never_reaches_a_provider() {
+        for name in [
+            "x-forwarded-for",
+            "forwarded",
+            "x-real-ip",
+            "tailscale-user-login",
+            "tailscale-user-name",
+            "x-fusebox-source",
+        ] {
+            assert!(!forwardable(name), "{name}");
+        }
+        assert!(forwardable("anthropic-version"));
+    }
 
     #[test]
     fn muse_requests_match_1_4_6_identity() {

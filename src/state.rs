@@ -49,6 +49,8 @@ pub struct App {
     pub admission: Arc<crate::admission::Admission>,
     /// Wrong management keys per address, for the lockout.
     pub key_guesses: crate::mgmt::Guesses,
+    /// Where client keys are used from, and what is connected now.
+    pub addresses: Arc<crate::addresses::Addresses>,
 }
 
 impl App {
@@ -62,6 +64,7 @@ impl App {
         let (live, _) = broadcast::channel(512);
         let sessions = Arc::new(crate::affinity::Sessions::load(&cfg.auth_dir(), cfg.session_affinity_idle_seconds));
         let push = crate::push::Push::load(&cfg.auth_dir());
+        let addresses = Arc::new(crate::addresses::Addresses::load(&cfg.auth_dir()));
         let models = crate::discovery::Store::load(&cfg.auth_dir());
         models.apply(&pool);
         // Tests opt in with an explicit isolated database; never touch a user's default DB.
@@ -116,6 +119,7 @@ impl App {
             clients,
             admission: Default::default(),
             key_guesses: Default::default(),
+            addresses,
         })
     }
 
@@ -334,6 +338,15 @@ pub struct RequestLog {
     pub client: &'static str,
     /// The client program, when its User-Agent names one (Claude Code, Codex, an SDK).
     pub client_app: Option<&'static str>,
+    /// Where the request came from; see `source`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source::Source>,
+    /// The client key's usage id (a named client's id, or a shared key's hash) and the
+    /// name it goes by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_label: Option<String>,
     pub provider: String,
     pub model: String,
     pub account: String,
@@ -519,6 +532,9 @@ mod tests {
             ts: DateTime::from_timestamp(minute * 60, 0).unwrap(),
             client: "responses",
             client_app: None,
+            source: None,
+            key: None,
+            key_label: None,
             provider: "codex".into(),
             model: "test".into(),
             account: "test".into(),

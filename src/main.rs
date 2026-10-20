@@ -1,4 +1,5 @@
 mod accounts;
+mod addresses;
 mod admission;
 mod affinity;
 mod antigravity;
@@ -33,6 +34,7 @@ mod quota;
 mod routing_tests;
 mod schema;
 mod server;
+mod source;
 mod sse;
 mod state;
 mod tls;
@@ -257,6 +259,16 @@ async fn serve(app: Arc<App>) -> Result<()> {
         .parse()
         .or_else(|_| format!("[{}]:{}", cfg.host, cfg.port).parse())
         .context("invalid host/port")?;
+    // The forwarder's port is bound first: while the main port takes connections, so does
+    // this one, and a forwarder that falls back to the main port when this one refuses
+    // never does so against a running Fusebox.
+    let forwarded_addr = (cfg.proxy_protocol_port != 0).then(|| SocketAddr::new(addr.ip(), cfg.proxy_protocol_port));
+    let forwarded_listener = match forwarded_addr {
+        Some(a) => {
+            Some(tokio::net::TcpListener::bind(a).await.with_context(|| format!("binding proxy-protocol-port {a}"))?)
+        }
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     if !cfg.ignored.is_empty() {
         tracing::warn!("these CLIProxyAPI settings have no effect here: {}", cfg.ignored.join(", "));
@@ -295,6 +307,9 @@ async fn serve(app: Arc<App>) -> Result<()> {
     println!("  openai     {shown}/v1");
     println!("  anthropic  {shown}");
     println!("  gemini     {shown}/v1beta");
+    if let Some(a) = forwarded_addr {
+        println!("  forwarded  {a} (PROXY protocol, from {})", trusted_list(&cfg));
+    }
     println!("  accounts   {} loaded from {}", accounts.len(), cfg.auth_dir().display());
     if accounts.is_empty() {
         println!(
@@ -316,6 +331,8 @@ async fn serve(app: Arc<App>) -> Result<()> {
         tracing::info!("shutting down; finishing requests in flight");
         stopping.cancel();
     });
+    let forwarded =
+        forwarded_listener.map(|l| tokio::spawn(serve_forwarded(app.clone(), l, tls.clone(), service.clone())));
     let result = if let Some(tls) = tls {
         let handle = axum_server::Handle::new();
         let stop = handle.clone();
@@ -347,6 +364,13 @@ async fn serve(app: Arc<App>) -> Result<()> {
             }
         }
     };
+    if let Some(task) = forwarded {
+        match task.await {
+            Ok(Err(e)) => tracing::error!("proxy-protocol-port: {e:#}"),
+            Err(e) => tracing::error!("proxy-protocol-port: {e}"),
+            Ok(Ok(())) => {}
+        }
+    }
     if let Some(task) = import_task {
         task.abort();
         let _ = task.await;
@@ -361,6 +385,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     app.sessions.save_async().await;
     save_cooldowns(&app);
     save_attribution(&app, true);
+    app.addresses.save(&app.cfg().named_clients, true);
     if let Some(store) = &app.usage
         && store.shutdown().await.is_err()
     {
@@ -371,6 +396,41 @@ async fn serve(app: Arc<App>) -> Result<()> {
 
 /// How long requests in flight get to finish once Fusebox is asked to stop.
 const DRAIN: Duration = Duration::from_secs(10);
+
+fn trusted_list(cfg: &Config) -> String {
+    match &cfg.trusted_proxies {
+        None => "this machine".into(),
+        Some(list) if list.is_empty() => "nobody (trusted-proxies is empty)".into(),
+        Some(list) => list.join(", "),
+    }
+}
+
+/// `proxy-protocol-port`: the same service, for a TCP forwarder in front. Each connection
+/// must come from a trusted proxy and start with a PROXY header naming the client; TLS,
+/// if on, follows it. Stops with the main port.
+async fn serve_forwarded(
+    app: Arc<App>,
+    listener: tokio::net::TcpListener,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<axum::Router, SocketAddr>,
+) -> Result<()> {
+    let handle = axum_server::Handle::new();
+    let stop = handle.clone();
+    let stopping = app.shutdown.clone();
+    tokio::spawn(async move {
+        stopping.cancelled().await;
+        stop.graceful_shutdown(Some(DRAIN));
+    });
+    let accept = source::ProxyProtocol::new(app);
+    let server = axum_server::from_tcp(listener.into_std()?)?.handle(handle);
+    match tls {
+        Some(tls) => {
+            server.acceptor(axum_server::tls_rustls::RustlsAcceptor::new(tls).acceptor(accept)).serve(service).await?
+        }
+        None => server.acceptor(accept).serve(service).await?,
+    }
+    Ok(())
+}
 
 /// Keeps quota attribution across restarts (at most every 30 seconds, and at
 /// shutdown).
@@ -447,6 +507,7 @@ async fn watch(app: Arc<App>) {
         app.sessions.flush(app.cfg().session_affinity_idle_seconds);
         save_cooldowns(&app);
         save_attribution(&app, false);
+        app.addresses.save(&app.cfg().named_clients, false);
         let t = mtime(&app.cfg_path);
         if t != cfg_time {
             cfg_time = t;

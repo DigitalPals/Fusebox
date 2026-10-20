@@ -1151,3 +1151,196 @@ async fn an_open_proxy_behind_a_reverse_proxy_still_serves_its_own_name() {
     let page = [("host", "box.tail1234.ts.net"), ("x-forwarded-for", "100.64.0.7"), ("origin", "https://evil.example")];
     assert_eq!(post(&page).await.unwrap().status(), 403);
 }
+
+// ------------------------------------------------------------ source addresses
+
+/// `proxy-protocol-port` for a test app, as `serve` starts it.
+async fn forwarded_port(app: &Arc<App>) -> (std::net::SocketAddr, Server) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let service = crate::server::router(app.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            crate::serve_forwarded(app, listener, None, service).await.unwrap();
+        }
+    });
+    (addr, Server { url: format!("http://{addr}"), task })
+}
+
+/// One HTTP/1.1 request on a fresh connection that starts with `preamble` (a PROXY
+/// header, or nothing); the status (0 when the connection was closed) and the response.
+async fn raw(
+    addr: std::net::SocketAddr,
+    preamble: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let body = body.map(Value::to_string).unwrap_or_default();
+    let mut req = format!(
+        "{preamble}{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if !body.is_empty() {
+        req.push_str("Content-Type: application/json\r\n");
+    }
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(&body);
+    let _ = stream.write_all(req.as_bytes()).await;
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut out)).await;
+    let text = String::from_utf8_lossy(&out).to_string();
+    (text.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0), text)
+}
+
+fn proxy_v1(client: &str) -> String {
+    format!("PROXY TCP4 {client} 10.10.0.235 50000 8317\r\n")
+}
+
+fn last_request(s: &Setup) -> crate::state::RequestLog {
+    s.app.stats.recent.lock().iter().last().cloned().unwrap()
+}
+
+async fn hook_containing(s: &Setup, text: &str) -> Option<Value> {
+    for _ in 0..50 {
+        if let Some(h) = s.mock.hooks.lock().iter().find(|h| h["text"].as_str().is_some_and(|t| t.contains(text))) {
+            return Some(h.clone());
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn forwarded_connections_carry_the_client_address() {
+    let s = setup(|cfg, url| {
+        cfg.api_keys.clear();
+        let client =
+            |id: &str| NamedClient { id: id.into(), label: id.into(), key: format!("fbx_{id}"), ..Default::default() };
+        cfg.named_clients =
+            vec![client("beast"), NamedClient { addresses: vec!["10.10.0.0/24".into()], ..client("locked") }];
+        cfg.notifications.webhooks = vec![format!("{url}/hook")];
+    })
+    .await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let body = json!({"model": "gpt-up", "stream": true, "input": [{"role":"user","content":"hi"}]});
+    let beast = [("authorization", "Bearer fbx_beast")];
+    let source = |log: &crate::state::RequestLog| log.source.clone().map(|x| (x.ip.to_string(), x.via, x.login));
+    use crate::source::Via;
+
+    // A LAN client through the gate is seen as itself, with its key.
+    let (status, text) = raw(gate, &proxy_v1("10.10.0.7"), "POST", "/v1/responses", &beast, Some(&body)).await;
+    assert_eq!(status, 200, "{text}");
+    let log = last_request(&s);
+    assert_eq!(source(&log), Some(("10.10.0.7".into(), Via::ProxyProtocol, None)));
+    assert_eq!((log.key.as_deref(), log.key_label.as_deref()), (Some("beast"), Some("beast")));
+    // Its own forwarding header is not believed.
+    let spoof = [("authorization", "Bearer fbx_beast"), ("x-forwarded-for", "127.0.0.1")];
+    raw(gate, &proxy_v1("10.10.0.7"), "POST", "/v1/responses", &spoof, Some(&body)).await;
+    assert_eq!(source(&last_request(&s)).unwrap().0, "10.10.0.7");
+    // tailscale serve through the gate: the PROXY header says loopback, tailscale says who.
+    let tailnet = [
+        ("authorization", "Bearer fbx_beast"),
+        ("x-forwarded-for", "100.101.7.12"),
+        ("tailscale-user-login", "someone@github"),
+    ];
+    let (status, _) = raw(gate, &proxy_v1("127.0.0.1"), "POST", "/v1/responses", &tailnet, Some(&body)).await;
+    assert_eq!(status, 200);
+    assert_eq!(source(&last_request(&s)), Some(("100.101.7.12".into(), Via::Forwarded, Some("someone@github".into()))));
+    // The first address was quiet; the next one is news.
+    let alert = hook_containing(&s, "beast used from a new address").await.expect("a new-address notification");
+    assert!(alert["text"].as_str().unwrap().contains("100.101.7.12 (Tailscale user someone@github)"), "{alert}");
+    assert_eq!(alert["event"], "client_new_address");
+    assert!(hook_containing(&s, "10.10.0.7 for the first time").await.is_none());
+    // A direct connection is itself too.
+    let (status, _) = ask(&s, "fbx_beast", "gpt-up", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(source(&last_request(&s)), Some(("127.0.0.1".into(), Via::Direct, None)));
+
+    // A key with an address list only works from there, on every path.
+    let locked = [("authorization", "Bearer fbx_locked")];
+    let (status, _) = raw(gate, &proxy_v1("10.10.0.9"), "POST", "/v1/responses", &locked, Some(&body)).await;
+    assert_eq!(status, 200);
+    let (status, text) = raw(gate, &proxy_v1("192.168.1.9"), "POST", "/v1/responses", &locked, Some(&body)).await;
+    assert_eq!(status, 403);
+    assert!(text.contains("this key doesn't work from 192.168.1.9"), "{text}");
+    assert!(hook_containing(&s, "locked's key refused").await.is_some());
+    assert_eq!(ask(&s, "fbx_locked", "gpt-up", &[]).await.0, 403, "loopback isn't on its list");
+    let forged = [("authorization", "Bearer fbx_locked"), ("x-forwarded-for", "10.10.0.9")];
+    let (status, _) = raw(gate, &proxy_v1("192.168.1.9"), "POST", "/v1/responses", &forged, Some(&body)).await;
+    assert_eq!(status, 403, "a LAN client can't claim a listed address");
+
+    // Without a management key the dashboard is this machine's alone: a LAN client
+    // through the gate no longer counts as this machine.
+    assert_eq!(raw(gate, &proxy_v1("10.10.0.7"), "GET", "/api/overview", &[], None).await.0, 403);
+    assert_eq!(raw(gate, &proxy_v1("127.0.0.1"), "GET", "/api/overview", &[], None).await.0, 200);
+
+    // The Clients page: each named key's addresses, and what is connected now.
+    let usage: Value = reqwest::get(format!("{}/api/clients/usage", s.proxy.url)).await.unwrap().json().await.unwrap();
+    let ips: Vec<&str> =
+        usage["addresses"]["beast"].as_array().unwrap().iter().map(|a| a["ip"].as_str().unwrap()).collect();
+    assert_eq!(ips.len(), 3, "{usage}");
+    assert!(ips.contains(&"10.10.0.7") && ips.contains(&"100.101.7.12") && ips.contains(&"127.0.0.1"));
+    let lan = usage["addresses"]["beast"].as_array().unwrap().iter().find(|a| a["ip"] == "10.10.0.7").unwrap();
+    assert_eq!((lan["requests"].as_u64(), lan["via"].as_str()), (Some(2), Some("proxy_protocol")));
+    assert_eq!(usage["addresses"]["locked"].as_array().unwrap().len(), 1, "refused requests aren't addresses it uses");
+    let connected = usage["connected"].as_array().unwrap();
+    assert!(
+        connected.iter().any(|c| c["label"] == "beast" && c["ip"] == "10.10.0.7" && c["in_flight"] == 0),
+        "{usage}"
+    );
+
+    // Pinned sessions say where they come from.
+    let account = s.app.pool.all().into_iter().next().unwrap();
+    let activity: Value = reqwest::get(format!("{}/api/accounts/{}/activity", s.proxy.url, account.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        activity["sessions"].as_array().unwrap().iter().all(|x| x["source"]["ip"].is_string() || x["requests"] == 0),
+        "{activity}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_protocol_port_takes_only_trusted_forwarders_with_a_header() {
+    let s = setup(|_, _| {}).await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let key = [("authorization", "Bearer client")];
+    assert_eq!(raw(gate, &proxy_v1("10.10.0.7"), "GET", "/v1/models", &key, None).await.0, 200);
+    assert_eq!(raw(gate, "", "GET", "/v1/models", &key, None).await.0, 0, "no header, no connection");
+    assert_eq!(raw(gate, "PROXY TCP4 nonsense\r\n", "GET", "/v1/models", &key, None).await.0, 0);
+    // LOCAL (a health check) is the forwarder's own connection.
+    assert_eq!(raw(gate, "PROXY UNKNOWN\r\n", "GET", "/v1/models", &key, None).await.0, 200);
+    // Only trusted proxies may connect at all.
+    let mut cfg = (*s.app.cfg()).clone();
+    cfg.trusted_proxies = Some(vec!["10.99.0.1".into()]);
+    s.app.set_config(cfg);
+    assert_eq!(raw(gate, &proxy_v1("10.10.0.7"), "GET", "/v1/models", &key, None).await.0, 0);
+}
+
+#[tokio::test]
+async fn wrong_management_keys_lock_out_only_their_own_address() {
+    let s = setup(|cfg, _| cfg.management_key = "right-key".into()).await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let get = |client: &'static str, key: &'static str| {
+        let bearer = format!("Bearer {key}");
+        async move { raw(gate, &proxy_v1(client), "GET", "/api/overview", &[("authorization", &bearer)], None).await.0 }
+    };
+    for _ in 0..5 {
+        assert_eq!(get("10.10.0.50", "wrong").await, 401);
+    }
+    assert_eq!(get("10.10.0.50", "right-key").await, 429);
+    assert_eq!(get("10.10.0.51", "right-key").await, 200, "another machine through the same gate");
+    let local = reqwest::Client::new().get(format!("{}/api/overview", s.proxy.url)).bearer_auth("right-key");
+    assert_eq!(local.send().await.unwrap().status(), 200);
+}

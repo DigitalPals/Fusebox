@@ -29,7 +29,8 @@ A lean rewrite of CLIProxyAPI (Go): one binary, no runtime, an embedded dashboar
 
 - Providers: Claude (OAuth + key), Codex/ChatGPT (OAuth + key), Gemini (key), Vertex AI (service account + key), Antigravity (OAuth), Grok/xAI (device code + key), Kimi (device code + key), Meta (device code + key), Devin (OAuth), any OpenAI-compatible endpoint. Images through `/v1/images/*`, xAI video through `/v1/videos/*`, embeddings through `/v1/embeddings` (API keys only).
 - Routing extras: model groups (fallback chains or spread), a background model for Claude Code's Haiku calls, account priority, failover before the first token, cooldowns that survive restarts.
-- Named clients can carry limits: models, programs, requests a minute, tokens a day, estimated dollars a month, an end date.
+- Named clients can carry limits: models, programs, addresses, requests a minute, tokens a day, estimated dollars a month, an end date.
+- Every request records its source address (directly, from a trusted reverse proxy's `X-Forwarded-For`, or from a TCP forwarder's PROXY protocol header on `proxy-protocol-port`) and its client key. Config, Clients shows each named key's addresses and what is connected now; a key seen at a new address can notify.
 - Notifications reach installed apps by web push and chat by webhooks (Discord, Slack, Teams, Telegram, ntfy, generic JSON).
 - Operations: `/readyz`, Prometheus `/metrics`, JSON logs, `fusebox usage backup`, a nonroot Docker image.
 - Dashboard is vanilla HTML/CSS/JS embedded in the binary; no build step, no external requests (no CDNs, no hosted fonts: IBM Plex Sans, IBM Plex Sans Condensed and DM Mono are self-hosted from the binary).

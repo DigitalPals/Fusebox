@@ -279,6 +279,9 @@ pub async fn handle(app: Arc<App>, headers: HeaderMap, auth: crate::server::Clie
     if crate::clients::observe(&headers) {
         app.models.save_clients();
     }
+    // An open socket shows on the dashboard's connected list until it closes.
+    let key = headers.get(crate::usage::capture::CLIENT_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let _connected = crate::source::Source::from_headers(&headers).map(|s| app.addresses.begin(key, &s, true));
     let (mut tx, mut rx) = socket.split();
     let mut sess = Session::default();
     let (interrupt, interrupts) = tokio::sync::mpsc::unbounded_channel();

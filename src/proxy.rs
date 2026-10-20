@@ -64,6 +64,8 @@ pub struct Tracker {
     analytics: Option<crate::usage::capture::RequestUsage>,
     downstream: crate::diagnostics::Downstream,
     logical_final: bool,
+    /// Keeps the request on the dashboard's connected list until it ends.
+    connected: Option<crate::addresses::Guard>,
 }
 
 impl Tracker {
@@ -74,6 +76,7 @@ impl Tracker {
             analytics: Some(crate::usage::capture::RequestUsage::new(app.usage.clone(), model)),
             downstream: crate::diagnostics::Downstream::current(),
             logical_final: true,
+            connected: None,
             started: Instant::now(),
             acct: None,
             stream_usage: Usage::default(),
@@ -86,6 +89,9 @@ impl Tracker {
                 ts: Utc::now(),
                 client: client.as_str(),
                 client_app: None,
+                source: None,
+                key: None,
+                key_label: None,
                 provider: String::new(),
                 model: model.to_string(),
                 account: String::new(),
@@ -125,9 +131,20 @@ impl Tracker {
         self.acct = Some(acct.clone());
     }
 
-    /// Names the client program from its User-Agent, for the dashboard.
+    /// Names the client program from its User-Agent, and the key and address it came
+    /// with, for the dashboard.
     pub fn client_app(&mut self, headers: &HeaderMap) {
         self.log.client_app = client_app(headers);
+        self.log.source = crate::source::Source::from_headers(headers);
+        self.log.key = headers
+            .get(crate::usage::capture::CLIENT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .filter(|k| !k.is_empty())
+            .map(String::from);
+        self.log.key_label = self.log.key.as_deref().map(|k| crate::mgmt::client_label(&self.app.cfg(), k));
+        if let Some(source) = &self.log.source {
+            self.connected = Some(self.app.addresses.begin(self.log.key.as_deref().unwrap_or(""), source, false));
+        }
         if let Some(a) = &mut self.analytics {
             a.client(headers);
             a.program(self.log.client_app);
@@ -290,6 +307,7 @@ impl Tracker {
             failure.as_ref().map(|f| f.kind).or_else(|| crate::diagnostics::failure_kind(status, error.as_deref()))
         };
         self.load = None;
+        self.connected = None;
         self.app.stats.active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         let (input, output, cache) = crate::state::usage_tokens(usage);
         self.log.status = status;

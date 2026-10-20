@@ -132,6 +132,12 @@ pub fn counted_tokens(input_and_writes: u64, output: u64) -> u64 {
     input_and_writes.saturating_add(output)
 }
 
+/// Whether a named client's address list lets this request in; the source comes from
+/// `source::layer`. A list with no source to check refuses.
+pub fn address_allowed(client: &NamedClient, headers: &HeaderMap) -> bool {
+    crate::source::allowed(&client.addresses, crate::source::Source::from_headers(headers).map(|s| s.ip))
+}
+
 impl Clients {
     pub fn new(store: Option<Store>) -> Self {
         Self { store, ..Default::default() }
@@ -144,6 +150,10 @@ impl Clients {
             && now.date_naive() > last
         {
             return Err(denied(401, format!("this key expired on {last}")));
+        }
+        if !address_allowed(client, headers) {
+            let from = crate::source::Source::from_headers(headers).map(|s| s.ip.to_string());
+            return Err(denied(403, format!("this key doesn't work from {}", from.as_deref().unwrap_or("here"))));
         }
         if !client.user_agents.is_empty() {
             let agent = headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or_default();

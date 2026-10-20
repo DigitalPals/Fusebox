@@ -367,7 +367,9 @@ pub(crate) async fn auth(
         .uri()
         .query()
         .and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned()));
-    let ip = addr.ip().to_canonical();
+    // Each client has its own count, also behind a proxy that names it: one machine's wrong
+    // keys must not lock everyone else out.
+    let ip = req.extensions().get::<crate::source::Source>().map_or_else(|| addr.ip().to_canonical(), |s| s.ip);
     if let Some(wait) = app.key_guesses.blocked(ip) {
         let mut resp = err(StatusCode::TOO_MANY_REQUESTS, format!("too many wrong keys; try again in {wait}s"));
         resp.headers_mut().insert("retry-after", wait.into());
@@ -663,6 +665,8 @@ async fn account_activity(State(app): State<Arc<App>>, Path(id): Path<String>) -
         since: Option<chrono::DateTime<chrono::Utc>>,
         client: &'static str,
         client_app: Option<&'static str>,
+        source: Option<crate::source::Source>,
+        key_label: Option<String>,
         model: String,
         requests: u64,
         cache_tokens: u64,
@@ -676,6 +680,10 @@ async fn account_activity(State(app): State<Arc<App>>, Path(id): Path<String>) -
         s.session.clone_from(session);
         s.since = Some(s.since.map_or(log.ts, |t| t.min(log.ts)));
         (s.client, s.client_app) = (log.client, log.client_app);
+        if log.source.is_some() {
+            s.source.clone_from(&log.source);
+            s.key_label.clone_from(&log.key_label);
+        }
         s.model.clone_from(&log.model);
         s.requests += 1;
         s.cache_tokens += log.cache_tokens;
@@ -698,6 +706,8 @@ async fn account_activity(State(app): State<Arc<App>>, Path(id): Path<String>) -
                 "since": s.since.map(|t| t.to_rfc3339()),
                 "client": Some(s.client).filter(|c| !c.is_empty()),
                 "client_app": s.client_app,
+                "source": s.source,
+                "key_label": s.key_label,
                 "model": Some(s.model).filter(|m| !m.is_empty()),
                 "requests": s.requests,
                 "cache_tokens": s.cache_tokens,
@@ -1392,8 +1402,12 @@ fn set_entry_priority(entry: &mut Value, priority: i32) {
     }
 }
 
+/// Addresses listed per named client.
+const ADDRESSES_SHOWN: usize = 20;
+
 /// What each named client used today and this month, beside its limits, and when each
-/// client key was last used since Fusebox started; shared keys in `api-keys` order.
+/// client key was last used since Fusebox started (shared keys in `api-keys` order),
+/// where named clients were used from, and which keys and addresses are connected now.
 async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
     let cfg = app.cfg();
     let clients: serde_json::Map<String, Value> =
@@ -1406,11 +1420,40 @@ async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
         .filter_map(|c| Some((c.id.clone(), json!(app.clients.last_used(&c.id).max(key_used(&c.key))?))))
         .collect();
     let shared_last_used: Vec<_> = cfg.api_keys.iter().map(|k| key_used(k)).collect();
+    // Where each named client's key was used from, most recent first.
+    let addresses: serde_json::Map<String, Value> = cfg
+        .named_clients
+        .iter()
+        .map(|c| {
+            let seen: Vec<Value> = app
+                .addresses
+                .history(&c.id)
+                .into_iter()
+                .take(ADDRESSES_SHOWN)
+                .map(|(ip, s)| {
+                    json!({ "ip": ip, "via": s.via, "login": s.login, "first": s.first, "last": s.last, "requests": s.requests })
+                })
+                .collect();
+            (c.id.clone(), json!(seen))
+        })
+        .collect();
+    let connected: Vec<Value> = app
+        .addresses
+        .connected()
+        .into_iter()
+        .map(|c| {
+            let mut v = json!(c);
+            v["label"] = json!(client_label(&cfg, &c.key));
+            v
+        })
+        .collect();
     Json(json!({
         "clients": clients,
         "estimates": app.usage.is_some(),
         "last_used": last_used,
         "shared_last_used": shared_last_used,
+        "addresses": addresses,
+        "connected": connected,
     }))
 }
 

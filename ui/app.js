@@ -259,6 +259,17 @@ const when = (iso) => (Date.parse(iso) - Date.now() < 20 * 3600e3 ? hm(iso) : `$
 const liveLeft = (iso, compact = false) => `<span data-until="${esc(iso)}"${compact ? ' data-countdown="compact"' : ''}>${esc(compact ? compactLeft(iso) : left(iso))}</span>`;
 const liveAgo = (iso) => `<span data-ago="${esc(iso || '')}">${ago(iso)}</span>`;
 const plural = (n, word, many = `${word}s`) => `${fmt(n)} ${n === 1 ? word : many}`;
+
+// Where a request came from (src/source.rs): the address, and how Fusebox knows it.
+const addrText = (ip) => (S.private ? HIDDEN : String(ip ?? ''));
+function viaText(s) {
+  if (!s) return '';
+  if (s.via === 'forwarded') return s.login ? `via Tailscale · ${S.private ? HIDDEN : s.login}` : 'via reverse proxy';
+  if (s.via === 'proxy_protocol') return 'via TCP forwarder';
+  return /^(127\.|::1$)/.test(s.ip || '') ? 'this machine' : 'direct';
+}
+const sourceText = (s) => (s ? `${addrText(s.ip)} · ${viaText(s)}` : '');
+const keyText = (label) => (S.private ? HIDDEN : label || '');
 const cap = (s) => String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1);
 
 class ApiError extends Error {
@@ -2300,7 +2311,8 @@ function detSessionsHTML() {
     const coverage = usageCoverageText(s);
     const meta = s.requests ? `<span class="mono">${esc(s.model || '')}</span><span>· ${plural(s.requests, 'recent req', 'recent req')} · ${aggregateTokensHTML(s, 'cache_tokens')} cached${coverage ? ` · usage: ${coverage}` : ''}</span>` : '<span>No requests in the last 300</span>';
     const quota = sessionQuotaText(a, s);
-    return `<div class="sess"><div class="sess-top">${fp}<span class="fg2">${esc(client)}</span>${s.active ? '<span class="dot s6 ok" title="A request is in flight"></span>' : ''}<span class="grow"></span><span class="dim" style="font-size:12px">${since}</span></div><div class="sess-meta">${meta}</div>${quota ? `<div class="sess-quota" title="Estimated from quota readings">${esc(quota)}</div>` : ''}</div>`;
+    const from = s.source ? `<div class="sess-meta"><span>from <span class="mono">${esc(sourceText(s.source))}</span>${s.key_label ? ` · key ${esc(keyText(s.key_label))}` : ''}</span></div>` : '';
+    return `<div class="sess"><div class="sess-top">${fp}<span class="fg2">${esc(client)}</span>${s.active ? '<span class="dot s6 ok" title="A request is in flight"></span>' : ''}<span class="grow"></span><span class="dim" style="font-size:12px">${since}</span></div><div class="sess-meta">${meta}</div>${from}${quota ? `<div class="sess-quota" title="Estimated from quota readings">${esc(quota)}</div>` : ''}</div>`;
   }).join('');
 }
 
@@ -2628,6 +2640,7 @@ function textMatches(r) {
   const acct = accountOf(r);
   const attempts = (r.routing_attempts || []).flatMap((a) => [a.account, a.previous_account, a.reason, routingReason(a.reason)]);
   return [r.model, r.account, acct && acctLabel(acct), acct && provName(acct), r.provider, r.client, CLIENT[r.client], r.client_app, String(r.status), r.error,
+    r.source?.ip, r.source?.login, r.key_label,
     r.session_id, r.session_source, r.routing_strategy, r.routing_reason, routingReason(r.routing_reason),
     r.routing_warning, ...(ROUTING_WARNING[r.routing_warning] || []), ...attempts,
   ].some((s) => s != null && String(s).toLowerCase().includes(q));
@@ -2678,7 +2691,7 @@ function reqToolsHTML(base = visibleRequests()) {
 }
 
 function requestsHTML() {
-  const search = `<div class="searchbox"${mob() ? ' style="flex:1;height:44px;padding:0 12px"' : ''}>${ICON.search}<label class="sr-only" for="req-filter">Filter requests</label><input id="req-filter" type="text" placeholder="${mob() ? 'Session, account, model…' : 'Filter by session, account, model…'}" value="${esc(S.filter)}" autocomplete="off" spellcheck="false"${mob() ? ' style="font-size:14px"' : ''}>${S.filter && !mob() ? '<button class="clear" type="button" data-act="clear-filter" aria-label="Clear filter">×</button>' : ''}</div>`;
+  const search = `<div class="searchbox"${mob() ? ' style="flex:1;height:44px;padding:0 12px"' : ''}>${ICON.search}<label class="sr-only" for="req-filter">Filter requests</label><input id="req-filter" type="text" placeholder="${mob() ? 'Session, account, address…' : 'Filter by session, account, model, address…'}" value="${esc(S.filter)}" autocomplete="off" spellcheck="false"${mob() ? ' style="font-size:14px"' : ''}>${S.filter && !mob() ? '<button class="clear" type="button" data-act="clear-filter" aria-label="Clear filter">×</button>' : ''}</div>`;
   const head = mob()
     ? `<div style="display:flex;gap:8px">${search}<span id="req-pause" style="display:contents">${pauseHTML()}</span></div>`
     : `<div class="page-head"><div><h1 class="h-page">Requests</h1><p class="meta">The last 300 since the server started, newest first. Click a row to see why it went where it did.</p></div>
@@ -2733,6 +2746,8 @@ function reqItemHTML(r) {
         <div><span>Client</span><span>${esc(client)}</span></div>
         <div><span>Endpoint</span><span class="mono">${esc(endpoint)}</span></div>
         <div><span>Session</span><span class="mono" title="${esc(r.session_id || '')}">${esc(r.session_id ? r.session_id.slice(0, 8) : 'none')}</span></div>
+        ${r.source ? `<div><span>Source</span><span class="mono">${esc(sourceText(r.source))}</span></div>` : ''}
+        ${r.key_label ? `<div><span>Key</span><span>${esc(keyText(r.key_label))}</span></div>` : ''}
         <div class="why-ft"><span>Latency</span><span class="mono">${ms(r.ttft_ms)} to first token</span></div>
         <div class="why-tok"><span>Tokens</span><span class="mono">${requestTokensHTML(r)}</span></div>
       </div>
@@ -2756,6 +2771,7 @@ function reqMobileHTML(r) {
     <span class="l3">${esc(reqAcctName(r))}${r.routing_reason ? ` · ${noteHTML(r)}` : ''}${r.session_id ? ` · <span class="mono">${esc(r.session_id.slice(0, 8))}</span>` : ''}</span>
     ${err ? `<span class="errline${r.status === 499 ? ' dim' : ''}" style="font-size:11.5px${r.status === 499 ? ';color:var(--fg-3)' : ''}">${esc(err)}</span>` : ''}
     ${open ? `<div class="m-why"><p>${esc(whySentence(r))}</p><span class="meta" style="font-size:12px">${esc(client)} · <span class="mono">${esc(endpoint)}</span></span>
+      ${r.source || r.key_label ? `<span class="meta" style="font-size:12px">${r.source ? `From <span class="mono">${esc(sourceText(r.source))}</span>` : ''}${r.source && r.key_label ? ' · ' : ''}${r.key_label ? `key ${esc(keyText(r.key_label))}` : ''}</span>` : ''}
       <span class="meta" style="font-size:12px">First token ${ms(r.ttft_ms)} · ${requestTokensHTML(r)}</span>
       ${cachePolicyHTML(r)}
       <div class="acts">${acct ? `<button class="btn" type="button" data-act="open-acc" data-id="${esc(acct.id)}">Open account</button>` : ''}${r.session_id ? `<button class="btn" type="button" data-act="filter-session" data-id="${esc(r.session_id)}">Session ${esc(r.session_id.slice(0, 8))}</button>` : ''}</div></div>` : ''}

@@ -24,6 +24,16 @@ pub struct Config {
     /// With a management key set, allow the dashboard from other machines (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub management_allow_remote: Option<bool>,
+    /// Proxies whose word on a client's address counts: forwarding headers from them,
+    /// and PROXY protocol headers on `proxy-protocol-port`. Addresses or ranges; this
+    /// machine (127.0.0.0/8, ::1) when unset, nobody when empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_proxies: Option<Vec<String>>,
+    /// A second port, on the same address, for a TCP forwarder in front (one that passes
+    /// TLS through, such as HAProxy in TCP mode): every connection must start with a
+    /// PROXY protocol header naming the client. 0 is off. Needs a restart.
+    #[serde(skip_serializing_if = "port_off")]
+    pub proxy_protocol_port: u16,
     /// Optional upstream proxy (http://, https://, socks5://).
     pub proxy_url: String,
     /// How many different accounts to try before giving up on a request.
@@ -210,6 +220,9 @@ pub struct NamedClient {
     /// User-Agent patterns its requests must match (`claude-cli/*`); empty allows any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_agents: Vec<String>,
+    /// Addresses or ranges its requests must come from (`10.10.0.0/24`); empty allows any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_minute: Option<u32>,
     /// Input, cache-write and output tokens per day (cache reads are not counted).
@@ -248,6 +261,9 @@ pub struct Notifications {
     pub account_used_up: bool,
     /// An account error, or three or more failed requests in an hour.
     pub account_errors: bool,
+    /// A named client's key used from an address it wasn't used from before, or refused
+    /// at one its address list doesn't allow.
+    pub client_new_address: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -261,6 +277,7 @@ impl Default for Notifications {
             provider_exhausted: true,
             account_used_up: false,
             account_errors: false,
+            client_new_address: true,
             webhooks: vec![],
         }
     }
@@ -314,6 +331,10 @@ fn is_zero(n: &i32) -> bool {
     *n == 0
 }
 
+fn port_off(port: &u16) -> bool {
+    *port == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct CompatEntry {
@@ -362,6 +383,8 @@ impl Default for Config {
             usage: Default::default(),
             management_key: String::new(),
             management_allow_remote: None,
+            trusted_proxies: None,
+            proxy_protocol_port: 0,
             proxy_url: String::new(),
             request_retry: 3,
             first_token_timeout_seconds: 120,
@@ -417,6 +440,12 @@ api-keys: []
 # Protects the dashboard + management API. Empty = only reachable from localhost.
 management-key: ""
 
+# Where requests come from. Reverse proxies on this machine (tailscale serve, nginx, Caddy)
+# name the client in X-Forwarded-For; a TCP forwarder that passes TLS through can't, so
+# give it a port of its own where each connection starts with a PROXY protocol header.
+# trusted-proxies: [127.0.0.1, ::1]   # whose word counts (default: this machine)
+# proxy-protocol-port: 8319           # 0 = off; same address as host; needs a restart
+
 proxy-url: ""               # optional upstream proxy, e.g. socks5://127.0.0.1:1080
 request-retry: 3            # accounts to try before failing a request
 first-token-timeout-seconds: 120 # a stream silent this long moves to the next account (0 = off)
@@ -455,6 +484,7 @@ usage:
 #   provider-exhausted: true   # every account of a provider is out, and when one is back
 #   account-used-up: false     # one account used up its 5-hour or weekly limit
 #   account-errors: false      # account errors and runs of failed requests
+#   client-new-address: true   # a named client's key used from a new address, or refused at one
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 
@@ -481,6 +511,7 @@ named-clients: []
 #    tokens-per-day: 5000000             # input + output; cache reads don't count
 #    usd-per-month: 100                  # estimated at API list prices
 #    expires: 2026-12-31
+#    addresses: [10.10.0.0/24]           # only from these addresses or ranges
 
 # API keys (optional). Accounts (Claude, Codex, Antigravity, Kimi, xAI, Meta, Devin, Vertex)
 # are added with `fusebox login <provider>` or from the dashboard.
@@ -654,6 +685,12 @@ impl Config {
                 client.models.iter().chain(&client.user_agents).all(|p| !p.trim().is_empty()),
                 "named-clients: {id} has an empty model or user-agent pattern"
             );
+            for address in &client.addresses {
+                anyhow::ensure!(
+                    crate::source::Cidr::parse(address).is_some(),
+                    "named-clients: {id}: \"{address}\" is not an address or range (10.10.0.7, 10.10.0.0/24)"
+                );
+            }
             anyhow::ensure!(
                 client.requests_per_minute != Some(0) && client.tokens_per_day != Some(0),
                 "named-clients: {id}: a limit of 0 blocks every request; remove the limit or raise it"
@@ -684,6 +721,16 @@ impl Config {
                 check_proxy_url(url).map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
             }
         }
+        for proxy in cfg.trusted_proxies.iter().flatten() {
+            anyhow::ensure!(
+                crate::source::Cidr::parse(proxy).is_some(),
+                "trusted-proxies: \"{proxy}\" is not an address or range (127.0.0.1, 10.0.0.0/8)"
+            );
+        }
+        anyhow::ensure!(
+            cfg.proxy_protocol_port == 0 || cfg.proxy_protocol_port != cfg.port,
+            "proxy-protocol-port must differ from port"
+        );
         for hook in &cfg.notifications.webhooks {
             check_webhook_url(hook).map_err(|e| anyhow::anyhow!("notifications.webhooks: {e}"))?;
         }
@@ -790,5 +837,34 @@ mod tests {
             let err = parse(&clients).unwrap_err().to_string();
             assert!(err.contains(problem), "{err}");
         }
+    }
+
+    #[test]
+    fn source_settings_are_checked() {
+        let cfg = Config::parse(
+            "trusted-proxies: [127.0.0.1, 10.0.0.0/8, \"::1\"]\nproxy-protocol-port: 8319\nnamed-clients:\n  - id: a\n    label: A\n    key: fbx_a\n    addresses: [10.10.0.0/24, 100.101.7.12]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.trusted_proxies.as_ref().unwrap().len(), 3);
+        assert_eq!(cfg.proxy_protocol_port, 8319);
+        assert_eq!(cfg.named_clients[0].addresses.len(), 2);
+        let defaults = Config::parse("").unwrap();
+        assert_eq!((defaults.trusted_proxies.clone(), defaults.proxy_protocol_port), (None, 0));
+        assert!(defaults.notifications.client_new_address, "new-address notifications are on unless turned off");
+        for (text, problem) in [
+            ("trusted-proxies: [example.com]\n", "trusted-proxies"),
+            ("trusted-proxies: [10.0.0.0/40]\n", "trusted-proxies"),
+            ("port: 8317\nproxy-protocol-port: 8317\n", "must differ from port"),
+            (
+                "named-clients:\n  - id: a\n    label: A\n    key: fbx_a\n    addresses: [\"10.0.0\"]\n",
+                "not an address or range",
+            ),
+        ] {
+            let err = Config::parse(text).unwrap_err().to_string();
+            assert!(err.contains(problem), "{text}: {err}");
+        }
+        // Unset, they stay out of the settings the dashboard reads.
+        let values = serde_json::to_value(&defaults).unwrap();
+        assert!(values.get("trusted-proxies").is_none() && values.get("proxy-protocol-port").is_none());
     }
 }

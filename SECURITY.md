@@ -22,6 +22,12 @@ an answer within a few days.
 - Give each client its own key (`named-clients`, or Config, Clients) and set `management-key`
   whenever anything other than this machine can reach the port, and always behind a reverse
   proxy. A key per client can be replaced or removed without touching the others.
+- Behind a TCP forwarder that passes TLS through, give it `proxy-protocol-port` so Fusebox
+  sees each client's address, and keep that port reachable only from the forwarder. A
+  forwarder on this machine that connects to the ordinary port looks like this machine to
+  Fusebox. `trusted-proxies` lists whose forwarding headers count (this machine by default).
+- An `addresses` list on a named client refuses its key from anywhere else. It is only as
+  good as the address Fusebox sees: see `docs/source-addresses.md`.
 - Keep `auth-dir` and `config.yaml` readable only by the user Fusebox runs as. On Windows,
   keep them inside your user profile, whose permissions already exclude other users.
 - Prefer the `-nonroot` Docker image when you don't need CLIProxyAPI's exact layout.

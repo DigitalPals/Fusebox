@@ -242,7 +242,7 @@ Everything is served from the binary at `/`, with no external requests.
 </tr>
 <tr>
 <td valign="top"><b>Accounts:</b> used or remaining 5-hour and weekly quota as segmented meters, when each would run out at its pace, token expiry, cooldowns per model, and a breaker for each account: refresh, switch off, remove. Above them, every subscription's next weekly reset on one seven-day line.</td>
-<td valign="top"><b>Requests:</b> every request as it happens, showing which client format went to which provider, time to first token and tokens. Click a row to see why it went to that account; click a session to follow it.</td>
+<td valign="top"><b>Requests:</b> every request as it happens, showing which client format went to which provider, time to first token and tokens. Click a row to see why it went to that account, which key sent it and from which address; click a session to follow it.</td>
 </tr>
 <tr>
 <td width="50%" valign="top"><img src="assets/screenshots/account.png" alt="One Claude account's page: its 5-hour and weekly windows with the clients that used each, its Max 20x plan, its hour of load and its pinned coding sessions"></td>
@@ -309,9 +309,10 @@ named-clients:
     tokens-per-day: 5000000           # input, cache writes and output; cache reads don't count
     usd-per-month: 100                # estimated at API list prices (needs the usage database)
     expires: 2026-12-31               # the last day the key works, server time
+    addresses: [10.10.0.0/24]         # addresses or ranges it may come from (see below)
 ```
 
-Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it, with when each key was last used since Fusebox started.
+Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it, with when each key was last used since Fusebox started, the addresses each named key was used from, and which keys and addresses are connected now. A named key used from an address it wasn't used from before sends a notification (`client-new-address`, on by default), as does one refused by its `addresses` list. Where an address comes from behind a proxy is in [Source addresses](docs/source-addresses.md).
 
 ```yaml
 host: "127.0.0.1"             # 0.0.0.0 to expose it (add a client first)
@@ -510,9 +511,9 @@ The default tags keep CLIProxyAPI's layout (root, `/CLIProxyAPI`), so they stay 
 
 ### HTTPS with Tailscale, nginx or Caddy
 
-Installing the dashboard as an app and push notifications need HTTPS. Either give Fusebox a certificate (`tls` in the config above) or keep it on `127.0.0.1` and put an HTTPS proxy in front. **Behind any proxy, set a `management-key`:** a proxy on the same machine connects from `127.0.0.1`, which Fusebox would otherwise trust as local. Fusebox recognises Tailscale, nginx and Caddy by the `X-Forwarded-For` header they add and asks them for the key, but a proxy that forwards raw TCP adds nothing. Add clients too, unless everyone who can reach the proxy may use your accounts.
+Installing the dashboard as an app and push notifications need HTTPS. Either give Fusebox a certificate (`tls` in the config above) or keep it on `127.0.0.1` and put an HTTPS proxy in front. **Behind any proxy, set a `management-key`:** a proxy on the same machine connects from `127.0.0.1`, which Fusebox would otherwise trust as local. Fusebox recognises Tailscale, nginx and Caddy by the `X-Forwarded-For` header they add, asks them for the key, and takes the client's address from that header. A proxy that forwards raw TCP adds nothing; give it `proxy-protocol-port` instead ([Source addresses](docs/source-addresses.md)). Add clients too, unless everyone who can reach the proxy may use your accounts.
 
-What Fusebox trusts by address alone (the dashboard without a `management-key`, the proxy without client keys on `127.0.0.1`) is refused to web pages: a request whose `Origin` names another site, or that arrives directly with a `Host` naming anything other than this machine, gets a 403, so a site you visit can't reach your accounts or settings. Tools on this machine, and pages served from `localhost`, are unaffected. Five wrong management keys lock that address out, from 30 seconds doubling up to 15 minutes.
+What Fusebox trusts by address alone (the dashboard without a `management-key`, the proxy without client keys on `127.0.0.1`) is refused to web pages: a request whose `Origin` names another site, or that arrives directly with a `Host` naming anything other than this machine, gets a 403, so a site you visit can't reach your accounts or settings. Tools on this machine, and pages served from `localhost`, are unaffected. Five wrong management keys lock that address out, from 30 seconds doubling up to 15 minutes; behind a proxy that names the client, that is the client's address, not the proxy's.
 
 **Tailscale.** With [HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) enabled for your tailnet, this serves Fusebox at `https://<machine>.<tailnet>.ts.net` to your tailnet only:
 

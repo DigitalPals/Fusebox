@@ -774,6 +774,9 @@ pub fn restart_fields(startup: &Config, current: &Config) -> Vec<&'static str> {
     if startup.port != current.port {
         fields.push("port");
     }
+    if startup.proxy_protocol_port != current.proxy_protocol_port {
+        fields.push("PROXY protocol port");
+    }
     if startup.tls.enable != current.tls.enable
         || startup.tls.cert != current.tls.cert
         || startup.tls.key != current.tls.key

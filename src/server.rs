@@ -64,6 +64,8 @@ pub fn router(app: Arc<App>) -> Router {
                 .route("/metrics", get(crate::metrics::metrics))
                 .layer(middleware::from_fn_with_state(app.clone(), crate::mgmt::auth)),
         )
+        // Before anything else, so every check and log line sees the real client.
+        .layer(middleware::from_fn_with_state(app.clone(), crate::source::layer))
         .with_state(app)
 }
 
@@ -134,9 +136,16 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
         } else {
             false
         };
+        let source = req.extensions().get::<crate::source::Source>().cloned();
         if let Some(client) = named
             && let Err(denied) = app.clients.admit(client, req.headers(), !websocket)
         {
+            if let Some(source) = &source
+                && !crate::policy::address_allowed(client, req.headers())
+            {
+                tracing::warn!(client = %client.id, address = %source.ip, "refused a client key from outside its address list");
+                crate::push::client_address(&app, client, source, true);
+            }
             let format = format_for_path(req.uri().path());
             let status = StatusCode::from_u16(denied.status).unwrap_or(StatusCode::FORBIDDEN);
             let mut resp =
@@ -154,6 +163,12 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
         let identity = named
             .map(|c| c.id.clone())
             .or_else(|| provided.as_ref().filter(|_| !cfg.api_keys.is_empty()).map(|_| scope.clone()));
+        if let (Some(client), Some(source)) = (named, &source)
+            && app.addresses.note(&client.id, source) == crate::addresses::Noted::New
+        {
+            tracing::info!(client = %client.id, address = %source.ip, "client key used from a new address");
+            crate::push::client_address(&app, client, source, false);
+        }
         if let Some(identity) = identity {
             app.clients.touch(&identity);
             if let Ok(value) = HeaderValue::from_str(&identity) {

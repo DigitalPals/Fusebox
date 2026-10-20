@@ -163,14 +163,16 @@ function configClientsHTML() {
     ${open ? `<div class="setup" data-setup="">${setupHTML()}</div>` : ''}
     ${sharedKeys().length ? `<div class="cfg-divider"></div><div class="cfg-list" id="shared-keys">${sharedKeysHTML()}</div>` : ''}
     <div class="cfg-divider"></div>
-    <div class="cfg-list" id="named-clients">${namedClientsHTML()}</div>`;
+    <div class="cfg-list" id="named-clients">${namedClientsHTML()}</div>
+    <div class="cfg-divider"></div>
+    <div class="cfg-list" id="connected-now">${connectedHTML()}</div>`;
 }
 
 const sharedKeys = () => configGet(['api-keys']) || [];
 
 // Named clients: a key per machine or tool. Other tools (Whombat, for one) add their own
 // through the same settings API. A row has one thing open at a time.
-const NAMED_ROW = { open: null, setup: null, confirm: null, replace: null, rename: null, renameLabel: '', renameError: '', limits: null, limitsError: '' };
+const NAMED_ROW = { open: null, setup: null, confirm: null, replace: null, rename: null, renameLabel: '', renameError: '', limits: null, limitsError: '', addresses: null };
 const namedIdle = () => ({ adding: false, label: '', error: '', created: null, replaced: false, shown: {}, ...NAMED_ROW,
   shared: { naming: null, label: '', error: '', confirm: null } });
 
@@ -208,13 +210,15 @@ function namedClientsHTML() {
   const shared = sharedKeys().length > 0;
   const off = c.busy ? ' disabled' : '';
   const used = c.clientUsage?.last_used || {};
+  const seen = c.clientUsage?.addresses || {};
   const row = (client) => {
     const name = esc(namedName(client));
     const id = esc(client.id);
     const btn = (act, text, label, cls = '', extra = '') => `<button type="button" class="btn sm${cls}" data-config-act="${act}" data-id="${id}" aria-label="${label}"${extra}${off}>${text}</button>`;
     const shown = !S.private && n.shown[client.id];
     const key = S.private ? secret(client.key) : shown ? client.key : configMask(client.key);
-    const sub = [used[client.id] ? `Last used ${liveAgo(used[client.id])}` : '', S.private ? '' : `<span class="mono">${id}</span>`].filter(Boolean).join(' · ');
+    const from = seen[client.id]?.[0];
+    const sub = [used[client.id] ? `Last used ${liveAgo(used[client.id])}${from ? ` from <span class="mono">${esc(addrText(from.ip))}</span>` : ''}` : '', S.private ? '' : `<span class="mono">${id}</span>`].filter(Boolean).join(' · ');
     const limits = namedLimitsText(client);
     const asking = [n.confirm, n.replace, n.rename, n.limits].includes(client.id);
     const last = list.length === 1 && !shared; // removing it turns client keys off
@@ -223,8 +227,9 @@ function namedClientsHTML() {
     return `<div class="named-row"><span class="cell2"><span>${name}</span>${sub ? `<span class="meta named-sub">${sub}</span>` : ''}${limits ? `<span class="meta named-limits">${esc(limits)}</span>` : ''}</span>
       <span class="named-key"><span class="mono">${esc(key)}</span>${copyBtn(client.key, `Copy the key for ${name}`, 'Key copied')}</span>
       ${asking ? '<span></span>' : `<span class="named-btns">${btn('named-setup', 'Set up', `Set up a tool with the key for ${name}`, '', ` aria-expanded="${n.setup === client.id}"`)}${btn('limits-edit', 'Limits', `Limits for ${name}`)}${btn('named-more', 'More', `More for ${name}`, ' ghost', ` aria-expanded="${n.open === client.id}"`)}</span>`}</div>
-      ${n.open === client.id && !asking ? `<div class="named-more" role="group" aria-label="More for ${name}">${S.private ? '' : btn('named-reveal', shown ? 'Hide key' : 'Show key', `${shown ? 'Hide' : 'Show'} the key for ${name}`, ' ghost')}${btn('named-rename', 'Rename', `Rename ${name}`, ' ghost')}${btn('named-replace', 'Replace key', `Replace the key for ${name}`, ' ghost')}${btn('named-remove', 'Remove', `Remove ${name}`, ' danger')}</div>` : ''}
+      ${n.open === client.id && !asking ? `<div class="named-more" role="group" aria-label="More for ${name}">${S.private ? '' : btn('named-reveal', shown ? 'Hide key' : 'Show key', `${shown ? 'Hide' : 'Show'} the key for ${name}`, ' ghost')}${btn('named-addresses', 'Addresses', `Where the key for ${name} was used from`, ' ghost', ` aria-expanded="${n.addresses === client.id}"`)}${btn('named-rename', 'Rename', `Rename ${name}`, ' ghost')}${btn('named-replace', 'Replace key', `Replace the key for ${name}`, ' ghost')}${btn('named-remove', 'Remove', `Remove ${name}`, ' danger')}</div>` : ''}
       ${n.setup === client.id ? `<div class="setup named-setup" data-setup="${id}" data-setup-uid="-row">${setupHTML(client.key, '-row')}</div>` : ''}
+      ${n.addresses === client.id ? namedAddressesHTML(client, seen[client.id] || []) : ''}
       ${n.rename === client.id ? namedRenameForm(client) : ''}
       ${n.limits === client.id ? namedLimitsForm(client) : ''}
       ${n.replace === client.id ? confirm(`Replace the key for ${name}? Tools using the current key stop working until you give them the new one.`, 'named-replace-keep', 'named-replace-confirm', 'Replacing…', 'Replace key') : ''}
@@ -280,10 +285,37 @@ function sharedKeysHTML() {
     <div class="named-list">${keys.map(row).join('')}</div>`;
 }
 
+// Where a named client's key was used from: kept for half a year, most recent first.
+function namedAddressesHTML(client, list) {
+  const name = esc(namedName(client));
+  const day = (iso) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const rows = list.map((a) => `<div class="addr-row" role="row"><span class="mono" role="cell">${esc(addrText(a.ip))}</span>
+    <span class="meta" role="cell">${esc(viaText(a))} · ${plural(a.requests, 'request')} · first ${esc(day(a.first))} · last ${liveAgo(a.last)}</span></div>`).join('');
+  const listed = client.addresses?.length ? ` Its key only works from ${esc(client.addresses.map(addrText).join(', '))}.` : ' To refuse other addresses, set Addresses under Limits.';
+  return `<div class="named-addresses">${rows ? `<div role="table" aria-label="Addresses the key for ${name} was used from">${rows}</div>` : '<p class="cfg-empty">No requests with this key yet.</p>'}
+    <p class="meta">The ${fmt(20)} most recent of the last half year. A new one sends a notification when that is on.${listed}</p></div>`;
+}
+
+// Keys and addresses with requests in flight or sockets open, and those seen in the
+// last five minutes, for every key (named, shared, or none).
+function connectedHTML() {
+  const list = S.config.clientUsage?.connected;
+  const head = configListHead('Connected now', 'Which machine is using Fusebox: requests in flight, open sockets, and what was seen in the last five minutes.');
+  if (!list) return `${head}<p class="cfg-empty">Loading…</p>`;
+  if (!list.length) return `${head}<p class="cfg-empty">Nothing in the last five minutes.</p>`;
+  const rows = list.map((c) => {
+    const busy = [c.in_flight ? `${plural(c.in_flight, 'request')} in flight` : '', c.sockets ? plural(c.sockets, 'open socket') : ''].filter(Boolean).join(' · ');
+    return `<div class="named-row conn-row"><span class="cell2"><span>${esc(keyText(c.label))}</span><span class="meta named-sub"><span class="mono">${esc(addrText(c.ip))}</span> · ${esc(viaText(c))}</span></span>
+      <span class="meta named-used">${busy ? `<span class="dot s6 ok"></span> ${busy}` : `Last request ${liveAgo(c.last)}`}</span><span></span></div>`;
+  }).join('');
+  return `${head}<div class="named-list">${rows}</div>`;
+}
+
 // Limits a named client's key can have; each is optional and works on its own.
 const LIMITS = [
   ['models', 'Models', 'claude-*, gpt-6-astra', 'list', 'Patterns with * wildcards. Empty allows every model.'],
   ['user-agents', 'Programs', 'claude-cli/*, codex*', 'list', 'User-Agent patterns its requests must match. Empty allows any.'],
+  ['addresses', 'Addresses', '10.10.0.0/24, 100.101.7.12', 'list', 'Addresses or ranges its requests must come from. Empty allows any. Behind a proxy, Fusebox must be told the real address: see trusted-proxies and proxy-protocol-port.'],
   ['requests-per-minute', 'Requests a minute', '60', 'int', ''],
   ['tokens-per-day', 'Tokens a day', '5000000', 'int', 'Input and output; cache reads don’t count.'],
   ['usd-per-month', 'Dollars a month', '100', 'num', 'Estimated at API list prices.'],
@@ -304,6 +336,7 @@ function namedLimitsText(client) {
   }
   if (client.models?.length) parts.push(client.models.join(', '));
   if (client['user-agents']?.length) parts.push(`from ${client['user-agents'].join(', ')}`);
+  if (client.addresses?.length) parts.push(`only at ${client.addresses.map(addrText).join(', ')}`);
   return parts.join(' · ');
 }
 
@@ -373,6 +406,7 @@ async function loadClientUsage(force = false) {
     if (S.route !== 'config' || c.section !== 'clients' || c.named.limits || document.activeElement?.closest('#named-clients form, #shared-keys form')) return;
     patch('named-clients', namedClientsHTML);
     patch('shared-keys', sharedKeysHTML);
+    patch('connected-now', connectedHTML);
   } catch { /* the lists still show without their usage */ }
 }
 
@@ -465,6 +499,7 @@ function namedAction(act, id) {
   if (act === 'named-done') { n.created = null; render(); return focus('[data-config-act="named-add"]'); }
   if (act === 'named-more') return row({ open: n.open === id ? null : id }, byId('named-more'));
   if (act === 'named-setup') { n.created = null; return row({ setup: n.setup === id ? null : id }, byId('named-setup')); }
+  if (act === 'named-addresses') return row({ open: id, addresses: n.addresses === id ? null : id }, byId('named-addresses'));
   if (act === 'named-reveal') { n.shown[id] = !n.shown[id]; render(); return focus(byId('named-reveal')); }
   if (act === 'named-rename-cancel') return row({ open: id }, byId('named-rename'));
   if (act === 'named-replace-keep') return row({ open: id }, byId('named-replace'));
@@ -694,7 +729,8 @@ function configNotificationsHTML() {
     ${configSwitch(['notifications', 'sign-in-expired'], 'Sign-in expired', 'A signed-in account needs signing in again before it can take requests.')}
     ${configSwitch(['notifications', 'provider-exhausted'], 'Provider out of capacity', 'Every account of a provider is used up or unavailable, and again when one is back.')}
     ${configSwitch(['notifications', 'account-used-up'], 'Account limit used up', 'One account used up its 5-hour or weekly limit while others carry on.')}
-    ${configSwitch(['notifications', 'account-errors'], 'Account errors', 'An account reports an error, or three or more of its requests fail within an hour.')}</div>`;
+    ${configSwitch(['notifications', 'account-errors'], 'Account errors', 'An account reports an error, or three or more of its requests fail within an hour.')}
+    ${configSwitch(['notifications', 'client-new-address'], 'New client address', 'A client’s key is used from an address it wasn’t used from before, or refused at one its address list doesn’t allow.')}</div>`;
 }
 
 // Where a webhook URL delivers, as the server decides it (src/push/webhooks.rs).

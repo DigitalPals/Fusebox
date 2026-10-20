@@ -249,6 +249,7 @@ fn enabled(settings: &Notifications, event: Event) -> bool {
         Event::ProviderExhausted => settings.provider_exhausted,
         Event::AccountUsedUp => settings.account_used_up,
         Event::AccountErrors => settings.account_errors,
+        Event::ClientAddress => settings.client_new_address,
         Event::Quiet => false,
     }
 }
@@ -283,6 +284,61 @@ async fn check(app: &App) {
         notify(app, &fault, faults::badge(&current)).await;
         webhooks::deliver_all(app, hooks, &fault).await;
     }
+}
+
+/// Tells devices and webhooks that a named client's key turned up at a new address, or
+/// was refused at one its address list doesn't allow (`refused`). Each client and address
+/// once while Fusebox runs, ten in an hour at most; sent in the background.
+pub fn client_address(
+    app: &Arc<App>,
+    client: &crate::config::NamedClient,
+    source: &crate::source::Source,
+    refused: bool,
+) {
+    let cfg = app.cfg();
+    if !enabled(&cfg.notifications, Event::ClientAddress)
+        || (app.push.subscriptions().is_empty() && cfg.notifications.webhooks.is_empty())
+        || !app.addresses.may_alert(&client.id, source.ip, refused)
+    {
+        return;
+    }
+    let name = if client.label.trim().is_empty() { client.id.clone() } else { client.label.clone() };
+    let at = match &source.login {
+        Some(login) => format!("{} (Tailscale user {login})", source.ip),
+        None => source.ip.to_string(),
+    };
+    let (title, body) = if refused {
+        (
+            format!("{name}'s key refused"),
+            format!(
+                "A request with {name}'s key came from {at}, which its address list doesn't allow. If that wasn't you, replace the key under Config, Clients."
+            ),
+        )
+    } else {
+        (
+            format!("{name} used from a new address"),
+            format!(
+                "{name}'s key was used from {at} for the first time. If that isn't one of your machines, replace the key under Config, Clients."
+            ),
+        )
+    };
+    let fault = Fault {
+        key: format!("address:{}:{}", client.id, source.ip),
+        event: Event::ClientAddress,
+        title,
+        body,
+        path: "#/config/clients".into(),
+        kind: "client_address",
+        level: if refused { "err" } else { "warn" },
+        ..Default::default()
+    };
+    let app = app.clone();
+    tokio::spawn(async move {
+        let badge = faults::badge(&all_faults(&app, &views(&app)));
+        notify(&app, &fault, badge).await;
+        let hooks = app.cfg().notifications.webhooks.clone();
+        webhooks::deliver_all(&app, &hooks, &fault).await;
+    });
 }
 
 /// Every current fault in the management API's form, errors first, as the faults

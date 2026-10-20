@@ -16,6 +16,9 @@ pub enum Event {
     ProviderExhausted,
     AccountUsedUp,
     AccountErrors,
+    /// A named client's key used from a new address, or refused at one. Sent as it
+    /// happens rather than found by the check.
+    ClientAddress,
     /// Counted for the app badge, never sent (rate limits come and go too often).
     #[default]
     Quiet,
