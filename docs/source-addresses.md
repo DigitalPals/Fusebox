@@ -18,8 +18,10 @@ this machine (127.0.0.0/8 and ::1); an empty list trusts no one. Forwarding head
 anyone else are ignored, so a client can't claim another address by sending them. Lists are
 read from the right, passing over trusted proxies, because proxies such as nginx add the
 address they saw on the right of whatever the client sent. Of `X-Forwarded-For`,
-`Forwarded` and `X-Real-IP`, the first one present decides, even if nothing in it can be
-read; Fusebox then uses the proxy's own address rather than look at the next header.
+`Forwarded` and `X-Real-IP`, the first one present decides. When nothing in it can be read,
+the source is unknown: Fusebox shows the proxy's own address, marked as such, and address
+lists refuse it rather than mistake the client for the proxy. A proxy that only sets
+`X-Real-IP` should also drop the `X-Forwarded-For` and `Forwarded` headers clients send.
 
 ## TCP forwarders and `proxy-protocol-port`
 

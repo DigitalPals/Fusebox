@@ -266,6 +266,7 @@ function viaText(s) {
   if (!s) return '';
   if (s.via === 'forwarded') return s.login ? `via Tailscale · ${S.private ? HIDDEN : s.login}` : 'via reverse proxy';
   if (s.via === 'proxy_protocol') return 'via TCP forwarder';
+  if (s.via === 'unknown') return 'proxy gave no readable address';
   return /^(127\.|::1$)/.test(s.ip || '') ? 'this machine' : 'direct';
 }
 const sourceText = (s) => (s ? `${addrText(s.ip)} · ${viaText(s)}` : '');

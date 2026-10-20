@@ -1399,6 +1399,26 @@ async fn untracked_requests_and_the_playground_still_say_who_was_there() {
 }
 
 #[tokio::test]
+async fn an_unreadable_forwarding_header_is_not_the_proxy_itself() {
+    let s = setup(|cfg, _| {
+        cfg.api_keys.clear();
+        cfg.named_clients = vec![NamedClient {
+            id: "local".into(),
+            label: "local".into(),
+            key: "fbx_local".into(),
+            addresses: vec!["127.0.0.1".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    assert_eq!(ask(&s, "fbx_local", "gpt-up", &[]).await.0, 200, "a tool on this machine");
+    let (status, text) = ask(&s, "fbx_local", "gpt-up", &[("x-forwarded-for", "unknown")]).await;
+    assert_eq!(status, 403, "a client behind the proxy, spoiling its header: {text}");
+    assert!(text.contains("an address the proxy in front didn't give"), "{text}");
+    assert_eq!(ask(&s, "fbx_local", "gpt-up", &[("x-forwarded-for", "10.0.0.1,")]).await.0, 403);
+}
+
+#[tokio::test]
 async fn proxy_protocol_port_takes_only_trusted_forwarders_with_a_header() {
     let s = setup(|_, _| {}).await;
     let (gate, _gate) = forwarded_port(&s.app).await;

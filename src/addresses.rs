@@ -223,14 +223,18 @@ impl Addresses {
         if !live.contains_key(slot) {
             // Nothing else may read the list for a while, so a newcomer clears out the stale.
             live.retain(|_, l| l.in_flight > 0 || l.sockets > 0 || now - l.last < RECENT);
-            if live.len() >= LIVE_MAX
-                && let Some(idle) = live
+            // Then the oldest idle ones, down to the bound with room for this one. Busy ones
+            // stay: their guards still have to count them down.
+            if live.len() >= LIVE_MAX {
+                let mut idle: Vec<_> = live
                     .iter()
                     .filter(|(_, l)| l.in_flight == 0 && l.sockets == 0)
-                    .min_by_key(|(_, l)| l.last)
-                    .map(|(k, _)| k.clone())
-            {
-                live.remove(&idle);
+                    .map(|(k, l)| (l.last, k.clone()))
+                    .collect();
+                idle.sort();
+                for (_, k) in idle.into_iter().take(live.len() + 1 - LIVE_MAX) {
+                    live.remove(&k);
+                }
             }
         }
         let entry = live.entry(slot.clone()).or_insert_with(|| Live {
@@ -423,6 +427,14 @@ mod tests {
             book.seen(&format!("k{i}"), &source("10.0.0.1", Via::Direct));
         }
         assert!(book.live.lock().len() <= LIVE_MAX);
+        // More busy ones than the bound are all kept; once they are done, the next newcomer
+        // brings the list back under it.
+        let busy: Vec<_> =
+            (0..(LIVE_MAX + 4)).map(|i| book.begin(&format!("b{i}"), &source("10.0.0.2", Via::Direct), true)).collect();
+        assert_eq!(book.live.lock().len(), LIVE_MAX + 4);
+        drop(busy);
+        book.seen("newcomer", &source("10.0.0.3", Via::Direct));
+        assert_eq!(book.live.lock().len(), LIVE_MAX);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

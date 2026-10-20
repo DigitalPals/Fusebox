@@ -54,6 +54,9 @@ pub enum Via {
     ProxyProtocol,
     /// A trusted reverse proxy's forwarding header.
     Forwarded,
+    /// A trusted proxy sent a forwarding header with no address that could be read. The
+    /// address is the proxy's own; address lists refuse it.
+    Unknown,
 }
 
 impl Via {
@@ -62,11 +65,12 @@ impl Via {
             Self::Direct => "direct",
             Self::ProxyProtocol => "proxy_protocol",
             Self::Forwarded => "forwarded",
+            Self::Unknown => "unknown",
         }
     }
 
     fn parse(s: &str) -> Option<Self> {
-        [Self::Direct, Self::ProxyProtocol, Self::Forwarded].into_iter().find(|v| v.as_str() == s)
+        [Self::Direct, Self::ProxyProtocol, Self::Forwarded, Self::Unknown].into_iter().find(|v| v.as_str() == s)
     }
 }
 
@@ -168,10 +172,13 @@ pub fn allowed(patterns: &[String], ip: Option<IpAddr>) -> bool {
 /// `forwarder` says the peer came from a PROXY protocol header.
 pub fn resolve(peer: IpAddr, forwarder: bool, headers: &HeaderMap, trusted: &[Cidr]) -> Source {
     let peer = peer.to_canonical();
-    if listed(trusted, peer)
-        && let Some(ip) = forwarded_for(headers, trusted)
-    {
-        return Source { ip, via: Via::Forwarded, login: tailscale_login(headers) };
+    if listed(trusted, peer) && ["x-forwarded-for", "forwarded", "x-real-ip"].iter().any(|h| headers.contains_key(*h)) {
+        // A proxy that forwarded a header nobody can read hasn't said who the client is;
+        // that isn't the proxy itself, so it must not pass for it.
+        return match forwarded_for(headers, trusted) {
+            Some(ip) => Source { ip, via: Via::Forwarded, login: tailscale_login(headers) },
+            None => Source { ip: peer, via: Via::Unknown, login: None },
+        };
     }
     Source { ip: peer, via: if forwarder { Via::ProxyProtocol } else { Via::Direct }, login: None }
 }
@@ -540,7 +547,9 @@ mod tests {
         assert_eq!(s.ip, ip("127.0.0.2"), "a chain of trusted proxies ends at the left-most");
         // Garbage on the right means the proxy said nothing usable.
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "10.0.0.1, unknown")]), &t);
-        assert_eq!((s.ip, s.via), (ip("127.0.0.1"), Via::Direct));
+        assert_eq!((s.ip, s.via), (ip("127.0.0.1"), Via::Unknown));
+        let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "10.0.0.1,")]), &t);
+        assert_eq!(s.via, Via::Unknown, "a trailing comma is an empty entry");
         // Garbage further left stops at the last readable entry.
         let s = resolve(ip("127.0.0.1"), false, &headers(&[("x-forwarded-for", "nonsense, 127.0.0.5")]), &t);
         assert_eq!(s.ip, ip("127.0.0.5"));
@@ -593,10 +602,14 @@ mod tests {
         let h = raw(&[("x-forwarded-for", b"\x80"), ("x-real-ip", b"192.0.2.42")]);
         assert_eq!(
             resolve(ip("127.0.0.1"), false, &h, &t),
-            Source { ip: ip("127.0.0.1"), via: Via::Direct, login: None }
+            Source { ip: ip("127.0.0.1"), via: Via::Unknown, login: None }
         );
         let h = raw(&[("forwarded", b"for=\x80"), ("x-real-ip", b"192.0.2.42")]);
-        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).ip, ip("127.0.0.1"));
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
+        let h = raw(&[("x-real-ip", b"\x80")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).via, Via::Unknown);
+        // From an untrusted peer the headers mean nothing at all.
+        assert_eq!(resolve(ip("10.10.0.7"), false, &h, &t).via, Via::Direct);
         // An empty header is still there.
         let h = raw(&[("x-forwarded-for", b""), ("x-real-ip", b"192.0.2.42")]);
         assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).ip, ip("127.0.0.1"));

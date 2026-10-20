@@ -133,9 +133,11 @@ pub fn counted_tokens(input_and_writes: u64, output: u64) -> u64 {
 }
 
 /// Whether a named client's address list lets this request in; the source comes from
-/// `source::layer`. A list with no source to check refuses.
+/// `source::layer`. A list refuses when there is no source to check, or only a proxy's
+/// address standing in for a client it didn't name.
 pub fn address_allowed(client: &NamedClient, headers: &HeaderMap) -> bool {
-    crate::source::allowed(&client.addresses, crate::source::Source::from_headers(headers).map(|s| s.ip))
+    let known = crate::source::Source::from_headers(headers).filter(|s| s.via != crate::source::Via::Unknown);
+    crate::source::allowed(&client.addresses, known.map(|s| s.ip))
 }
 
 impl Clients {
@@ -152,8 +154,12 @@ impl Clients {
             return Err(denied(401, format!("this key expired on {last}")));
         }
         if !address_allowed(client, headers) {
-            let from = crate::source::Source::from_headers(headers).map(|s| s.ip.to_string());
-            return Err(denied(403, format!("this key doesn't work from {}", from.as_deref().unwrap_or("here"))));
+            let from = match crate::source::Source::from_headers(headers) {
+                Some(s) if s.via != crate::source::Via::Unknown => s.ip.to_string(),
+                Some(_) => "an address the proxy in front didn't give".into(),
+                None => "here".into(),
+            };
+            return Err(denied(403, format!("this key doesn't work from {from}")));
         }
         if !client.user_agents.is_empty() {
             let agent = headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or_default();
