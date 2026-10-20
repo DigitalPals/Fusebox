@@ -444,7 +444,8 @@ management-key: ""
 # name the client in X-Forwarded-For; a TCP forwarder that passes TLS through can't, so
 # give it a port of its own where each connection starts with a PROXY protocol header.
 # trusted-proxies: [127.0.0.1, ::1]   # whose word counts (default: this machine)
-# proxy-protocol-port: 8319           # 0 = off; same address as host; needs a restart
+# proxy-protocol-port: 8319           # 0 = off; same address as host; needs a restart.
+#                                     # When on, forwarding headers count only on this port.
 
 proxy-url: ""               # optional upstream proxy, e.g. socks5://127.0.0.1:1080
 request-retry: 3            # accounts to try before failing a request

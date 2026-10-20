@@ -337,7 +337,7 @@ pub fn model_allowed(client: &NamedClient, model: &str) -> bool {
 
 /// The named client a request came from, as `client_auth` marked it.
 pub fn named_client<'a>(cfg: &'a crate::config::Config, headers: &HeaderMap) -> Option<&'a NamedClient> {
-    let id = headers.get(crate::usage::capture::CLIENT_HEADER)?.to_str().ok()?;
+    let id = crate::usage::capture::client_id(headers)?;
     cfg.named_clients.iter().find(|c| c.id == id)
 }
 

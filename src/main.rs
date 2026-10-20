@@ -259,9 +259,11 @@ async fn serve(app: Arc<App>) -> Result<()> {
         .parse()
         .or_else(|_| format!("[{}]:{}", cfg.host, cfg.port).parse())
         .context("invalid host/port")?;
-    // The forwarder's port is bound first: while the main port takes connections, so does
-    // this one, and a forwarder that falls back to the main port when this one refuses
-    // never does so against a running Fusebox.
+    // The forwarder's port is bound first, so a forwarder that falls back to the main port
+    // when this one refuses rarely meets a Fusebox that is up. When it does (it dialled just
+    // before both were bound), `source::layer` believes no forwarding headers on the main
+    // port while this one is on, so its clients show as this machine, not as whoever they
+    // claim to be.
     let forwarded_addr = (cfg.proxy_protocol_port != 0).then(|| SocketAddr::new(addr.ip(), cfg.proxy_protocol_port));
     let forwarded_listener = match forwarded_addr {
         Some(a) => {

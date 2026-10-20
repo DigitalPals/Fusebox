@@ -136,11 +136,7 @@ impl Tracker {
     pub fn client_app(&mut self, headers: &HeaderMap) {
         self.log.client_app = client_app(headers);
         self.log.source = crate::source::Source::from_headers(headers);
-        self.log.key = headers
-            .get(crate::usage::capture::CLIENT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .filter(|k| !k.is_empty())
-            .map(String::from);
+        self.log.key = crate::usage::capture::client_id(headers).filter(|k| !k.is_empty()).map(String::from);
         self.log.key_label = self.log.key.as_deref().map(|k| crate::mgmt::client_label(&self.app.cfg(), k));
         if let Some(source) = &self.log.source {
             self.connected = Some(self.app.addresses.begin(self.log.key.as_deref().unwrap_or(""), source, false));

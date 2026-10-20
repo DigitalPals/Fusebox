@@ -10,8 +10,9 @@
 //!
 //! Only proxies in `trusted-proxies` (this machine, unless set) are believed, on either
 //! path. A raw TCP forwarder on this machine that connects to the ordinary port looks like
-//! this machine, and so can't be told apart from a reverse proxy here: point it at the
-//! PROXY protocol port instead.
+//! this machine, and so can't be told apart from a reverse proxy there. Once a PROXY
+//! protocol port is on, forwarding headers therefore count only on that port: a forwarder
+//! that falls back to the ordinary port can't pass its clients' headers off as its own.
 //!
 //! The source is worked out once per request, in [`layer`]. It is kept in the request's
 //! extensions and, for code that only sees headers, in the internal `x-fusebox-source`
@@ -178,43 +179,41 @@ pub fn resolve(peer: IpAddr, forwarder: bool, headers: &HeaderMap, trusted: &[Ci
 /// The client a trusted proxy names: in `X-Forwarded-For`, else `Forwarded`, else
 /// `X-Real-IP`. Proxies add themselves on the right, so the list is read from the right,
 /// passing over trusted proxies; what a client wrote itself is further left.
+///
+/// The first of those headers that is there decides, even when nothing in it can be read:
+/// moving on to the next would let a client that spoiled one choose its address with
+/// another. Entries are split before they are read as text, so a client's stray bytes on
+/// the left can't hide what the proxy added on the right.
 fn forwarded_for(headers: &HeaderMap, trusted: &[Cidr]) -> Option<IpAddr> {
-    let values = |name: &str| -> Vec<String> {
+    let entries = |name: &str| -> Vec<Option<String>> {
         headers
             .get_all(name)
             .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .flat_map(|v| v.as_bytes().split(|b| *b == b',').map(|e| std::str::from_utf8(e).ok().map(str::to_string)))
             .collect()
     };
-    let xff = values("x-forwarded-for");
-    if !xff.is_empty() {
-        return rightmost(xff.iter().map(String::as_str), trusted);
+    if headers.contains_key("x-forwarded-for") {
+        return rightmost(entries("x-forwarded-for"), trusted);
     }
-    let forwarded = values("forwarded");
-    if !forwarded.is_empty() {
-        let fors: Vec<String> = forwarded
-            .iter()
-            .map(|element| {
-                element
-                    .split(';')
-                    .find_map(|pair| {
-                        let (k, v) = pair.split_once('=')?;
-                        k.trim().eq_ignore_ascii_case("for").then(|| v.trim().to_string())
-                    })
-                    .unwrap_or_default()
+    if headers.contains_key("forwarded") {
+        let fors = entries("forwarded").into_iter().map(|element| {
+            element.and_then(|element| {
+                element.split(';').find_map(|pair| {
+                    let (k, v) = pair.split_once('=')?;
+                    k.trim().eq_ignore_ascii_case("for").then(|| v.trim().to_string())
+                })
             })
-            .collect();
-        return rightmost(fors.iter().map(String::as_str), trusted);
+        });
+        return rightmost(fors.collect(), trusted);
     }
-    headers.get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(address)
+    headers.get("x-real-ip").and_then(|v| std::str::from_utf8(v.as_bytes()).ok()).and_then(address)
 }
 
-fn rightmost<'a>(entries: impl DoubleEndedIterator<Item = &'a str>, trusted: &[Cidr]) -> Option<IpAddr> {
+fn rightmost(entries: Vec<Option<String>>, trusted: &[Cidr]) -> Option<IpAddr> {
     let mut last = None;
-    for entry in entries.rev() {
+    for entry in entries.iter().rev() {
         // Anything unreadable from here on was written by someone untrusted.
-        let Some(ip) = address(entry) else { break };
+        let Some(ip) = entry.as_deref().and_then(address) else { break };
         last = Some(ip);
         if !listed(trusted, ip) {
             break;
@@ -248,7 +247,16 @@ pub async fn layer(State(app): State<Arc<App>>, mut req: Request, next: Next) ->
         req.extensions_mut().insert(ConnectInfo(client));
     }
     if let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() {
-        let source = resolve(peer.ip(), forwarded.is_some(), req.headers(), &trusted_proxies(&app.cfg()));
+        // With a forwarder on its own port, forwarding headers count only there. A forwarder
+        // that falls back to the ordinary port (an older Fusebox, or the instant this one
+        // starts) connects from this machine, and its clients' headers would pass for a
+        // trusted proxy's. The port bound at startup is the one that counts.
+        let trusted = if app.startup_config.proxy_protocol_port != 0 && forwarded.is_none() {
+            Vec::new()
+        } else {
+            trusted_proxies(&app.cfg())
+        };
+        let source = resolve(peer.ip(), forwarded.is_some(), req.headers(), &trusted);
         if let Some(value) = source.header() {
             req.headers_mut().insert(HEADER, value);
         }
@@ -563,6 +571,35 @@ mod tests {
             &t,
         );
         assert_eq!(s.ip, ip("10.0.0.4"));
+    }
+
+    #[test]
+    fn stray_bytes_cannot_hide_what_the_proxy_added() {
+        let t = loopback();
+        let raw = |pairs: &[(&str, &[u8])]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.append(
+                    axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_bytes(v).unwrap(),
+                );
+            }
+            h
+        };
+        // nginx appended the real address after a client's non-ASCII junk.
+        let h = raw(&[("x-forwarded-for", b"\x80\xff, 192.0.2.7"), ("x-real-ip", b"192.0.2.42")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).ip, ip("192.0.2.7"));
+        // A spoiled header that is there still decides: no falling through to X-Real-IP.
+        let h = raw(&[("x-forwarded-for", b"\x80"), ("x-real-ip", b"192.0.2.42")]);
+        assert_eq!(
+            resolve(ip("127.0.0.1"), false, &h, &t),
+            Source { ip: ip("127.0.0.1"), via: Via::Direct, login: None }
+        );
+        let h = raw(&[("forwarded", b"for=\x80"), ("x-real-ip", b"192.0.2.42")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).ip, ip("127.0.0.1"));
+        // An empty header is still there.
+        let h = raw(&[("x-forwarded-for", b""), ("x-real-ip", b"192.0.2.42")]);
+        assert_eq!(resolve(ip("127.0.0.1"), false, &h, &t).ip, ip("127.0.0.1"));
     }
 
     #[test]

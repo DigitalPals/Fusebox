@@ -445,9 +445,13 @@ fn check_url(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Settings left out of `values` while unset, so the settings a dashboard reads don't
+/// change for those who never use them, but that can still be set.
+const OPTIONAL: &[&str] = &["trusted-proxies", "proxy-protocol-port"];
+
 fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
     for (field, value) in changes {
-        ensure!(values.get(field).is_some(), "Unknown setting: {field}");
+        ensure!(values.get(field).is_some() || OPTIONAL.contains(&field.as_str()), "Unknown setting: {field}");
         match field.as_str() {
             "port" => {
                 ensure!(value.as_u64().is_some_and(|p| (1..=65535).contains(&p)), "Port must be between 1 and 65535")
@@ -477,6 +481,14 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
             "management-allow-remote" => {
                 ensure!(value.is_null() || value.is_boolean(), "Remote access must be enabled or disabled")
             }
+            "trusted-proxies" => ensure!(
+                value.is_null() || value.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
+                "Trusted proxies must be a list of addresses or ranges"
+            ),
+            "proxy-protocol-port" => ensure!(
+                value.as_u64().is_some_and(|p| p <= 65535),
+                "PROXY protocol port must be between 0 (off) and 65535"
+            ),
             "session-affinity-idle-seconds" => {
                 ensure!(value.as_u64().is_some_and(|n| n >= 60), "Forget idle sessions after at least 60 seconds")
             }
@@ -746,7 +758,9 @@ pub fn apply(text: &str, changes: &Map<String, Value>) -> Result<(String, Config
     let before = yaml(text)?;
     let mut after = before.clone();
     for (field, value) in changes {
-        if before_values.get(field) == Some(value) {
+        // An optional setting left unset reads as null (or 0 for a port that is off).
+        let unset = before_values.get(field).is_none() && (value.is_null() || value.as_u64() == Some(0));
+        if before_values.get(field) == Some(value) || unset {
             continue;
         }
         if let Some((_, group)) = PROVIDERS.iter().find(|(f, _)| *f == field) {
@@ -1029,6 +1043,33 @@ mod tests {
         current.debug = true;
         assert!(restart_fields(&startup, &current).contains(&"debug logging"));
         assert!(restart_fields(&startup, &startup).is_empty());
+        current.proxy_protocol_port = 8319;
+        assert!(restart_fields(&startup, &current).contains(&"PROXY protocol port"));
+    }
+
+    #[test]
+    fn source_settings_can_be_set_and_unset_through_the_settings_api() {
+        let source = "port: 8318\n";
+        assert!(values(source).unwrap().get("trusted-proxies").is_none(), "unset, they stay out");
+        // Setting nothing new is no change.
+        let (out, _) = edit(source, json!({"trusted-proxies": null, "proxy-protocol-port": 0}));
+        assert_eq!(out, source);
+        let (out, cfg) =
+            edit(source, json!({"trusted-proxies": ["127.0.0.1", "10.0.0.0/8"], "proxy-protocol-port": 8319}));
+        assert_eq!(cfg.trusted_proxies, Some(vec!["127.0.0.1".to_string(), "10.0.0.0/8".to_string()]));
+        assert_eq!(cfg.proxy_protocol_port, 8319);
+        assert_eq!(values(&out).unwrap()["proxy-protocol-port"], 8319);
+        let (out, cfg) = edit(&out, json!({"trusted-proxies": null, "proxy-protocol-port": 0}));
+        assert_eq!((cfg.trusted_proxies, cfg.proxy_protocol_port), (None, 0));
+        assert!(values(&out).unwrap().get("proxy-protocol-port").is_none());
+        for bad in [
+            json!({"proxy-protocol-port": 70000}),
+            json!({"proxy-protocol-port": 8318}),
+            json!({"trusted-proxies": ["example.com"]}),
+            json!({"trusted-proxies": "127.0.0.1"}),
+        ] {
+            assert!(apply(source, bad.as_object().unwrap()).is_err(), "{bad}");
+        }
     }
 
     #[test]

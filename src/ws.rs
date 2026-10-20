@@ -280,7 +280,7 @@ pub async fn handle(app: Arc<App>, headers: HeaderMap, auth: crate::server::Clie
         app.models.save_clients();
     }
     // An open socket shows on the dashboard's connected list until it closes.
-    let key = headers.get(crate::usage::capture::CLIENT_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let key = crate::usage::capture::client_id(&headers).unwrap_or_default();
     let _connected = crate::source::Source::from_headers(&headers).map(|s| app.addresses.begin(key, &s, true));
     let (mut tx, mut rx) = socket.split();
     let mut sess = Session::default();
@@ -459,12 +459,22 @@ async fn turn(
         items.extend(input_items(&body));
     }
 
-    // Each turn counts against a named client's limits, as an HTTP request would.
-    if let Some(client) = crate::policy::named_client(&cfg, headers)
-        && let Err(d) = app.clients.admit(client, headers, true)
-    {
-        let err = crate::formats::error_body(Format::Responses, d.status, &d.message);
-        return send(tx, error_event(d.status, &err)).await;
+    // Each turn counts against a named client's limits, and is a request from its address,
+    // as an HTTP request would be. The client is the one the handshake authenticated.
+    if let Some(client) = auth.named(&cfg) {
+        let source = crate::source::Source::from_headers(headers);
+        if let Err(d) = app.clients.admit(client, headers, true) {
+            if let Some(source) = &source
+                && !crate::policy::address_allowed(client, headers)
+            {
+                crate::server::address_refused(app, client, source);
+            }
+            let err = crate::formats::error_body(Format::Responses, d.status, &d.message);
+            return send(tx, error_event(d.status, &err)).await;
+        }
+        if let Some(source) = &source {
+            crate::server::address_used(app, client, source);
+        }
     }
     if cfg.codex_websockets {
         match native_turn(app, headers, sess, &body, full.as_deref(), tx).await {

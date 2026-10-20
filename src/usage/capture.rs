@@ -10,6 +10,12 @@ use std::sync::Arc;
 
 pub const REQUEST_HEADER: &str = "x-fusebox-usage-request";
 pub const CLIENT_HEADER: &str = "x-fusebox-usage-client";
+
+/// The client key's usage id that `client_auth` stamped. Ids may be any UTF-8 text, which
+/// `HeaderValue::to_str` (visible ASCII only) would turn away.
+pub fn client_id(h: &axum::http::HeaderMap) -> Option<&str> {
+    h.get(CLIENT_HEADER).and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+}
 struct Captured {
     observation: Observation,
     failure: Option<crate::diagnostics::Failure>,
@@ -92,7 +98,7 @@ impl RequestUsage {
         self.program = name;
     }
     pub fn client(&mut self, h: &axum::http::HeaderMap) {
-        self.client = h.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()).and_then(safe);
+        self.client = client_id(h).and_then(safe);
         if let Some(id) = h.get(REQUEST_HEADER).and_then(|v| v.to_str().ok()).and_then(safe) {
             self.logical_id = id;
         }

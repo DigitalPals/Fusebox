@@ -1312,6 +1312,93 @@ async fn forwarded_connections_carry_the_client_address() {
 }
 
 #[tokio::test]
+async fn with_a_forwarder_port_only_that_port_believes_forwarding_headers() {
+    // A forwarder that falls back to the ordinary port connects from this machine; its
+    // clients' own X-Forwarded-For must not pass for a trusted proxy's there.
+    let s = setup(|cfg, _| {
+        cfg.proxy_protocol_port = 1;
+        cfg.api_keys.clear();
+        cfg.named_clients = vec![NamedClient {
+            id: "locked".into(),
+            label: "locked".into(),
+            key: "fbx_locked".into(),
+            addresses: vec!["10.10.0.0/24".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let forged = [("x-forwarded-for", "10.10.0.9")];
+    assert_eq!(ask(&s, "fbx_locked", "gpt-up", &forged).await.0, 403, "seen as this machine, not 10.10.0.9");
+    assert!(s.app.addresses.history("locked").is_empty());
+    // Through the forwarder's port, tailscale serve's header still counts.
+    let body = json!({"model": "gpt-up", "stream": true, "input": [{"role":"user","content":"hi"}]});
+    let tailnet = [("authorization", "Bearer fbx_locked"), ("x-forwarded-for", "10.10.0.9")];
+    let (status, _) = raw(gate, &proxy_v1("127.0.0.1"), "POST", "/v1/responses", &tailnet, Some(&body)).await;
+    assert_eq!(status, 200);
+    assert_eq!(last_request(&s).source.unwrap().ip.to_string(), "10.10.0.9");
+}
+
+#[tokio::test]
+async fn websocket_turns_keep_a_keys_addresses_and_its_address_list() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let s = setup(|cfg, url| {
+        cfg.codex_websockets = false;
+        cfg.api_keys.clear();
+        // Ids may be any text; the per-turn checks must still find the client.
+        cfg.named_clients = vec![NamedClient {
+            id: "café".into(),
+            label: "Café".into(),
+            key: "fbx_cafe".into(),
+            addresses: vec!["127.0.0.1".into()],
+            ..Default::default()
+        }];
+        cfg.notifications.webhooks = vec![format!("{url}/hook")];
+    })
+    .await;
+    let mut request =
+        format!("{}/v1/responses", s.proxy.url.replace("http://", "ws://")).into_client_request().unwrap();
+    request.headers_mut().insert("authorization", "Bearer fbx_cafe".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(s.app.addresses.history("café").is_empty(), "a handshake isn't a request");
+    for _ in 0..3 {
+        assert_eq!(websocket_turn(&mut socket).await["type"], "response.completed");
+    }
+    let history = s.app.addresses.history("café");
+    assert_eq!((history.len(), history[0].1.requests), (1, 3), "each turn counts");
+    let connected = s.app.addresses.connected();
+    assert!(connected.iter().any(|c| c.key == "café" && c.sockets == 1), "{connected:?}");
+    // Tightening the list refuses the next turn and says so.
+    let mut cfg = (*s.app.cfg()).clone();
+    cfg.named_clients[0].addresses = vec!["10.10.0.0/24".into()];
+    s.app.set_config(cfg);
+    let event = websocket_turn(&mut socket).await;
+    assert_eq!((event["type"].as_str(), event["status"].as_u64()), (Some("error"), Some(403)), "{event}");
+    assert!(hook_containing(&s, "Café's key refused").await.is_some());
+    drop(socket);
+}
+
+#[tokio::test]
+async fn untracked_requests_and_the_playground_still_say_who_was_there() {
+    let s = setup(|_, _| {}).await;
+    let (gate, _gate) = forwarded_port(&s.app).await;
+    let key = [("authorization", "Bearer client")];
+    assert_eq!(raw(gate, &proxy_v1("10.10.0.7"), "GET", "/v1/models", &key, None).await.0, 200);
+    let connected = s.app.addresses.connected();
+    assert!(connected.iter().any(|c| c.ip.to_string() == "10.10.0.7" && c.in_flight == 0), "{connected:?}");
+    // The dashboard's playground keeps the dashboard user's address.
+    let body = json!({"model": "gpt-up", "prompt": "hi"});
+    let (status, _) = raw(gate, &proxy_v1("127.0.0.1"), "POST", "/api/playground", &[], Some(&body)).await;
+    assert_eq!(status, 200);
+    let log = last_request(&s);
+    assert_eq!(log.key_label.as_deref(), Some("Dashboard playground"));
+    assert_eq!(
+        log.source.map(|x| (x.ip.to_string(), x.via)),
+        Some(("127.0.0.1".into(), crate::source::Via::ProxyProtocol))
+    );
+}
+
+#[tokio::test]
 async fn proxy_protocol_port_takes_only_trusted_forwarders_with_a_header() {
     let s = setup(|_, _| {}).await;
     let (gate, _gate) = forwarded_port(&s.app).await;

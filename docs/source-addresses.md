@@ -17,7 +17,9 @@ the address comes from, and when it can be trusted.
 this machine (127.0.0.0/8 and ::1); an empty list trusts no one. Forwarding headers from
 anyone else are ignored, so a client can't claim another address by sending them. Lists are
 read from the right, passing over trusted proxies, because proxies such as nginx add the
-address they saw on the right of whatever the client sent.
+address they saw on the right of whatever the client sent. Of `X-Forwarded-For`,
+`Forwarded` and `X-Real-IP`, the first one present decides, even if nothing in it can be
+read; Fusebox then uses the proxy's own address rather than look at the next header.
 
 ## TCP forwarders and `proxy-protocol-port`
 
@@ -37,11 +39,20 @@ A reverse proxy can sit behind the forwarder too (tailscale serve → forwarder 
 PROXY header then names the reverse proxy, which is trusted, and its `X-Forwarded-For` names
 the client.
 
-**Keep the forwarder off the ordinary port.** A raw forwarder on this machine that connects to
-the ordinary port looks like this machine, so a client behind it could send `X-Forwarded-For`
-and be believed. A forwarder that falls back to the ordinary port while the PROXY port is
-down (for a rollback to a Fusebox without it) has that weakness while it falls back; Fusebox
-binds the PROXY port before the ordinary one, so a running Fusebox never causes it.
+**With `proxy-protocol-port` on, forwarding headers count only on that port.** A raw forwarder
+on this machine that connects to the ordinary port looks like this machine, so a client
+behind it could otherwise send `X-Forwarded-For` and be believed. That happens when a
+forwarder falls back to the ordinary port because the PROXY port refused it: during a
+rollback to a Fusebox without the port, or in the instant a starting Fusebox binds its two
+ports. So once the PROXY port is on, everything on the ordinary port is taken at its
+connection address: tools on this machine show as this machine, and so does a client that
+came through a fallback. Put reverse proxies behind the forwarder (as tailscale serve is in
+front of a gate), or have them connect to the PROXY port themselves. The setting that counts
+is the one Fusebox started with.
+
+Through a fallback a client looks like this machine, so set a `management-key` (the
+dashboard without one trusts this machine), and don't list 127.0.0.1 in the `addresses` of a
+key that is used through the forwarder.
 
 ## What uses the address
 

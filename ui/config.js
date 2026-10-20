@@ -347,7 +347,7 @@ function namedLimitsForm(client) {
   return `<form class="named-limits-form" id="limits-form" data-id="${esc(client.id)}" novalidate>
     <div class="cfg-grid">${LIMITS.map(([key, label, placeholder, kind, help]) => `<div class="field${kind === 'list' ? ' wide' : ''}">
       <label for="limit-${key}">${esc(label)}</label>
-      <input id="limit-${key}" name="${key}" type="${kind === 'date' ? 'date' : kind === 'list' ? 'text' : 'number'}" ${kind === 'int' ? 'min="1" step="1"' : kind === 'num' ? 'min="0.01" step="0.01"' : ''}
+      <input id="limit-${key}" name="${key}" type="${kind === 'date' ? 'date' : key === 'addresses' && S.private ? 'password' : kind === 'list' ? 'text' : 'number'}" ${kind === 'int' ? 'min="1" step="1"' : kind === 'num' ? 'min="0.01" step="0.01"' : ''}
         value="${esc(String(value(key, kind)))}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"${off}>
       ${help ? `<small>${esc(help)}</small>` : ''}</div>`).join('')}</div>
     ${n.limitsError ? `<p class="cfg-error" role="alert">${esc(n.limitsError)}</p>` : ''}

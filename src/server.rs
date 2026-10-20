@@ -81,6 +81,14 @@ pub(crate) enum ClientAuth {
 }
 
 impl ClientAuth {
+    /// The named client this access belongs to, while it still exists.
+    pub(crate) fn named<'a>(&self, cfg: &'a crate::config::Config) -> Option<&'a crate::config::NamedClient> {
+        match self {
+            Self::Named { id, .. } => cfg.named_clients.iter().find(|c| &c.id == id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn valid(&self, cfg: &crate::config::Config) -> bool {
         match self {
             Self::Open => cfg.api_keys.is_empty() && cfg.named_clients.is_empty(),
@@ -143,8 +151,7 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
             if let Some(source) = &source
                 && !crate::policy::address_allowed(client, req.headers())
             {
-                tracing::warn!(client = %client.id, address = %source.ip, "refused a client key from outside its address list");
-                crate::push::client_address(&app, client, source, true);
+                address_refused(&app, client, source);
             }
             let format = format_for_path(req.uri().path());
             let status = StatusCode::from_u16(denied.status).unwrap_or(StatusCode::FORBIDDEN);
@@ -163,11 +170,12 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
         let identity = named
             .map(|c| c.id.clone())
             .or_else(|| provided.as_ref().filter(|_| !cfg.api_keys.is_empty()).map(|_| scope.clone()));
-        if let (Some(client), Some(source)) = (named, &source)
-            && app.addresses.note(&client.id, source) == crate::addresses::Noted::New
-        {
-            tracing::info!(client = %client.id, address = %source.ip, "client key used from a new address");
-            crate::push::client_address(&app, client, source, false);
+        // A WebSocket's handshake isn't a request; each turn records its address instead.
+        if let (Some(client), Some(source), false) = (named, &source, websocket) {
+            address_used(&app, client, source);
+        }
+        if let Some(source) = &source {
+            app.addresses.seen(identity.as_deref().unwrap_or(""), source);
         }
         if let Some(identity) = identity {
             app.clients.touch(&identity);
@@ -188,6 +196,20 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
     let format = format_for_path(req.uri().path());
     (StatusCode::UNAUTHORIZED, axum::Json(formats::error_body(format, 401, "invalid or missing API key")))
         .into_response()
+}
+
+/// A named client's admitted request: its address is recorded, and is news when new.
+pub(crate) fn address_used(app: &Arc<App>, client: &crate::config::NamedClient, source: &crate::source::Source) {
+    if app.addresses.note(&client.id, source) == crate::addresses::Noted::New {
+        tracing::info!(client = %client.id, address = %source.ip, "client key used from a new address");
+        crate::push::client_address(app, client, source, false);
+    }
+}
+
+/// A named client's key refused by its address list.
+pub(crate) fn address_refused(app: &Arc<App>, client: &crate::config::NamedClient, source: &crate::source::Source) {
+    tracing::warn!(client = %client.id, address = %source.ip, "refused a client key from outside its address list");
+    crate::push::client_address(app, client, source, true);
 }
 
 fn format_for_path(path: &str) -> Format {
@@ -351,8 +373,16 @@ pub struct PlaygroundBody {
 /// The dashboard's playground: one prompt to one model, streamed back as Chat
 /// Completions. It goes through routing like any request and shows on the Usage page
 /// as the client `dashboard`.
-pub async fn playground(State(app): State<Arc<App>>, axum::Json(b): axum::Json<PlaygroundBody>) -> Response {
+pub async fn playground(
+    State(app): State<Arc<App>>,
+    incoming: HeaderMap,
+    axum::Json(b): axum::Json<PlaygroundBody>,
+) -> Response {
     let mut headers = HeaderMap::new();
+    // Where the dashboard user is, as `source::layer` resolved it.
+    if let Some(source) = incoming.get(crate::source::HEADER) {
+        headers.insert(crate::source::HEADER, source.clone());
+    }
     let scope = crate::affinity::scope_for_key(Some("fusebox-dashboard-playground"));
     if let (Ok(scope), Ok(client)) = (HeaderValue::from_str(&scope), HeaderValue::from_str("dashboard")) {
         headers.insert(crate::affinity::SCOPE_HEADER, scope);

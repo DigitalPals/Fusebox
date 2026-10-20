@@ -30,6 +30,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(30);
 const RECENT: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 /// Notifications about addresses in an hour, at most, whatever happens.
 const ALERTS_PER_HOUR: usize = 10;
+/// Keys and addresses kept on the connected list, at most; idle ones go first.
+const LIVE_MAX: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Seen {
@@ -155,8 +157,12 @@ impl Addresses {
     }
 
     /// Writes the book when it changed: at most every 30 seconds, or now with `force`.
-    /// Clients no longer configured and addresses not seen for half a year are dropped.
+    /// Clients no longer configured and addresses not seen for half a year are dropped
+    /// first, which is a change too.
     pub fn save(&self, clients: &[crate::config::NamedClient], force: bool) {
+        if self.prune(clients) {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
         if !self.dirty.load(Ordering::Relaxed) {
             return;
         }
@@ -168,16 +174,7 @@ impl Addresses {
             *saved = Some(Instant::now());
         }
         self.dirty.store(false, Ordering::Relaxed);
-        let bytes = {
-            let mut book = self.book.lock();
-            let cutoff = Utc::now() - chrono::TimeDelta::days(FORGET_AFTER_DAYS);
-            let ids: HashSet<&str> = clients.iter().map(|c| c.id.as_str()).collect();
-            book.clients.retain(|id, known| {
-                known.retain(|_, s| s.last > cutoff);
-                ids.contains(id.as_str()) && !known.is_empty()
-            });
-            serde_json::to_vec(&*book)
-        };
+        let bytes = serde_json::to_vec(&*self.book.lock());
         let result = bytes.map_err(anyhow::Error::from).and_then(|b| crate::files::write_private(&self.path, &b));
         if let Err(e) = result {
             self.dirty.store(true, Ordering::Relaxed);
@@ -185,30 +182,70 @@ impl Addresses {
         }
     }
 
+    /// Drops configured-away clients and addresses unseen for half a year; true if any went.
+    fn prune(&self, clients: &[crate::config::NamedClient]) -> bool {
+        let cutoff = Utc::now() - chrono::TimeDelta::days(FORGET_AFTER_DAYS);
+        let ids: HashSet<&str> = clients.iter().map(|c| c.id.as_str()).collect();
+        let mut book = self.book.lock();
+        let mut changed = false;
+        book.clients.retain(|id, known| {
+            let before = known.len();
+            known.retain(|_, s| s.last > cutoff);
+            let keep = ids.contains(id.as_str()) && !known.is_empty();
+            changed |= known.len() != before || !keep;
+            keep
+        });
+        changed
+    }
+
     /// Counts a request (or, with `socket`, an open WebSocket) until the guard is dropped.
     pub fn begin(self: &Arc<Self>, key: &str, source: &Source, socket: bool) -> Guard {
         let slot = (key.to_string(), source.ip);
-        {
-            let mut live = self.live.lock();
-            let entry = live.entry(slot.clone()).or_insert_with(|| Live {
-                via: source.via,
-                login: None,
-                in_flight: 0,
-                sockets: 0,
-                last: Utc::now(),
-            });
-            entry.via = source.via;
-            if source.login.is_some() {
-                entry.login.clone_from(&source.login);
-            }
-            entry.last = Utc::now();
+        self.touch(&slot, source, |entry| {
             if socket {
                 entry.sockets += 1;
             } else {
                 entry.in_flight += 1;
             }
-        }
+        });
         Guard { book: self.clone(), slot, socket }
+    }
+
+    /// Notes an admitted request without counting it in flight: requests that aren't
+    /// tracked to their end (model lists, say) still show who was here.
+    pub fn seen(&self, key: &str, source: &Source) {
+        self.touch(&(key.to_string(), source.ip), source, |_| {});
+    }
+
+    fn touch(&self, slot: &(String, IpAddr), source: &Source, count: impl FnOnce(&mut Live)) {
+        let now = Utc::now();
+        let mut live = self.live.lock();
+        if !live.contains_key(slot) {
+            // Nothing else may read the list for a while, so a newcomer clears out the stale.
+            live.retain(|_, l| l.in_flight > 0 || l.sockets > 0 || now - l.last < RECENT);
+            if live.len() >= LIVE_MAX
+                && let Some(idle) = live
+                    .iter()
+                    .filter(|(_, l)| l.in_flight == 0 && l.sockets == 0)
+                    .min_by_key(|(_, l)| l.last)
+                    .map(|(k, _)| k.clone())
+            {
+                live.remove(&idle);
+            }
+        }
+        let entry = live.entry(slot.clone()).or_insert_with(|| Live {
+            via: source.via,
+            login: None,
+            in_flight: 0,
+            sockets: 0,
+            last: now,
+        });
+        entry.via = source.via;
+        if source.login.is_some() {
+            entry.login.clone_from(&source.login);
+        }
+        entry.last = now;
+        count(entry);
     }
 
     /// Keys and addresses with requests in flight or open sockets, or seen in the last
@@ -332,6 +369,13 @@ mod tests {
         let quiet = Addresses::load(&dir);
         quiet.save(&[client("beast")], true);
         assert!(!dir.join(FILE).exists());
+        // A book loaded as it was saved still forgets a client removed since.
+        again.dirty.store(true, Ordering::Relaxed);
+        again.save(&[client("beast")], true);
+        let loaded = Addresses::load(&dir);
+        assert_eq!(loaded.history("beast").len(), 1);
+        loaded.save(&[], false);
+        assert!(Addresses::load(&dir).history("beast").is_empty(), "pruned even though nothing new came in");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -366,6 +410,19 @@ mod tests {
         assert_eq!(now.len(), 2);
         book.live.lock().values_mut().for_each(|l| l.last = Utc::now() - RECENT - chrono::TimeDelta::seconds(1));
         assert!(book.connected().is_empty());
+        // Seen without being counted, and the stale cleared out by a newcomer even when
+        // nobody reads the list.
+        book.seen("beast", &source("10.10.0.8", Via::Direct));
+        book.live.lock().values_mut().for_each(|l| l.last = Utc::now() - RECENT - chrono::TimeDelta::seconds(1));
+        book.seen("beast", &source("10.10.0.9", Via::Direct));
+        assert_eq!(book.live.lock().len(), 1);
+        let now = book.connected();
+        assert_eq!((now[0].ip.to_string(), now[0].in_flight), ("10.10.0.9".into(), 0));
+        // An idle list is bounded.
+        for i in 0..(LIVE_MAX + 10) {
+            book.seen(&format!("k{i}"), &source("10.0.0.1", Via::Direct));
+        }
+        assert!(book.live.lock().len() <= LIVE_MAX);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
