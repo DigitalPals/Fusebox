@@ -219,7 +219,8 @@ async fn codex_image(app: &App, acct: &Account, headers: &HeaderMap, body: &Valu
         return read_json(resp).await;
     }
     let mut stream = resp.bytes_stream();
-    let mut dec = SseDecoder::default();
+    // Generated images arrive base64-encoded inside a single event.
+    let mut dec = SseDecoder::with_limit(app.cfg().stream_limits.media_event_bytes);
     let mut images: Vec<(String, String)> = Vec::new();
     let mut meta = json!({});
     let mut usage = Value::Null;
@@ -258,11 +259,17 @@ async fn codex_image(app: &App, acct: &Account, headers: &HeaderMap, body: &Valu
                 return Err(err);
             }
         }
+        if dec.failed() {
+            return Err(fail(502, crate::sse::LIMIT_ERROR));
+        }
     }
     for ev in dec.finish() {
         if let Some(err) = handle(&ev.data, &mut images) {
             return Err(err);
         }
+    }
+    if dec.failed() {
+        return Err(fail(502, crate::sse::LIMIT_ERROR));
     }
     if images.is_empty() {
         return Err(fail(502, "the upstream did not return an image"));

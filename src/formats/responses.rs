@@ -821,7 +821,10 @@ fn usage_json(u: &Usage) -> Value {
         "total_tokens": u.prompt_total() + u.output,
     });
     if u.cache_write > 0 {
+        // Canonical name, read by Codex. The legacy alias carries the same count for
+        // clients that read Fusebox's earlier spelling; it is not an additional amount.
         usage["input_tokens_details"]["cache_write_tokens"] = u.cache_write.into();
+        usage["input_tokens_details"]["cache_creation_tokens"] = u.cache_write.into();
     }
     usage
 }

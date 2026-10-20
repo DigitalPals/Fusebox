@@ -56,14 +56,14 @@ pub struct Cache {
 }
 impl Cache {
     fn key(headers: &HeaderMap, acct: &Account, model: &str, body: &Value) -> String {
+        // Read each lock on its own: a guard inside the loop's array would be held
+        // for the whole loop, including while the credential lock is taken.
+        let identity = acct.state.lock().credential_identity.clone();
+        let backend = upstream::backend_stamp(acct);
         let mut hash = Sha256::new();
-        for part in [
-            crate::affinity::client_scope(headers),
-            acct.id.clone(),
-            acct.state.lock().credential_identity.clone(),
-            model.into(),
-            body.to_string(),
-        ] {
+        for part in
+            [crate::affinity::client_scope(headers), acct.id.clone(), identity, backend, model.into(), body.to_string()]
+        {
             hash.update((part.len() as u64).to_le_bytes());
             hash.update(part.as_bytes());
         }
@@ -244,6 +244,7 @@ pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outco
             let mut value = (*value).clone();
             value["usage"] = json!({"prompt_tokens":0,"total_tokens":0});
             value["fusebox_cache_hit"] = true.into();
+            tracker.cached(&acct);
             tracker.finish(200, &Usage::default(), None);
             return Ok(value);
         }
@@ -449,6 +450,8 @@ async fn google(
     let mut launched = 0usize;
     let mut results = Vec::new();
     let mut first_error = None;
+    // A chunk that failed validation after a successful response was still executed.
+    let mut executed_failure = false;
     let mut exhausted = false;
     let mut final_chunk = None;
     loop {
@@ -469,14 +472,15 @@ async fn google(
         let Some((index, result, mut child)) = pending.next().await else {
             break;
         };
-        let chunk_status = result.as_ref().err().map_or(200, |e| e.0);
+        let chunk_status = result.as_ref().err().map_or(200, |(e, _)| e.0);
         match result {
             Ok((vectors, tokens)) => {
                 tracker.embedding_progress(tokens, !vertex);
                 results.push((index, vectors, tokens));
             }
-            Err(error) => {
+            Err((error, executed)) => {
                 tracker.embedding_progress(None, false);
+                executed_failure |= executed;
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -492,7 +496,7 @@ async fn google(
     }
     let outcome = (|| {
         if let Some(error) = first_error {
-            return Err(failure(error, launched > 1 || !results.is_empty()));
+            return Err(failure(error, launched > 1 || !results.is_empty() || executed_failure));
         }
         results.sort_by_key(|(index, _, _)| *index);
         let mut vectors = Vec::with_capacity(texts.len());
@@ -530,16 +534,19 @@ async fn google_chunk(
     estimate: u64,
     vertex: bool,
     child: ChunkUsage,
-) -> (usize, Result<(Vec<Value>, Option<u64>), (u16, Value)>, ChunkUsage) {
+) -> (usize, Result<(Vec<Value>, Option<u64>), ((u16, Value), bool)>, ChunkUsage) {
     let result = async {
-        let resp = send(app, acct, url, auth, &req).await?;
+        let resp = send(app, acct, url, auth, &req).await.map_err(|e| (e, false))?;
         if let Some(c) = child.analytics.tap() {
             c.headers(resp.headers(), resp.status().as_u16());
         }
-        let v = read_json(resp).await?;
+        let v = read_json(resp).await.map_err(|e| (e, false))?;
+        // The provider has done this chunk's work from here on; retrying elsewhere would repeat it.
+        let executed = |e: (u16, Value)| (e, true);
         let (vectors, tokens) = if vertex {
-            let predictions =
-                v["predictions"].as_array().ok_or_else(|| fail(502, "Vertex returned invalid predictions"))?;
+            let predictions = v["predictions"]
+                .as_array()
+                .ok_or_else(|| executed(fail(502, "Vertex returned invalid predictions")))?;
             let counts: Option<Vec<u64>> = predictions
                 .iter()
                 .map(|p| {
@@ -556,7 +563,7 @@ async fn google_chunk(
                 c.embedding(tokens, false);
             }
             if predictions.iter().any(|p| p["embeddings"]["statistics"]["truncated"] == true) {
-                return Err(fail(400, "Vertex truncated embedding input despite autoTruncate=false"));
+                return Err(executed(fail(400, "Vertex truncated embedding input despite autoTruncate=false")));
             }
             (predictions.iter().map(|p| p["embeddings"]["values"].clone()).collect::<Vec<_>>(), tokens)
         } else {
@@ -566,7 +573,7 @@ async fn google_chunk(
             (v["embeddings"].as_array().into_iter().flatten().map(|p| p["values"].clone()).collect(), Some(estimate))
         };
         if vectors.len() != expected {
-            return Err(fail(502, "Google returned a different number of embeddings"));
+            return Err(executed(fail(502, "Google returned a different number of embeddings")));
         }
         Ok((vectors, tokens))
     }

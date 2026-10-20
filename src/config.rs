@@ -482,7 +482,7 @@ request-limits:
 stream-limits:
   event-bytes: 16777216    # maximum SSE event/unfinished line or native WS event
   media-event-bytes: 67108864 # models whose names contain image, audio or video
-  bootstrap-bytes: 2097152 # release buffered initial chunks at this threshold
+  bootstrap-bytes: 2097152 # after the first event, release buffered chunks at this threshold
   pre-output-timeout-seconds: 0 # optional combined headers/first-event deadline; expiry is terminal
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts

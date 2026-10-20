@@ -23,15 +23,17 @@ The implementation is on `perf/reviewed-optimizations`, based on
   session identifiers on HTTP and native WebSockets. Caller keys and session
   headers keep their precedence. Claude scope/TTL behavior is unchanged.
 - Chat↔Responses keeps late system/developer instructions in order, including
-  their cache markers. Other target wire formats reject late privileged
-  instructions with `400`, rather than changing their position or authority.
-  Leading instructions retain the previous aggregation behavior.
+  their cache markers. Claude, Gemini and Devin targets add late instructions
+  to the system prompt in order, as before, keeping their authority rather
+  than demoting them to user turns. Leading instructions retain the previous
+  aggregation behavior.
 - Chat `verbosity` and Responses `text.verbosity` survive supported GPT-5/6
   translations on the Codex provider. Translated service tiers require
   `translation.allow-service-tier: true`; unsupported/dropped controls have
   explicit diagnostics. Native requests retain their existing controls.
 - Translated Responses output emits the canonical positive
-  `usage.input_tokens_details.cache_write_tokens`. Parsers still accept legacy
+  `usage.input_tokens_details.cache_write_tokens`, plus the legacy
+  `cache_creation_tokens` alias with the same count. Parsers still accept legacy
   spellings. Chat output retains its existing spelling pending a verified Chat
   contract. Native usage continues to distinguish unknown from zero; the numeric
   translation IR has not been redesigned to represent unknown usage.
@@ -53,9 +55,10 @@ The implementation is on `perf/reviewed-optimizations`, based on
 - SSE events and fragmented lines are bounded; completed usage events preceding
   an oversized event are retained. Native WebSocket events also receive a size
   check within their existing transport bound. The default event limit is
-  16 MiB, or 64 MiB for model names containing image/audio/video. Initial held
-  chunks are released once the 2 MiB bootstrap threshold is reached, with at most
-  a network chunk of threshold overshoot.
+  16 MiB, or 64 MiB for upstream model names containing image/audio/video.
+  After the first event, held chunks are released once the 2 MiB bootstrap
+  threshold is reached. Before it, the first-event deadline keeps applying and
+  the event limit bounds buffering.
 - Optional `stream-limits.pre-output-timeout-seconds` gives HTTP headers and the
   first event one absolute deadline, and bounds native WS sending/first event.
   It is off by default. Expiry and ambiguous upstream gateway timeouts are

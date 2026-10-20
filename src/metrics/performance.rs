@@ -106,46 +106,79 @@ impl Performance {
     pub fn websocket(&mut self, reason: &'static str) {
         *self.ws.entry(reason).or_default() += 1;
     }
+    /// One contiguous group per metric family, as the exposition format requires.
     pub fn render(&self, out: &mut String) {
-        for (name, help) in [
-            ("total", "Request duration"),
-            ("ttft", "Time to first content"),
-            ("prepare", "Final attempt preparation"),
-            ("headers", "Final attempt upstream headers"),
-        ] {
-            let _ = writeln!(
-                out,
-                "# HELP fusebox_{name}_seconds {help} in seconds.\n# TYPE fusebox_{name}_seconds histogram"
-            );
-        }
-        let _ = writeln!(
+        const KINDS: [&str; 5] = ["input", "cache_read", "cache_write", "output", "reasoning"];
+        let rows: Vec<(String, &Series)> = self
+            .series
+            .iter()
+            .map(|((provider, model, transport), row)| {
+                let labels = format!(
+                    "provider=\"{}\",model=\"{}\",transport=\"{transport}\"",
+                    super::label(provider),
+                    super::label(model)
+                );
+                (labels, row)
+            })
+            .collect();
+        let family = |out: &mut String, name: &str, kind: &str, help: &str| {
+            let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
+        };
+
+        family(
             out,
-            "# HELP fusebox_usage_tokens_total Reported disjoint tokens across all provider attempts; reasoning is an output subset.\n# TYPE fusebox_usage_tokens_total counter\n# TYPE fusebox_usage_fields_total counter\n# TYPE fusebox_routed_requests_total counter\n# TYPE fusebox_retries_total counter\n# TYPE fusebox_websocket_turns_total counter"
+            "fusebox_usage_tokens_total",
+            "counter",
+            "Reported disjoint tokens across all provider attempts; reasoning is an output subset.",
         );
-        for ((provider, model, transport), row) in &self.series {
-            let labels = format!(
-                "provider=\"{}\",model=\"{}\",transport=\"{transport}\"",
-                super::label(provider),
-                super::label(model)
-            );
-            for (i, kind) in ["input", "cache_read", "cache_write", "output", "reasoning"].iter().enumerate() {
+        for (labels, row) in &rows {
+            for (i, kind) in KINDS.iter().enumerate() {
+                let _ = writeln!(out, "fusebox_usage_tokens_total{{{labels},kind=\"{kind}\"}} {}", row.tokens[i]);
+            }
+        }
+        family(
+            out,
+            "fusebox_usage_fields_total",
+            "counter",
+            "Provider attempts whose usage reported or omitted each token kind.",
+        );
+        for (labels, row) in &rows {
+            for (i, kind) in KINDS.iter().enumerate() {
                 let _ = writeln!(
                     out,
-                    "fusebox_usage_tokens_total{{{labels},kind=\"{kind}\"}} {}\nfusebox_usage_fields_total{{{labels},kind=\"{kind}\",state=\"reported\"}} {}\nfusebox_usage_fields_total{{{labels},kind=\"{kind}\",state=\"unknown\"}} {}",
-                    row.tokens[i], row.known[i], row.unknown[i]
+                    "fusebox_usage_fields_total{{{labels},kind=\"{kind}\",state=\"reported\"}} {}\nfusebox_usage_fields_total{{{labels},kind=\"{kind}\",state=\"unknown\"}} {}",
+                    row.known[i], row.unknown[i]
                 );
             }
-            let _ = writeln!(
-                out,
-                "fusebox_routed_requests_total{{{labels}}} {}\nfusebox_retries_total{{{labels}}} {}",
-                row.requests, row.retries
-            );
-            for (name, h) in
-                [("total", &row.total), ("ttft", &row.ttft), ("prepare", &row.prepare), ("headers", &row.headers)]
-            {
-                h.render(out, &format!("fusebox_{name}_seconds"), &labels);
+        }
+        family(out, "fusebox_routed_requests_total", "counter", "Finished routed requests.");
+        for (labels, row) in &rows {
+            let _ = writeln!(out, "fusebox_routed_requests_total{{{labels}}} {}", row.requests);
+        }
+        family(out, "fusebox_retries_total", "counter", "Provider attempts beyond the first, per finished request.");
+        for (labels, row) in &rows {
+            let _ = writeln!(out, "fusebox_retries_total{{{labels}}} {}", row.retries);
+        }
+        type Pick = fn(&Series) -> &Histogram;
+        let histograms: [(&str, &str, Pick); 4] = [
+            ("total", "Request duration", |r| &r.total),
+            ("ttft", "Time to first content", |r| &r.ttft),
+            ("prepare", "Final attempt preparation", |r| &r.prepare),
+            ("headers", "Final attempt upstream headers", |r| &r.headers),
+        ];
+        for (name, help, histogram) in histograms {
+            let name = format!("fusebox_{name}_seconds");
+            family(out, &name, "histogram", &format!("{help} in seconds."));
+            for (labels, row) in &rows {
+                histogram(row).render(out, &name, labels);
             }
         }
+        family(
+            out,
+            "fusebox_websocket_turns_total",
+            "counter",
+            "Codex WebSocket turns by native completion or fallback reason.",
+        );
         for (reason, count) in &self.ws {
             let _ = writeln!(out, "fusebox_websocket_turns_total{{reason=\"{reason}\"}} {count}");
         }
@@ -170,5 +203,41 @@ mod tests {
         assert!(out.contains("kind=\"input\",state=\"unknown\""));
         assert!(out.contains("kind=\"cache_write\",state=\"reported\""));
         assert!(!out.contains("event"));
+    }
+
+    #[test]
+    fn every_family_is_one_described_group() {
+        let mut p = Performance::default();
+        let mut o = Observation::new("proxy", "attempt".into(), "codex", 0);
+        for model in ["a", "b"] {
+            o.actual_model = Some(model.into());
+            p.attempt(&o, "http");
+        }
+        p.websocket("native");
+        let mut out = String::new();
+        p.render(&mut out);
+        let family = |line: &str| {
+            let name = line.split(['{', ' ']).next().unwrap();
+            ["_bucket", "_count", "_sum"]
+                .iter()
+                .find_map(|suffix| name.strip_suffix(suffix).filter(|n| n.ends_with("_seconds")))
+                .unwrap_or(name)
+                .to_string()
+        };
+        let mut finished = std::collections::HashSet::new();
+        let (mut current, mut described) = (String::new(), std::collections::HashSet::new());
+        for line in out.lines() {
+            if let Some(rest) = line.strip_prefix("# HELP ").or_else(|| line.strip_prefix("# TYPE ")) {
+                described.insert(rest.split(' ').next().unwrap().to_string());
+                continue;
+            }
+            let name = family(line);
+            assert!(described.contains(&name), "{name} has no HELP/TYPE");
+            if name != current {
+                assert!(finished.insert(current.clone()), "{current} is split");
+                assert!(!finished.contains(&name), "{name} appears in two groups");
+                current = name;
+            }
+        }
     }
 }

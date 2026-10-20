@@ -297,6 +297,37 @@ pub(crate) fn parse_openai_system(content: &Value, req: &mut Request) {
     req.system.push(text);
 }
 
+/// Targets without positional instructions (Claude, Gemini, Devin) receive late
+/// system/developer messages in their system prompt, as before positions were kept.
+/// Demoting them to user turns would lower their privilege. Returns `None` when
+/// the request has no late instructions.
+pub fn hoist_instructions(req: &Request) -> Option<Request> {
+    if !req.messages.iter().any(|m| matches!(m.role, Role::System | Role::Developer)) {
+        return None;
+    }
+    let mut out = req.clone();
+    let messages = std::mem::take(&mut out.messages);
+    for m in messages {
+        if !matches!(m.role, Role::System | Role::Developer) {
+            out.messages.push(m);
+            continue;
+        }
+        let text = m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            out.system.push(text);
+        }
+    }
+    Some(out)
+}
+
 pub(crate) fn openai_system_blocks(req: &Request, index: usize, kind: &str) -> Value {
     use serde_json::json;
     match req.system_cache_blocks.get(&index) {

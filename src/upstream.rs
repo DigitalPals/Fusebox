@@ -102,11 +102,22 @@ pub fn is_claude_code(h: &HeaderMap) -> bool {
 /// A request-local memoization stamp. Credentials themselves are never retained
 /// in a cache key or diagnostics, and token rotation invalidates prepared headers.
 pub fn credential_stamp(acct: &Account) -> String {
-    let (token, base, _, account) = creds(acct);
+    let (token, _, _, _) = creds(acct);
+    stamp([token, backend_stamp(acct), acct.state.lock().identity_epoch.to_string()])
+}
+
+/// The account's base URL, provider account id and configured custom headers.
+/// A header-only reload keeps the credential identity, so caches of prepared
+/// requests or upstream results must include this as well.
+pub fn backend_stamp(acct: &Account) -> String {
+    let (_, base, _, account) = creds(acct);
+    let headers = acct.headers.iter().flat_map(|(k, v)| [k.clone(), v.clone()]);
+    stamp([base.unwrap_or_default(), account.unwrap_or_default()].into_iter().chain(headers))
+}
+
+fn stamp(values: impl IntoIterator<Item = String>) -> String {
     let mut hash = Sha256::new();
-    for value in
-        [token, base.unwrap_or_default(), account.unwrap_or_default(), acct.state.lock().identity_epoch.to_string()]
-    {
+    for value in values {
         hash.update((value.len() as u64).to_le_bytes());
         hash.update(value.as_bytes());
     }

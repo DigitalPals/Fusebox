@@ -190,8 +190,11 @@ fn responses_usage_uses_canonical_cache_write_field_without_double_counting() {
     agg.usage = Usage { input: 70, cache_read: 20, cache_write: 10, output: 40, reasoning: 30 };
     let v = formats::responses::render_full(&agg, "model", &Request::default());
     assert_eq!(v["usage"]["input_tokens_details"]["cache_write_tokens"], 10);
-    assert!(v["usage"]["input_tokens_details"].get("cache_creation_tokens").is_none());
+    // The legacy alias repeats the same count rather than adding to it.
+    assert_eq!(v["usage"]["input_tokens_details"]["cache_creation_tokens"], 10);
     assert_eq!(v["usage"]["total_tokens"], 140);
+    // Fusebox's own parser reads either name once.
+    assert_eq!(formats::responses::usage_of(&v["usage"]).unwrap().cache_write, 10);
 }
 
 #[test]
@@ -268,4 +271,49 @@ fn latency_ties_require_comparable_samples_and_do_not_change_pinned_accounts() {
         })
         .collect();
     assert_ne!(picks[0], picks[1]);
+}
+
+#[test]
+fn late_instructions_join_the_system_prompt_on_targets_without_positions() {
+    let plain = formats::chat::parse_request(&json!({"messages":[{"role":"user","content":"q"}]})).unwrap();
+    assert!(formats::hoist_instructions(&plain).is_none());
+    let original = json!({"messages":[{"role":"system","content":"stable"},{"role":"user","content":"question"},
+        {"role":"assistant","content":"answer"},{"role":"developer","content":[{"type":"text","text":"late"}]},
+        {"role":"user","content":"next"}]});
+    let req = formats::chat::parse_request(&original).unwrap();
+    let hoisted = formats::hoist_instructions(&req).unwrap();
+    // Leading instructions first, then late ones in order, as before positions were kept.
+    assert_eq!(hoisted.system, vec!["stable", "late"]);
+    assert!(hoisted.messages.iter().all(|m| !matches!(m.role, crate::ir::Role::System | crate::ir::Role::Developer)));
+    assert!(req.messages.iter().any(|m| m.role == crate::ir::Role::Developer), "the original keeps its positions");
+    let claude = formats::claude::build_request(&hoisted, "claude-sonnet-5-5");
+    assert!(claude["system"].to_string().contains("late"));
+    assert!(!claude["messages"].to_string().contains("late"), "late instructions are not demoted to a user turn");
+    let gemini = formats::gemini::build_request(&hoisted, "gemini-3.8-flash");
+    assert!(!gemini["contents"].to_string().contains("late"));
+}
+
+#[test]
+fn prepared_request_stamps_change_with_custom_account_headers() {
+    let stamp_with = |headers: &[(&str, &str)]| {
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![crate::config::KeyEntry {
+                api_key: "key".into(),
+                headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        (upstream::credential_stamp(&acct), upstream::backend_stamp(&acct))
+    };
+    let plain = stamp_with(&[]);
+    assert_eq!(plain, stamp_with(&[]));
+    let routed = stamp_with(&[("x-backend", "eu")]);
+    assert_ne!(plain.0, routed.0);
+    assert_ne!(plain.1, routed.1);
+    assert_ne!(routed, stamp_with(&[("x-backend", "us")]));
 }

@@ -156,6 +156,13 @@ impl Tracker {
         if let Some(a) = &mut self.analytics {
             a.attempt(acct);
         }
+        // A whole-request attempt replaces an earlier chunked attempt's accounting;
+        // those chunks already recorded their own usage.
+        if self.log.chunks > 0 {
+            self.log.chunks = 0;
+            self.batch_completeness = None;
+            self.stream_usage = Usage::default();
+        }
         self.account_attempt(acct);
     }
     fn account_attempt(&mut self, acct: &Arc<Account>) {
@@ -168,9 +175,28 @@ impl Tracker {
     }
 
     pub fn embedding_attempt(&mut self, acct: &Arc<Account>) {
+        // End an earlier whole-request attempt the way a normal retry would. Left
+        // open, it would be finalized with this attempt's status and usage.
+        if let Some(c) = self.usage_tap() {
+            self.app.stats.performance.lock().attempt(&c.snapshot(None, None, false), self.log.transport);
+        }
+        if let Some(a) = &mut self.analytics {
+            let _ = a.finish(None, None, false);
+        }
+        self.attempt_started = Instant::now();
+        self.prepared_ms = None;
+        self.headers_ms = None;
         self.account_attempt(acct);
         // Concurrent chunks own their individual provider load reservations.
         self.load = None;
+    }
+
+    /// A cached result names the account it came from without counting an
+    /// attempt or a request against that account.
+    pub fn cached(&mut self, acct: &Account) {
+        self.log.provider = acct.provider.as_str().to_string();
+        self.log.account = acct.label.clone();
+        self.log.account_id = acct.id.clone();
     }
     pub fn embedding_child(
         &self,
@@ -414,16 +440,10 @@ impl Tracker {
                 && captured.as_ref().is_some_and(|o| o.tokens.cache_read == Some(0))
                 && let (Some(context), Some(ttft)) = (&self.latency_context, self.log.ttft_ms)
             {
-                if st.latency.len() >= 64 {
-                    st.latency.clear();
-                }
                 // Routing compares the resolved upstream name, which may differ
                 // from the provider's reported snapshot name.
                 let model = self.latency_model.as_ref().unwrap_or(&self.log.model).clone();
-                st.latency
-                    .entry((model, context.clone()))
-                    .and_modify(|s| s.add(ttft))
-                    .or_insert_with(|| crate::latency::Sample::new(ttft));
+                crate::latency::record(&mut st.latency, (model, context.clone()), ttft);
             }
             st.counters.record(&self.log);
             st.last_used = Some(Utc::now());
@@ -1177,9 +1197,14 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             && call.body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["type"] == "custom"));
         let passthrough = provider.wires().contains(&call.format) && (!custom_tools || native_custom_tools(provider));
         let native = if passthrough { call.format } else { provider.wires().first().copied().unwrap_or(Format::Chat) };
+        // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
         let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
         let preparation_key = (acct.id.clone(), upstream_model.clone(), native, upstream::credential_stamp(&acct));
-        let prepared = if let Some((_, cached)) = preparation_cache.as_ref().filter(|(key, _)| key == &preparation_key)
+        // Antigravity and Devin stamp each prepared request with fresh request and
+        // session ids, so a retry must prepare again rather than resend them.
+        let memoizable = !matches!(provider, Provider::Antigravity | Provider::Devin);
+        let prepared = if let Some((_, cached)) =
+            preparation_cache.as_ref().filter(|(key, _)| memoizable && key == &preparation_key)
         {
             cached.clone()
         } else {
@@ -1224,13 +1249,10 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 } else {
                     original
                 };
-                if !matches!(native, Format::Chat | Format::Responses)
-                    && req.messages.iter().any(|m| matches!(m.role, ir::Role::System | ir::Role::Developer))
-                {
-                    let message = "Inline system/developer instructions require an OpenAI-compatible target; use the provider's native instruction format";
-                    tracker.finish(400, &Usage::default(), Some(message.into()));
-                    return error_reply(call.format, 400, message);
-                }
+                let hoisted = (devin || !matches!(native, Format::Chat | Format::Responses))
+                    .then(|| formats::hoist_instructions(req))
+                    .flatten();
+                let req = hoisted.as_ref().unwrap_or(req);
                 if native == Format::Claude
                     && !devin
                     && let Err(message) = formats::claude::validate_thinking_budget(req, &upstream_model)
@@ -1327,8 +1349,6 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
                     && requested_cache.markers);
 
-            // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
-            let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
             let prepared = upstream::prepare(
                 &Target {
                     acct: &acct,
@@ -1540,18 +1560,18 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         let mut body: Option<ByteStream> = None;
         if is_sse && !devin {
             let stream: ByteStream = Box::pin(resp.take().expect("response").bytes_stream());
-            let event_limit = first_token
+            let first_event = first_token
                 .into_iter()
                 .chain(absolute_deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now())))
                 .min();
-            match bootstrap(stream, native, event_limit, &cfg.stream_limits, &upstream_model).await {
+            match bootstrap(stream, native, first_event, &cfg.stream_limits, &upstream_model).await {
                 Boot::Ready(stream) => body = Some(stream),
                 Boot::Failed { status, message, held } => {
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                         status, "upstream failed before its first token; trying another account");
                     // What it reported before failing still counts for this attempt.
                     let tap = tracker.usage_tap();
-                    let mut dec = SseDecoder::default();
+                    let mut dec = SseDecoder::with_limit(cfg.stream_limits.for_model(&upstream_model));
                     let mut events: Vec<_> = held.iter().flat_map(|chunk| dec.push(chunk)).collect();
                     events.extend(dec.finish());
                     for sse in &events {
@@ -1567,6 +1587,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     } else {
                         acct.state.lock().set_error(format!("{status}: {message}"));
                     }
+                    // Like an HTTP 504, a gateway timeout event is ambiguous: the provider
+                    // may still be generating, so it is answered rather than repeated.
                     if status == 504 {
                         tracker.finish(status, &Usage::default(), Some(message.clone()));
                         return error_reply(call.format, status, &message);
@@ -1602,13 +1624,19 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         let req = Arc::new(parsed.take().unwrap_or_default());
 
         let unwrap = provider == Provider::Antigravity;
+        // Limits follow the resolved upstream model, as in `bootstrap`; a client alias
+        // need not name the media type.
+        let event_limit = cfg.stream_limits.for_model(&upstream_model);
         if passthrough {
             if let Some(body) = body {
                 if call.stream {
-                    return Reply::Stream { frames: passthrough_stream(body, native, tracker, unwrap), account };
+                    return Reply::Stream {
+                        frames: passthrough_stream(body, native, tracker, unwrap, event_limit),
+                        account,
+                    };
                 }
                 // Codex only streams: rebuild the final response object.
-                return collect_passthrough(body, native, tracker, call.format).await;
+                return collect_passthrough(body, native, tracker, call.format, event_limit).await;
             }
             let resp = resp.take().expect("response");
             let text = match resp.text().await {
@@ -1625,7 +1653,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 // An unlabelled stream after all: rebuild the final object from it.
                 Err(_) if text.contains("data:") => {
                     let body = futures::stream::once(async move { Ok(bytes::Bytes::from(text)) });
-                    return collect_passthrough(Box::pin(body), native, tracker, call.format).await;
+                    return collect_passthrough(Box::pin(body), native, tracker, call.format, event_limit).await;
                 }
                 Err(_) => {
                     let message = "upstream returned an invalid JSON response";
@@ -1813,11 +1841,6 @@ async fn bootstrap(
         };
         held_bytes = held_bytes.saturating_add(chunk.len());
         held.push(chunk.clone());
-        // Release the bounded bootstrap buffer to the normal decoder. It still
-        // enforces event limits and retains usage before an oversized event.
-        if held_bytes >= limits.bootstrap_bytes {
-            return ready(held, body);
-        }
         for sse in dec.push(&chunk) {
             release_at.get_or_insert_with(|| tokio::time::Instant::now() + BOOT_HOLD);
             let parsed = serde_json::from_str::<Value>(&sse.data).ok();
@@ -1835,6 +1858,13 @@ async fn bootstrap(
                 ev if is_content(&ev) => return ready(held, body),
                 _ => {}
             }
+        }
+        // Once an event has arrived, release the bounded bootstrap buffer to the
+        // normal decoder, which still enforces event limits. Before the first
+        // event the first-event deadline must keep applying, so buffering
+        // continues there, bounded by the decoder's event limit instead.
+        if release_at.is_some() && held_bytes >= limits.bootstrap_bytes {
+            return ready(held, body);
         }
     }
 }
@@ -2010,9 +2040,15 @@ async fn collect(events: EventStream, format: Format, model: &str, req: &Request
 }
 
 /// Forwards upstream SSE events untouched while tapping usage.
-fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker, unwrap: bool) -> FrameStream {
+fn passthrough_stream(
+    mut body: ByteStream,
+    native: Format,
+    mut tracker: Tracker,
+    unwrap: bool,
+    event_limit: usize,
+) -> FrameStream {
     Box::pin(async_stream::stream! {
-        let mut dec = SseDecoder::with_limit(tracker.app.cfg().stream_limits.for_model(&tracker.log.model));
+        let mut dec = SseDecoder::with_limit(event_limit);
         let mut parser = formats::parser(native);
         let mut evs = Vec::new();
         let mut transport_error = None;
@@ -2086,8 +2122,14 @@ fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker
 /// Non-streaming client on a stream-only upstream (Codex): return the final response object.
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
-async fn collect_passthrough(mut body: ByteStream, native: Format, mut tracker: Tracker, format: Format) -> Reply {
-    let mut dec = SseDecoder::with_limit(tracker.app.cfg().stream_limits.for_model(&tracker.log.model));
+async fn collect_passthrough(
+    mut body: ByteStream,
+    native: Format,
+    mut tracker: Tracker,
+    format: Format,
+    event_limit: usize,
+) -> Reply {
+    let mut dec = SseDecoder::with_limit(event_limit);
     let mut parser = formats::parser(native);
     let mut agg = Aggregate::default();
     let mut final_obj: Option<Value> = None;
@@ -2123,6 +2165,11 @@ async fn collect_passthrough(mut body: ByteStream, native: Format, mut tracker: 
         }
     }
     dec.finish().into_iter().for_each(|s| handle(s, &mut agg, &mut final_obj));
+    // A trailing multiline event can first cross the limit in the final flush.
+    if dec.failed() {
+        tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_event_limit"));
+        agg.error.get_or_insert_with(|| (502, crate::sse::LIMIT_ERROR.into()));
+    }
     if let Some((status, msg)) = agg.error.clone() {
         tracker.finish(status, &agg.usage, Some(msg.clone()));
         return error_reply(format, status, &msg);
