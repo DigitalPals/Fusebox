@@ -1,0 +1,144 @@
+{
+  "date": "2026-10-20",
+  "source_commit": "f3dbd1e0ef1b8844726ea3c01f0c56037e0adcdd",
+  "version": "0.7.0+gui.5439d28a0287",
+  "binary_sha256": "36dc460b61b2ed08d780bd98b7ba8a6e7c7f0e6d76be0cc642319f2bb7ae0ef3",
+  "source_sha256": "5439d28a028712be1aa62f9f5b6c0a8f5e8810a3540ec1608490ea6126ac7cd3",
+  "changes": [
+    "Unreadable forwarding entries beyond trusted intermediaries leave the client unknown.",
+    "The connected list removes excess idle entries when the final request or socket ends."
+  ],
+  "validation": {
+    "rust_tests": 549,
+    "ui_tests": 85,
+    "python_tests": 30,
+    "format": "passed",
+    "clippy": "passed",
+    "candidate_process_smoke": {
+      "ok": true,
+      "version": "0.7.0+gui.5439d28a0287",
+      "binary_sha256": "36dc460b61b2ed08d780bd98b7ba8a6e7c7f0e6d76be0cc642319f2bb7ae0ef3",
+      "previous_binary_sha256": "328acd2519450c3784a4c4bb6a17128d4d71394fc3378f8145d322b4b4b3ce4f",
+      "schema_version": 4,
+      "previous_reopened": true,
+      "added_entries": [],
+      "removed_entries": [],
+      "cli_protocols": [
+        "responses",
+        "messages"
+      ],
+      "completed_streams": 4,
+      "malformed_proxy_chains_refused": 8,
+      "development_restarted": true,
+      "lease": "0d9a0e94767643d69767a2afaa8fe8fd"
+    },
+    "live_beast_clis": {
+      "ok": true,
+      "endpoint": "https://10.10.0.235:8317",
+      "clients": {
+        "codex": {
+          "ok": true,
+          "exit_code": 0,
+          "turn_completed": true,
+          "expected_answer": true,
+          "elapsed_seconds": 3.85
+        },
+        "claude": {
+          "ok": true,
+          "exit_code": 0,
+          "turn_completed": true,
+          "expected_answer": true,
+          "elapsed_seconds": 2.22
+        }
+      }
+    }
+  },
+  "production": {
+    "host": "10.10.0.235",
+    "service": "cli-proxy-api.service",
+    "forced": true,
+    "gate_unchanged": true,
+    "force_observation": [
+      {
+        "active_before": 3,
+        "attempt": 0,
+        "drained": true,
+        "drained_after_ms": 52,
+        "hold_lifted_by_cleanup_after_ms": null,
+        "phase": "committed"
+      }
+    ],
+    "postflight": {
+      "account_count": 4,
+      "automatic_restarts": 0,
+      "backup_sha256": "a661c487958a47221714f212ac9cb311e8bde2fd3bd0bc1b384eb29eaff92bae",
+      "billing_calls": 0,
+      "binary_sha256": "36dc460b61b2ed08d780bd98b7ba8a6e7c7f0e6d76be0cc642319f2bb7ae0ef3",
+      "configuration_unchanged": true,
+      "database": {
+        "bytes": 799006848,
+        "bytes_per_observation": 2433,
+        "compressing": false,
+        "disk_free_bytes": 13384155136,
+        "free_bytes": 0,
+        "growth_bytes_per_day": 22725610,
+        "incremental_vacuum": true,
+        "live_bytes": 798990336,
+        "observations": 328264,
+        "uncompressed_rows": 0,
+        "updated_at_ms": 1792484916615
+      },
+      "gate_held": false,
+      "models_listed": 23,
+      "ok": true,
+      "proxy_protocol_port_ready": true,
+      "readiness": {
+        "accounts": {
+          "ready": 4,
+          "total": 4
+        },
+        "status": "ready",
+        "usage": "healthy"
+      },
+      "rollback_version": "0.7.0+gui.378b18e77863",
+      "schema_additions": [],
+      "service_active": true,
+      "usage_after": {
+        "observations": 328267,
+        "quick_check": "ok",
+        "schema_sha256": "77de40c13636ff2b9c71c4fd4db6cf2d89daf463f887265961ce248ce0a9ea8d",
+        "schema_version": 4
+      },
+      "usage_backup_sha256": "6df61dedfbfadbcf9b9df80e34d43aa6a8857f042f0712b0e6196981d551c147",
+      "usage_before": {
+        "observations": 328264,
+        "quick_check": "ok",
+        "schema_sha256": "77de40c13636ff2b9c71c4fd4db6cf2d89daf463f887265961ce248ce0a9ea8d",
+        "schema_version": 4
+      },
+      "usage_health": {
+        "accepted": 3,
+        "dropped": 0,
+        "prior_unclosed_sessions": 0,
+        "queue_depth": 0,
+        "rejected": 0,
+        "state": "healthy",
+        "writer_errors": 0,
+        "written": 3
+      },
+      "version": "0.7.0+gui.5439d28a0287"
+    }
+  },
+  "rollback": {
+    "version": "0.7.0+gui.378b18e77863",
+    "binary_sha256": "328acd2519450c3784a4c4bb6a17128d4d71394fc3378f8145d322b4b4b3ce4f",
+    "core_backup_sha256": "a661c487958a47221714f212ac9cb311e8bde2fd3bd0bc1b384eb29eaff92bae",
+    "usage_backup_sha256": "6df61dedfbfadbcf9b9df80e34d43aa6a8857f042f0712b0e6196981d551c147"
+  },
+  "operator_records": "/opt/cli-proxy-api-rust/incoming/fusebox-source-fixes-20261020/",
+  "retention": {
+    "owner": "John Pals / Fusebox production operator",
+    "retained": "Production release, prior release, source archive, updater backups and deployment receipts.",
+    "temporary_resources": "Leased candidate processes stopped; all task leases closed and checked."
+  }
+}
