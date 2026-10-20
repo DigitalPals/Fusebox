@@ -97,6 +97,9 @@ body {
 a { color: var(--fg); text-decoration: none; }
 a:hover { color: var(--brand); }
 button, input, select, textarea { font: inherit; color: inherit; font-variant-numeric: tabular-nums; }
+/* The open list inherits the select's colours; a transparent select leaves it on the
+   browser's white with the theme's light text, so give it the panel's own. */
+option { background: var(--surface-pop); color: var(--fg); }
 button { cursor: pointer; }
 input::placeholder, textarea::placeholder { color: var(--fg-3); }
 :focus-visible { outline: 2px solid var(--line-hover); outline-offset: 2px; }
@@ -427,6 +430,8 @@ h1, h2, h3, p { margin: 0; }
 .snip-tabs button { flex: none; padding: 5px 10px; font-size: 13px; background: transparent; color: var(--fg-3); border: 0; border-radius: 5px; }
 .snip-tabs button:hover { color: var(--fg); }
 .snip-tabs button[aria-pressed="true"] { background: var(--seg-on); color: var(--fg); }
+/* The strip scrolls, which clips an outside ring; draw it inside instead. */
+.snip-tabs > :focus-visible { outline-offset: -2px; }
 .code { margin: 0; padding: 14px 16px; font: 400 12.5px/1.6 var(--mono); color: var(--fg-2); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .code .v { color: var(--fg); }
 .code .k { color: var(--fg-3); }
