@@ -17,6 +17,8 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         temperature: v["temperature"].as_f64(),
         top_p: v["top_p"].as_f64(),
         parallel_tool_calls: v["parallel_tool_calls"].as_bool(),
+        verbosity: v["verbosity"].as_str().map(String::from),
+        service_tier: v["service_tier"].as_str().map(String::from),
         ..Default::default()
     };
     match &v["stop"] {
@@ -45,7 +47,14 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
     for m in messages {
         match m["role"].as_str().unwrap_or("user") {
             "system" | "developer" => {
-                super::parse_openai_system(&m["content"], &mut req);
+                if req.messages.is_empty() {
+                    super::parse_openai_system(&m["content"], &mut req);
+                } else {
+                    req.messages.push(Message {
+                        role: if m["role"] == "developer" { Role::Developer } else { Role::System },
+                        parts: content_parts(&m["content"]),
+                    });
+                }
             }
             "assistant" => {
                 let mut parts = Vec::new();
@@ -164,6 +173,10 @@ pub fn build_request(req: &Request, model: &str) -> Value {
     }
     for m in &req.messages {
         match m.role {
+            Role::System | Role::Developer => {
+                let role = if m.role == Role::System { "system" } else { "developer" };
+                messages.push(json!({"role":role,"content":cached_text_parts(&m.parts)}));
+            }
             Role::Assistant => {
                 let text: String = m
                     .parts
@@ -234,6 +247,12 @@ pub fn build_request(req: &Request, model: &str) -> Value {
         "stream_options": { "include_usage": true },
     });
     let o = out.as_object_mut().unwrap();
+    if let Some(verbosity) = &req.verbosity {
+        o.insert("verbosity".into(), verbosity.clone().into());
+    }
+    if let Some(tier) = &req.service_tier {
+        o.insert("service_tier".into(), tier.clone().into());
+    }
     if !req.tools.is_empty() {
         o.insert(
             "tools".into(),

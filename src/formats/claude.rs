@@ -254,18 +254,6 @@ pub fn validate_native_thinking_budget(body: &Value, model: &str) -> Result<(), 
     Ok(())
 }
 
-fn has_cache_control(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.get("cache_control").is_some_and(|control| !control.is_null())
-                || object.get("prompt_cache_breakpoint").is_some_and(|control| !control.is_null())
-                || object.values().any(has_cache_control)
-        }
-        Value::Array(values) => values.iter().any(has_cache_control),
-        _ => false,
-    }
-}
-
 /// Enable Anthropic's moving cache boundary for translated conversations.
 /// Call only for an actual Claude provider, not every provider using its wire format.
 /// Explicit controls, including OpenAI's intentional explicit-with-no-markers mode,
@@ -273,12 +261,13 @@ fn has_cache_control(value: &Value) -> bool {
 #[cfg(test)]
 pub fn apply_translated_cache_policy(original: &Value, body: &mut Value) {
     let explicit = original["prompt_cache_options"]["mode"] == "explicit";
-    apply_translated_cache_policy_with(explicit, !explicit && has_cache_control(original), body);
+    apply_translated_cache_policy_with(explicit, !explicit && crate::cache::has_markers(original), body);
 }
 
 /// The same, with the caller's mode and markers already known for this request.
+#[cfg(test)]
 pub fn apply_translated_cache_policy_with(explicit_mode: bool, original_markers: bool, body: &mut Value) {
-    if !explicit_mode && !original_markers && !has_cache_control(body) {
+    if !explicit_mode && !original_markers && !crate::cache::has_markers(body) {
         body["cache_control"] = json!({ "type": "ephemeral" });
     }
 }

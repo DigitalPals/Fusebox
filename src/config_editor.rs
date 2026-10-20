@@ -497,6 +497,20 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                     .context("Prompt cache: choose valid scope and incompatible-hint handling")?;
                 config.validate().map_err(anyhow::Error::msg)?;
             }
+            "stream-limits" => {
+                let limits: crate::stream_limits::Limits =
+                    serde_json::from_value(value.clone()).context("Invalid stream-limits")?;
+                limits.validate().map_err(anyhow::Error::msg)?;
+            }
+            "embeddings" => {
+                let config: crate::embeddings::Config =
+                    serde_json::from_value(value.clone()).context("Invalid embeddings")?;
+                config.validate().map_err(anyhow::Error::msg)?;
+            }
+            "translation" => {
+                let _: crate::formats::TranslationConfig =
+                    serde_json::from_value(value.clone()).context("Invalid translation")?;
+            }
             "request-limits" => {
                 let limits: crate::admission::Config =
                     serde_json::from_value(value.clone()).context("Invalid request-limits")?;
@@ -508,7 +522,7 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                 policy.validate().map_err(anyhow::Error::msg)?;
             }
             "codex-websockets" | "claude-cloak" | "banked-resets" | "session-affinity" | "force-model-prefix"
-            | "debug" => {
+            | "debug" | "latency-routing" => {
                 ensure!(value.is_boolean(), "{field}: use a boolean")
             }
             "notifications" => ensure!(
@@ -922,6 +936,9 @@ mod tests {
     fn cache_and_admission_settings_round_trip_and_reject_invalid_options() {
         let changes = json!({
             "prompt-cache": {"scope":"workspace", "namespace":"tools-v2", "on-incompatible":"reject"},
+            "latency-routing":true,"translation":{"allow-service-tier":true},
+            "embeddings":{"concurrency":3,"cache-seconds":60,"cache-bytes":1048576},
+            "stream-limits":{"event-bytes":1048576,"media-event-bytes":4194304,"bootstrap-bytes":65536,"pre-output-timeout-seconds":30},
             "request-limits": {"text-body-bytes":1048576,"media-body-bytes":268435456,"max-in-flight":8,"max-in-flight-body-bytes":33554432}
         });
         for source in ["# keep this\nport: 8317\n", "config-version: 8\nrouting:\n  strategy: fill-first\n"] {
@@ -929,6 +946,9 @@ mod tests {
             assert_eq!(cfg.prompt_cache.scope, crate::cache::Scope::Workspace);
             assert_eq!(cfg.prompt_cache.on_incompatible, crate::cache::Incompatible::Reject);
             assert_eq!(cfg.request_limits.max_in_flight, 8);
+            assert!(cfg.latency_routing && cfg.translation.allow_service_tier);
+            assert_eq!(cfg.embeddings.concurrency, 3);
+            assert_eq!(cfg.stream_limits.pre_output_timeout_seconds, 30);
             assert_eq!(values(&out).unwrap()["prompt-cache"], changes["prompt-cache"]);
             assert!(cfg.ignored.is_empty());
         }
@@ -936,6 +956,9 @@ mod tests {
             json!({"prompt-cache":{"scope":"public"}}),
             json!({"prompt-cache":{"namespace":"x".repeat(257)}}),
             json!({"prompt-cache":{"unknown":true}}),
+            json!({"stream-limits":{"event-bytes":0}}),
+            json!({"embeddings":{"concurrency":0}}),
+            json!({"translation":{"allow-service-tier":"yes"}}),
             json!({"request-limits":{"text-body-bytes":0}}),
             json!({"request-limits":{"media-body-bytes":268435457}}),
             json!({"request-limits":{"max-in-flight":-1}}),

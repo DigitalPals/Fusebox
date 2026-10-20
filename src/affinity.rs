@@ -247,9 +247,77 @@ struct Binding {
     inferred: bool,
 }
 
+/// Immutable shared history segments. Incremental native WebSocket turns append
+/// only their delta; deep copies and full serialization happen only for fallback.
+#[derive(Clone)]
+pub struct History {
+    tail: Option<Arc<HistorySegment>>,
+    len: usize,
+    bytes: usize,
+    depth: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self { tail: None, len: 0, bytes: 2, depth: 0 }
+    }
+}
+
+struct HistorySegment {
+    previous: Option<Arc<HistorySegment>>,
+    items: Vec<Value>,
+}
+
+impl From<Vec<Value>> for History {
+    fn from(items: Vec<Value>) -> Self {
+        let mut history = Self::default();
+        history.extend(items);
+        history
+    }
+}
+
+impl History {
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn extend(&mut self, items: Vec<Value>) {
+        if items.is_empty() {
+            return;
+        }
+        let size = history_size(&items, &[], MAX_RESPONSE_BYTES).unwrap_or(MAX_RESPONSE_BYTES + 1);
+        // Array brackets are shared; the joining comma is needed only when nonempty.
+        let bytes = if self.len == 0 { size } else { self.bytes.saturating_add(size.saturating_sub(1)) };
+        if self.depth >= 1024 {
+            let values = self.to_values();
+            self.tail = Some(Arc::new(HistorySegment { previous: None, items: values }));
+            self.depth = 1;
+        }
+        self.len += items.len();
+        self.bytes = bytes;
+        self.depth += 1;
+        self.tail = Some(Arc::new(HistorySegment { previous: self.tail.take(), items }));
+    }
+
+    pub fn to_values(&self) -> Vec<Value> {
+        let mut segments = Vec::with_capacity(self.depth);
+        let mut next = self.tail.as_deref();
+        while let Some(segment) = next {
+            segments.push(segment);
+            next = segment.previous.as_deref();
+        }
+        let mut values = Vec::with_capacity(self.len);
+        for segment in segments.into_iter().rev() {
+            values.extend(segment.items.iter().cloned());
+        }
+        values
+    }
+}
+
 struct Conversation {
     session: String,
-    input: Arc<Vec<Value>>,
+    input: History,
     bytes: usize,
     last_seen: i64,
 }
@@ -495,6 +563,21 @@ impl Sessions {
         exclude: &[String],
         only: Option<&Only>,
     ) -> Result<Selected, (u16, String)> {
+        self.pick_session_with_context(pool, cfg, model, session, inferred, exclude, only, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_session_with_context(
+        &self,
+        pool: &Pool,
+        cfg: &Config,
+        model: &str,
+        session: Option<&str>,
+        inferred: bool,
+        exclude: &[String],
+        only: Option<&Only>,
+        context: Option<&crate::latency::Context>,
+    ) -> Result<Selected, (u16, String)> {
         let Some(session) = session.filter(|_| cfg.session_affinity) else {
             let (account, model) = selection(self.pick_unbound(pool, cfg, model, exclude, None, only), model)?;
             return Ok(Selected {
@@ -588,8 +671,18 @@ impl Sessions {
                 }
             }
         }
-        let (acct, upstream) =
-            selection(pool.pick(model, &excluded, cfg, None, only, &registry.account_load(cfg)), model)?;
+        let (acct, upstream) = selection(
+            pool.pick_with_context(
+                model,
+                &excluded,
+                cfg,
+                None,
+                only,
+                &registry.account_load(cfg),
+                context.filter(|_| moving.is_none() && exclude.is_empty()),
+            ),
+            model,
+        )?;
         let previous = registry.bindings.insert(
             key,
             Binding {
@@ -760,7 +853,7 @@ impl Sessions {
         }
     }
 
-    pub fn previous(&self, headers: &HeaderMap, id: &str, session: Option<&str>) -> Option<(String, Vec<Value>)> {
+    pub fn previous(&self, headers: &HeaderMap, id: &str, session: Option<&str>) -> Option<(String, History)> {
         let key = digest(&[&client_scope(headers), "response", id]);
         let (session, input) = {
             let mut registry = self.registry.lock();
@@ -771,24 +864,23 @@ impl Sessions {
             previous.last_seen = Utc::now().timestamp();
             (previous.session.clone(), previous.input.clone())
         };
-        // Large histories are copied without holding the global routing lock.
-        Some((session, (*input).clone()))
+        Some((session, input))
     }
 
     /// Takes the input by value: the caller's copy becomes the stored history.
-    pub fn remember(&self, headers: &HeaderMap, session: &str, response: &Value, full_input: Vec<Value>) {
+    pub fn remember(&self, headers: &HeaderMap, session: &str, response: &Value, full_input: impl Into<History>) {
         let Some(id) = response["id"].as_str() else {
             return;
         };
         let Some(output) = response["output"].as_array() else {
             return;
         };
-        let Some(bytes) = history_size(&full_input, output, MAX_RESPONSE_BYTES) else {
+        let mut input = full_input.into();
+        input.extend(output.clone());
+        let bytes = input.bytes;
+        if bytes > MAX_RESPONSE_BYTES {
             return;
-        };
-        let mut input = full_input;
-        input.extend(output.iter().cloned());
-        let input = Arc::new(input);
+        }
         let key = digest(&[&client_scope(headers), "response", id]);
         let mut registry = self.registry.lock();
         if let Some(old) = registry.responses.remove(&key) {
@@ -1610,5 +1702,41 @@ mod tests {
         assert_ne!(a.id, b.id);
         a.state.lock().quota = Default::default();
         assert_eq!(sessions.pick(&pool, &cfg, "coding", Some("task"), &[], None).unwrap().0.id, b.id);
+    }
+}
+
+#[cfg(test)]
+mod optimization_measurements {
+    use super::*;
+    /// Synthetic data-structure measurement, not provider latency or RSS.
+    #[test]
+    #[ignore]
+    fn shared_history_measurement() {
+        use std::{hint::black_box, time::Instant};
+        for size in [10 << 10, 200 << 10, 1 << 20] {
+            let seed = vec![serde_json::json!({"role":"user","content":"x".repeat(size)})];
+            let delta = serde_json::json!({"role":"assistant","content":"y".repeat(128)});
+            let mut original = seed.clone();
+            let start = Instant::now();
+            for _ in 0..64 {
+                let mut next = black_box(original.clone());
+                next.push(delta.clone());
+                black_box(history_size(&next, &[], MAX_RESPONSE_BYTES));
+                original = black_box(next.clone());
+            }
+            let old_us = start.elapsed().as_micros();
+            let mut shared = History::from(seed);
+            let start = Instant::now();
+            for _ in 0..64 {
+                let mut next = black_box(shared.clone());
+                next.extend(vec![delta.clone()]);
+                shared = black_box(next.clone());
+            }
+            let shared_us = start.elapsed().as_micros();
+            assert_eq!(original, shared.to_values());
+            println!(
+                "{{\"seed_bytes\":{size},\"turns\":64,\"deep_copy_and_full_measure_us\":{old_us},\"shared_append_us\":{shared_us}}}"
+            );
+        }
     }
 }

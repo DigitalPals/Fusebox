@@ -351,6 +351,7 @@ struct ErrorPause {
 
 #[derive(Debug, Default)]
 pub struct AccountState {
+    pub latency: HashMap<(String, crate::latency::Context), crate::latency::Sample>,
     /// Shared across account reloads so in-flight requests remain counted.
     pub active_requests: Arc<AtomicUsize>,
     /// Codex's `x-models-etag` from the latest response: a changed value means its model list changed.
@@ -1169,6 +1170,7 @@ impl Pool {
                     st.credential_identity = identity;
                     st.quota_refreshing = false;
                     st.quota = Default::default();
+                    st.latency.clear();
                     st.quota_cooldowns.clear();
                     st.banked_resets = None;
                     st.attribution = Default::default();
@@ -1210,6 +1212,7 @@ impl Pool {
                         last_error: st.last_error.clone(),
                         last_used: st.last_used,
                         counters: st.counters.clone(),
+                        latency: st.latency.clone(),
                         quota: st.quota.clone(),
                         attribution: st.attribution.clone(),
                         ..Default::default()
@@ -1379,6 +1382,20 @@ impl Pool {
         only: Option<&Only>,
         session_load: &HashMap<String, usize>,
     ) -> Pick {
+        self.pick_with_context(model, exclude, cfg, pinned, only, session_load, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_with_context(
+        &self,
+        model: &str,
+        exclude: &[String],
+        cfg: &Config,
+        pinned: Option<&str>,
+        only: Option<&Only>,
+        session_load: &HashMap<String, usize>,
+        context: Option<&crate::latency::Context>,
+    ) -> Pick {
         let force = self.force_prefix.load(std::sync::atomic::Ordering::Relaxed);
         let accounts = self.accounts.read();
         let mut candidates: Vec<(&Arc<Account>, String)> = Vec::new();
@@ -1415,7 +1432,7 @@ impl Pool {
         if candidates.iter().any(|(a, _)| a.first_party(model)) {
             candidates.retain(|(a, _)| a.first_party(model));
         }
-        let idx = self.choose(&candidates, model, cfg, session_load, true);
+        let idx = self.choose(&candidates, model, cfg, session_load, true, context);
         let (a, m) = &candidates[idx];
         Pick::Ok((*a).clone(), m.clone())
     }
@@ -1429,6 +1446,7 @@ impl Pool {
         cfg: &Config,
         session_load: &HashMap<String, usize>,
         advance: bool,
+        context: Option<&crate::latency::Context>,
     ) -> usize {
         let take_turn = |count: usize| {
             let mut cur = self.cursor.lock();
@@ -1473,6 +1491,28 @@ impl Pool {
                 let best = scores.iter().filter(|s| preferred(s)).map(|s| s.weight).fold(0.0, f64::max);
                 let tied: Vec<_> =
                     (0..scores.len()).filter(|&i| preferred(&scores[i]) && scores[i].weight >= best - 1e-9).collect();
+                if cfg.latency_routing
+                    && let Some(context) = context
+                {
+                    let estimates: Option<Vec<_>> = tied
+                        .iter()
+                        .map(|&i| {
+                            let (account, model) = &candidates[i];
+                            account
+                                .state
+                                .lock()
+                                .latency
+                                .get(&(model.clone(), context.clone()))
+                                .and_then(|s| s.estimate())
+                                .map(|ms| (i, ms))
+                        })
+                        .collect();
+                    if let Some(estimates) = estimates
+                        && let Some((i, _)) = estimates.into_iter().min_by(|a, b| a.1.total_cmp(&b.1))
+                    {
+                        return i;
+                    }
+                }
                 tied[take_turn(tied.len())]
             }
             Routing::LeastUsed => {
@@ -1517,7 +1557,7 @@ impl Pool {
         let (first, overflow): (Vec<_>, Vec<_>) = ready.into_iter().partition(|(a, _)| !vendor || a.first_party(model));
         let mut steps = Vec::new();
         if !first.is_empty() {
-            let next = self.choose(&first, model, cfg, session_load, false);
+            let next = self.choose(&first, model, cfg, session_load, false, None);
             let mut order: Vec<usize> = (0..first.len()).filter(|&i| i != next).collect();
             if cfg.routing == Routing::SmartQuota {
                 // Accounts keeping a reserve come last, then the earliest weekly renewal;

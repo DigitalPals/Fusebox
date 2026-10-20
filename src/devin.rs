@@ -312,7 +312,7 @@ pub fn build_request(req: &Request, model: &str) -> Value {
     let mut pending: Vec<String> = Vec::new();
     for m in &req.messages {
         match m.role {
-            Role::User => {
+            Role::User | Role::System | Role::Developer => {
                 let mut text = Vec::new();
                 let mut images = Vec::new();
                 for p in &m.parts {

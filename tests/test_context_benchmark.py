@@ -297,7 +297,7 @@ class CLITests(unittest.TestCase):
         completed_row = {"http_status": 200, "status": "completed", "usage": {"input_tokens": 0}}
         with mock.patch.dict(os.environ, {"FUSEBOX_API_KEY": "synthetic-secret"}), \
                 mock.patch.object(bench, "request_trial", side_effect=[dict(completed_row) for _ in range(6)]):
-            code, out, _ = self.invoke(original, {**original, "input": "two"}, ["--execute"])
+            code, out, _ = self.invoke(original, {**original, "input": "two"}, ["--execute", "--phases", "single"])
         self.assertEqual(code, 0)
         rows = json.loads(out)["trials"]
         self.assertEqual([row["variant"] for row in rows], ["original", "compacted", "compacted", "original", "original", "compacted"])
@@ -307,30 +307,41 @@ class CLITests(unittest.TestCase):
         self.assertEqual((code, call.call_count), (130, 1))
         self.assertEqual(json.loads(out)["summary"]["variants"]["original"]["completed"], 0)
 
-    def test_one_session_pins_all_trials_and_only_last_planned_request_ends_it(self):
+    def test_variant_cohorts_are_separate_and_initial_phase_is_not_scored_as_warm(self):
         seen = []
         def callback(handler):
             seen.append((handler.headers.get("x-fusebox-session-id"),
-                         handler.headers.get("x-fusebox-session-end"), strict_body(handler.request_body)))
+                         handler.headers.get("x-fusebox-session-end"), bench.strict_json(handler.request_body)))
             headers(handler, "application/json")
             handler.wfile.write(json.dumps(completed(usage={"input_tokens": 10, "output_tokens": 2})).encode())
-
-        def strict_body(body):
-            return bench.strict_json(body)
-
         original = {"model": "synthetic", "input": "original", "stream": False}
         compacted = {**original, "input": "compacted"}
-        with server(callback) as endpoint, mock.patch.dict(os.environ, {"FUSEBOX_API_KEY": "synthetic-key"}), \
-                mock.patch.object(bench.uuid, "uuid4", return_value="fixture"):
+        with server(callback) as endpoint, mock.patch.dict(os.environ, {"FUSEBOX_API_KEY": "synthetic-key"}):
             code, out, err = self.invoke(original, compacted, ["--execute", "--endpoint", endpoint])
-        self.assertEqual((code, err, len(seen)), (0, "", 6))
-        self.assertEqual(len({row[0] for row in seen}), 1)
-        self.assertTrue(seen[0][0].startswith("context-benchmark-"))
-        self.assertEqual([row[1] for row in seen], [None] * 5 + ["true"])
-        self.assertEqual([row[2] for row in seen], [original, compacted, compacted, original, original, compacted])
-        self.assertNotIn(seen[0][0], out)
+        report = json.loads(out)
+        self.assertEqual((code, err, len(seen)), (0, "", 10))
+        self.assertEqual(len({row[0] for row in seen}), 2)
+        self.assertEqual([row[1] for row in seen], [None] * 8 + ["true", "true"])
+        for value in (original, compacted):
+            self.assertEqual(len({row[0] for row in seen if row[2] == value}), 1)
+        self.assertEqual([row["phase"] for row in report["trials"]], ["initial"]*2 + ["warmup"]*2 + ["warm"]*6)
+        self.assertEqual(report["summary"]["variants"]["original"]["attempted"], 3)
+        self.assertFalse(report["cold_cache_proven"])
+        for session, _, _ in seen:
+            self.assertNotIn(session, out)
         self.assertNotIn("synthetic-key", out + err)
-        self.assertEqual(json.loads(out)["session_fingerprint"], "5ec3d2c1888154267e20e0b86d96b0a4")
+
+    def test_experiment_modes_only_allow_the_selected_control(self):
+        original = {"model":"synthetic", "input":"same", "text":{"verbosity":"low"}}
+        other = {**original, "text":{"verbosity":"high"}}
+        self.assertEqual(self.invoke(original, other)[0], 2)
+        self.assertEqual(self.invoke(original, other, ["--experiment", "verbosity"])[0], 0)
+        self.assertEqual(self.invoke(original, {**other, "input":"changed"}, ["--experiment", "verbosity"])[0], 2)
+        schema = {"type":"function", "parameters":{"properties":{"prompt_cache_breakpoint":{"const":1}}}}
+        base = {"model":"synthetic", "input":[], "tools":[schema]}
+        changed = json.loads(json.dumps(base))
+        changed["tools"][0]["parameters"]["properties"]["prompt_cache_breakpoint"]["const"] = 2
+        self.assertNotEqual(bench.comparison_controls(base,"cache"),bench.comparison_controls(changed,"cache"))
 
     def test_endpoint_rejects_credentials_queries_and_remote_plaintext(self):
         for endpoint in ("https://user:PRIVATE@example.com/v1/responses", "https://example.com/v1/responses?key=PRIVATE",

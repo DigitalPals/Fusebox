@@ -19,6 +19,33 @@ use serde_json::Value;
 use crate::ir::{Aggregate, CacheTextBlock, Event, Format, Message, Part, Request, Role};
 use crate::sse::SseEvent;
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct TranslationConfig {
+    /// Tiers may increase cost and subscription backends differ. Explicit opt-in.
+    pub allow_service_tier: bool,
+}
+
+/// Restrict translated OpenAI controls to a verified backend. Native requests
+/// remain under the caller's control. Never invent a tier or lower an effort.
+pub fn generation_controls(body: &mut Value, wire: Format, openai: bool, allow_tier: bool) -> Vec<&'static str> {
+    let mut dropped = Vec::new();
+    if !openai {
+        let removed = if wire == Format::Responses {
+            body.get_mut("text").and_then(Value::as_object_mut).and_then(|t| t.remove("verbosity"))
+        } else {
+            body.as_object_mut().and_then(|b| b.remove("verbosity"))
+        };
+        if removed.is_some() {
+            dropped.push("verbosity_unsupported");
+        }
+    }
+    if (!openai || !allow_tier) && body.as_object_mut().and_then(|b| b.remove("service_tier")).is_some() {
+        dropped.push("service_tier_not_enabled");
+    }
+    dropped
+}
+
 /// One outgoing stream frame. `event` is the SSE event name (also used as the
 /// websocket message type for the Responses API).
 #[derive(Debug, Clone)]
@@ -158,7 +185,6 @@ fn carry_cache_hints(source: Format, target: Format, original: &Value, translate
     }
     if breakpoints > 0 {
         let field = if source == Format::Chat { "messages" } else { "input" };
-        let mut conversation_started = false;
         let mut assistant_tools_seen = false;
         for item in original[field].as_array().into_iter().flatten() {
             if source == Format::Responses && target == Format::Chat {
@@ -188,16 +214,6 @@ fn carry_cache_hints(source: Format, target: Format, original: &Value, translate
                 return Err(
                     "Cache breakpoints with unsupported content require the upstream's native API format".into()
                 );
-            }
-            if matches!(item["role"].as_str(), Some("system" | "developer")) {
-                if conversation_started {
-                    return Err(
-                        "Cache breakpoints with interleaved system messages require the upstream's native API format"
-                            .into(),
-                    );
-                }
-            } else {
-                conversation_started = true;
             }
             // Chat tool messages support text only; moving an image into a
             // separate user message would move the cache boundary as well.
@@ -598,13 +614,6 @@ mod tests {
     fn cache_translation_drops_breakpoints_that_reordering_would_move() {
         // Why each request can't keep its breakpoints, and that it still goes out without them.
         let cases = [
-            (
-                json!({"input":[
-                    {"role":"user","content":"question"},
-                    {"role":"developer","content":[{"type":"input_text","text":"late instructions","prompt_cache_breakpoint":{"mode":"explicit"}}]}
-                ]}),
-                "interleaved",
-            ),
             (
                 json!({"input":[{"type":"function_call_output","call_id":"call_1","output":[
                     {"type":"input_image","image_url":"https://example.com/image.png"},

@@ -43,6 +43,8 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         temperature: v["temperature"].as_f64(),
         top_p: v["top_p"].as_f64(),
         parallel_tool_calls: v["parallel_tool_calls"].as_bool(),
+        verbosity: v["text"]["verbosity"].as_str().map(String::from),
+        service_tier: v["service_tier"].as_str().map(String::from),
         ..Default::default()
     };
     if let Some(i) = v["instructions"].as_str().filter(|s| !s.is_empty()) {
@@ -121,7 +123,14 @@ pub fn parse_items(items: &[Value], req: &mut Request) {
             "message" => {
                 let role = it["role"].as_str().unwrap_or("user");
                 if role == "system" || role == "developer" {
-                    super::parse_openai_system(&it["content"], req);
+                    if req.messages.is_empty() {
+                        super::parse_openai_system(&it["content"], req);
+                    } else {
+                        req.messages.push(Message {
+                            role: if role == "developer" { Role::Developer } else { Role::System },
+                            parts: content_parts(&it["content"]),
+                        });
+                    }
                     continue;
                 }
                 let parts = content_parts(&it["content"]);
@@ -239,7 +248,12 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
         let mut content = Vec::new();
         let flush = |content: &mut Vec<Value>, input: &mut Vec<Value>| {
             if !content.is_empty() {
-                let role = if m.role == Role::Assistant { "assistant" } else { "user" };
+                let role = match m.role {
+                    Role::System => "system",
+                    Role::Developer => "developer",
+                    Role::Assistant => "assistant",
+                    Role::User => "user",
+                };
                 input.push(json!({ "type": "message", "role": role, "content": std::mem::take(content) }));
             }
         };
@@ -372,6 +386,12 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
         if let Some(t) = req.top_p {
             o.insert("top_p".into(), t.into());
         }
+    }
+    if let Some(verbosity) = &req.verbosity {
+        out["text"]["verbosity"] = verbosity.clone().into();
+    }
+    if let Some(tier) = &req.service_tier {
+        out["service_tier"] = tier.clone().into();
     }
     out
 }
@@ -801,7 +821,7 @@ fn usage_json(u: &Usage) -> Value {
         "total_tokens": u.prompt_total() + u.output,
     });
     if u.cache_write > 0 {
-        usage["input_tokens_details"]["cache_creation_tokens"] = u.cache_write.into();
+        usage["input_tokens_details"]["cache_write_tokens"] = u.cache_write.into();
     }
     usage
 }

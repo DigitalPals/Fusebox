@@ -12,6 +12,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::state::App;
+pub mod performance;
 
 /// `0.4.0 (1a2b3c4)`, or `0.4.0` when the commit isn't known (see build.rs).
 pub const VERSION: &str = env!("FUSEBOX_VERSION");
@@ -149,6 +150,25 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
         kinds.into_iter().map(|(k, n)| (format!("kind=\"{}\"", label(&k)), n as f64)).collect(),
     );
     let cfg = app.cfg();
+    let (hits, misses, entries, bytes) = app.embedding_cache.lock().stats(&cfg.embeddings);
+    metric(
+        "fusebox_embedding_cache_lookups_total",
+        "counter",
+        "Exact embedding result cache lookups since start.",
+        vec![("result=\"hit\"".into(), hits as f64), ("result=\"miss\"".into(), misses as f64)],
+    );
+    metric(
+        "fusebox_embedding_cache_entries",
+        "gauge",
+        "Exact embedding results retained.",
+        vec![(String::new(), entries as f64)],
+    );
+    metric(
+        "fusebox_embedding_cache_bytes",
+        "gauge",
+        "Serialized bytes of retained embedding results.",
+        vec![(String::new(), bytes as f64)],
+    );
     let clients: Vec<_> = cfg.named_clients.iter().map(|c| (c.id.clone(), app.clients.spend(&c.id))).collect();
     metric(
         "fusebox_client_tokens_today",
@@ -177,6 +197,7 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
             vec![(String::new(), health["dropped"].as_f64().unwrap_or(0.0))],
         );
     }
+    app.stats.performance.lock().render(&mut out);
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], out).into_response()
 }
 

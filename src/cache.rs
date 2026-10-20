@@ -165,21 +165,65 @@ impl Policy {
 }
 
 pub fn has_markers(value: &Value) -> bool {
-    has_fields(value, &["cache_control", "prompt_cache_breakpoint"])
+    has_fields(value, &["cache_control", "prompt_cache_breakpoint"], &mut Vec::new())
 }
 
 pub fn has_claude_controls(value: &Value) -> bool {
-    has_fields(value, &["cache_control"])
+    has_fields(value, &["cache_control"], &mut Vec::new())
 }
 
-fn has_fields(value: &Value, fields: &[&str]) -> bool {
+/// Schemas and tool arguments are caller data. Everywhere else the scan stays
+/// conservative, including unknown block types and nested tool-result content:
+/// missing a real marker could add a fifth Anthropic breakpoint.
+fn has_fields<'a>(value: &'a Value, fields: &[&str], path: &mut Vec<&'a str>) -> bool {
     match value {
         Value::Object(object) => {
             fields.iter().any(|field| object.get(*field).is_some_and(|v| !v.is_null()))
-                || object.values().any(|value| has_fields(value, fields))
+                || object.iter().any(|(key, value)| {
+                    let tool_schema = matches!(key.as_str(), "input_schema" | "parameters")
+                        && (path.as_slice() == ["tools"] || path.as_slice() == ["tools", "function"])
+                        || matches!(key.as_str(), "parameters" | "parametersJsonSchema" | "parameters_json_schema")
+                            && matches!(path.as_slice(), ["tools", "functionDeclarations" | "function_declarations"]);
+                    let arguments = (key == "input"
+                        && matches!(object.get("type").and_then(Value::as_str), Some("tool_use" | "server_tool_use")))
+                        || (key == "arguments"
+                            && (matches!(object.get("type").and_then(Value::as_str), Some("function_call"))
+                                || path.ends_with(&["tool_calls", "function"])))
+                        || key == "args" && matches!(path.last(), Some(&"functionCall" | &"function_call"));
+                    let output_schema = key == "schema"
+                        && matches!(
+                            path.as_slice(),
+                            ["output_config", "format"] | ["response_format", "json_schema"] | ["text", "format"]
+                        )
+                        || matches!(
+                            key.as_str(),
+                            "responseSchema" | "responseJsonSchema" | "response_schema" | "response_json_schema"
+                        ) && matches!(path.as_slice(), ["generationConfig" | "generation_config"]);
+                    if tool_schema || arguments || output_schema {
+                        return false;
+                    }
+                    path.push(key);
+                    let found = has_fields(value, fields, path);
+                    path.pop();
+                    found
+                })
         }
-        Value::Array(values) => values.iter().any(|value| has_fields(value, fields)),
+        Value::Array(values) => values.iter().any(|value| has_fields(value, fields, path)),
         _ => false,
+    }
+}
+
+/// Stable compact codes for the allowlisted persistent numeric metadata.
+pub fn intent_code(intent: &str) -> u64 {
+    match intent {
+        "provider_default" => 1,
+        "none" => 2,
+        "automatic" => 3,
+        "explicit" => 4,
+        "explicit_no_breakpoints" => 5,
+        "prewarm" => 6,
+        "rejected" => 7,
+        _ => 0,
     }
 }
 

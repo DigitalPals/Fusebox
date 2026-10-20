@@ -23,6 +23,12 @@ struct Captured {
 #[derive(Clone)]
 pub struct Capture(Arc<Mutex<Captured>>);
 impl Capture {
+    pub fn logical_result(&self, success: bool) {
+        self.0.lock().observation.logical_success = Some(success);
+    }
+    pub fn metadata(&self, key: &'static str, value: u64) {
+        self.0.lock().observation.numeric_metadata.insert(key.into(), value);
+    }
     pub fn failure(&self, failure: crate::diagnostics::Failure) {
         self.0.lock().failure = Some(failure);
     }
@@ -81,6 +87,20 @@ pub struct RequestUsage {
     program: Option<&'static str>,
 }
 impl RequestUsage {
+    /// Independent per-chunk capture with the same logical request and tenant.
+    pub fn fork(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            logical_id: self.logical_id.clone(),
+            requested_model: self.requested_model.clone(),
+            client: self.client.clone(),
+            session: self.session.clone(),
+            current: None,
+            clients: self.clients.clone(),
+            account: None,
+            program: self.program,
+        }
+    }
     pub fn new(store: Option<Store>, model: &str) -> Self {
         Self {
             store,

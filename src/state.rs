@@ -25,6 +25,7 @@ pub struct App {
     pub refresh_tasks: crate::oauth::RefreshTasks,
     pub http: Http,
     pub stats: Stats,
+    pub embedding_cache: Mutex<crate::embeddings::Cache>,
     pub usage: Option<crate::usage::store::Store>,
     pub usage_error: Option<String>,
     pub logins: Mutex<HashMap<String, crate::mgmt::Login>>,
@@ -104,6 +105,7 @@ impl App {
             sessions,
             refresh_tasks: Default::default(),
             stats: Stats::default(),
+            embedding_cache: Default::default(),
             logins: Mutex::new(HashMap::new()),
             reset_quotes: Mutex::new(HashMap::new()),
             push,
@@ -128,12 +130,16 @@ impl App {
     }
 
     pub fn set_config(&self, cfg: Config) {
+        let reset_embedding_cache = self.cfg().embeddings != cfg.embeddings;
         crate::clients::configure(&cfg.client_identities);
         self.http.set_default_proxy(&cfg.proxy_url);
         self.pool.reload(&cfg);
         self.models.apply(&self.pool);
         self.retain_account_pools();
         self.cfg.store(Arc::new(cfg));
+        if reset_embedding_cache {
+            self.embedding_cache.lock().clear();
+        }
         self.broadcast("accounts", serde_json::Value::Null);
     }
 
@@ -361,6 +367,8 @@ pub struct RequestLog {
     pub routing_attempts: Vec<RoutingAttempt>,
     /// Requested and effective cache controls; contains no prompt text or keys.
     pub cache_policy: Option<crate::cache::Policy>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub control_downgrades: Vec<&'static str>,
     pub status: u16,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
@@ -373,6 +381,8 @@ pub struct RequestLog {
     pub stream: bool,
     pub transport: &'static str,
     pub attempts: u32,
+    /// Planned provider chunks are distinct from account retries.
+    pub chunks: u32,
     pub error: Option<String>,
 }
 
@@ -453,6 +463,7 @@ fn last_hour(series: &VecDeque<Bucket>) -> Vec<Bucket> {
 
 #[derive(Default)]
 pub struct Stats {
+    pub performance: Mutex<crate::metrics::performance::Performance>,
     pub totals: Mutex<Totals>,
     pub recent: Mutex<VecDeque<RequestLog>>,
     pub series: Mutex<VecDeque<Bucket>>,
@@ -546,6 +557,7 @@ mod tests {
             routing_warning: None,
             routing_attempts: vec![],
             cache_policy: None,
+            control_downgrades: Vec::new(),
             status: 200,
             latency_ms: 0,
             ttft_ms: None,
@@ -557,6 +569,7 @@ mod tests {
             stream: true,
             transport: "http",
             attempts: 1,
+            chunks: 0,
             error: None,
         }
     }

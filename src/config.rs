@@ -44,6 +44,8 @@ pub struct Config {
     pub first_token_timeout_seconds: u64,
     /// How new sessions choose an account.
     pub routing: Routing,
+    /// Break exact smart-quota ties for new sessions using comparable cold TTFT samples.
+    pub latency_routing: bool,
     /// Smart routing reserves this 5-hour remaining percentage for active/recent sessions.
     #[serde(deserialize_with = "percentage")]
     pub five_hour_reserve_percent: u8,
@@ -53,7 +55,10 @@ pub struct Config {
     pub session_affinity_idle_seconds: u64,
     /// Derived cache-key scope and handling of incompatible explicit cache hints.
     pub prompt_cache: crate::cache::Config,
+    pub translation: crate::formats::TranslationConfig,
+    pub embeddings: crate::embeddings::Config,
     pub request_limits: crate::admission::Config,
+    pub stream_limits: crate::stream_limits::Limits,
     /// Keep an upstream websocket open to Codex when clients connect over websocket.
     pub codex_websockets: bool,
     /// Rewrite non-Claude-Code requests on Claude OAuth accounts so they look like Claude Code.
@@ -388,12 +393,16 @@ impl Default for Config {
             proxy_url: String::new(),
             request_retry: 3,
             first_token_timeout_seconds: 120,
+            latency_routing: false,
             routing: Routing::LeastUsed,
             five_hour_reserve_percent: 30,
             session_affinity: true,
             session_affinity_idle_seconds: 86_400,
             prompt_cache: Default::default(),
+            translation: Default::default(),
+            embeddings: Default::default(),
             request_limits: Default::default(),
+            stream_limits: Default::default(),
             codex_websockets: true,
             claude_cloak: true,
             banked_resets: false,
@@ -451,6 +460,7 @@ proxy-url: ""               # optional upstream proxy, e.g. socks5://127.0.0.1:1
 request-retry: 3            # accounts to try before failing a request
 first-token-timeout-seconds: 120 # a stream silent this long moves to the next account (0 = off)
 routing: least-used         # new sessions: least-used | smart-quota | round-robin | fill-first
+latency-routing: false     # break exact smart-quota ties for new sessions using comparable cold timings
 five-hour-reserve-percent: 30 # smart-quota: keep this 5-hour share for sessions already on an account
 session-affinity: true      # keep a session on its subscription until quota is exhausted
 session-affinity-idle-seconds: 86400 # expire assignments after a day without requests
@@ -458,11 +468,22 @@ prompt-cache:
   scope: session           # session | client | workspace (x-fusebox-cache-workspace)
   namespace: ""            # optional shared prompt/tool version
   on-incompatible: drop    # drop (preserve intent) | automatic | reject
+translation:
+  allow-service-tier: false # preserve caller tiers on supported OpenAI translations (may cost more)
+embeddings:
+  concurrency: 1           # Google chunks in flight, 1–16; completed chunks are never replayed
+  cache-seconds: 0         # exact result reuse per client/account/model/options; 0 is off
+  cache-bytes: 16777216    # serialized cache capacity; process memory overhead is additional
 request-limits:
   text-body-bytes: 268435456
   media-body-bytes: 268435456
   max-in-flight: 0 # 0 is unlimited; HTTP POST requests through stream completion
   max-in-flight-body-bytes: 0 # aggregate decoded body bytes; 0 is unlimited
+stream-limits:
+  event-bytes: 16777216    # maximum SSE event/unfinished line or native WS event
+  media-event-bytes: 67108864 # models whose names contain image, audio or video
+  bootstrap-bytes: 2097152 # release buffered initial chunks at this threshold
+  pre-output-timeout-seconds: 0 # optional combined headers/first-event deadline; expiry is terminal
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
@@ -652,6 +673,8 @@ impl Config {
         let mut cfg: Config = serde_yaml::from_value(doc).context("invalid config")?;
         cfg.ignored = ignored;
         cfg.prompt_cache.validate().map_err(anyhow::Error::msg)?;
+        cfg.stream_limits.validate().map_err(anyhow::Error::msg)?;
+        cfg.embeddings.validate().map_err(anyhow::Error::msg)?;
         cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
         cfg.banked_reset_policy.validate().map_err(anyhow::Error::msg)?;
         for (client, version) in &cfg.client_identities {

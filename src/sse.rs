@@ -6,46 +6,75 @@ pub struct SseEvent {
     pub data: String,
 }
 
-#[derive(Default)]
+pub const LIMIT_ERROR: &str = "upstream SSE event exceeds configured stream limit";
+
 pub struct SseDecoder {
     buf: Vec<u8>,
-    /// Bytes already checked for a newline in the unfinished line.
-    scanned: usize,
+    limit: usize,
+    failed: bool,
     event: Option<String>,
     data: String,
     has_data: bool,
 }
 
+impl Default for SseDecoder {
+    fn default() -> Self {
+        Self::with_limit(16 << 20)
+    }
+}
 impl SseDecoder {
+    pub fn with_limit(limit: usize) -> Self {
+        Self { buf: Vec::new(), limit, failed: false, event: None, data: String::new(), has_data: false }
+    }
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+    fn fail(&mut self) {
+        self.failed = true;
+        self.buf = Vec::new();
+        self.data = String::new();
+        self.event = None;
+    }
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
-        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        let mut start = 0;
-        while let Some(pos) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') {
-            let end = self.scanned + pos;
-            let mut line = &self.buf[start..end];
-            if line.last() == Some(&b'\r') {
-                line = &line[..line.len() - 1];
-            }
-            let line = String::from_utf8_lossy(line);
-            start = end + 1;
-            self.scanned = start;
-            Self::line(&mut self.event, &mut self.data, &mut self.has_data, &line, &mut out);
+        if self.failed {
+            return out;
         }
-        self.scanned = self.buf.len() - start;
-        self.buf.drain(..start);
+        for piece in chunk.split_inclusive(|&b| b == b'\n') {
+            if self.buf.len().saturating_add(piece.len()) > self.limit {
+                self.fail();
+                break;
+            }
+            self.buf.extend_from_slice(piece);
+            if piece.last() != Some(&b'\n') {
+                continue;
+            }
+            let line = String::from_utf8_lossy(&self.buf[..self.buf.len() - 1]);
+            if self.data.len().saturating_add(line.len()) > self.limit {
+                self.fail();
+                break;
+            }
+            Self::line(&mut self.event, &mut self.data, &mut self.has_data, line.trim_end_matches('\r'), &mut out);
+            self.buf.clear();
+        }
         out
     }
 
     /// Flush a trailing event without a terminating blank line.
     pub fn finish(&mut self) -> Vec<SseEvent> {
         let mut out = Vec::new();
+        if self.failed {
+            return out;
+        }
+        if self.data.len().saturating_add(self.buf.len()) > self.limit {
+            self.fail();
+            return out;
+        }
         if !self.buf.is_empty() {
             let line = String::from_utf8_lossy(&self.buf);
             Self::line(&mut self.event, &mut self.data, &mut self.has_data, line.trim_end_matches('\r'), &mut out);
             self.buf.clear();
         }
-        self.scanned = 0;
         Self::dispatch(&mut self.event, &mut self.data, &mut self.has_data, &mut out);
         out
     }

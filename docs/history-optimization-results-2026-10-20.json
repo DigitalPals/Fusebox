@@ -1,0 +1,26 @@
+{
+  "synthetic": true,
+  "debug_build": true,
+  "includes_initial_construction": false,
+  "includes_final_flattening": false,
+  "runs": [
+    {
+      "seed_bytes": 10240,
+      "turns": 64,
+      "deep_copy_and_full_measure_us": 16327,
+      "shared_append_us": 190
+    },
+    {
+      "seed_bytes": 204800,
+      "turns": 64,
+      "deep_copy_and_full_measure_us": 174921,
+      "shared_append_us": 181
+    },
+    {
+      "seed_bytes": 1048576,
+      "turns": 64,
+      "deep_copy_and_full_measure_us": 870418,
+      "shared_append_us": 186
+    }
+  ]
+}

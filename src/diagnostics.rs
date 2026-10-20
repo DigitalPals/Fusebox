@@ -190,7 +190,7 @@ pub fn record(
                 provider = log.provider, model = model_label(&log.model),
                 account = ?account, session = ?session,
                 upstream_request = ?upstream_request, upstream_response = ?response,
-                attempts = log.attempts, latency_ms = log.latency_ms, ttft_ms = ?log.ttft_ms,
+                attempts = log.attempts, chunks = log.chunks, control_downgrades = ?log.control_downgrades, latency_ms = log.latency_ms, ttft_ms = ?log.ttft_ms,
                 input_tokens = log.input_tokens, output_tokens = log.output_tokens, cached_tokens = log.cache_tokens,
                 usage_completeness = log.usage_completeness,
                 reported_input_tokens = ?capture.and_then(|o| o.tokens.input),

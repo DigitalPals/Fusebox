@@ -22,6 +22,7 @@ mod feature_tests;
 mod files;
 mod formats;
 mod ir;
+mod latency;
 mod media;
 mod metrics;
 mod mgmt;
@@ -37,6 +38,7 @@ mod server;
 mod source;
 mod sse;
 mod state;
+mod stream_limits;
 mod tls;
 mod token_count;
 mod upstream;
@@ -713,3 +715,6 @@ mod tests {
         assert_eq!(config_path(None, env(&[])), PathBuf::from("config.yaml"));
     }
 }
+
+#[cfg(test)]
+mod optimization_tests;

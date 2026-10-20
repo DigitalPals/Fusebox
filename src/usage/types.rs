@@ -148,7 +148,7 @@ impl Observation {
         {
             valid_label(s)?;
         }
-        if self.numeric_metadata.len() > 8
+        if self.numeric_metadata.len() > 24
             || self.numeric_metadata.iter().any(|(k, v)| {
                 !matches!(
                     k.as_str(),
@@ -162,6 +162,17 @@ impl Observation {
                         | "tool_tokens"
                         | "per_request_usage"
                         | "estimated_input_tokens"
+                        | "request_latency_ms"
+                        | "request_ttft_ms"
+                        | "prepare_ms"
+                        | "headers_ms"
+                        | "transport_ws"
+                        | "attempt_number"
+                        | "cache_requested"
+                        | "cache_applied"
+                        | "cache_downgraded"
+                        | "embedding_chunk"
+                        | "control_downgrade_count"
                 ) || *v > MAX_TOKENS
             })
         {

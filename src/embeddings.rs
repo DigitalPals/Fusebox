@@ -2,6 +2,8 @@
 //! natively; Gemini keys through `batchEmbedContents` and Vertex AI through `predict`.
 //! Subscriptions don't offer embeddings, so they never take these requests.
 
+use futures::{StreamExt, stream::FuturesUnordered};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
@@ -15,6 +17,130 @@ use crate::media::{Outcome, fail, openai_base, read_json, send};
 use crate::proxy::Tracker;
 use crate::state::App;
 use crate::upstream::{self, Target};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Config {
+    pub concurrency: usize,
+    pub cache_seconds: u64,
+    pub cache_bytes: usize,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self { concurrency: 1, cache_seconds: 0, cache_bytes: 16 << 20 }
+    }
+}
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=16).contains(&self.concurrency) || self.cache_seconds > 86400 || self.cache_bytes > 256 << 20 {
+            return Err(
+                "embeddings: concurrency must be 1–16, cache-seconds 0–86400, cache-bytes at most 256 MiB".into()
+            );
+        }
+        Ok(())
+    }
+}
+struct Cached {
+    value: Arc<Value>,
+    bytes: usize,
+    created: std::time::Instant,
+    expires: std::time::Instant,
+    used: std::time::Instant,
+}
+#[derive(Default)]
+pub struct Cache {
+    entries: std::collections::HashMap<String, Cached>,
+    bytes: usize,
+    hits: u64,
+    misses: u64,
+}
+impl Cache {
+    fn key(headers: &HeaderMap, acct: &Account, model: &str, body: &Value) -> String {
+        let mut hash = Sha256::new();
+        for part in [
+            crate::affinity::client_scope(headers),
+            acct.id.clone(),
+            acct.state.lock().credential_identity.clone(),
+            model.into(),
+            body.to_string(),
+        ] {
+            hash.update((part.len() as u64).to_le_bytes());
+            hash.update(part.as_bytes());
+        }
+        hex::encode(hash.finalize())
+    }
+    fn get(&mut self, key: &str, cfg: &Config) -> Option<Arc<Value>> {
+        self.trim(cfg);
+        let Some(cached) = self.entries.get_mut(key) else {
+            self.misses = self.misses.saturating_add(1);
+            return None;
+        };
+        self.hits = self.hits.saturating_add(1);
+        cached.used = std::time::Instant::now();
+        Some(cached.value.clone())
+    }
+    fn trim(&mut self, cfg: &Config) {
+        let now = std::time::Instant::now();
+        self.entries.retain(|_, e| {
+            cfg.cache_seconds > 0 && e.expires > now && now.duration_since(e.created).as_secs() < cfg.cache_seconds
+        });
+        self.bytes = self.entries.values().map(|e| e.bytes).sum();
+        while self.bytes > cfg.cache_bytes || self.entries.len() > 1000 {
+            let Some(old) = self.entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            self.bytes -= self.entries.remove(&old).unwrap().bytes;
+        }
+    }
+    fn insert(&mut self, key: String, value: Arc<Value>, bytes: usize, cfg: &Config) {
+        if cfg.cache_seconds == 0 || bytes > cfg.cache_bytes {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(old) = self.entries.insert(
+            key,
+            Cached {
+                value,
+                bytes,
+                created: now,
+                expires: now + std::time::Duration::from_secs(cfg.cache_seconds),
+                used: now,
+            },
+        ) {
+            self.bytes -= old.bytes;
+        }
+        self.bytes += bytes;
+        self.trim(cfg);
+    }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+    pub fn stats(&mut self, cfg: &Config) -> (u64, u64, usize, usize) {
+        self.trim(cfg);
+        (self.hits, self.misses, self.entries.len(), self.bytes)
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn shorter_ttl_and_capacity_apply_to_existing_results() {
+        let mut cache = Cache::default();
+        let mut cfg = Config { cache_seconds: 60, cache_bytes: 1024, ..Default::default() };
+        cache.insert("old".into(), Arc::new(json!({"data":[]})), 11, &cfg);
+        cache.entries.get_mut("old").unwrap().created -= std::time::Duration::from_secs(10);
+        cfg.cache_seconds = 5;
+        assert!(cache.get("old", &cfg).is_none());
+        cache.insert("new".into(), Arc::new(json!({"data":[]})), 11, &cfg);
+        assert!(cache.get("new", &cfg).is_some());
+        cfg.cache_bytes = 0;
+        assert!(cache.get("new", &cfg).is_none());
+        assert_eq!(cache.stats(&cfg), (1, 2, 0, 0));
+    }
+}
 
 /// Google's embedding models (`gemini-embedding-001`, `text-embedding-005`, ...).
 fn google_model(model: &str) -> bool {
@@ -110,14 +236,37 @@ pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outco
     let mut last = None;
     for acct in candidates.into_iter().take(attempts) {
         let upstream = acct.resolve(&model).unwrap_or_else(|| model.clone());
+        let cache_cfg = app.cfg().embeddings.clone();
+        let cache_key = (cache_cfg.cache_seconds > 0).then(|| Cache::key(&headers, &acct, &upstream, &body));
+        let cached = cache_key.as_deref().and_then(|key| app.embedding_cache.lock().get(key, &cache_cfg));
+        if let Some(value) = cached {
+            // Copy the vectors after releasing the shared cache lock.
+            let mut value = (*value).clone();
+            value["usage"] = json!({"prompt_tokens":0,"total_tokens":0});
+            value["fusebox_cache_hit"] = true.into();
+            tracker.finish(200, &Usage::default(), None);
+            return Ok(value);
+        }
         let result = match acct.provider {
-            Provider::Gemini => gemini(&app, &acct, &headers, &upstream, &body, &mut tracker).await,
-            Provider::Vertex => vertex(&app, &acct, &headers, &upstream, &body, &mut tracker).await,
+            Provider::Gemini => google(&app, &acct, &headers, &upstream, &body, &mut tracker, false).await,
+            Provider::Vertex => google(&app, &acct, &headers, &upstream, &body, &mut tracker, true).await,
             _ => openai(&app, &acct, &headers, &upstream, &body, &mut tracker).await,
         };
         match result {
             Ok((mut v, usage)) => {
                 v["model"] = requested.into();
+                if let Some(key) = cache_key {
+                    let bytes = v.to_string().len();
+                    if bytes <= cache_cfg.cache_bytes {
+                        let value = Arc::new(v.clone());
+                        let mut cache = app.embedding_cache.lock();
+                        // A completed request must not repopulate a cache disabled
+                        // or resized while that request was running.
+                        if app.cfg().embeddings == cache_cfg {
+                            cache.insert(key, value, bytes, &cache_cfg);
+                        }
+                    }
+                }
                 tracker.finish(200, &usage, None);
                 return Ok(v);
             }
@@ -179,6 +328,8 @@ fn google_url(app: &App, acct: &Account, headers: &HeaderMap, model: &str) -> (S
         stream: false,
         count_tokens: false,
         cache_key: None,
+        cache_session: None,
+        cache_defaults: true,
     };
     let p = upstream::prepare(&t, json!({}));
     (p.url, p.headers)
@@ -238,101 +389,189 @@ async fn request(
     read_json(resp).await
 }
 
-async fn gemini(
-    app: &App,
-    acct: &Arc<Account>,
-    headers: &HeaderMap,
-    model: &str,
-    body: &Value,
-    tracker: &mut Tracker,
-) -> Result<(Value, Usage), Failure> {
-    let Some(texts) = texts(&body["input"]) else {
-        return Err(failure(fail(400, "Gemini embeddings take text input"), false));
-    };
-    let (url, auth) = google_url(app, acct, headers, model);
-    let url =
-        url.replace(":generateContent", ":batchEmbedContents").replace(":streamGenerateContent", ":batchEmbedContents");
-    let mut vectors = Vec::with_capacity(texts.len());
-    let mut tokens = 0;
-    for chunk in texts.chunks(100) {
-        let requests: Vec<Value> = chunk
-            .iter()
-            .map(|t| {
-                let mut r = json!({ "model": format!("models/{model}"), "content": { "parts": [{ "text": t }] } });
-                if let Some(d) = body["dimensions"].as_u64() {
-                    r["outputDimensionality"] = d.into();
-                }
-                r
-            })
-            .collect();
-        let v = request(app, acct, &url, &auth, &json!({ "requests": requests }), model, tracker)
-            .await
-            .map_err(|e| failure(e, !vectors.is_empty()))?;
-        // Gemini doesn't report embedding tokens. Persist the estimate as partial.
-        let count = chunk.iter().map(|t| (t.len() as u64).div_ceil(4)).sum::<u64>();
-        if let Some(c) = tracker.usage_tap() {
-            c.embedding(Some(count), true);
+struct ChunkUsage {
+    analytics: crate::usage::capture::RequestUsage,
+    app: Arc<App>,
+    _load: crate::accounts::RequestLoad,
+    finished: bool,
+}
+impl ChunkUsage {
+    fn finish(&mut self, status: u16) {
+        if let Some(o) = self.analytics.finish(Some(status), None, false) {
+            self.app.stats.performance.lock().attempt(&o, "http");
         }
-        let embeddings: Vec<Value> =
-            v["embeddings"].as_array().into_iter().flatten().map(|e| e["values"].clone()).collect();
-        if embeddings.len() != chunk.len() {
-            return Err(failure(fail(502, "Gemini returned a different number of embeddings"), true));
-        }
-        vectors.extend(embeddings);
-        tokens += count;
+        self.finished = true;
     }
-    response(vectors, tokens, body["encoding_format"].as_str().unwrap_or("float")).map_err(|e| failure(e, true))
+}
+impl Drop for ChunkUsage {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish(499);
+        }
+    }
 }
 
-async fn vertex(
-    app: &App,
+async fn google(
+    app: &Arc<App>,
     acct: &Arc<Account>,
     headers: &HeaderMap,
     model: &str,
     body: &Value,
     tracker: &mut Tracker,
+    vertex: bool,
 ) -> Result<(Value, Usage), Failure> {
-    let Some(texts) = texts(&body["input"]) else {
-        return Err(failure(fail(400, "Vertex embeddings take text input"), false));
-    };
+    let texts = texts(&body["input"]).ok_or_else(|| failure(fail(400, "Google embeddings take text input"), false))?;
+    tracker.embedding_attempt(acct);
     let (url, auth) = google_url(app, acct, headers, model);
-    let url = url.replace(":generateContent", ":predict").replace(":streamGenerateContent", ":predict");
-    let mut vectors = Vec::with_capacity(texts.len());
-    let mut tokens = 0;
-    let limit = if model.starts_with("gemini-embedding") { 1 } else { 5 };
-    for chunk in texts.chunks(limit) {
-        let mut req = json!({ "instances": chunk.iter().map(|t| json!({ "content": t })).collect::<Vec<_>>(), "parameters": {"autoTruncate": false} });
+    let method = if vertex { ":predict" } else { ":batchEmbedContents" };
+    let url = url.replace(":generateContent", method).replace(":streamGenerateContent", method);
+    let limit = if !vertex {
+        100
+    } else if model.starts_with("gemini-embedding") {
+        1
+    } else {
+        5
+    };
+    let mut jobs = texts.chunks(limit).enumerate().map(|(index, chunk)| {
+        let mut req = if vertex {
+            json!({"instances":chunk.iter().map(|t|json!({"content":t})).collect::<Vec<_>>(),"parameters":{"autoTruncate":false}})
+        } else {
+            json!({"requests":chunk.iter().map(|t|json!({"model":format!("models/{model}"),"content":{"parts":[{"text":t}]}})).collect::<Vec<_>>()})
+        };
         if let Some(d) = body["dimensions"].as_u64() {
-            req["parameters"]["outputDimensionality"] = d.into();
+            if vertex { req["parameters"]["outputDimensionality"] = d.into(); }
+            else { for r in req["requests"].as_array_mut().unwrap() { r["outputDimensionality"] = d.into(); } }
         }
-        let v =
-            request(app, acct, &url, &auth, &req, model, tracker).await.map_err(|e| failure(e, !vectors.is_empty()))?;
-        let predictions = v["predictions"].as_array().cloned().unwrap_or_default();
-        let counts: Option<Vec<u64>> = predictions
-            .iter()
-            .map(|p| {
-                p["embeddings"]["statistics"]["token_count"]
-                    .as_f64()
-                    .filter(|n| {
-                        n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= crate::usage::types::MAX_TOKENS as f64
-                    })
-                    .map(|n| n as u64)
-            })
-            .collect();
-        let count = counts.map(|c| c.into_iter().sum::<u64>());
-        if let Some(c) = tracker.usage_tap() {
-            c.embedding(count, false);
+        (index, req, chunk.len(), chunk.iter().map(|t|(t.len() as u64).div_ceil(4)).sum::<u64>())
+    });
+    let mut pending = FuturesUnordered::new();
+    let concurrency = app.cfg().embeddings.concurrency.clamp(1, 16);
+    let mut launched = 0usize;
+    let mut results = Vec::new();
+    let mut first_error = None;
+    let mut exhausted = false;
+    let mut final_chunk = None;
+    loop {
+        while first_error.is_none() && !exhausted && pending.len() < concurrency {
+            let Some((index, req, count, estimate)) = jobs.next() else {
+                exhausted = true;
+                break;
+            };
+            launched += 1;
+            let child = ChunkUsage {
+                analytics: tracker.embedding_child(acct, index, model),
+                app: app.clone(),
+                _load: crate::accounts::RequestLoad::new(acct),
+                finished: false,
+            };
+            pending.push(google_chunk(app, acct, &url, &auth, req, index, count, estimate, vertex, child));
         }
-        if predictions.len() != chunk.len() {
-            return Err(failure(fail(502, "Vertex returned a different number of embeddings"), true));
+        let Some((index, result, mut child)) = pending.next().await else {
+            break;
+        };
+        let chunk_status = result.as_ref().err().map_or(200, |e| e.0);
+        match result {
+            Ok((vectors, tokens)) => {
+                tracker.embedding_progress(tokens, !vertex);
+                results.push((index, vectors, tokens));
+            }
+            Err(error) => {
+                tracker.embedding_progress(None, false);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
-        if predictions.iter().any(|p| p["embeddings"]["statistics"]["truncated"] == true) {
-            return Err(failure(fail(400, "Vertex truncated embedding input despite autoTruncate=false"), true));
+        if pending.is_empty() && (launched == texts.len().div_ceil(limit) || first_error.is_some()) {
+            // Final response validation can still fail after successful chunks.
+            final_chunk = Some((child, chunk_status));
+        } else {
+            child.finish(chunk_status);
         }
-        tokens += count.unwrap_or(0);
-        vectors.extend(predictions.into_iter().map(|p| p["embeddings"]["values"].clone()));
+        // Drain in-flight work after failure so its usage survives, but schedule no new chunks.
     }
-    response(vectors, tokens, body["encoding_format"].as_str().unwrap_or("float")).map_err(|e| failure(e, true))
+    let outcome = (|| {
+        if let Some(error) = first_error {
+            return Err(failure(error, launched > 1 || !results.is_empty()));
+        }
+        results.sort_by_key(|(index, _, _)| *index);
+        let mut vectors = Vec::with_capacity(texts.len());
+        let mut tokens = Some(0u64);
+        for (_, values, count) in results {
+            vectors.extend(values);
+            tokens = tokens.zip(count).map(|(a, b)| a + b);
+        }
+        let (mut output, usage) =
+            response(vectors, tokens.unwrap_or(0), body["encoding_format"].as_str().unwrap_or("float"))
+                .map_err(|e| failure(e, true))?;
+        if tokens.is_none() {
+            output.as_object_mut().unwrap().remove("usage");
+        }
+        Ok((output, usage))
+    })();
+    if let Some((mut child, status)) = final_chunk {
+        if let Some(c) = child.analytics.tap() {
+            c.logical_result(outcome.is_ok());
+        }
+        child.finish(status);
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn google_chunk(
+    app: &App,
+    acct: &Arc<Account>,
+    url: &str,
+    auth: &[(String, String)],
+    req: Value,
+    index: usize,
+    expected: usize,
+    estimate: u64,
+    vertex: bool,
+    child: ChunkUsage,
+) -> (usize, Result<(Vec<Value>, Option<u64>), (u16, Value)>, ChunkUsage) {
+    let result = async {
+        let resp = send(app, acct, url, auth, &req).await?;
+        if let Some(c) = child.analytics.tap() {
+            c.headers(resp.headers(), resp.status().as_u16());
+        }
+        let v = read_json(resp).await?;
+        let (vectors, tokens) = if vertex {
+            let predictions =
+                v["predictions"].as_array().ok_or_else(|| fail(502, "Vertex returned invalid predictions"))?;
+            let counts: Option<Vec<u64>> = predictions
+                .iter()
+                .map(|p| {
+                    p["embeddings"]["statistics"]["token_count"]
+                        .as_f64()
+                        .filter(|n| {
+                            n.is_finite() && *n >= 0. && n.fract() == 0. && *n <= crate::usage::types::MAX_TOKENS as f64
+                        })
+                        .map(|n| n as u64)
+                })
+                .collect();
+            let tokens = counts.map(|c| c.into_iter().sum());
+            if let Some(c) = child.analytics.tap() {
+                c.embedding(tokens, false);
+            }
+            if predictions.iter().any(|p| p["embeddings"]["statistics"]["truncated"] == true) {
+                return Err(fail(400, "Vertex truncated embedding input despite autoTruncate=false"));
+            }
+            (predictions.iter().map(|p| p["embeddings"]["values"].clone()).collect::<Vec<_>>(), tokens)
+        } else {
+            if let Some(c) = child.analytics.tap() {
+                c.embedding(Some(estimate), true);
+            }
+            (v["embeddings"].as_array().into_iter().flatten().map(|p| p["values"].clone()).collect(), Some(estimate))
+        };
+        if vectors.len() != expected {
+            return Err(fail(502, "Google returned a different number of embeddings"));
+        }
+        Ok((vectors, tokens))
+    }
+    .await;
+    (index, result, child)
 }
 
 #[cfg(test)]

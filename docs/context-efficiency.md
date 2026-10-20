@@ -6,7 +6,9 @@ change Fusebox's live request path. A shorter request is useful only when it
 preserves the task's required information and answer quality.
 
 The default is an offline dry run. Network requests require `--execute`; each
-execution sends up to twice `--trials` requests and can spend tokens. The harness
+execution sends up to `2 × (trials + warmups + 1)` requests and can spend tokens.
+The default is ten requests: one initial pair, one warmup pair and three measured
+warm pairs. `--phases single` uses only `2 × trials` requests with uncontrolled cache state. The harness
 uses Python 3.9+ and the standard library. Executing requests requires Unix timer
 support, available on Debian.
 
@@ -69,17 +71,18 @@ your responsibility.
 
 ## Read the measurements
 
-Each pair runs original then compacted on odd pairs, and compacted then original
-on even pairs. There are no unreported warmup calls. Inspect individual trials:
-early cold requests and later warmed requests can differ substantially.
+The default reports an initial-state pair, explicit unscored warmups, and warm
+pairs separately. Each variant has its own session cohort; order alternates across
+pairs. Initial state is uncontrolled: the report never claims a proven cold cache.
+Caller cache keys remain unchanged, and provider caches can share prefixes across
+cohorts. Check reported cache reads and routing before comparing.
 
-Every trial sends the same freshly generated `x-fusebox-session-id` header to
-retain one account assignment when Fusebox session affinity is enabled. The report
-includes the journal fingerprint of Fusebox's credential-scoped session identity
-for correlation with the sanitized request journal. The raw session header, client
-scope and API key are not printed. This does not change either request body. Only the last **planned** request sends
-`x-fusebox-session-end: true`. An early stop sends no cleanup request; its assignment
-can remain until the server's configured idle expiry. Session pinning does not
+Each variant sends one freshly generated `x-fusebox-session-id` to retain its own
+account assignment. The report includes per-variant journal fingerprints for
+correlation with sanitized request logs, without raw session ids or credentials.
+The final planned request in **each** cohort sends `x-fusebox-session-end: true`.
+An early stop sends no cleanup request; assignments expire under the configured
+idle policy. Session pinning does not
 prevent quota fallback, account unavailability, or routing changes when affinity
 is disabled, and cannot guarantee a particular provider cache state.
 
@@ -146,7 +149,8 @@ authenticated client key; unauthenticated traffic shares a client scope.
 
 Request details and structured completion logs expose requested/applied controls,
 key scope and translation downgrades. They describe the prepared request rather
-than an upstream cache hit. `drop` retains existing hint behavior; `automatic`
+than an upstream cache hit. `drop` removes incompatible hints while preserving
+explicit no-cache intent through OAuth preparation; `automatic`
 opts into Claude automatic caching after lost boundaries; `reject` helps find
 incompatible requests before provider contact. Inspect provider cached-input and
 cache-write usage alongside these diagnostics. Compare cold and warmed runs on
@@ -160,9 +164,11 @@ Do not silently discard earlier requirements or replace exact evidence with an
 unverified summary.
 
 Run several representative tasks and assess their answers against the same rubric.
-This metadata-only harness deliberately reports `quality_evaluated: false` and
-does not retain answers; perform answer review with your approved evaluation
-workflow. A completion marker cannot establish factual accuracy or task quality.
+The harness does not retain answers. By default `quality_evaluated` is false.
+Attach a local evaluation receipt with `--quality-evidence receipt.json` after
+using your approved evaluation workflow. The receipt accepts only `rubric_id`,
+`sample_count` (positive integer) and `passed` (boolean); its SHA-256 and these
+metadata enter the report. The harness does not independently verify the receipt. A completion marker cannot establish factual accuracy or task quality.
 
 Large stable prefixes may already have a high cache-hit rate. Rewriting a prefix
 can reduce total input while losing cached input, increasing uncached work, cost,
@@ -180,3 +186,26 @@ loopback responses only:
 ```sh
 python3 -m unittest discover -s tests -p test_context_benchmark.py -v
 ```
+
+## Other controlled experiments
+
+`--experiment context` remains the default and allows only `input` and
+`instructions` to differ. Other modes keep context and all unrelated controls
+identical: `cache` permits cache keys/options/retention and supported content-block
+breakpoints; `verbosity` permits `text.verbosity`; `effort` permits
+`reasoning.effort`; `model`, `tools`, and `tier` permit their corresponding settings.
+Choose one variable at a time. A model or tier experiment intentionally changes
+routing or price, so a latency difference alone cannot establish savings.
+
+Use shorter, relevant tool results, task-appropriate models and caller-selected
+effort/verbosity with a quality rubric. Fusebox preserves caller choices where the
+backend supports them and reports dropped controls. It never silently compacts a
+prompt, lowers effort, or selects a paid tier.
+
+`scripts/cache-analysis.py export.jsonl --ttl-seconds 300` analyzes a local native
+observation export. It reports request gaps and writes without a later observed
+read in the same provider/account/client/model/session cohort, excluding writes
+whose TTL has not elapsed at the export boundary. These are candidates for review,
+not proof that an exact prefix went unused: external traffic, gaps, and different
+prefixes within a session remain unobserved. Use 1800 for applicable OpenAI caches
+or 3600 for explicit Claude 1h caches. TTL starts at request start.

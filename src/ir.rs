@@ -43,6 +43,9 @@ pub struct Request {
     pub reasoning: Option<Reasoning>,
     pub response_format: Option<ResponseFormat>,
     pub parallel_tool_calls: Option<bool>,
+    pub verbosity: Option<String>,
+    /// OpenAI processing tier; never mapped to Anthropic tier semantics.
+    pub service_tier: Option<String>,
     /// Chat clients that asked for usage in the final stream chunk.
     pub include_usage: bool,
     /// Responses API freeform tools (their single argument is `input`).
@@ -51,6 +54,8 @@ pub struct Request {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    System,
+    Developer,
     User,
     Assistant,
 }

@@ -454,7 +454,8 @@ async fn turn(
     sess.key = Some(key);
     sess.source = Some(source);
     let _lease = app.sessions.hold(sess.key.as_deref().unwrap(), app.cfg().session_affinity_idle_seconds);
-    let mut full = if prev.is_some() { previous.map(|(_, items)| items) } else { Some(vec![]) };
+    let mut full =
+        if prev.is_some() { previous.map(|(_, items)| items) } else { Some(crate::affinity::History::default()) };
     if let Some(items) = &mut full {
         items.extend(input_items(&body));
     }
@@ -477,8 +478,9 @@ async fn turn(
         }
     }
     if cfg.codex_websockets {
-        match native_turn(app, headers, sess, &body, full.as_deref(), tx).await {
+        match native_turn(app, headers, sess, &body, full.as_ref(), tx).await {
             Native::Done => {
+                app.stats.performance.lock().websocket("native");
                 sess.pending_selection = None;
                 if crate::affinity::ends_session(headers) {
                     app.sessions.end(sess.key.as_deref().unwrap());
@@ -490,7 +492,9 @@ async fn turn(
                 sess.pending_selection = None;
                 return Err(ClientGone);
             }
-            Native::Fallback => {}
+            Native::Fallback(reason) => {
+                app.stats.performance.lock().websocket(reason);
+            }
         }
     }
 
@@ -502,7 +506,7 @@ async fn turn(
             }});
             return send(tx, error_event(400, &err)).await;
         }
-        body["input"] = Value::Array(full.clone().unwrap());
+        body["input"] = Value::Array(full.as_ref().unwrap().to_values());
         body.as_object_mut().unwrap().remove("previous_response_id");
     }
 
@@ -534,7 +538,7 @@ fn capture(
     headers: &HeaderMap,
     sess: &mut Session,
     v: &Value,
-    full: Option<&[Value]>,
+    full: Option<&crate::affinity::History>,
     aggregate: &ir::Aggregate,
 ) {
     let r = &v["response"];
@@ -547,14 +551,14 @@ fn capture(
     if let (Some(key), Some(full)) = (&sess.key, full) {
         let mut response = r.clone();
         crate::affinity::complete_output(&mut response, aggregate);
-        app.sessions.remember(headers, key, &response, full.to_vec());
+        app.sessions.remember(headers, key, &response, full.clone());
     }
 }
 
 enum Native {
     Done,
     Gone,
-    Fallback,
+    Fallback(&'static str),
 }
 
 async fn connect(acct: &Arc<Account>, client_headers: &HeaderMap) -> Result<Upstream, UpstreamFailure> {
@@ -584,13 +588,13 @@ async fn native_turn(
     headers: &HeaderMap,
     sess: &mut Session,
     body: &Value,
-    full: Option<&[Value]>,
+    full: Option<&crate::affinity::History>,
     tx: &mut ClientTx,
 ) -> Native {
     let cfg = app.cfg();
     // Native websockets don't go through HTTP proxies.
     if !cfg.proxy_url.is_empty() {
-        return Native::Fallback;
+        return Native::Fallback("global_proxy");
     }
     let (model, suffix) = ir::split_model_suffix(body["model"].as_str().unwrap_or_default());
     // Model groups and the client's model limits are handled on the HTTP pipeline.
@@ -598,18 +602,27 @@ async fn native_turn(
         || cfg.model_groups.contains_key(&model)
         || crate::policy::check_model(app, headers, &model).is_err()
     {
-        return Native::Fallback;
+        return Native::Fallback("model_group_or_policy");
     }
 
     let (only, model) = app.pool.route(&model);
     let model = app.pool.canonical(&model, only.as_ref());
     if only.as_ref().is_some_and(|o| *o != crate::accounts::Only::Provider(Provider::Codex)) {
-        return Native::Fallback;
+        return Native::Fallback("provider_route");
     }
 
     // Refresh the shared assignment every turn, including on an existing socket.
-    let selected = match app.sessions.pick_with_reason(&app.pool, &cfg, &model, sess.key.as_deref(), &[], only.as_ref())
-    {
+    let latency_context = cfg.latency_routing.then(|| crate::latency::Context::new(body, "ws"));
+    let selected = match app.sessions.pick_session_with_context(
+        &app.pool,
+        &cfg,
+        &model,
+        sess.key.as_deref(),
+        false,
+        &[],
+        only.as_ref(),
+        latency_context.as_ref(),
+    ) {
         Ok(pair) => pair,
         Err((status, message)) => {
             let result = send(tx, error_event(status, &json!({"error":{"message":message}}))).await;
@@ -621,7 +634,7 @@ async fn native_turn(
     let acct = selected.account.clone();
     let upstream_model = selected.model.clone();
     if acct.provider != Provider::Codex || !acct.is_oauth() || acct.proxy_url.is_some() {
-        return Native::Fallback;
+        return Native::Fallback("account_ineligible");
     }
     let (cache_key, cache_scope) =
         crate::cache::key(headers, body, sess.key.as_deref(), sess.source, &cfg.prompt_cache);
@@ -631,12 +644,16 @@ async fn native_turn(
     if !reuse {
         sess.close_upstream("account_changed").await;
         if crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
-            return Native::Fallback;
+            return Native::Fallback("oauth_refresh");
         }
         let mut upstream_headers = headers.clone();
+        let separate_session = matches!(cache_scope, "client" | "workspace")
+            .then(|| sess.key.as_deref().map(crate::affinity::prompt_cache_key))
+            .flatten();
         if !upstream_headers.contains_key("session_id")
             && !upstream_headers.contains_key("session-id")
-            && let Some(key) = body["prompt_cache_key"].as_str().or(cache_key.as_deref())
+            && let Some(key) =
+                separate_session.as_deref().or(body["prompt_cache_key"].as_str()).or(cache_key.as_deref())
             && let Ok(value) = key.parse()
         {
             upstream_headers.insert("session_id", value);
@@ -649,7 +666,7 @@ async fn native_turn(
             }
             Err(e) => {
                 e.log(&sess.connection_id, "handshake_fallback");
-                return Native::Fallback;
+                return Native::Fallback("connect_failed");
             }
         }
     }
@@ -668,7 +685,7 @@ async fn native_turn(
             let err = json!({"error":{"message":"Previous response is unavailable on this connection; resend full conversation input without previous_response_id", "code":"previous_response_not_found"}});
             return if send(tx, error_event(400, &err)).await.is_ok() { Native::Done } else { Native::Gone };
         };
-        payload["input"] = Value::Array(full.to_vec());
+        payload["input"] = Value::Array(full.to_values());
         payload.as_object_mut().unwrap().remove("previous_response_id");
     }
     crate::upstream::sanitize_codex_body(&mut payload, &upstream_model, true);
@@ -685,20 +702,38 @@ async fn native_turn(
     let mut tracker = Tracker::new(app, Format::Responses, true, "ws", &model);
     tracker.client_app(headers);
     tracker.session(sess.key.as_deref(), sess.source, &cfg);
+    tracker.latency_context(latency_context);
     tracker.selected(&selected);
     tracker.cache_policy(crate::cache::Policy::new(body, &payload, Format::Responses, cache_scope, None));
     let payload = payload.to_string();
-    let deadline = send_deadline(payload.len());
+    let pre_output_deadline = (cfg.stream_limits.pre_output_timeout_seconds > 0)
+        .then(|| tokio::time::Instant::now() + Duration::from_secs(cfg.stream_limits.pre_output_timeout_seconds));
+    let deadline = pre_output_deadline.map_or_else(
+        || send_deadline(payload.len()),
+        |d| d.saturating_duration_since(tokio::time::Instant::now()).min(send_deadline(payload.len())),
+    );
     if let Err(failure) =
         upstream_write_within(deadline, "send", up.send(tungstenite::Message::Text(payload.into()))).await
     {
         failure.log(&sess.connection_id, "send_fallback");
         tracker.diagnostic_failure(failure.diagnostic.clone());
+        if pre_output_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+            sess.discard_upstream();
+            tracker.finish(504, &Usage::default(), Some("upstream pre-output deadline exceeded".into()));
+            return if send(tx, error_event(504, &json!({"error":{"message":"upstream pre-output deadline exceeded"}})))
+                .await
+                .is_ok()
+            {
+                Native::Done
+            } else {
+                Native::Gone
+            };
+        }
         // A send only fails or times out with part of the message still unwritten, and the
         // socket is dropped here, so upstream never received the request: HTTP runs it once.
         sess.discard_upstream();
         tracker.cancel();
-        return Native::Fallback;
+        return Native::Fallback("send_failed");
     }
 
     let mut parser = responses::Parser::default();
@@ -712,7 +747,7 @@ async fn native_turn(
     while let Some(Ok(_)) = sess.interrupts.as_mut().map(|rx| rx.try_recv()) {}
     loop {
         let next = tokio::select! {
-            next = tokio::time::timeout(Duration::from_secs(600), up.next()) => next,
+            next = tokio::time::timeout(if !forwarded { pre_output_deadline.map(|d|d.saturating_duration_since(tokio::time::Instant::now())).unwrap_or(Duration::from_secs(600)) } else { Duration::from_secs(600) }, up.next()) => next,
             Some(text) = next_interrupt(&mut sess.interrupts) => {
                 // The response still ends with response.completed, read as usual.
                 if let Err(failure) = upstream_write("interrupt", up.send(tungstenite::Message::Text(text.into()))).await {
@@ -773,6 +808,11 @@ async fn native_turn(
                 break;
             }
         };
+        if text.len() > cfg.stream_limits.for_model(&upstream_model) {
+            tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_event_limit"));
+            error = Some((502, crate::sse::LIMIT_ERROR.into()));
+            break;
+        }
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         tracker.observe_wire(&v);
         let kind = v["type"].as_str().unwrap_or_default().to_string();
@@ -799,14 +839,14 @@ async fn native_turn(
                     sess.discard_upstream();
                     close_upstream(&mut up, &sess.connection_id, "quota_rejected").await;
                     tracker.finish_fallback(status, &usage, Some(msg));
-                    return Native::Fallback;
+                    return Native::Fallback("upstream_failed");
                 }
             } else if !forwarded && matches!(status, 401 | 403) {
                 // HTTP fallback refreshes credentials on the same assigned account.
                 sess.discard_upstream();
                 close_upstream(&mut up, &sess.connection_id, "auth_rejected").await;
                 tracker.cancel();
-                return Native::Fallback;
+                return Native::Fallback("upstream_closed");
             } else if status == 429 {
                 // A plain rate limit: step aside briefly. Sessions detour meanwhile.
                 acct.rate_limit(&model, chrono::Utc::now() + chrono::Duration::seconds(60), &format!("429: {msg}"));

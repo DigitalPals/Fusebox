@@ -1,0 +1,15 @@
+{
+  "mock_only": true,
+  "existing_dev_service_found": false,
+  "release_binary_sha256": "339dcb9babd8513012181dd4ef8e5eaf9a6212a2f42e9d1c29ce6a1c65f6daed",
+  "checks": [
+    "health_readiness_dashboard_and_gzip",
+    "translation_controls_and_instruction_order",
+    "settings_reload_and_new_metrics",
+    "health_readiness_dashboard_and_gzip",
+    "restart_on_same_config_and_port_with_persisted_settings"
+  ],
+  "restart_verified": true,
+  "temporary_services_stopped": true,
+  "lease": "bcf5b819edf449108370bbe24f27bf81"
+}

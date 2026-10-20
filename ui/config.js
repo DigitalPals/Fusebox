@@ -22,7 +22,7 @@ const CONFIG_KEY_SECTION = {
   'api-keys': 'clients', 'management-key': 'access', 'management-allow-remote': 'access',
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
-  'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'request-limits': 'connections', 'log-format': 'diagnostics',
+  'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'latency-routing': 'routing', 'translation': 'routing', 'embeddings': 'connections', 'stream-limits': 'connections', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
   'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', notifications: 'notifications', debug: 'diagnostics',
 };
@@ -629,6 +629,8 @@ function configRoutingHTML() {
     ${configChoice(['prompt-cache', 'on-incompatible'], 'Incompatible cache hints', [['drop', 'Drop hints'], ['automatic', 'Use provider defaults'], ['reject', 'Reject request']],
       'Drop keeps the current behavior. Provider defaults enables automatic Claude caching after explicit boundaries are lost in translation. Explicit mode without boundaries remains uncached. Reject returns an error before contacting the provider.')}
     <div class="cfg-divider wide"></div>
+    ${configSwitch(['latency-routing'], 'Prefer a faster account when quota scores tie', 'For new sessions under Smart quota balancing. Uses recent comparable first-response timings after at least three cold samples per account. Existing sessions keep their account.')}
+    ${configSwitch(['translation', 'allow-service-tier'], 'Preserve a caller’s OpenAI service tier during translation', 'Off by default. A requested fast or priority tier can cost more. Supported OpenAI targets only; native requests already preserve the caller’s settings.')}
     ${configSwitch(['force-model-prefix'], 'Require model prefixes', 'Unprefixed requests only use accounts without a prefix. Use prefix/model to select a prefixed account.')}
     <div class="cfg-divider wide"></div>
     ${configGroupsHTML()}
@@ -714,6 +716,13 @@ function configConnectionsHTML() {
     ${configSwitch(['claude-cloak'], 'Claude Code compatibility', 'Make requests through Claude OAuth accounts resemble Claude Code requests for other clients.')}
     ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}
     <div class="cfg-divider wide"></div>
+    ${configField(['embeddings', 'concurrency'], 'Concurrent embedding chunks', { type: 'number', min: 1, max: 16, required: true, help: 'Google embedding batches can send up to this many chunks at once. Default: 1. Higher values use more provider capacity.' })}
+    ${configField(['embeddings', 'cache-seconds'], 'Reuse identical embedding results (seconds)', { type: 'number', min: 0, max: 86400, required: true, help: '0 disables reuse. Cached results stay in memory, separate by client, account, model and all request options. Cache hits use no provider tokens.' })}
+    ${configField(['embeddings', 'cache-bytes'], 'Embedding cache capacity (bytes)', { type: 'number', min: 0, max: 268435456, required: true, help: 'Maximum serialized embedding results retained in memory. Default: 16 MiB; memory overhead is additional.' })}
+    ${configField(['stream-limits', 'pre-output-timeout-seconds'], 'Total wait for response to start (seconds)', { type: 'number', min: 0, max: 3600, required: true, help: '0 retains the existing timeouts. Otherwise headers and the first event share this deadline. Expiry ends the request without repeating potentially paid inference.' })}
+    ${configField(['stream-limits', 'event-bytes'], 'Text response event limit (bytes)', { type: 'number', min: 1024, max: 268435456, required: true, help: 'Maximum upstream event or unfinished line. Default: 16 MiB.' })}
+    ${configField(['stream-limits', 'media-event-bytes'], 'Media response event limit (bytes)', { type: 'number', min: 1024, max: 268435456, required: true, help: 'For models whose names contain image, audio or video. Default: 64 MiB. Set at least the text event limit.' })}
+    ${configField(['stream-limits', 'bootstrap-bytes'], 'Buffer before streaming (bytes)', { type: 'number', min: 1024, max: 67108864, required: true, help: 'Release initial response chunks when this threshold is reached. Default: 2 MiB. Event limits still apply; a single network chunk may cross the threshold.' })}
     ${configField(['request-limits', 'text-body-bytes'], 'Text request limit (bytes)', { type: 'number', min: 1, max: 268435456, required: true, help: 'Maximum encoded and decoded body size for text, embedding and token-count requests. Default: 256 MiB.' })}
     ${configField(['request-limits', 'media-body-bytes'], 'Media request limit (bytes)', { type: 'number', min: 1, max: 268435456, required: true, help: 'Maximum encoded and decoded body size for image and video requests, including multipart uploads. Default: 256 MiB.' })}
     ${configField(['request-limits', 'max-in-flight'], 'Concurrent HTTP requests', { type: 'number', min: 0, required: true, help: 'Includes reading the body, provider work and the response stream. Excess requests return 503. Zero is unlimited; WebSockets are separate.' })}

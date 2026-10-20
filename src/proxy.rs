@@ -47,6 +47,19 @@ pub enum Reply {
     Error(u16, Value),
 }
 
+/// Reuse encoded preparation for same-account retries. Bytes clone cheaply;
+/// keeping only the latest preparation bounds memory to one payload per request.
+type PreparationKey = (String, String, Format, String);
+type PreparationCache = Option<(PreparationKey, Arc<WireRequest>)>;
+
+struct WireRequest {
+    url: String,
+    headers: Vec<(String, String)>,
+    payload: bytes::Bytes,
+    policy: crate::cache::Policy,
+    names: HashMap<String, String>,
+}
+
 // --------------------------------------------------------------------- tracker
 
 /// Records the request in stats when finished (or dropped mid-stream).
@@ -54,6 +67,9 @@ pub struct Tracker {
     app: Arc<App>,
     log: RequestLog,
     started: Instant,
+    attempt_started: Instant,
+    prepared_ms: Option<u64>,
+    headers_ms: Option<u64>,
     acct: Option<Arc<Account>>,
     /// Stream progress must outlive the suspended generator when its body is dropped.
     stream_usage: Usage,
@@ -64,6 +80,9 @@ pub struct Tracker {
     analytics: Option<crate::usage::capture::RequestUsage>,
     downstream: crate::diagnostics::Downstream,
     logical_final: bool,
+    latency_context: Option<crate::latency::Context>,
+    latency_model: Option<String>,
+    batch_completeness: Option<&'static str>,
     /// Keeps the request on the dashboard's connected list until it ends.
     connected: Option<crate::addresses::Guard>,
 }
@@ -76,8 +95,14 @@ impl Tracker {
             analytics: Some(crate::usage::capture::RequestUsage::new(app.usage.clone(), model)),
             downstream: crate::diagnostics::Downstream::current(),
             logical_final: true,
+            batch_completeness: None,
+            latency_context: None,
+            latency_model: None,
             connected: None,
             started: Instant::now(),
+            attempt_started: Instant::now(),
+            prepared_ms: None,
+            headers_ms: None,
             acct: None,
             stream_usage: Usage::default(),
             stream_error: None,
@@ -103,6 +128,7 @@ impl Tracker {
                 routing_warning: None,
                 routing_attempts: Vec::new(),
                 cache_policy: None,
+                control_downgrades: Vec::new(),
                 status: 0,
                 latency_ms: 0,
                 ttft_ms: None,
@@ -112,6 +138,7 @@ impl Tracker {
                 stream,
                 transport,
                 attempts: 0,
+                chunks: 0,
                 error: None,
                 usage_completeness: "missing",
                 failure_kind: None,
@@ -120,15 +147,50 @@ impl Tracker {
     }
 
     pub fn attempt(&mut self, acct: &Arc<Account>) {
+        if let Some(c) = self.usage_tap() {
+            self.app.stats.performance.lock().attempt(&c.snapshot(None, None, false), self.log.transport);
+        }
+        self.attempt_started = Instant::now();
+        self.prepared_ms = None;
+        self.headers_ms = None;
         if let Some(a) = &mut self.analytics {
             a.attempt(acct);
         }
+        self.account_attempt(acct);
+    }
+    fn account_attempt(&mut self, acct: &Arc<Account>) {
         self.load = Some(crate::accounts::RequestLoad::new(acct));
         self.log.attempts += 1;
         self.log.provider = acct.provider.as_str().to_string();
         self.log.account = acct.label.clone();
         self.log.account_id = acct.id.clone();
         self.acct = Some(acct.clone());
+    }
+
+    pub fn embedding_attempt(&mut self, acct: &Arc<Account>) {
+        self.account_attempt(acct);
+        // Concurrent chunks own their individual provider load reservations.
+        self.load = None;
+    }
+    pub fn embedding_child(
+        &self,
+        acct: &Arc<Account>,
+        index: usize,
+        model: &str,
+    ) -> crate::usage::capture::RequestUsage {
+        let mut child = self.analytics.as_ref().expect("unfinished tracker").fork();
+        child.attempt(acct);
+        if let Some(c) = child.tap() {
+            c.metadata("embedding_chunk", index as u64);
+            c.model(model);
+        }
+        child
+    }
+    pub fn embedding_progress(&mut self, tokens: Option<u64>, estimated: bool) {
+        self.log.chunks += 1;
+        self.stream_usage.input += tokens.unwrap_or(0);
+        let complete = tokens.is_some() && !estimated && self.batch_completeness != Some("partial");
+        self.batch_completeness = Some(if complete { "complete" } else { "partial" });
     }
 
     /// Names the client program from its User-Agent, and the key and address it came
@@ -188,6 +250,7 @@ impl Tracker {
     }
 
     pub fn selected(&mut self, selected: &crate::affinity::Selected) {
+        self.latency_model = Some(selected.model.clone());
         // Preserve the initial allocation and any migration even if later retries reuse it.
         if self.log.routing_reason.is_none()
             || !matches!(selected.reason, "new_session" | "session_reused" | "retry_same")
@@ -209,6 +272,10 @@ impl Tracker {
 
     pub fn cache_policy(&mut self, policy: crate::cache::Policy) {
         self.log.cache_policy = Some(policy);
+    }
+
+    pub(crate) fn latency_context(&mut self, context: Option<crate::latency::Context>) {
+        self.latency_context = context;
     }
 
     pub(crate) fn usage_tap(&self) -> Option<crate::usage::capture::Capture> {
@@ -288,13 +355,34 @@ impl Tracker {
             return;
         }
         self.done = true;
+        if let Some(c) = self.usage_tap() {
+            c.metadata("request_latency_ms", self.started.elapsed().as_millis() as u64);
+            if let Some(ttft) = self.log.ttft_ms {
+                c.metadata("request_ttft_ms", ttft);
+            }
+            if let Some(ms) = self.prepared_ms {
+                c.metadata("prepare_ms", ms);
+            }
+            if let Some(ms) = self.headers_ms {
+                c.metadata("headers_ms", ms);
+            }
+            c.metadata("transport_ws", u64::from(self.log.transport == "ws"));
+            c.metadata("attempt_number", u64::from(self.log.attempts));
+            c.metadata("control_downgrade_count", self.log.control_downgrades.len() as u64);
+            if let Some(p) = &self.log.cache_policy {
+                c.metadata("cache_requested", crate::cache::intent_code(p.requested));
+                c.metadata("cache_applied", crate::cache::intent_code(p.applied));
+                c.metadata("cache_downgraded", u64::from(p.downgrade_reason.is_some()));
+            }
+        }
         let failure = self.usage_tap().and_then(|c| c.failure_detail());
         let captured = self.analytics.as_mut().and_then(|a| a.finish(Some(status), Some(usage), self.logical_final));
-        self.log.usage_completeness = match captured.as_ref().map(|o| o.completeness.as_str()) {
-            Some("complete") => "complete",
-            Some("partial") => "partial",
-            _ => "missing",
-        };
+        self.log.usage_completeness =
+            self.batch_completeness.unwrap_or(match captured.as_ref().map(|o| o.completeness.as_str()) {
+                Some("complete") => "complete",
+                Some("partial") => "partial",
+                _ => "missing",
+            });
         self.log.failure_kind = if status == 499 {
             Some(self.downstream.kind())
         } else if status < 400 {
@@ -305,6 +393,7 @@ impl Tracker {
         self.load = None;
         self.connected = None;
         self.app.stats.active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let usage = if self.log.chunks > 0 { &self.stream_usage } else { usage };
         let (input, output, cache) = crate::state::usage_tokens(usage);
         self.log.status = status;
         self.log.latency_ms = self.started.elapsed().as_millis() as u64;
@@ -319,8 +408,32 @@ impl Tracker {
                 mark_quota_exhausted(a, &self.log.model, &reqwest::header::HeaderMap::new(), message);
             }
             let mut st = a.state.lock();
+            if status < 400
+                && self.log.attempts == 1
+                && self.log.routing_reason == Some("new_session")
+                && captured.as_ref().is_some_and(|o| o.tokens.cache_read == Some(0))
+                && let (Some(context), Some(ttft)) = (&self.latency_context, self.log.ttft_ms)
+            {
+                if st.latency.len() >= 64 {
+                    st.latency.clear();
+                }
+                // Routing compares the resolved upstream name, which may differ
+                // from the provider's reported snapshot name.
+                let model = self.latency_model.as_ref().unwrap_or(&self.log.model).clone();
+                st.latency
+                    .entry((model, context.clone()))
+                    .and_modify(|s| s.add(ttft))
+                    .or_insert_with(|| crate::latency::Sample::new(ttft));
+            }
             st.counters.record(&self.log);
             st.last_used = Some(Utc::now());
+        }
+        {
+            let mut performance = self.app.stats.performance.lock();
+            if let Some(o) = &captured {
+                performance.attempt(o, self.log.transport);
+            }
+            performance.request(&self.log, captured.as_ref(), self.prepared_ms, self.headers_ms);
         }
         self.app.stats.record(&self.log);
         self.app.broadcast("request", &self.log);
@@ -616,12 +729,14 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         call.session = Some(identity.key);
         call.session_source = Some(identity.source);
     }
+    let mut continuation_history = None;
     if call.format == Format::Responses
         && let Some(id) = call.body["previous_response_id"].as_str()
         && let Some((session, mut previous)) = app.sessions.previous(&call.headers, id, call.session.as_deref())
     {
         previous.extend(crate::affinity::input_items(&call.body));
-        call.body["input"] = Value::Array(previous);
+        call.body["input"] = Value::Array(previous.to_values());
+        continuation_history = Some(previous);
         call.body.as_object_mut().unwrap().remove("previous_response_id");
         if call.session.is_none() {
             call.session_source = Some("previous_response_id");
@@ -651,7 +766,11 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     let session = call.session.clone();
     let lease = session.as_deref().map(|s| app.sessions.hold(s, app.cfg().session_affinity_idle_seconds));
     let end_session = crate::affinity::ends_session(&headers);
-    let mut full = capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default();
+    let mut full = continuation_history.unwrap_or_else(|| {
+        crate::affinity::History::from(
+            capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default(),
+        )
+    });
     match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
@@ -912,7 +1031,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     tracker.client_app(&call.headers);
     tracker.session(call.session.as_deref(), call.session_source, &cfg);
     let requested_cache = crate::cache::Requested::of(&call.body);
+    tracker.latency_context = cfg.latency_routing.then(|| crate::latency::Context::new(&call.body, call.transport));
 
+    let mut preparation_cache: PreparationCache = None;
     let mut parsed: Option<Request> = None;
     let mut shortened: Option<(Request, HashMap<String, String>)> = None;
     let mut tried: Vec<String> = Vec::new();
@@ -955,7 +1076,16 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         let picked = if let Some(retry) = retry {
             Ok(retry)
         } else if cfg.session_affinity && call.session.is_some() && call.session_source != Some("generated_response") {
-            app.sessions.pick_session(&app.pool, &cfg, &model, call.session.as_deref(), inferred, &tried, only.as_ref())
+            app.sessions.pick_session_with_context(
+                &app.pool,
+                &cfg,
+                &model,
+                call.session.as_deref(),
+                inferred,
+                &tried,
+                only.as_ref(),
+                tracker.latency_context.as_ref(),
+            )
         } else {
             match app.sessions.pick_unbound(&app.pool, &cfg, &model, &tried, pin.as_deref(), only.as_ref()) {
                 Pick::Ok(a, m) => Ok(crate::affinity::Selected {
@@ -1047,93 +1177,130 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             && call.body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["type"] == "custom"));
         let passthrough = provider.wires().contains(&call.format) && (!custom_tools || native_custom_tools(provider));
         let native = if passthrough { call.format } else { provider.wires().first().copied().unwrap_or(Format::Chat) };
-        let mut names = HashMap::new();
-        let mut body = if passthrough {
-            let mut b = call.body.clone();
-            if let Some(r) = &suffix {
-                apply_native_reasoning(native, &mut b, r, &upstream_model);
-            }
-            b
+        let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
+        let preparation_key = (acct.id.clone(), upstream_model.clone(), native, upstream::credential_stamp(&acct));
+        let prepared = if let Some((_, cached)) = preparation_cache.as_ref().filter(|(key, _)| key == &preparation_key)
+        {
+            cached.clone()
         } else {
-            if parsed.is_none() {
-                let body = if call.format == Format::Gemini {
-                    let mut body = call.body.clone();
-                    body["model"] = model.clone().into();
-                    std::borrow::Cow::Owned(body)
-                } else {
-                    std::borrow::Cow::Borrowed(&call.body)
-                };
-                match formats::parse_request(call.format, &body) {
-                    Ok(mut r) => {
-                        if suffix.is_some() {
-                            r.reasoning = suffix.clone();
+            let mut names = HashMap::new();
+            let mut body = if passthrough {
+                let mut b = call.body.clone();
+                if let Some(r) = &suffix {
+                    apply_native_reasoning(native, &mut b, r, &upstream_model);
+                }
+                b
+            } else {
+                if parsed.is_none() {
+                    let body = if call.format == Format::Gemini {
+                        let mut body = call.body.clone();
+                        body["model"] = model.clone().into();
+                        std::borrow::Cow::Owned(body)
+                    } else {
+                        std::borrow::Cow::Borrowed(&call.body)
+                    };
+                    match formats::parse_request(call.format, &body) {
+                        Ok(mut r) => {
+                            if suffix.is_some() {
+                                r.reasoning = suffix.clone();
+                            }
+                            parsed = Some(r);
                         }
-                        parsed = Some(r);
-                    }
-                    Err(e) => {
-                        tracker.finish(400, &Usage::default(), Some(e.clone()));
-                        return error_reply(call.format, 400, &e);
+                        Err(e) => {
+                            tracker.finish(400, &Usage::default(), Some(e.clone()));
+                            return error_reply(call.format, 400, &e);
+                        }
                     }
                 }
-            }
-            let original = parsed.as_ref().unwrap();
-            let req = if native != Format::Claude && has_long_tool_names(original) {
-                let (req, mapping) = shortened.get_or_insert_with(|| {
-                    let mut req = original.clone();
-                    let mapping = shorten_tool_names(&mut req);
-                    (req, mapping)
-                });
-                names = mapping.clone();
-                &*req
-            } else {
-                original
-            };
-            if native == Format::Claude
-                && !devin
-                && let Err(message) = formats::claude::validate_thinking_budget(req, &upstream_model)
-            {
-                tracker.finish(400, &Usage::default(), Some(message.clone()));
-                return error_reply(call.format, 400, &message);
-            }
-            match native {
-                _ if devin => crate::devin::build_request(req, &upstream_model),
-                Format::Claude => formats::claude::build_request(req, &upstream_model),
-                Format::Responses => formats::responses::build_request(
-                    req,
-                    &upstream_model,
-                    &formats::responses::BuildOpts {
-                        chatgpt_backend: provider == Provider::Codex && acct.is_oauth(),
-                        custom_tools: native_custom_tools(provider),
-                        default_reasoning: provider == Provider::Codex,
-                    },
-                ),
-                Format::Gemini => formats::gemini::build_request(req, &upstream_model),
-                Format::Chat => formats::chat::build_request(req, &upstream_model),
-            }
-        };
-        let cache_downgrade = if passthrough {
-            None
-        } else {
-            match formats::preserve_cache_hints(call.format, native, &call.body, &mut body) {
-                Ok(downgrade) => downgrade,
-                Err(message) => {
-                    let mut policy = crate::cache::Policy::for_request(
-                        &requested_cache,
-                        &body,
-                        native,
-                        cache_scope,
-                        Some(message.clone()),
-                    );
-                    policy.applied = "rejected";
-                    policy.key_scope = "not_sent";
-                    tracker.cache_policy(policy);
+                let original = parsed.as_ref().unwrap();
+                let req = if native != Format::Claude && has_long_tool_names(original) {
+                    let (req, mapping) = shortened.get_or_insert_with(|| {
+                        let mut req = original.clone();
+                        let mapping = shorten_tool_names(&mut req);
+                        (req, mapping)
+                    });
+                    names = mapping.clone();
+                    &*req
+                } else {
+                    original
+                };
+                if !matches!(native, Format::Chat | Format::Responses)
+                    && req.messages.iter().any(|m| matches!(m.role, ir::Role::System | ir::Role::Developer))
+                {
+                    let message = "Inline system/developer instructions require an OpenAI-compatible target; use the provider's native instruction format";
+                    tracker.finish(400, &Usage::default(), Some(message.into()));
+                    return error_reply(call.format, 400, message);
+                }
+                if native == Format::Claude
+                    && !devin
+                    && let Err(message) = formats::claude::validate_thinking_budget(req, &upstream_model)
+                {
                     tracker.finish(400, &Usage::default(), Some(message.clone()));
                     return error_reply(call.format, 400, &message);
                 }
+                match native {
+                    _ if devin => crate::devin::build_request(req, &upstream_model),
+                    Format::Claude => formats::claude::build_request(req, &upstream_model),
+                    Format::Responses => formats::responses::build_request(
+                        req,
+                        &upstream_model,
+                        &formats::responses::BuildOpts {
+                            chatgpt_backend: provider == Provider::Codex && acct.is_oauth(),
+                            custom_tools: native_custom_tools(provider),
+                            default_reasoning: provider == Provider::Codex,
+                        },
+                    ),
+                    Format::Gemini => formats::gemini::build_request(req, &upstream_model),
+                    Format::Chat => formats::chat::build_request(req, &upstream_model),
+                }
+            };
+            if !passthrough {
+                let openai = provider == Provider::Codex
+                    && (upstream_model.starts_with("gpt-5") || upstream_model.starts_with("gpt-6"));
+                let mut dropped =
+                    formats::generation_controls(&mut body, native, openai, cfg.translation.allow_service_tier);
+                let verbosity_requested = call.format == Format::Chat && call.body["verbosity"].is_string()
+                    || call.format == Format::Responses && call.body["text"]["verbosity"].is_string();
+                if verbosity_requested && !matches!(native, Format::Chat | Format::Responses) {
+                    dropped.push("verbosity_unsupported");
+                }
+                if matches!(call.format, Format::Chat | Format::Responses)
+                    && call.body["service_tier"].is_string()
+                    && !matches!(native, Format::Chat | Format::Responses)
+                {
+                    dropped.push("service_tier_not_enabled");
+                }
+                tracker.log.control_downgrades = dropped.clone();
+                for reason in dropped {
+                    if crate::diagnostics::warn_once(reason, std::time::Duration::from_secs(600)) {
+                        tracing::warn!(request_id = tracker.log.id, reason, "translated generation control dropped");
+                    }
+                }
             }
-        };
-        if let Some(reason) = &cache_downgrade {
-            if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject {
+            let cache_downgrade = if passthrough {
+                None
+            } else {
+                match formats::preserve_cache_hints(call.format, native, &call.body, &mut body) {
+                    Ok(downgrade) => downgrade,
+                    Err(message) => {
+                        let mut policy = crate::cache::Policy::for_request(
+                            &requested_cache,
+                            &body,
+                            native,
+                            cache_scope,
+                            Some(message.clone()),
+                        );
+                        policy.applied = "rejected";
+                        policy.key_scope = "not_sent";
+                        tracker.cache_policy(policy);
+                        tracker.finish(400, &Usage::default(), Some(message.clone()));
+                        return error_reply(call.format, 400, &message);
+                    }
+                }
+            };
+            if let Some(reason) = &cache_downgrade
+                && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject
+            {
                 let mut policy = crate::cache::Policy::for_request(
                     &requested_cache,
                     &body,
@@ -1147,71 +1314,92 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 tracker.finish(400, &Usage::default(), Some(reason.clone()));
                 return error_reply(call.format, 400, reason);
             }
-            if cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
-                && provider == Provider::Claude
-                && requested_cache.markers
-                && !crate::cache::has_markers(&body)
+            if native == Format::Claude
+                && !devin
+                && let Err(message) = formats::claude::validate_native_thinking_budget(&body, &upstream_model)
             {
-                // The caller explicitly opted into provider defaults after a lost
-                // boundary. Explicit mode without any markers retains its intent.
-                body["cache_control"] = json!({"type":"ephemeral"});
+                tracker.finish(400, &Usage::default(), Some(message.clone()));
+                return error_reply(call.format, 400, &message);
             }
-        }
-        if native == Format::Claude
-            && !devin
-            && let Err(message) = formats::claude::validate_native_thinking_budget(&body, &upstream_model)
-        {
-            tracker.finish(400, &Usage::default(), Some(message.clone()));
-            return error_reply(call.format, 400, &message);
-        }
-        if !passthrough && provider == Provider::Claude {
-            formats::claude::apply_translated_cache_policy_with(
-                requested_cache.explicit_mode,
-                requested_cache.markers,
-                &mut body,
+            let cache_defaults = passthrough
+                || (!requested_cache.explicit_mode && !requested_cache.markers)
+                || (cache_downgrade.is_some()
+                    && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
+                    && requested_cache.markers);
+
+            // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
+            let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
+            let prepared = upstream::prepare(
+                &Target {
+                    acct: &acct,
+                    cfg: &cfg,
+                    client_headers: &call.headers,
+                    model: &upstream_model,
+                    wire: native,
+                    passthrough,
+                    stream: upstream_stream,
+                    count_tokens: false,
+                    cache_key: cache_key.as_deref(),
+                    cache_session: call.session.as_deref().filter(|_| matches!(cache_scope, "client" | "workspace")),
+                    cache_defaults,
+                },
+                body,
             );
-        }
+            let mut cache_policy = crate::cache::Policy::for_request(
+                &requested_cache,
+                &prepared.body,
+                native,
+                cache_scope,
+                cache_downgrade,
+            );
+            if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
+                cache_policy.key_scope = cache_scope;
+            }
+            if cfg.debug {
+                tracing::debug!(provider = provider.as_str(), "upstream request prepared");
+            }
 
-        // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
-        let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
-        let prepared = upstream::prepare(
-            &Target {
-                acct: &acct,
-                cfg: &cfg,
-                client_headers: &call.headers,
-                model: &upstream_model,
-                wire: native,
-                passthrough,
-                stream: upstream_stream,
-                count_tokens: false,
-                cache_key: cache_key.as_deref(),
-            },
-            body,
-        );
-        let mut cache_policy =
-            crate::cache::Policy::for_request(&requested_cache, &prepared.body, native, cache_scope, cache_downgrade);
-        if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
-            cache_policy.key_scope = cache_scope;
-        }
-        tracker.cache_policy(cache_policy);
-        if cfg.debug {
-            tracing::debug!(provider = provider.as_str(), "upstream request prepared");
-        }
-
+            let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
+            let wire = Arc::new(WireRequest {
+                url: prepared.url,
+                headers: prepared.headers,
+                payload: payload.into(),
+                policy: cache_policy,
+                names,
+            });
+            preparation_cache = Some((preparation_key, wire.clone()));
+            wire
+        };
+        let names = prepared.names.clone();
+        tracker.cache_policy(prepared.policy.clone());
         let client = app.http.for_account(&acct);
         let mut rb = client.post(&prepared.url);
         for (k, v) in &prepared.headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
-        let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
+        let payload = prepared.payload.clone();
+        let absolute_deadline = (cfg.stream_limits.pre_output_timeout_seconds > 0).then(|| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(cfg.stream_limits.pre_output_timeout_seconds)
+        });
+        tracker.prepared_ms = Some(tracker.attempt_started.elapsed().as_millis() as u64);
         let send = rb.body(payload).send();
         // A stream's headers come before its first token; an upstream that hasn't even
         // sent those by the first-token deadline has stalled.
-        let sent = match first_token.filter(|_| upstream_stream) {
+        let header_limit = first_token
+            .filter(|_| upstream_stream)
+            .into_iter()
+            .chain(absolute_deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now())))
+            .min();
+        let sent = match header_limit {
             Some(limit) => tokio::time::timeout(limit, send).await.ok(),
             None => Some(send.await),
         };
         let Some(sent) = sent else {
+            if absolute_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                let msg = "upstream pre-output deadline exceeded; inference may still be running";
+                tracker.finish(504, &Usage::default(), Some(msg.into()));
+                return error_reply(call.format, 504, msg);
+            }
             let msg = stalled_message(first_token);
             tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
             tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
@@ -1222,6 +1410,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             last_error = Some((504, formats::error_body(call.format, 504, &msg)));
             continue;
         };
+        tracker.headers_ms = Some(tracker.attempt_started.elapsed().as_millis() as u64);
         let resp = match sent {
             Ok(r) => r,
             Err(e) => {
@@ -1351,7 +1540,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         let mut body: Option<ByteStream> = None;
         if is_sse && !devin {
             let stream: ByteStream = Box::pin(resp.take().expect("response").bytes_stream());
-            match bootstrap(stream, native, first_token).await {
+            let event_limit = first_token
+                .into_iter()
+                .chain(absolute_deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now())))
+                .min();
+            match bootstrap(stream, native, event_limit, &cfg.stream_limits, &upstream_model).await {
                 Boot::Ready(stream) => body = Some(stream),
                 Boot::Failed { status, message, held } => {
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
@@ -1374,12 +1567,21 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     } else {
                         acct.state.lock().set_error(format!("{status}: {message}"));
                     }
+                    if status == 504 {
+                        tracker.finish(status, &Usage::default(), Some(message.clone()));
+                        return error_reply(call.format, status, &message);
+                    }
                     app.broadcast("accounts", Value::Null);
                     tried.push(acct.id.clone());
                     last_error = Some((status, formats::error_body(call.format, status, &message)));
                     continue;
                 }
                 Boot::Stalled => {
+                    if absolute_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                        let msg = "upstream pre-output deadline exceeded; inference may still be running";
+                        tracker.finish(504, &Usage::default(), Some(msg.into()));
+                        return error_reply(call.format, 504, msg);
+                    }
                     let msg = stalled_message(first_token);
                     tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
@@ -1448,9 +1650,25 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         let events = if devin {
             crate::devin::event_stream(resp.take().expect("response"), names)
         } else if let Some(body) = body {
-            sse_events(body, native, names, acct.clone(), model.clone(), tracker.usage_tap())
+            sse_events(
+                body,
+                native,
+                names,
+                acct.clone(),
+                model.clone(),
+                tracker.usage_tap(),
+                cfg.stream_limits.for_model(&upstream_model),
+            )
         } else {
-            full_events(resp.take().expect("response"), native, names, acct.clone(), model.clone(), tracker.usage_tap())
+            full_events(
+                resp.take().expect("response"),
+                native,
+                names,
+                acct.clone(),
+                model.clone(),
+                tracker.usage_tap(),
+                cfg.stream_limits.for_model(&upstream_model),
+            )
         };
         let client_model = model.clone();
         if call.stream {
@@ -1562,12 +1780,19 @@ enum Boot {
 /// can go to another account before the client sees anything. The first event must
 /// come within `first_event`; after it, content gets `BOOT_HOLD` before the stream is
 /// let through as it is.
-async fn bootstrap(mut body: ByteStream, native: Format, first_event: Option<std::time::Duration>) -> Boot {
+async fn bootstrap(
+    mut body: ByteStream,
+    native: Format,
+    first_event: Option<std::time::Duration>,
+    limits: &crate::stream_limits::Limits,
+    model: &str,
+) -> Boot {
     let start = tokio::time::Instant::now();
     let stall_at = first_event.map(|d| start + d);
     let mut release_at = stall_at.is_none().then(|| start + BOOT_HOLD);
     let mut held: Vec<bytes::Bytes> = Vec::new();
-    let mut dec = SseDecoder::default();
+    let mut held_bytes = 0usize;
+    let mut dec = SseDecoder::with_limit(limits.for_model(model));
     let mut parser = formats::parser(native);
     let mut events = Vec::new();
     let ready = |held: Vec<bytes::Bytes>, rest: ByteStream| -> Boot {
@@ -1586,11 +1811,20 @@ async fn bootstrap(mut body: ByteStream, native: Format, first_event: Option<std
             Some(Err(e)) => return Boot::Failed { status: 502, message: format!("upstream stream error: {e}"), held },
             None => return Boot::Failed { status: 502, message: PREMATURE_END.into(), held },
         };
+        held_bytes = held_bytes.saturating_add(chunk.len());
         held.push(chunk.clone());
+        // Release the bounded bootstrap buffer to the normal decoder. It still
+        // enforces event limits and retains usage before an oversized event.
+        if held_bytes >= limits.bootstrap_bytes {
+            return ready(held, body);
+        }
         for sse in dec.push(&chunk) {
             release_at.get_or_insert_with(|| tokio::time::Instant::now() + BOOT_HOLD);
             let parsed = serde_json::from_str::<Value>(&sse.data).ok();
             parser.feed_value(&sse, parsed.as_ref(), &mut events);
+        }
+        if dec.failed() {
+            return ready(held, body);
         }
         for ev in events.drain(..) {
             match ev {
@@ -1613,6 +1847,7 @@ fn full_events(
     acct: Arc<Account>,
     model: String,
     usage_tap: Option<crate::usage::capture::Capture>,
+    event_limit: usize,
 ) -> EventStream {
     let rename = renamer(names);
     Box::pin(async_stream::stream! {
@@ -1632,13 +1867,14 @@ fn full_events(
             }
             // Mislabelled stream: decode it as SSE after all.
             Err(_) => {
-                let mut dec = SseDecoder::default();
+                let mut dec = SseDecoder::with_limit(event_limit);
                 let mut parser = formats::parser(native);
                 let mut out = Vec::new();
                 for sse in dec.push(text.as_bytes()).into_iter().chain(dec.finish()) {
                     let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
                     parser.feed_value(&sse, parsed.as_ref(), &mut out);
                 }
+                if dec.failed() { out.push(Event::Error { status:502, message: crate::sse::LIMIT_ERROR.into() }); }
                 out
             }
         };
@@ -1666,10 +1902,11 @@ fn sse_events(
     acct: Arc<Account>,
     model: String,
     usage_tap: Option<crate::usage::capture::Capture>,
+    event_limit: usize,
 ) -> EventStream {
     let rename = renamer(names);
     Box::pin(async_stream::stream! {
-        let mut dec = SseDecoder::default();
+        let mut dec = SseDecoder::with_limit(event_limit);
         let mut parser = formats::parser(native);
         let mut out = Vec::new();
         let mut finished = false;
@@ -1693,14 +1930,21 @@ fn sse_events(
                         let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
                         parser.feed_value(&sse, parsed.as_ref(), &mut out);
                     }
+                    if dec.failed() {
+                        out.push(Event::Error { status:502, message: crate::sse::LIMIT_ERROR.into() });
+                    }
                     for ev in out.drain(..) { yield rename(ev); }
                     return;
                 }
+            }
+            if dec.failed() {
+                out.push(Event::Error { status:502, message: crate::sse::LIMIT_ERROR.into() });
             }
             for ev in out.drain(..) {
                 finished |= matches!(ev, Event::Finish(_));
                 yield rename(ev);
             }
+            if dec.failed() { return; }
         }
     })
 }
@@ -1768,7 +2012,7 @@ async fn collect(events: EventStream, format: Format, model: &str, req: &Request
 /// Forwards upstream SSE events untouched while tapping usage.
 fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker, unwrap: bool) -> FrameStream {
     Box::pin(async_stream::stream! {
-        let mut dec = SseDecoder::default();
+        let mut dec = SseDecoder::with_limit(tracker.app.cfg().stream_limits.for_model(&tracker.log.model));
         let mut parser = formats::parser(native);
         let mut evs = Vec::new();
         let mut transport_error = None;
@@ -1818,6 +2062,13 @@ fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker
                 };
                 yield Frame { event: sse.event.map(std::borrow::Cow::Owned), data };
             }
+            if dec.failed() {
+                tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_event_limit"));
+                tracker.observe_stream_event(&Event::Error { status:502, message: crate::sse::LIMIT_ERROR.into() });
+                tracker.finish_stream();
+                yield stream_error_frame(native, 502, crate::sse::LIMIT_ERROR);
+                return;
+            }
             if end {
                 break;
             }
@@ -1836,7 +2087,7 @@ fn passthrough_stream(mut body: ByteStream, native: Format, mut tracker: Tracker
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
 async fn collect_passthrough(mut body: ByteStream, native: Format, mut tracker: Tracker, format: Format) -> Reply {
-    let mut dec = SseDecoder::default();
+    let mut dec = SseDecoder::with_limit(tracker.app.cfg().stream_limits.for_model(&tracker.log.model));
     let mut parser = formats::parser(native);
     let mut agg = Aggregate::default();
     let mut final_obj: Option<Value> = None;
@@ -1865,6 +2116,10 @@ async fn collect_passthrough(mut body: ByteStream, native: Format, mut tracker: 
                 }
                 break;
             }
+        }
+        if dec.failed() {
+            agg.error = Some((502, crate::sse::LIMIT_ERROR.into()));
+            break;
         }
     }
     dec.finish().into_iter().for_each(|s| handle(s, &mut agg, &mut final_obj));
@@ -1923,6 +2178,8 @@ pub async fn count_tokens(app: Arc<App>, headers: HeaderMap, body: Value) -> (Va
                 stream: false,
                 count_tokens: true,
                 cache_key: None,
+                cache_session: None,
+                cache_defaults: true,
             },
             body.clone(),
         );

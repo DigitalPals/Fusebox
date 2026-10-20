@@ -372,6 +372,57 @@ def summarize(trials, planned_pairs):
     return result
 
 
+EXPERIMENT_FIELDS = {
+    "context": ("input", "instructions"),
+    "cache": ("prompt_cache_key", "prompt_cache_options", "prompt_cache_retention"),
+    "verbosity": ("text.verbosity",), "effort": ("reasoning.effort",),
+    "model": ("model",), "tools": ("tools", "tool_choice",), "tier": ("service_tier",),
+}
+
+
+def comparison_controls(value, experiment):
+    # Copy through JSON; never mutate a caller-authored body.
+    result = json.loads(json.dumps(value))
+    for path in EXPERIMENT_FIELDS[experiment]:
+        parts = path.split(".")
+        parent = result
+        for part in parts[:-1]:
+            parent = parent.get(part, {}) if isinstance(parent, dict) else {}
+        if isinstance(parent, dict):
+            parent.pop(parts[-1], None)
+    # Empty option wrappers have the same meaning as absence for comparison.
+    for field in ("text", "reasoning"):
+        if result.get(field) == {}:
+            result.pop(field)
+    if experiment == "cache":
+        for item in result.get("input", []) if isinstance(result.get("input"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("content", "output"):
+                for block in item.get(field, []) if isinstance(item.get(field), list) else []:
+                    if isinstance(block, dict):
+                        block.pop("prompt_cache_breakpoint", None)
+    return result
+
+
+def quality_evidence(path):
+    if not path:
+        return {"evaluated": False}
+    raw = Path(path).read_bytes()
+    if len(raw) > 65536:
+        raise BenchmarkError("quality_evidence_limit")
+    try:
+        value = strict_json(raw)
+    except (ValueError, UnicodeError):
+        raise BenchmarkError("invalid_quality_evidence") from None
+    if (not isinstance(value, dict) or set(value) - {"rubric_id", "sample_count", "passed"}
+            or not metadata_label(value.get("rubric_id"))
+            or type(value.get("sample_count")) is not int or not 1 <= value["sample_count"] <= 1000000
+            or type(value.get("passed")) is not bool):
+        raise BenchmarkError("invalid_quality_evidence")
+    return {"evaluated": True, "sha256": hashlib.sha256(raw).hexdigest(), **value}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original", required=True, help="Original request JSON file")
@@ -383,25 +434,33 @@ def main(argv=None):
     parser.add_argument("--max-response-bytes", type=int, default=8 * 1024 * 1024)
     parser.add_argument("--execute", action="store_true", help="Send requests; may spend tokens")
     parser.add_argument("--allow-insecure-http", action="store_true", help="Allow unencrypted remote HTTP")
+    parser.add_argument("--experiment", choices=EXPERIMENT_FIELDS, default="context")
+    parser.add_argument("--warmups", type=int, default=1, help="Unscored warmups per variant, 0–5")
+    parser.add_argument("--phases", choices=("separate", "single"), default="separate",
+                        help="Separate initial-state and warm measurements (default) or legacy single phase")
+    parser.add_argument("--quality-evidence", help="JSON with rubric_id, sample_count and passed; no transcripts")
     args = parser.parse_args(argv)
     try:
-        if not 1 <= args.trials <= 20 or not 0 < args.timeout <= 600:
+        if not 1 <= args.trials <= 20 or not 0 <= args.warmups <= 5 or not 0 < args.timeout <= 600:
             raise BenchmarkError("invalid_trial_or_timeout_limit")
         if not 1 <= args.max_request_bytes <= 16 * 1024 * 1024 or not 1 <= args.max_response_bytes <= 64 * 1024 * 1024:
             raise BenchmarkError("invalid_body_limit")
         validate_endpoint(args.endpoint, args.allow_insecure_http)
         loaded = {name: load_request(getattr(args, name), args.max_request_bytes) for name in ("original", "compacted")}
-        controls = lambda value: {key: val for key, val in value.items() if key not in {"input", "instructions"}}
-        if controls(loaded["original"][1]) != controls(loaded["compacted"][1]):
-            raise BenchmarkError("non_context_settings_differ")
+        if comparison_controls(loaded["original"][1], args.experiment) != comparison_controls(loaded["compacted"][1], args.experiment):
+            raise BenchmarkError("non_context_settings_differ" if args.experiment == "context" else "non_experiment_settings_differ")
+        quality = quality_evidence(args.quality_evidence)
+        extra_pairs = 1 + args.warmups if args.phases == "separate" else 0
         report = {"schema_version": 1, "mode": "execute" if args.execute else "dry_run",
-                  "planned_requests": 2 * args.trials, "timeout_seconds_per_request": args.timeout,
+                  "planned_requests": 2 * (args.trials + extra_pairs), "experiment": args.experiment,
+                  "phases": args.phases, "cold_cache_proven": False,
+                  "cache_cohorts": "separate_sessions_per_variant; caller keys preserved; provider cache isolation unproven", "timeout_seconds_per_request": args.timeout,
                   "requests": {name: item[2] for name, item in loaded.items()},
                   "model": metadata_label(loaded["original"][1]["model"]),
                   "stream_requested": loaded["original"][1].get("stream", False),
                   "order": "original/compacted on odd pairs; compacted/original on even pairs",
                   "usage_source": "response_usage_fields_at_fusebox_endpoint",
-                  "trials": [], "quality_evaluated": False}
+                  "trials": [], "quality_evaluated": quality["evaluated"], "quality_evidence": quality}
         before = loaded["original"][2]["context_json_bytes"]
         after = loaded["compacted"][2]["context_json_bytes"]
         report["offline_context_bytes"] = {"compacted_minus_original": after - before,
@@ -417,22 +476,26 @@ def main(argv=None):
                 api_key = getpass.getpass("Fusebox API key (blank for unauthenticated local endpoint): ")
             if any(ord(char) < 32 or ord(char) > 126 for char in api_key):
                 raise BenchmarkError("invalid_api_key_characters")
-            session_id = "context-benchmark-" + str(uuid.uuid4())
-            report["session_fingerprint"] = session_journal_fingerprint(api_key, session_id)
+            sessions = {variant: "context-benchmark-" + str(uuid.uuid4()) + "-" + variant for variant in loaded}
+            report["session_fingerprints"] = {variant: session_journal_fingerprint(api_key, session) for variant, session in sessions.items()}
             stop = False
-            for pair in range(1, args.trials + 1):
-                order = ("original", "compacted") if pair % 2 else ("compacted", "original")
+            phases = [("initial", 0)] + [("warmup", -i-1) for i in range(args.warmups)] if args.phases == "separate" else []
+            phases += [("warm" if args.phases == "separate" else "uncontrolled", pair) for pair in range(1, args.trials + 1)]
+            for index, (phase, pair) in enumerate(phases):
+                order = ("original", "compacted") if index % 2 == 0 else ("compacted", "original")
                 for variant in order:
                     row = request_trial(args.endpoint, loaded[variant][0], api_key, args.timeout, args.max_response_bytes,
-                                        session_id=session_id, session_end=pair == args.trials and variant == order[-1])
-                    row.update({"variant": variant, "pair": pair})
+                                        session_id=sessions[variant], session_end=index == len(phases)-1)
+                    row.update({"variant": variant, "pair": pair, "phase": phase})
                     report["trials"].append(row)
                     if row["status"] == "cancelled_by_user" or row["http_status"] in {401, 403, 404, 429}:
                         stop = True
                         break
                 if stop:
                     break
-            report["summary"] = summarize(report["trials"], args.trials)
+            measured = [row for row in report["trials"] if row["phase"] in {"warm", "uncontrolled"}]
+            report["summary"] = summarize(measured, args.trials)
+            report["initial_summary"] = summarize([{**row, "pair":1} for row in report["trials"] if row["phase"] == "initial"], 1)
         print(json.dumps(report, indent=2, allow_nan=False))
         if any(row["status"] == "cancelled_by_user" for row in report["trials"]):
             return 130

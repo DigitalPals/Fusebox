@@ -1679,3 +1679,53 @@ async fn token_count_fallback_marks_estimates_and_ignores_base64_size() {
     assert_eq!(response.headers()["x-fusebox-token-count-estimated"], "true");
     assert!(response.json::<Value>().await.unwrap()["totalTokens"].as_u64().unwrap() > 0);
 }
+
+#[tokio::test]
+async fn translated_cache_intent_survives_oauth_cloak_for_each_incompatible_policy() {
+    use crate::cache::Incompatible;
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.clear();
+    cfg.claude_api_key =
+        vec![KeyEntry { api_key: "a".into(), base_url: Some(fixture.provider.url.clone()), ..Default::default() }];
+    let mut logs_count = 0;
+    for handling in [Incompatible::Drop, Incompatible::Automatic, Incompatible::Reject] {
+        for markers in [false, true] {
+            cfg.prompt_cache.on_incompatible = handling;
+            fixture.app.set_config(cfg.clone());
+            let acct =
+                fixture.app.pool.all().into_iter().find(|a| a.provider == crate::accounts::Provider::Claude).unwrap();
+            *acct.cred.write() = crate::accounts::Credential::OAuth(crate::accounts::OAuth {
+                access_token: "a".into(),
+                refresh_token: "unused".into(),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                base_url: Some(fixture.provider.url.clone()),
+                email: None,
+                account_id: None,
+                project_id: None,
+                raw: Default::default(),
+            });
+            let mut body = json!({"model":"claude-sonnet-5-5","prompt_cache_options":{"mode":"explicit"},
+                "input":[{"role":"user","content":[{"type":"input_text","text":"q"}]}]});
+            if markers {
+                body["input"][0]["content"][0]["prompt_cache_breakpoint"] = json!({"mode":"explicit"});
+            }
+            let (status, response) = fixture.request(Some("oauth-cache-test"), body).await;
+            assert_eq!(status, if handling == Incompatible::Reject { 400 } else { 200 }, "{response}");
+            logs_count += 1;
+            let logs = fixture.logs(logs_count).await;
+            let expected = if handling == Incompatible::Reject {
+                "rejected"
+            } else if handling == Incompatible::Automatic && markers {
+                "automatic"
+            } else {
+                "none"
+            };
+            assert_eq!(logs.last().unwrap().cache_policy.as_ref().unwrap().applied, expected);
+            if handling != Incompatible::Reject {
+                let sent = fixture.mock.calls.lock().last().unwrap().1.clone();
+                assert_eq!(crate::cache::has_claude_controls(&sent), handling == Incompatible::Automatic && markers);
+            }
+        }
+    }
+}

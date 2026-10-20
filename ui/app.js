@@ -1670,14 +1670,15 @@ function whySentence(r) {
   let end = '';
   if (r.status === 499) end = ` ${cancellationText(r)}`;
   else if (isErr(r)) end = r.attempts > 1 ? ' It still failed upstream.' : ' The request failed upstream; nothing was retried.';
-  return base + tries + end;
+  const chunks = r.chunks ? ` It used ${r.chunks} embedding chunks.` : '';
+  return base + tries + chunks + end;
 }
 
 function routeHTML(r, tags = true, logoSize = 14) {
   const acct = accountOf(r);
   const provider = acct ? provName(acct) : PROVIDER[r.provider] || r.provider || '—';
   const kind = { ws: 'ws', images: 'image', video: 'video' }[r.transport];
-  const extra = tags ? [kind, r.attempts > 1 ? `${r.attempts} tries` : null].filter(Boolean) : [];
+  const extra = tags ? [kind, r.attempts > 1 ? `${r.attempts} tries` : null, r.chunks ? `${r.chunks} chunks` : null].filter(Boolean) : [];
   return `<span class="route">${esc(CLIENT[r.client] || r.client)} <span class="arrow">→</span> ${r.provider ? logo(r.provider, acct ? acct.group : r.account, acct && acct.kind, logoSize) : ''} ${esc(provider)}${extra.map((t) => `<span class="tag">${t}</span>`).join('')}</span>`;
 }
 

@@ -174,6 +174,8 @@ Clients authenticate with `Authorization: Bearer`, `x-api-key`, `x-goog-api-key`
 
 Embeddings accept `encoding_format: float` (default) or `base64`; base64 encodes little-endian float32 values. Google adapters preserve input order, split Vertex batches to one text for Gemini embedding models or five for older text embedding models, and disable automatic truncation. A failed later chunk returns an error without replaying completed chunks; their usage is still recorded. Gemini embedding token counts are labelled estimates in the usage database. Models without a known price remain unpriced and cannot be treated as free by monthly budgets.
 
+Google embedding chunks run sequentially by default. `embeddings.concurrency` enables 1–16 chunks at once; Requests shows account attempts separately from chunks. `embeddings.cache-seconds` enables exact in-memory result reuse (default `0`, off), isolated by client, account credential identity, resolved model and every request option. `embeddings.cache-bytes` caps serialized results (default 16 MiB, at most 1,000 entries); memory overhead is additional. Hits return `fusebox_cache_hit: true` and zero provider usage. Changing these settings clears the result cache. These controls are under Connections in Config.
+
 JSON API requests and multipart image edits support `Content-Encoding: gzip` or `zstd`, as well as uncompressed bodies. Authentication runs before decompression; both compressed and decoded bodies are limited to 256 MiB. Unsupported or stacked encodings return 415, malformed compressed bodies return 400, and oversized bodies return 413. Encoding and JSON validation failures appear in request statistics and logs without a provider attempt.
 
 ### Providers
@@ -441,7 +443,11 @@ prompt-cache:
 
 `client` shares a derived key across sessions authenticated by the same client key. `workspace` also includes the `x-fusebox-cache-workspace` header (1–1024 bytes after trimming); absent or invalid headers fall back to session scope. Unauthenticated requests share one client scope. A nonempty namespace versions derived keys in any scope. Shared scopes do not alter account affinity, so cache reuse still depends on the selected account and provider. Caller-supplied keys always take precedence, and workspace names and raw cache keys are excluded from policy diagnostics. Native Codex WebSockets use the same derivation as HTTP.
 
+Shared derived cache keys keep a separate upstream Codex session identifier for each session. Caller-supplied session headers and cache keys retain their existing behavior. These scopes affect derived OpenAI/xAI keys; Claude caching uses its native boundaries and TTLs.
+
 `drop` discards incompatible hints while preserving compatible fields and the caller's explicit caching intent. `automatic` opts into automatic caching on the Claude provider when translation loses explicit boundaries. Explicit mode without boundaries remains uncached; TTLs are not translated. `reject` returns `400` before sending a request with incompatible hints. Unsupported prewarming remains an error in every mode. See [context efficiency](docs/context-efficiency.md) for measuring cache reuse and latency with stable prefixes.
+
+Cache intent is checked outside tool schemas, tool-call arguments and structured-output schemas, so a data property named `cache_control` does not disable defaults or trigger a false downgrade. Final Claude OAuth preparation honors the same policy: `drop` and explicit mode without boundaries do not acquire automatic cache controls during cloaking.
 
 HTTP POST body limits apply to both encoded and decoded bytes. The defaults retain 256 MiB per request. Optional admission limits cover body collection, provider work and response streaming, returning `503` with `Retry-After: 1` when full:
 
@@ -455,7 +461,23 @@ request-limits:
 
 Body limits must be 1–268435456 bytes. `media-body-bytes` applies to `/v1/images/*` and `/v1/videos/*`; other API POST routes, including multimodal Gemini calls, use `text-body-bytes`. Zero disables each aggregate limit. The byte budget counts decoded request bodies through response completion and releases reservations on errors or cancellation. It bounds body bytes, not total RSS: parsed JSON, histories and responses need additional memory. Admission is fail-fast and process-wide; WebSockets and management routes are separate. These settings reload for new requests without a restart and are available under Connections in the dashboard.
 
+Upstream streams also have configurable bounds, under Connections:
+
+```yaml
+stream-limits:
+  event-bytes: 16777216
+  media-event-bytes: 67108864
+  bootstrap-bytes: 2097152
+  pre-output-timeout-seconds: 0
+```
+
+The decoder bounds SSE events and unfinished lines; native WebSocket events also have a size check. Models whose names contain `image`, `audio` or `video` use the larger media limit. Reaching the bootstrap threshold releases buffered chunks for streaming; it does not repeat inference. An oversized event ends the stream with an error and retains usage already received. A nonzero pre-output timeout gives HTTP headers and the first event one absolute deadline, or bounds the first native WebSocket event including its send. Expiry is terminal `504`, with no automatic inference retry. Zero keeps the existing timeout behavior.
+
 Output limits are preserved during translation. Manual Claude thinking needs an output limit greater than 1,024 tokens; incompatible requests receive a `400` instead of silently increasing the limit. Gemini reasoning suffixes use the same mapping for native and translated requests.
+
+Chat↔Responses translation retains late system/developer messages in their original positions, with cache boundaries. A route to another wire format rejects these late privileged instructions with `400`. Translated low-verbosity preferences are retained for supported GPT-5/6 models on the Codex provider. Translated OpenAI service tiers require `translation.allow-service-tier: true`; dropped controls appear in request diagnostics. Native requests keep caller controls. Codex subscription preparation still removes output caps that its backend does not accept, so those caps are not a subscription billing limit.
+
+Optional `latency-routing: true` breaks exact Smart quota ties for new HTTP or WebSocket sessions using recent comparable first-response timings. It requires three successful single-attempt samples with explicitly zero cache reads per account, matches model, input-size bucket, reasoning effort, cache intent and transport, and leaves existing session assignments intact. It is off by default.
 
 Token-count responses include `x-fusebox-token-count-estimated: false` when Claude supplies a count, or `true` for the local fallback. The fallback estimates text and tool schemas and uses fixed allowances for media; it does not count base64 data as text. Media dimensions, document length and audio/video duration can change the real count, so use provider usage for accounting.
 
@@ -495,6 +517,8 @@ scrape_configs:
     authorization: { credentials: "<management-key>" }
     static_configs: [{ targets: ["127.0.0.1:8317"] }]
 ```
+
+Metrics also expose separate input, cache-read, cache-write, output and reasoning counters across attempts, reported/unknown usage fields, preparation/header/first-content/total latency histograms, retry counts, WebSocket fallback reasons and exact embedding-cache statistics. Model/provider/transport series are bounded; session identifiers and prompt hashes are excluded. Reasoning is an output subset and must not be added to output again. See the [optimization implementation and measurements](docs/efficiency-2026-10-20.md) and [context experiment guide](docs/context-efficiency.md).
 
 `log-format: json` (or `FUSEBOX_LOG_FORMAT=json`) writes one JSON object per line for log collectors. `fusebox usage backup ~/usage-backup.sqlite3` copies the usage database safely while Fusebox runs and checks the copy. `fusebox --version` names the commit it was built from.
 

@@ -37,6 +37,9 @@ struct Mock {
     calls: Mutex<Vec<(String, String)>>,
     hooks: Mutex<Vec<Value>>,
     embedding_calls: Mutex<Vec<(String, Value)>>,
+    embedding_delay: std::sync::atomic::AtomicBool,
+    embedding_active: std::sync::atomic::AtomicUsize,
+    embedding_peak: std::sync::atomic::AtomicUsize,
 }
 
 fn key(headers: &HeaderMap) -> String {
@@ -113,6 +116,14 @@ async fn google_embeddings(
     Json(body): Json<Value>,
 ) -> Response {
     mock.embedding_calls.lock().push((path.clone(), body.clone()));
+    if mock.embedding_delay.load(std::sync::atomic::Ordering::Relaxed) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let active = mock.embedding_active.fetch_add(1, Relaxed) + 1;
+        mock.embedding_peak.fetch_max(active, Relaxed);
+        let fail = body["instances"].as_array().is_some_and(|a| a.iter().any(|v| v["content"] == "fail"));
+        tokio::time::sleep(Duration::from_millis(if fail { 5 } else { 50 })).await;
+        mock.embedding_active.fetch_sub(1, Relaxed);
+    }
     if path.ends_with(":batchEmbedContents") {
         let vectors: Vec<Value> = body["requests"]
             .as_array()
@@ -1023,6 +1034,8 @@ fn fusebox_headers_never_reach_a_provider() {
         stream: true,
         count_tokens: false,
         cache_key: None,
+        cache_session: None,
+        cache_defaults: true,
     };
     let p = crate::upstream::prepare(&t, json!({"model":"claude-sonnet-5-5","messages":[]}));
     let names: Vec<&str> = p.headers.iter().map(|(k, _)| k.as_str()).collect();
@@ -1495,4 +1508,204 @@ async fn wrong_management_keys_lock_out_only_their_own_address() {
     assert_eq!(get("10.10.0.51", "right-key").await, 200, "another machine through the same gate");
     let local = reqwest::Client::new().get(format!("{}/api/overview", s.proxy.url)).bearer_auth("right-key");
     assert_eq!(local.send().await.unwrap().status(), 200);
+}
+
+#[tokio::test]
+async fn embedding_concurrency_keeps_output_order_and_records_each_chunk_once() {
+    let s = setup(|cfg, url| {
+        cfg.codex_api_key.clear();
+        cfg.embeddings.concurrency = 3;
+        cfg.usage.database = Some(format!("{}/usage.sqlite3", cfg.auth_dir));
+        cfg.vertex_api_key =
+            vec![KeyEntry { api_key: "google".into(), base_url: Some(url.into()), ..Default::default() }];
+    })
+    .await;
+    s.mock.embedding_delay.store(true, std::sync::atomic::Ordering::Relaxed);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/embeddings", s.proxy.url))
+        .bearer_auth("client")
+        .json(&json!({"model":"gemini-embedding-001","input":["0","1","2","3","4","5"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    for i in 0..6 {
+        assert_eq!(body["data"][i]["embedding"][0].as_f64(), Some(i as f64));
+    }
+    assert_eq!(s.mock.embedding_peak.load(std::sync::atomic::Ordering::Relaxed), 3);
+    let store = s.app.usage.as_ref().unwrap();
+    store.flush().await.unwrap();
+    let counts: (u64, u64, u64) = store
+        .call(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*),SUM(input),SUM(json_extract(payload,'$.logical_success')=1) FROM usage_observations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (6, 18, 1));
+    let log = s.app.stats.recent.lock().back().unwrap().clone();
+    assert_eq!(log.attempts, 1);
+    assert_eq!(log.chunks, 6);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_embedding_failure_drains_paid_chunks_without_replay_or_new_work() {
+    let s = setup(|cfg, url| {
+        cfg.codex_api_key.clear();
+        cfg.embeddings.concurrency = 3;
+        cfg.usage.database = Some(format!("{}/usage.sqlite3", cfg.auth_dir));
+        cfg.vertex_api_key = ["a", "b"]
+            .map(|k| KeyEntry { api_key: k.into(), base_url: Some(url.into()), ..Default::default() })
+            .to_vec();
+    })
+    .await;
+    s.mock.embedding_delay.store(true, std::sync::atomic::Ordering::Relaxed);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/embeddings", s.proxy.url))
+        .bearer_auth("client")
+        .json(&json!({"model":"gemini-embedding-001","input":["0","fail","2","3","4"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    assert_eq!(s.mock.embedding_calls.lock().len(), 3);
+    let store = s.app.usage.as_ref().unwrap();
+    store.flush().await.unwrap();
+    let counts: (u64, u64, u64) = store
+        .call(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*),SUM(input),SUM(json_extract(payload,'$.logical_success')=0) FROM usage_observations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (3, 6, 1));
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_embedding_vectors_record_usage_and_logical_failure_without_replay() {
+    let s = setup(|cfg, url| {
+        cfg.codex_api_key.clear();
+        cfg.usage.database = Some(format!("{}/usage.sqlite3", cfg.auth_dir));
+        cfg.vertex_api_key = ["a", "b"]
+            .map(|key| KeyEntry { api_key: key.into(), base_url: Some(url.into()), ..Default::default() })
+            .to_vec();
+    })
+    .await;
+    // The mock's float parser emits a null vector component for NaN.
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/embeddings", s.proxy.url))
+        .bearer_auth("client")
+        .json(&json!({"model":"gemini-embedding-001","input":["NaN"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+    assert_eq!(s.mock.embedding_calls.lock().len(), 1);
+    let store = s.app.usage.as_ref().unwrap();
+    store.flush().await.unwrap();
+    let counts: (u64, u64, u64) = store
+        .call(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*),SUM(input),SUM(json_extract(payload,'$.logical_success')=0) FROM usage_observations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (1, 3, 1));
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn embedding_result_cache_is_opt_in_scoped_and_has_zero_provider_usage_on_hit() {
+    let s = setup(|cfg, url| {
+        cfg.codex_api_key.clear();
+        cfg.api_keys.push("second-client".into());
+        cfg.embeddings.cache_seconds = 60;
+        cfg.vertex_api_key =
+            vec![KeyEntry { api_key: "google".into(), base_url: Some(url.into()), ..Default::default() }];
+    })
+    .await;
+    let body = json!({"model":"gemini-embedding-001","input":["1"],"dimensions":2});
+    for (i, (key, dimensions)) in
+        [("client", 2), ("client", 2), ("second-client", 2), ("client", 3)].into_iter().enumerate()
+    {
+        let mut request = body.clone();
+        request["dimensions"] = dimensions.into();
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", s.proxy.url))
+            .bearer_auth(key)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let value: Value = response.json().await.unwrap();
+        if i == 1 {
+            assert_eq!(value["fusebox_cache_hit"], true);
+            assert_eq!(value["usage"]["total_tokens"], 0);
+        } else {
+            assert!(value["fusebox_cache_hit"].is_null());
+        }
+    }
+    assert_eq!(s.mock.embedding_calls.lock().len(), 3);
+    let mut cfg = (*s.app.cfg()).clone();
+    cfg.embeddings.cache_seconds = 0;
+    s.app.set_config(cfg.clone());
+    cfg.embeddings.cache_seconds = 60;
+    s.app.set_config(cfg);
+    let value: Value = reqwest::Client::new()
+        .post(format!("{}/v1/embeddings", s.proxy.url))
+        .bearer_auth("client")
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(value["fusebox_cache_hit"].is_null(), "disabled cache retained an old result");
+    assert_eq!(s.mock.embedding_calls.lock().len(), 4);
+}
+
+#[tokio::test]
+async fn token_and_latency_metrics_share_the_actual_provider_model_cohort() {
+    let s = setup(|cfg, _| {
+        for entry in &mut cfg.codex_api_key {
+            entry.models = vec![crate::config::ModelAlias { name: "gpt-up".into(), alias: Some("friendly".into()) }];
+        }
+    })
+    .await;
+    assert_eq!(ask(&s, "client", "friendly", &[]).await.0, 200);
+    let metrics =
+        reqwest::Client::new().get(format!("{}/metrics", s.proxy.url)).send().await.unwrap().text().await.unwrap();
+    let cohort = "provider=\"openai\",model=\"gpt-up\",transport=\"http\"";
+    assert!(metrics.contains(&format!("fusebox_usage_tokens_total{{{cohort},kind=\"input\"}} 10")), "{metrics}");
+    assert!(metrics.contains(&format!("fusebox_total_seconds_count{{{cohort}}} 1")), "{metrics}");
+    assert!(!metrics.contains("provider=\"codex\",model=\"friendly\""));
+}
+
+#[tokio::test]
+async fn absolute_pre_output_timeout_is_terminal_and_does_not_duplicate_inference() {
+    let s = setup(|cfg, _| {
+        cfg.stream_limits.pre_output_timeout_seconds = 1;
+        cfg.first_token_timeout_seconds = 5;
+    })
+    .await;
+    s.mock.acts.lock().insert(("a".into(), "gpt-up".into()), Act::Stall);
+    let start = Instant::now();
+    let response = ask(&s, "client", "gpt-up", &[]).await;
+    assert_eq!(response.0, 504);
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(s.mock.calls.lock().len(), 1);
 }
