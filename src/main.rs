@@ -28,6 +28,7 @@ mod metrics;
 mod mgmt;
 mod oauth;
 mod policy;
+mod pools;
 mod proxy;
 mod push;
 mod quota;

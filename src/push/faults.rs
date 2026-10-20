@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
+use crate::pools::{Member, Pool};
 use crate::quota::Window;
 
 /// Which `notifications` setting sends a fault.
@@ -27,7 +28,8 @@ pub enum Event {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Fault {
     /// Stable identity: `signin:<id>`, `quota:<id>`, `error:<id>`, `failures:<id>`,
-    /// `rate:<id>` or `provider:<provider>`. Also the notification's tag.
+    /// `rate:<id>`, `pace:<id>:<window>`, `pace:pool:<provider>:<window>` or
+    /// `provider:<provider>`. Also the notification's tag.
     pub key: String,
     pub event: Event,
     /// The provider group, so one provider running out can stand in for its accounts.
@@ -36,11 +38,11 @@ pub struct Fault {
     pub body: String,
     /// Where a click lands in the dashboard.
     pub path: String,
-    /// The rule that tripped: `signin`, `quota`, `rate_limit`, `error`, `failures` or `provider`.
+    /// The rule that tripped: `signin`, `quota`, `rate_limit`, `error`, `failures`, `pace` or `provider`.
     pub kind: &'static str,
     /// `err` while requests fail, `warn` while an account sits out for a while.
     pub level: &'static str,
-    /// The account it is about; none for a whole provider.
+    /// The account it is about; none for a whole provider or all its subscriptions.
     pub account: Option<String>,
     pub label: Option<String>,
     pub provider_name: String,
@@ -133,6 +135,10 @@ pub struct AccountView {
     pub group_name: String,
     pub label: String,
     pub api_key: bool,
+    /// A Claude or Codex sign-in: a subscription that reports limits, even before it has.
+    pub subscription: bool,
+    /// The subscription plan, as the quota reports it ("max_20x").
+    pub plan: Option<String>,
     pub disabled: bool,
     /// From `AccountState::pauses`: model -> (until, kind).
     pub pauses: BTreeMap<String, (DateTime<Utc>, &'static str)>,
@@ -140,12 +146,28 @@ pub struct AccountView {
     pub windows: Vec<Window>,
     /// Failed requests (not cancellations) in the last hour.
     pub failures: u64,
-    /// Per current window (name, model scope): the client that used most of it, and
-    /// its points (from quota attribution).
-    pub top_clients: Vec<(String, Option<String>, String, f64)>,
+    /// Per current window (name, model scope): the points of it each client used, by the
+    /// client's name (from quota attribution).
+    pub clients: Vec<(String, Option<String>, BTreeMap<String, f64>)>,
 }
 
 impl AccountView {
+    fn member(&self) -> Member<'_> {
+        Member {
+            id: &self.id,
+            provider: &self.provider,
+            plan: self.plan.as_deref(),
+            subscription: self.subscription,
+            disabled: self.disabled,
+            windows: &self.windows,
+        }
+    }
+
+    /// Each client's points of a current window.
+    fn clients_of(&self, w: &Window) -> Option<&BTreeMap<String, f64>> {
+        self.clients.iter().find(|(name, model, _)| *name == w.name && *model == w.model).map(|(.., c)| c)
+    }
+
     fn signin_error(&self) -> bool {
         !self.api_key && self.last_error.as_deref().is_some_and(signin_error)
     }
@@ -199,8 +221,17 @@ pub fn signin_error(text: &str) -> bool {
         })
 }
 
+/// Each provider's subscriptions taken together, as the overview's combined limits draw them.
+pub fn pools(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Pool> {
+    crate::pools::pools(&accounts.iter().map(AccountView::member).collect::<Vec<_>>(), now)
+}
+
 pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
     let mut out = Vec::new();
+    let members: Vec<Member> = accounts.iter().map(AccountView::member).collect();
+    // Smart-quota routing runs down the account that renews first on purpose, so a provider
+    // with several subscriptions has one pace warning per window, for all of them together.
+    let pooled = crate::pools::pooled(&members);
     for a in accounts.iter().filter(|a| !a.disabled) {
         let fault = |key: &str, event, title: String, body: String| Fault {
             key: format!("{key}:{}", a.id),
@@ -253,17 +284,13 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
             }
             _ => {}
         }
-        // A window that this pace would use up before it renews. Not pushed: the
-        // meters say it too; this says who.
-        if !matches!(pause, Some((_, (_, "quota")))) {
+        // A window that this pace would use up before it renews, when the account is its
+        // provider's only subscription. Not pushed: the meters say it too; this says who.
+        if !matches!(pause, Some((_, (_, "quota")))) && !pooled.contains_key(a.provider.as_str()) {
             for w in &a.windows {
                 let Some(pace) = early_run_out(w, now) else { continue };
-                let who = a
-                    .top_clients
-                    .iter()
-                    .find(|(name, model, ..)| *name == w.name && *model == w.model)
-                    .filter(|(.., points)| *points > 0.0 && w.used > 0.0)
-                    .map(|(.., label, points)| format!(" {label} used {:.0}% of it.", 100.0 * points / w.used));
+                let clients = a.clients_of(w).into_iter().flatten().map(|(label, points)| (label.as_str(), *points));
+                let who = top_client(clients, w.used);
                 let limit = window_title(&w.name);
                 out.push(Fault {
                     key: format!(
@@ -342,6 +369,9 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
         }
     }
 
+    // Providers with several subscriptions: one pace warning per window, for them all.
+    out.extend(crate::pools::pools(&members, now).iter().filter_map(|p| pool_pace(p, accounts, now)));
+
     // Providers whose every enabled account is out.
     let mut groups: BTreeMap<&str, Vec<&AccountView>> = BTreeMap::new();
     for a in accounts.iter().filter(|a| !a.disabled) {
@@ -384,6 +414,62 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
         });
     }
     out
+}
+
+/// A provider's subscriptions together running out at this pace before renewals bring
+/// capacity back. Not pushed, as one account's warning; it clears by the renewal it waits for.
+fn pool_pace(pool: &Pool, accounts: &[AccountView], now: DateTime<Utc>) -> Option<Fault> {
+    let back = pool.runs_out?;
+    let reporting: Vec<(&AccountView, f64)> =
+        pool.weights.iter().filter_map(|(id, k)| Some((accounts.iter().find(|a| a.id == *id)?, *k))).collect();
+    let name = reporting.first()?.0.group_name.clone();
+    // The client that used most of the windows, each counting as it does in the pool. A
+    // window that has renewed counts as unused, and its clients are the last window's.
+    let mut clients = BTreeMap::<&str, f64>::new();
+    for (a, k) in &reporting {
+        let live = a
+            .windows
+            .iter()
+            .find(|w| w.name == pool.window && w.model == pool.model && w.resets_at.is_none_or(|r| r > now));
+        for (label, points) in live.and_then(|w| a.clients_of(w)).into_iter().flatten() {
+            *clients.entry(label).or_default() += k * points;
+        }
+    }
+    let weight: f64 = pool.weights.iter().map(|(_, k)| k).sum();
+    let who = top_client(clients, pool.used * weight).unwrap_or_default();
+    let scope = pool.model.as_deref().map(|m| format!("{} ", capitalized(m))).unwrap_or_default();
+    let title = format!("{name} {scope}{} limits run out early at this pace", window_title(&pool.window));
+    let together = match reporting.len() {
+        1 => "The one account reporting it runs out".to_string(),
+        n => format!("Together the {n} accounts run out"),
+    };
+    let detail = format!("{together} before renewals bring capacity back.{who}");
+    Some(Fault {
+        key: format!(
+            "pace:pool:{}:{}{}",
+            pool.provider,
+            pool.window,
+            pool.model.as_deref().map(|m| format!(":{m}")).unwrap_or_default()
+        ),
+        event: Event::Quiet,
+        provider: pool.provider.clone(),
+        title: title.clone(),
+        body: detail.clone(),
+        path: "#/overview".into(),
+        kind: "pace",
+        level: "warn",
+        provider_name: name,
+        summary: title,
+        detail: Some(detail),
+        until: Some(back),
+        ..Default::default()
+    })
+}
+
+/// " The laptop used 62% of it.": the client that used most of a window, of `used` points.
+fn top_client<'a>(clients: impl IntoIterator<Item = (&'a str, f64)>, used: f64) -> Option<String> {
+    let (label, points) = clients.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    (points > 0.0 && used > 0.0).then(|| format!(" {label} used {:.0}% of it.", 100.0 * points / used))
 }
 
 /// A provider that was out has an account that can take requests again.
@@ -605,6 +691,108 @@ mod tests {
         let back = recovered(&[a, b], "claude").unwrap();
         assert_eq!(back.title, "Claude is back");
         assert_eq!(back.body, "b@example.com can take requests again.");
+    }
+
+    /// A Claude subscription with these windows.
+    fn sub(id: &str, windows: Vec<Window>) -> AccountView {
+        AccountView { subscription: true, plan: Some("max_20x".into()), windows, ..acct(id, "claude") }
+    }
+
+    fn window(name: &str, model: Option<&str>, used: f64, left: Duration, now: DateTime<Utc>) -> Window {
+        Window { name: name.into(), used, resets_at: Some(now + left), model: model.map(String::from) }
+    }
+
+    fn clients(
+        name: &str,
+        model: Option<&str>,
+        points: &[(&str, f64)],
+    ) -> (String, Option<String>, BTreeMap<String, f64>) {
+        (name.into(), model.map(String::from), points.iter().map(|(c, p)| (c.to_string(), *p)).collect())
+    }
+
+    #[test]
+    fn several_subscriptions_get_one_pace_warning_for_them_all() {
+        let now = Utc::now();
+        let week = |used, days: f64| window("week", None, used, Duration::minutes((days * 1440.0) as i64), now);
+        // The account renewing first is run down on purpose: over its pace alone, but the
+        // other has room until it renews, so nothing is said about either.
+        let drained = [sub("a", vec![week(90.0, 2.8)]), sub("b", vec![week(0.0, 4.9)])];
+        assert!(faults(&drained, now).iter().all(|f| f.kind != "pace"));
+        assert_eq!(faults(&drained[..1], now)[0].key, "pace:a:week", "on its own it would be");
+
+        // Both busy: together they run out before the first renewal brings capacity back.
+        let mut a = sub("a", vec![week(90.0, 3.5)]);
+        a.clients = vec![clients("week", None, &[("The laptop", 50.0), ("CI", 40.0)])];
+        let mut b = sub("b", vec![week(60.0, 4.2)]);
+        b.clients = vec![clients("week", None, &[("The laptop", 20.0), ("CI", 40.0)])];
+        let busy = [a.clone(), b];
+        let f = faults(&busy, now);
+        assert_eq!(keys(&f), ["pace:pool:claude:week"], "no warning for either account");
+        assert_eq!((f[0].event, f[0].account.as_deref()), (Event::Quiet, None));
+        let api = f[0].json();
+        assert_eq!(
+            (api["kind"].as_str(), api["level"].as_str(), api["badge"].as_bool()),
+            (Some("pace"), Some("warn"), Some(false))
+        );
+        assert!(api["account_id"].is_null() && api["label"].is_null());
+        assert_eq!((api["provider"].as_str(), api["provider_name"].as_str()), (Some("claude"), Some("Claude")));
+        assert_eq!(api["title"], "Claude weekly limits run out early at this pace");
+        // CI used 40 + 40 of the 150 points used, the laptop 50 + 20.
+        assert_eq!(
+            api["detail"],
+            "Together the 2 accounts run out before renewals bring capacity back. CI used 53% of it."
+        );
+        assert_eq!(api["until"], a.windows[0].resets_at.unwrap().to_rfc3339(), "a real renewal, not when it runs out");
+        assert_eq!(api["path"], "#/overview");
+        let later: Vec<Value> = faults(&busy, now + Duration::minutes(2)).iter().map(Fault::json).collect();
+        assert_eq!(later, [api], "nothing in it moves with the clock");
+
+        // A disabled account, or an API key, makes no pool: one subscription keeps its own rule.
+        let mut off = sub("b", vec![week(60.0, 4.2)]);
+        off.disabled = true;
+        let mut key = acct("k", "claude");
+        key.api_key = true;
+        let f = faults(&[a, off, key], now);
+        assert_eq!(keys(&f), ["pace:a:week"]);
+        assert_eq!(f[0].detail.as_deref(), Some("It would run out before it renews. The laptop used 56% of it."));
+        assert_eq!(f[0].account.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn pools_warn_for_five_hour_and_model_windows_too() {
+        let now = Utc::now();
+        let five = |used| window("5h", None, used, Duration::hours(1), now);
+        let opus = |used, days| window("week", Some("opus"), used, Duration::days(days), now);
+        let a = sub("a", vec![five(90.0), opus(80.0, 3)]);
+        let b = sub("b", vec![opus(75.0, 4)]);
+        let f = faults(&[a.clone(), b.clone()], now);
+        assert_eq!(keys(&f), ["pace:pool:claude:5h", "pace:pool:claude:week:opus"]);
+        assert_eq!(f[0].summary, "Claude 5-hour limits run out early at this pace");
+        assert_eq!(
+            f[0].detail.as_deref(),
+            Some("The one account reporting it runs out before renewals bring capacity back.")
+        );
+        assert_eq!(f[0].until, a.windows[0].resets_at);
+        assert_eq!(f[1].summary, "Claude Opus weekly limits run out early at this pace");
+        // An account without an Opus limit of its own takes Opus until its weekly limit
+        // stops it, which the weekly pool covers.
+        let c = sub("c", vec![]);
+        assert_eq!(keys(&faults(&[a, b, c], now)), ["pace:pool:claude:5h"]);
+    }
+
+    #[test]
+    fn a_pool_with_one_account_reporting_a_window_has_that_accounts_rule() {
+        let now = Utc::now();
+        for used in [15.0, 25.0, 40.0, 55.0, 70.0, 85.0, 99.0] {
+            for hours in [12, 36, 60, 84, 108, 132, 156] {
+                let w = window("week", None, used, Duration::hours(hours), now);
+                let alone = faults(&[sub("a", vec![w.clone()])], now);
+                let pooled = faults(&[sub("a", vec![w.clone()]), sub("b", vec![])], now);
+                assert_eq!(early_run_out(&w, now).is_some(), !alone.is_empty(), "{used}% with {hours}h left");
+                assert_eq!(alone.len(), pooled.len(), "{used}% with {hours}h left");
+                assert_eq!(alone.first().map(|f| f.until), pooled.first().map(|f| f.until));
+            }
+        }
     }
 
     #[test]

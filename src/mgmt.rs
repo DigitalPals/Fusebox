@@ -545,6 +545,8 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "active": app.stats.active.load(Ordering::Relaxed),
         "series": app.stats.series(),
         "accounts": { "total": accounts.len(), "active": active, "cooling": cooling, "disabled": disabled, "providers": providers },
+        // Each provider's subscriptions together, per window: the dashboard's combined limits.
+        "pools": crate::push::current_pools(&app),
         "models": app.pool.models().len(),
         "config_path": app.cfg_path.display().to_string(),
         "auth_dir": cfg.auth_dir().display().to_string(),
@@ -1556,6 +1558,39 @@ mod tests {
         account.state.lock().clear_error();
         assert_eq!(next_faults().await, json!([]), "a cleared fault is sent at once");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_overview_pools_subscriptions_as_the_pace_faults_do() {
+        // Keys reporting usage limits count as subscriptions, as on the dashboard.
+        let key = |k: &str| crate::config::KeyEntry { api_key: k.into(), ..Default::default() };
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![key("one"), key("two")],
+            ..Default::default()
+        };
+        let app = App::new(cfg, "/nonexistent/config.yaml".into());
+        let resets = chrono::Utc::now() + chrono::Duration::days(3);
+        for (a, used) in app.pool.all().iter().zip([90.0, 60.0]) {
+            a.state.lock().quota.windows =
+                vec![crate::quota::Window { name: "week".into(), used, resets_at: Some(resets), model: None }];
+        }
+        let Json(view) = overview(State(app.clone())).await;
+        let [pool] = view["pools"].as_array().unwrap().as_slice() else { panic!("one pool: {}", view["pools"]) };
+        assert_eq!((pool["provider"].as_str(), pool["window"].as_str()), (Some("codex"), Some("week")));
+        assert_eq!(
+            (pool["accounts"].as_u64(), pool["reported"].as_u64(), pool["used"].as_f64()),
+            (Some(2), Some(2), Some(75.0))
+        );
+        assert_eq!((pool["priced"].as_bool(), pool["runs_out_early"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(pool["until"], resets.to_rfc3339());
+        let faults = crate::push::current_faults(&app);
+        let pace: Vec<&Value> = faults.as_array().unwrap().iter().filter(|f| f["kind"] == "pace").collect();
+        assert_eq!(pace.len(), 1);
+        assert_eq!(
+            (pace[0]["key"].as_str(), pace[0]["until"].as_str()),
+            (Some("pace:pool:codex:week"), pool["until"].as_str())
+        );
     }
 
     #[test]

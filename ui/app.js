@@ -499,11 +499,12 @@ function onFaults(list) {
 
 // The menu's items from the server's list: errors first, then warnings, and last the
 // pace warnings (a window that would run out early: worth a look, nothing to do).
-// Account faults and the usage database's ("storage", linking to the Usage page);
-// provider-wide faults are left out, as the menu has always listed accounts.
+// Account faults, the usage database's ("storage", linking to the Usage page) and the
+// pace warnings for all of a provider's subscriptions; other provider-wide faults are left
+// out, as the menu has always listed accounts.
 const FAULT_RANK = { err: 0, warn: 1, pace: 2 };
 function faultItems(list) {
-  const items = (Array.isArray(list) ? list : []).filter((f) => f.account_id || f.kind === 'storage').map((f) => ({
+  const items = (Array.isArray(list) ? list : []).filter((f) => f.account_id || f.kind === 'storage' || f.kind === 'pace').map((f) => ({
     lvl: f.level === 'err' ? 'err' : 'warn', id: f.account_id || null, title: f.title, signin: f.kind === 'signin',
     provider: f.provider_name || '', label: f.label || '', kind: f.kind || '', detail: f.detail || '', badge: f.badge !== false,
     path: f.path || '',
@@ -1177,9 +1178,19 @@ function runAlert(i) {
   if (!al) return;
   closeFaults();
   if (al.kind === 'storage') { location.hash = al.path || '#/usage'; return; }
+  if (!al.id) return showPools();
   const a = accountById(al.id);
   if (al.signin && a) return signInAgain(a);
   openAccount(al.id);
+}
+
+// A provider's pace warning opens on the overview's combined limits, after the route
+// change has scrolled to the top.
+function showPools() {
+  const show = () => $('#ov-pool')?.scrollIntoView({ block: 'start' });
+  if (S.route === 'overview') return show();
+  addEventListener('hashchange', show, { once: true });
+  location.hash = '#/overview';
 }
 
 // ---------------------------------------------------------------- overview
@@ -1341,12 +1352,8 @@ function ovSubsHTML() {
       ${rows}</div>`;
 }
 
-// Each plan's monthly price, relative to the provider's cheapest paid plan. Claude doesn't
-// publish its weekly limits, and they don't grow with the 5x and 20x in Max's names (those
-// are for the 5-hour window); prices come closest to the weekly sizes people have measured.
-const PLAN_PRICE = { claude: { pro: 1, max_5x: 5, max_20x: 10 } };
+// Plans count by their monthly price; the weights themselves are in src/pools.rs.
 const PLAN_PRICE_NOTE = 'Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10';
-const planWeight = (a) => (a.quota && PLAN_PRICE[a.provider]?.[a.quota.plan]) || null;
 
 // How many accounts are on each known plan, most first: [["Max 20x", 2], ["Pro", 1]].
 function planCounts(list) {
@@ -1358,44 +1365,17 @@ function planCounts(list) {
   return [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
 }
 
-// The weekly windows of each provider with two or more subscriptions, taken together: the
-// accounts' average use and the average of where each would be at even pace. When every
-// reporting account's plan has a price, each counts by it (`priced`); otherwise they count
-// equally. Windows renew at different times, so each account's pace comes from its own reset.
-// A window that has renewed, or not started, counts as unused and at the start of its week.
-// Disabled accounts and accounts that have not reported a weekly window are left out.
-function weeklyPools(accounts, now = Date.now()) {
-  const byProvider = new Map();
-  for (const a of accounts) {
-    if (a.disabled || !metered(a)) continue;
-    if (!byProvider.has(a.provider)) byProvider.set(a.provider, []);
-    byProvider.get(a.provider).push(a);
-  }
-  const pools = [];
-  for (const list of byProvider.values()) {
-    if (list.length < 2) continue;
-    const weeks = list
-      .map((a) => [a, ((a.quota && a.quota.windows) || []).find((x) => x.name === 'week' && !x.model && Number.isFinite(x.used))])
-      .filter(([, w]) => w);
-    if (!weeks.length) continue;
-    const priced = weeks.every(([a]) => planWeight(a));
-    let weight = 0;
-    let used = 0;
-    let elapsed = 0;
-    let paced = true;
-    for (const [a, w] of weeks) {
-      const k = priced ? planWeight(a) : 1;
-      weight += k;
-      const q = quotaOf(w, now);
-      if (!q) continue;
-      const t = windowElapsed(w, now) ?? (q.used === 0 ? 0 : null);
-      used += k * q.used;
-      if (t == null) paced = false;
-      else elapsed += k * t;
-    }
-    pools.push({ account: list[0], accounts: list.length, reported: weeks.length, used: used / weight, pace: paced ? elapsed / weight : null, priced, plans: planCounts(list) });
-  }
-  return pools;
+// The weekly windows of each provider with two or more subscriptions, taken together, as the
+// server works them out (src/pools.rs) for this meter and for the pace warning alike: the
+// accounts' weighted use and the weighted average of where each would be at even pace, each
+// counting by its plan's price when every reporting account's has one (`priced`), equally
+// otherwise. `runs_out_early` says that at the pace so far they all run out before renewals
+// bring capacity back, which is at `until`.
+function weeklyPools() {
+  return ((S.overview && S.overview.pools) || []).filter((p) => p.window === 'week' && !p.model).map((p) => {
+    const list = (p.account_ids || []).map(accountById).filter(Boolean);
+    return list.length ? { ...p, account: list[0], plans: planCounts(list) } : null;
+  }).filter(Boolean);
 }
 
 // How far the combined use is from even pace, in percentage points of the week.
@@ -1439,14 +1419,21 @@ function poolGapHTML(p) {
   return gap ? `<span class="pool-gap ${gap.cls}">${gap.text}</span>` : '';
 }
 
+// The pace warning's verdict, on the row it is about.
+function poolEarlyHTML(p) {
+  if (!p.runs_out_early) return '';
+  const back = p.until ? ` Capacity comes back ${fullResetTime(p.until)}.` : '';
+  return `<span class="pool-gap warn" title="${esc(`At this pace these accounts run out before renewals bring capacity back.${back}`)}">Runs out early</span>`;
+}
+
 // One bar per provider with several subscriptions, under the Subscriptions table, in its
 // columns: all of a provider's weekly quota together, with the pace mark where it should be.
 function ovPoolHTML() {
-  const pools = weeklyPools(S.accounts || []);
+  const pools = weeklyPools();
   if (!pools.length) return '';
   if (mob()) {
     const items = pools.map((p) => `<div class="item">
-        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div>${poolGapHTML(p)}</div>
+        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div>${poolEarlyHTML(p) || poolGapHTML(p)}</div>
         <div class="indent">${poolMeterHTML(p)}</div>
       </div>`).join('');
     return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2></div><div class="card stack-list pool">${items}</div>`;
@@ -1455,7 +1442,7 @@ function ovPoolHTML() {
       <span class="c-idx"></span>
       <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${esc(poolCount(p))}</span></div></div>
       ${poolMeterHTML(p)}
-      <div class="c-status">${poolGapHTML(p)}</div>
+      <div class="c-status">${poolGapHTML(p)}${poolEarlyHTML(p)}</div>
     </div>`).join('');
   const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_PRICE_NOTE)}"` : '';
   return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>
@@ -1996,8 +1983,10 @@ function renderFaultsMenu(list = faultsList()) {
     const a = accountById(al.id);
     // A pace warning's detail names the client that used most of the window.
     const tip = (al.kind === 'pace' || al.kind === 'storage') && al.detail ? ` title="${esc(S.private && al.kind === 'pace' ? al.detail.split(/(?<=\.) /)[0] : al.detail)}"` : '';
-    // The usage database's faults belong to no account.
-    const where = al.kind === 'storage' ? esc(al.provider || 'Usage') : `${esc(a ? provName(a) : al.provider || '')} · ${esc(a ? acctLabel(a) : al.label ? who(al.label) : '')}`;
+    // The usage database's faults belong to no account, nor does a provider's pace warning.
+    const where = al.kind === 'storage' ? esc(al.provider || 'Usage')
+      : !al.id ? `${esc(al.provider)} · all subscriptions`
+        : `${esc(a ? provName(a) : al.provider || '')} · ${esc(a ? acctLabel(a) : al.label ? who(al.label) : '')}`;
     return `<button class="fault-item" type="button" data-act="alert-open" data-id="${i}"${tip}><span class="dot ${al.lvl}"></span><span class="cell2"><b>${esc(al.title)}</b><span class="mono">${where}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
   }).join('');
   $('#lay-faults').innerHTML = `<div class="scrim menu" data-act="close-faults"></div><div class="faults-menu" id="faults-menu" role="dialog" aria-label="Faults"${style}>${items || '<p class="pal-none">Nothing tripped. Every account is in rotation.</p>'}</div>`;
@@ -3908,7 +3897,7 @@ async function pollOverview() {
   overviewAt = Date.now();
   try {
     S.overview = await api('/overview');
-    if (S.route === 'overview') { patchFigures(); patchBars(); }
+    if (S.route === 'overview') { patchFigures(); patchBars(); patchChanged('ov-pool', ovPoolHTML); }
     if (S.route === 'accounts' && S.sub) loadActivity(S.sub, true);
   } catch {}
 }

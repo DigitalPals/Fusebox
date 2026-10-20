@@ -97,10 +97,12 @@ test('pace warnings go last in the menu and never count on the app badge', () =>
     { kind: 'signin', level: 'err', account_id: 'c', title: 'Sign-in expired' },
     { kind: 'provider', level: 'err', title: 'Every Claude account is used up', badge: true },
     { kind: 'storage', level: 'warn', title: 'Usage database is large', detail: 'It is 900 MB and grows about 12 MB a day.', path: '#/usage', provider: '', provider_name: 'Usage', badge: true },
+    { kind: 'pace', level: 'warn', key: 'pace:pool:claude:week', provider: 'claude', provider_name: 'Claude', account_id: null, label: null, title: 'Claude weekly limits run out early at this pace', detail: 'Together the 2 accounts run out before renewals bring capacity back.', path: '#/overview', badge: false },
   ];
   const items = run(`faultItems(${JSON.stringify(faults)})`);
-  assert.deepEqual(items.map((f) => f.id), ['c', 'b', null, 'a'], 'provider-wide faults stay out; the usage database\'s come in');
-  assert.deepEqual(items.map((f) => f.badge), [true, true, true, false]);
+  assert.deepEqual(items.map((f) => f.id), ['c', 'b', null, 'a', null], 'provider-wide faults stay out; the usage database\'s and a provider\'s pace warning come in');
+  assert.deepEqual(items.map((f) => f.badge), [true, true, true, false, false]);
+  assert.deepEqual([items[4].title, items[4].provider, items[4].label], ['Claude weekly limits run out early at this pace', 'Claude', '']);
   assert.equal(items[0].signin, true);
   assert.equal(items[2].path, '#/usage');
   assert.equal(items[2].provider, 'Usage');

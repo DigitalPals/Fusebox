@@ -357,14 +357,26 @@ fn all_faults(app: &App, accounts: &[AccountView]) -> Vec<Fault> {
     current
 }
 
+/// Each provider's subscriptions taken together, per window: the overview's combined
+/// limits, worked out as the pace faults work them out.
+pub fn current_pools(app: &App) -> Value {
+    Value::Array(faults::pools(&views(app), Utc::now()).iter().map(crate::pools::Pool::json).collect())
+}
+
 /// The rules' view of every account.
 fn views(app: &App) -> Vec<AccountView> {
     let now = Utc::now();
+    let cfg = app.cfg();
+    // Client names, worked out once for the keys several accounts share.
+    let mut names = HashMap::<String, String>::new();
     app.pool
         .all()
         .iter()
         .map(|a| {
-            let api_key = matches!(*a.cred.read(), Credential::ApiKey { .. });
+            let (api_key, sign_in) = match &*a.cred.read() {
+                Credential::ApiKey { .. } => (true, false),
+                Credential::OAuth(o) => (false, !o.raw.contains_key("service_account")),
+            };
             let compat = a.group.clone().filter(|g| !g.is_empty()).unwrap_or_else(|| "Compatible".into());
             let group_name = match a.provider {
                 Provider::Claude => "Claude",
@@ -397,18 +409,27 @@ fn views(app: &App) -> Vec<AccountView> {
                 group_name,
                 label: a.label.clone(),
                 api_key,
+                subscription: sign_in && matches!(a.provider, Provider::Claude | Provider::Codex),
+                plan: st.quota.plan.clone(),
                 disabled: st.disabled,
                 pauses: st.pauses(now),
                 last_error: st.last_error(now).map(String::from),
                 windows: st.quota.windows.clone(),
                 failures,
-                top_clients: st
+                clients: st
                     .attribution
                     .current
                     .iter()
-                    .filter_map(|s| {
-                        let (client, points) = s.clients.iter().max_by(|a, b| a.1.total_cmp(b.1))?;
-                        Some((s.name.clone(), s.model.clone(), crate::mgmt::client_label(&app.cfg(), client), *points))
+                    .map(|s| {
+                        let mut points = std::collections::BTreeMap::<String, f64>::new();
+                        for (client, p) in &s.clients {
+                            let name = names
+                                .entry(client.clone())
+                                .or_insert_with(|| crate::mgmt::client_label(&cfg, client))
+                                .clone();
+                            *points.entry(name).or_default() += *p;
+                        }
+                        (s.name.clone(), s.model.clone(), points)
                     })
                     .collect(),
             }
