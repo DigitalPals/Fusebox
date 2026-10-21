@@ -310,7 +310,7 @@ pub fn build_request(req: &Request, model: &str) -> Value {
     let effort = req.reasoning.as_ref().and_then(|r| r.effort_level());
     let mut prompts: Vec<Value> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
-    for m in &req.messages {
+    for m in crate::formats::alternating_messages(&req.messages).iter() {
         match m.role {
             Role::User | Role::System | Role::Developer => {
                 let mut text = Vec::new();
@@ -878,6 +878,43 @@ mod tests {
         assert!(f.iter().any(|(n, v)| *n == 2 && matches!(v, Field::Int(4))));
         assert!(f.iter().any(|(n, v)| *n == 7 && matches!(v, Field::Bytes(b) if *b == b"c1")));
         assert!(top.iter().any(|(n, v)| *n == 21 && matches!(v, Field::Bytes(b) if *b == b"swe-2-high")));
+    }
+
+    #[test]
+    fn separate_reasoning_and_tool_items_share_the_devin_turn() {
+        use crate::ir::Message;
+        let req = Request {
+            messages: vec![
+                Message { role: Role::User, parts: vec![Part::Text("hi".into())] },
+                Message {
+                    role: Role::Assistant,
+                    parts: vec![Part::Reasoning {
+                        text: "thinking".into(),
+                        sig: Some(Sig::Devin("sealed:signature".into())),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    parts: vec![Part::ToolCall { id: "c1".into(), name: "f".into(), args: "{}".into(), sig: None }],
+                },
+                Message {
+                    role: Role::User,
+                    parts: vec![Part::ToolResult {
+                        id: "c1".into(),
+                        name: None,
+                        content: vec![Part::Text("ok".into())],
+                        is_error: false,
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        let spec = build_request(&req, "swe-2");
+        assert_eq!(spec["prompts"].as_array().unwrap().len(), 3);
+        assert_eq!(spec["prompts"][1]["thinking"], "thinking");
+        assert_eq!(spec["prompts"][1]["sig"], "sealed:signature");
+        assert_eq!(spec["prompts"][1]["tool_calls"][0][0], "c1");
+        assert_eq!(spec["prompts"][2]["source"], 4);
     }
 
     #[test]

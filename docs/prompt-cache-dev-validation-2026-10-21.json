@@ -1,0 +1,61 @@
+{
+  "mock_only": true,
+  "paid_provider_calls": 0,
+  "existing_dev_service_found": false,
+  "release_binary_sha256": "78c751e52c2c187eeb2f3cb7b1cf42c6078e4c363acc2b3def1222ed6f0e75bb",
+  "lease": "e31245660c904a0589af644c819ec5cf",
+  "checks": [
+    "rebuilt_binary_health_and_readiness",
+    "dashboard_assets_include_provider_diagnostics",
+    "usage_assets_include_cache_write_lifetimes",
+    "chat_to_responses_request_succeeds",
+    "mixed_breakpoint_lifetimes_preserved",
+    "adjacent_openai_user_messages_remain_separate",
+    "comparison_response_id_preserved_upstream",
+    "translated_lifetime_usage_matches_provider",
+    "request_details_report_sanitized_provider_miss",
+    "request_details_do_not_expose_prompt_or_comparison_id",
+    "first_observation_cost_is_30100000_nanos",
+    "native_response_diagnostics_pass_through_unchanged",
+    "dashboard_totals_include_both_lifetime_subsets",
+    "stored_observations_keep_lifetimes_and_per_request_cost",
+    "durable_observations_exclude_prompt_and_diagnostic_identifiers",
+    "csv_exports_lifetime_counts",
+    "sqlite_schema5_and_lifetime_storage_integrity",
+    "structured_completion_logs_report_provider_cache_misses",
+    "structured_logs_exclude_prompt_and_comparison_id",
+    "restart_same_config_database_and_listen_port",
+    "restart_preserves_dashboard_counts_cost_and_lifetimes",
+    "restart_preserves_durable_observation_details"
+  ],
+  "restart_verified": true,
+  "temporary_services_stopped": true,
+  "result": "passed",
+  "per_request_cost_nanos": 30100000,
+  "persisted_observations": 2,
+  "sqlite_schema": 5,
+  "cleanup_check": {
+    "command": "agent-resource check e31245660c904a0589af644c819ec5cf",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  "fixture_setup_attempt": {
+    "lease": "87963cf8978f41dc90ef6a7028da2dbb",
+    "result": "fixture corrected before successful validation",
+    "adjustment": "Added the text delta emitted by a normal Responses stream before response.completed.",
+    "cleanup_check": {
+      "status": "closed",
+      "remaining": [],
+      "preserved_volumes": [],
+      "errors": [],
+      "command": "agent-resource check 87963cf8978f41dc90ef6a7028da2dbb"
+    }
+  },
+  "build_capacity_reservation": {
+    "id": "ci-job-ea91555720144afeb9f58246d35b98ab",
+    "released": true,
+    "verification": "Parent confirmed lease file absent and reservation process exited."
+  }
+}

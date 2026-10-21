@@ -537,6 +537,7 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
             output: number(usage.get("output_tokens")),
             reasoning: number(usage.pointer("/output_tokens_details/thinking_tokens"))
                 .or_else(|| number(usage.pointer("/output_tokens_details/reasoning_tokens"))),
+            ..Tokens::default()
         };
         o.completeness = if o.tokens.total().is_some() { "complete" } else { "partial" }.into();
         o.validate().map_err(|_| anyhow!("invalid usage metadata"))?;

@@ -1,4 +1,4 @@
-//! Cache intent and effective policy, without prompt content or raw cache keys.
+//! Cache intent, effective policy and provider diagnostics without prompt content or raw identifiers.
 
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,81 @@ pub struct Policy {
     pub key_scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downgrade_reason: Option<String>,
+}
+
+/// The provider's explanation of cache reuse, independent of requested controls.
+/// Keep only known classifications and bounded counts: diagnostic responses can
+/// also contain identifiers or future free-text fields that must not reach logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Diagnostics {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison_reusable_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_missed_tokens: Option<u64>,
+}
+
+impl Diagnostics {
+    fn from_wire(value: &Value) -> Option<Self> {
+        // Both full Responses objects and response.* SSE/WebSocket events.
+        // Never search recursively through arbitrary model or tool output.
+        let diagnostic =
+            value["response"].get("prompt_cache_diagnostics").or_else(|| value.get("prompt_cache_diagnostics"))?;
+        let diagnostic = diagnostic.as_object()?;
+        let kind = match diagnostic.get("type").and_then(Value::as_str) {
+            Some("cache_hit") => "cache_hit",
+            Some("cache_miss") => "cache_miss",
+            Some("comparison_response_not_found") => "comparison_response_not_found",
+            _ => "unavailable",
+        };
+        let reason = (kind == "cache_miss").then(|| match diagnostic.get("reason").and_then(Value::as_str) {
+            Some("model_changed") => "model_changed",
+            Some("prompt_cache_key_changed") => "prompt_cache_key_changed",
+            Some("service_tier_changed") => "service_tier_changed",
+            Some("tools_changed") => "tools_changed",
+            Some("text_format_changed") => "text_format_changed",
+            Some("reasoning_effort_changed") => "reasoning_effort_changed",
+            Some("verbosity_changed") => "verbosity_changed",
+            Some("context_compacted") => "context_compacted",
+            Some("input_changed") => "input_changed",
+            _ => "unknown",
+        });
+        // JSON dashboard numbers must be exact; reject negatives, strings,
+        // fractional values and numbers outside JavaScript's safe integer range.
+        let tokens = |name: &str| {
+            (kind == "cache_miss")
+                .then(|| diagnostic.get(name).and_then(Value::as_u64).filter(|n| *n <= 9_007_199_254_740_991))
+                .flatten()
+        };
+        Some(Self {
+            kind,
+            reason,
+            comparison_reusable_tokens: tokens("comparison_reusable_tokens"),
+            cache_missed_tokens: tokens("cache_missed_tokens"),
+        })
+    }
+}
+
+/// Shared with translated stream decoders, which outlive request preparation.
+/// Only a sanitized diagnostic survives beyond the original wire event.
+#[derive(Clone, Default)]
+pub(crate) struct DiagnosticObserver(std::sync::Arc<parking_lot::Mutex<Option<Diagnostics>>>);
+
+impl DiagnosticObserver {
+    pub(crate) fn observe(&self, value: &Value) {
+        if let Some(diagnostic) = Diagnostics::from_wire(value) {
+            *self.0.lock() = Some(diagnostic);
+        }
+    }
+    pub(crate) fn snapshot(&self) -> Option<Diagnostics> {
+        self.0.lock().clone()
+    }
+    pub(crate) fn reset(&self) {
+        *self.0.lock() = None;
+    }
 }
 
 /// What the caller's own body asks of the cache, read once per request: each

@@ -27,15 +27,18 @@ pub(crate) use read::ReadError;
 #[cfg(test)]
 mod reference;
 
-pub(super) const VERSION: i64 = 4;
+pub(super) const VERSION: i64 = 5;
 /// The last layout releases before 0.6 can open; `usage downgrade` returns to it.
 pub(super) const LEGACY_VERSION: i64 = 3;
 pub(super) const APPLICATION_ID: i64 = 0x46555345;
 const MAX_QUERY_DAYS: i64 = 3660;
-const ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,COALESCE(pricing_partial,CASE WHEN typeof(snapshot_json)='text' THEN json_extract(snapshot_json,'$.partial') END) AS pricing_partial";
+const ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,COALESCE(pricing_partial,CASE WHEN typeof(snapshot_json)='text' THEN json_extract(snapshot_json,'$.partial') END) AS pricing_partial,write_30m,write_12h";
 /// The schema-3 entry columns, for recreating that layout on downgrade.
 const LEGACY_ENTRY_COLUMNS: &str = "id,source,origin_id,source_event_id,canonical_key,association_key,event_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,json_extract(snapshot_json,'$.partial') AS pricing_partial";
-const WINNER_ORDER: &str = "trust_rank,CASE completeness WHEN 'complete' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,known_fields DESC,COALESCE(output,-1) DESC,source,origin_id,source_event_id,fingerprint";
+const LEGACY_WINNER_ORDER: &str = "trust_rank,CASE completeness WHEN 'complete' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,known_fields DESC,COALESCE(output,-1) DESC,source,origin_id,source_event_id,fingerprint";
+// Compare TTL evidence only after the primary categories. Schema-4 rows have no
+// OpenAI lifetimes, so existing winners remain stable through migration.
+const WINNER_ORDER: &str = "trust_rank,CASE completeness WHEN 'complete' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,known_fields DESC,((write_30m IS NOT NULL)+(write_12h IS NOT NULL)) DESC,COALESCE(output,-1) DESC,source,origin_id,source_event_id,fingerprint";
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 enum Command {
     Observe(Box<Observation>),
@@ -609,7 +612,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         // existing ones switch when the compactor first vacuums them.
         conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
     }
-    // Every step runs inside one transaction: 0→1→2→3→4.
+    // Every step runs inside one transaction: 0→1→2→3→4→5.
     let tx = conn.transaction()?;
     if version < 1 {
         tx.execute_batch(&format!("CREATE TABLE usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -646,6 +649,9 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         // Combined accounting drops imported copies of proxy responses by association key.
         tx.execute_batch("CREATE INDEX usage_entries_association ON usage_entries(association_key,source);")?;
     }
+    if version < 5 {
+        upgrade_cache_lifetimes(&tx, version >= 4)?;
+    }
     if version < 4 {
         upgrade_to_4(&tx)?;
     }
@@ -672,6 +678,25 @@ fn upgrade_to_4(tx: &Connection) -> Result<()> {
     )?;
     rollup::create(tx)?;
     codec::ensure_database_id(tx)?;
+    Ok(())
+}
+
+/// Schema 5 adds independent OpenAI lifetime subsets. Existing observations and
+/// snapshots stay untouched: older captures contain no trustworthy TTL evidence.
+fn upgrade_cache_lifetimes(tx: &Connection, rebuild_rollups: bool) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE usage_observations ADD COLUMN write_30m INTEGER;
+         ALTER TABLE usage_observations ADD COLUMN write_12h INTEGER;
+         ALTER TABLE usage_entries ADD COLUMN write_30m INTEGER;
+         ALTER TABLE usage_entries ADD COLUMN write_12h INTEGER;",
+    )?;
+    if rebuild_rollups {
+        for trigger in rollup::TRIGGERS {
+            tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
+        }
+        tx.execute_batch("DROP TABLE usage_rollup; DROP TABLE usage_facets;")?;
+        rollup::create(tx)?;
+    }
     Ok(())
 }
 
@@ -781,7 +806,8 @@ pub fn backup(database: &Path, to: &Path) -> Result<()> {
     result
 }
 
-/// Retry recoverable unpriced estimates and the identified bundled Sonnet 5.5 error.
+/// Retry recoverable unpriced estimates and identified bundled pricing errors.
+/// Cache writes are corrected only when the stored observation proves its TTL.
 /// Every revision preserves its previous snapshot in the same transaction as rollups.
 pub fn reprice(conn: &mut Connection) -> Result<u64> {
     conn.execute_batch(
@@ -804,7 +830,9 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
               (cost_nanos IS NULL AND REPLACE(pricing_basis,'local_override:','') IN
                 ('outside_effective_period','unsupported_inference_region','unknown_model','unsupported_service_tier',
                  'unsupported_service_tier_context','unsupported_regional_model','unsupported_rate_or_overflow'))
-              OR (model='claude-sonnet-5-5' AND catalogue_version='2026-10-07.3' AND cache_read>0 AND cost_nanos IS NOT NULL))
+              OR (model='claude-sonnet-5-5' AND catalogue_version='2026-10-07.3' AND cache_read>0 AND cost_nanos IS NOT NULL)
+              OR (provider='openai' AND cache_write>0 AND (write_30m IS NOT NULL OR write_12h IS NOT NULL)
+                AND (cost_nanos IS NULL OR catalogue_version='2026-10-18.1')))
             ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,rusqlite::types::Value>(5)?,r.get::<_,String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let Some(last) = rows.last() else { break };
         cursor = last.0;
@@ -815,13 +843,30 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
             let Ok(payload) = codec::decode(&tx, (&payload).into()) else { continue };
             let Ok(o) = serde_json::from_str::<Observation>(&payload) else { continue };
             let old_snapshot = codec::decode(&tx, (&old_snapshot).into())?;
+            let mut correction = "recoverable_unpriced_estimate";
             if old_cost.is_some() {
                 let old: super::pricing::Snapshot = serde_json::from_str(&old_snapshot)?;
-                if catalogue.local_override
-                    || old.local_override
-                    || old.rate.is_none_or(|r| r.cache_read_nanos_per_token != Some(200))
-                {
+                if catalogue.local_override || old.local_override {
                     continue;
+                }
+                let Some(rate) = old.rate else { continue };
+                if o.provider == "openai" {
+                    // Old observations without TTL counts are not repairable.
+                    if old_catalogue != "2026-10-18.1"
+                        || rate.cache_write_nanos_per_token.is_none()
+                        || rate.cache_write_30m_nanos_per_token.is_some()
+                        || rate.cache_write_12h_nanos_per_token.is_some()
+                        || o.tokens.write_30m.unwrap_or(0).checked_add(o.tokens.write_12h.unwrap_or(0))
+                            != o.tokens.cache_write
+                    {
+                        continue;
+                    }
+                    correction = "openai_cache_write_lifetime_correction";
+                } else {
+                    if rate.cache_read_nanos_per_token != Some(200) {
+                        continue;
+                    }
+                    correction = "sonnet_5_5_cache_read_correction";
                 }
             }
             let snapshot = catalogue.price(&o);
@@ -833,7 +878,7 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
                 continue;
             }
             tx.execute("INSERT INTO usage_price_revisions(observation_id,changed_at_ms,reason,previous_cost_nanos,previous_catalogue_version,previous_snapshot,catalogue_version,cost_nanos)
-                VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![id,Utc::now().timestamp_millis(),if old_cost.is_some(){"sonnet_5_5_cache_read_correction"}else{"recoverable_unpriced_estimate"},old_cost,old_catalogue,old_snapshot,snapshot.catalogue_version,snapshot.cost_nanos])?;
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![id,Utc::now().timestamp_millis(),correction,old_cost,old_catalogue,old_snapshot,snapshot.catalogue_version,snapshot.cost_nanos])?;
             tx.execute("UPDATE usage_observations SET cost_nanos=?2,pricing_basis=?3,catalogue_version=?4,snapshot_json=?5,pricing_partial=?6 WHERE id=?1",params![id,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,i64::from(snapshot.partial)])?;
             groups.insert(key);
             repriced += 1;
@@ -885,7 +930,7 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
         } else {
             2
         };
-        let changed=tx.prepare_cached("INSERT OR IGNORE INTO usage_observations(source,origin_id,source_event_id,fingerprint,canonical_key,association_key,trust_rank,event_at_ms,ingested_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,known_fields,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,snapshot_json,payload,pricing_partial) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)")?.execute(params![o.source,o.origin_id,o.source_event_id,fingerprint,canonical_key(o),association_key(o),rank,o.event_at_ms,Utc::now().timestamp_millis(),o.provider,o.actual_model.as_ref(),o.account_id,o.client_id,o.logical_request_id,o.attempt_id,o.response_id,o.completeness,known as i64,tokens.input,tokens.cache_read,tokens.cache_write,tokens.write_5m,tokens.write_1h,tokens.output,tokens.reasoning,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,documents.store(&serde_json::to_string(o)?)?,i64::from(snapshot.partial)])?;
+        let changed=tx.prepare_cached("INSERT OR IGNORE INTO usage_observations(source,origin_id,source_event_id,fingerprint,canonical_key,association_key,trust_rank,event_at_ms,ingested_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,known_fields,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,snapshot_json,payload,pricing_partial,write_30m,write_12h) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)")?.execute(params![o.source,o.origin_id,o.source_event_id,fingerprint,canonical_key(o),association_key(o),rank,o.event_at_ms,Utc::now().timestamp_millis(),o.provider,o.actual_model.as_ref(),o.account_id,o.client_id,o.logical_request_id,o.attempt_id,o.response_id,o.completeness,known as i64,tokens.input,tokens.cache_read,tokens.cache_write,tokens.write_5m,tokens.write_1h,tokens.output,tokens.reasoning,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,documents.store(&serde_json::to_string(o)?)?,i64::from(snapshot.partial),tokens.write_30m,tokens.write_12h])?;
         if changed > 0 {
             changed_groups.insert(canonical_key(o));
             inserted += 1;
@@ -1180,3 +1225,7 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "store/lifetime_tests.rs"]
+mod lifetime_tests;

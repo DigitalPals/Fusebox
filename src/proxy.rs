@@ -20,6 +20,9 @@ use crate::upstream::{self, Target};
 pub type FrameStream = Pin<Box<dyn Stream<Item = Frame> + Send>>;
 
 #[cfg(test)]
+#[path = "cache_diagnostic_tests.rs"]
+mod cache_diagnostic_tests;
+#[cfg(test)]
 #[path = "diagnostic_tests.rs"]
 mod diagnostic_tests;
 #[cfg(test)]
@@ -60,6 +63,22 @@ struct WireRequest {
     names: HashMap<String, String>,
 }
 
+/// The same upstream value feeds accounting and sanitized cache diagnostics.
+#[derive(Clone)]
+struct WireTap {
+    usage: Option<crate::usage::capture::Capture>,
+    diagnostics: crate::cache::DiagnosticObserver,
+}
+
+impl WireTap {
+    fn wire(&self, value: &Value) {
+        self.diagnostics.observe(value);
+        if let Some(capture) = &self.usage {
+            capture.wire(value);
+        }
+    }
+}
+
 // --------------------------------------------------------------------- tracker
 
 /// Records the request in stats when finished (or dropped mid-stream).
@@ -73,6 +92,7 @@ pub struct Tracker {
     acct: Option<Arc<Account>>,
     /// Stream progress must outlive the suspended generator when its body is dropped.
     stream_usage: Usage,
+    cache_diagnostics: crate::cache::DiagnosticObserver,
     stream_error: Option<(u16, String)>,
     stream_finished: bool,
     load: Option<crate::accounts::RequestLoad>,
@@ -105,6 +125,7 @@ impl Tracker {
             headers_ms: None,
             acct: None,
             stream_usage: Usage::default(),
+            cache_diagnostics: crate::cache::DiagnosticObserver::default(),
             stream_error: None,
             stream_finished: false,
             load: None,
@@ -128,6 +149,7 @@ impl Tracker {
                 routing_warning: None,
                 routing_attempts: Vec::new(),
                 cache_policy: None,
+                cache_diagnostics: None,
                 control_downgrades: Vec::new(),
                 status: 0,
                 latency_ms: 0,
@@ -166,6 +188,7 @@ impl Tracker {
         self.account_attempt(acct);
     }
     fn account_attempt(&mut self, acct: &Arc<Account>) {
+        self.cache_diagnostics.reset();
         self.load = Some(crate::accounts::RequestLoad::new(acct));
         self.log.attempts += 1;
         self.log.provider = acct.provider.as_str().to_string();
@@ -307,10 +330,11 @@ impl Tracker {
     pub(crate) fn usage_tap(&self) -> Option<crate::usage::capture::Capture> {
         self.analytics.as_ref().and_then(|a| a.tap())
     }
+    fn wire_tap(&self) -> WireTap {
+        WireTap { usage: self.usage_tap(), diagnostics: self.cache_diagnostics.clone() }
+    }
     pub(crate) fn observe_wire(&self, value: &Value) {
-        if let Some(c) = self.usage_tap() {
-            c.wire(value);
-        }
+        self.wire_tap().wire(value);
     }
     pub(crate) fn diagnostic_failure(&self, failure: crate::diagnostics::Failure) {
         if let Some(c) = self.usage_tap() {
@@ -381,6 +405,7 @@ impl Tracker {
             return;
         }
         self.done = true;
+        self.log.cache_diagnostics = self.cache_diagnostics.snapshot();
         if let Some(c) = self.usage_tap() {
             c.metadata("request_latency_ms", self.started.elapsed().as_millis() as u64);
             if let Some(ttft) = self.log.ttft_ms {
@@ -1570,14 +1595,14 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                         status, "upstream failed before its first token; trying another account");
                     // What it reported before failing still counts for this attempt.
-                    let tap = tracker.usage_tap();
+                    let tap = tracker.wire_tap();
                     let mut dec = SseDecoder::with_limit(cfg.stream_limits.for_model(&upstream_model));
                     let mut events: Vec<_> = held.iter().flat_map(|chunk| dec.push(chunk)).collect();
                     events.extend(dec.finish());
                     for sse in &events {
-                        observe_sse(&acct, &model, tap.as_ref(), sse);
+                        observe_sse(&acct, &model, &tap, sse);
                     }
-                    if let Some(c) = &tap {
+                    if let Some(c) = &tap.usage {
                         c.headers(&HeaderMap::new(), status);
                     }
                     if status == 429 && quota_exhausted(&acct, &model, status, &message) {
@@ -1684,7 +1709,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 names,
                 acct.clone(),
                 model.clone(),
-                tracker.usage_tap(),
+                tracker.wire_tap(),
                 cfg.stream_limits.for_model(&upstream_model),
             )
         } else {
@@ -1694,7 +1719,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 names,
                 acct.clone(),
                 model.clone(),
-                tracker.usage_tap(),
+                tracker.wire_tap(),
                 cfg.stream_limits.for_model(&upstream_model),
             )
         };
@@ -1876,7 +1901,7 @@ fn full_events(
     names: HashMap<String, String>,
     acct: Arc<Account>,
     model: String,
-    usage_tap: Option<crate::usage::capture::Capture>,
+    usage_tap: WireTap,
     event_limit: usize,
 ) -> EventStream {
     let rename = renamer(names);
@@ -1884,7 +1909,7 @@ fn full_events(
         let text = match resp.text().await {
             Ok(text) => text,
             Err(e) => {
-                if let Some(c) = &usage_tap { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
+                if let Some(c) = &usage_tap.usage { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
                 yield Event::Error { status: 502, message: format!("upstream response read failed: {e}") };
                 return;
             }
@@ -1892,7 +1917,7 @@ fn full_events(
         let evs = match serde_json::from_str::<Value>(&text) {
             Ok(v) => {
                 observe_quota_value(&acct, &model, &v);
-                if let Some(c) = &usage_tap { c.wire(&v); }
+                usage_tap.wire(&v);
                 checked_full_events(native, &v)
             }
             // Mislabelled stream: decode it as SSE after all.
@@ -1901,7 +1926,7 @@ fn full_events(
                 let mut parser = formats::parser(native);
                 let mut out = Vec::new();
                 for sse in dec.push(text.as_bytes()).into_iter().chain(dec.finish()) {
-                    let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                    let parsed = observe_sse(&acct, &model, &usage_tap, &sse);
                     parser.feed_value(&sse, parsed.as_ref(), &mut out);
                 }
                 if dec.failed() { out.push(Event::Error { status:502, message: crate::sse::LIMIT_ERROR.into() }); }
@@ -1931,7 +1956,7 @@ fn sse_events(
     names: HashMap<String, String>,
     acct: Arc<Account>,
     model: String,
-    usage_tap: Option<crate::usage::capture::Capture>,
+    usage_tap: WireTap,
     event_limit: usize,
 ) -> EventStream {
     let rename = renamer(names);
@@ -1944,20 +1969,20 @@ fn sse_events(
             match body.next().await {
                 Some(Ok(chunk)) => {
                     for sse in dec.push(&chunk) {
-                        let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                        let parsed = observe_sse(&acct, &model, &usage_tap, &sse);
                         parser.feed_value(&sse, parsed.as_ref(), &mut out);
                     }
                 }
                 Some(Err(e)) => {
                     if finished { return; }
-                    if let Some(c) = &usage_tap { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
+                    if let Some(c) = &usage_tap.usage { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
                     out.push(Event::Error { status: 502, message: format!("upstream stream error: {e}") });
                     for ev in out.drain(..) { yield rename(ev); }
                     return;
                 }
                 None => {
                     for sse in dec.finish() {
-                        let parsed = observe_sse(&acct, &model, usage_tap.as_ref(), &sse);
+                        let parsed = observe_sse(&acct, &model, &usage_tap, &sse);
                         parser.feed_value(&sse, parsed.as_ref(), &mut out);
                     }
                     if dec.failed() {
@@ -1980,17 +2005,10 @@ fn sse_events(
 }
 
 /// Quota, usage and the stream parser all read the event's JSON: parse it once, here.
-fn observe_sse(
-    acct: &Account,
-    model: &str,
-    usage_tap: Option<&crate::usage::capture::Capture>,
-    sse: &crate::sse::SseEvent,
-) -> Option<Value> {
+fn observe_sse(acct: &Account, model: &str, usage_tap: &WireTap, sse: &crate::sse::SseEvent) -> Option<Value> {
     let v = serde_json::from_str::<Value>(&sse.data).ok()?;
     observe_quota_value(acct, model, &v);
-    if let Some(c) = usage_tap {
-        c.wire(&v);
-    }
+    usage_tap.wire(&v);
     Some(v)
 }
 

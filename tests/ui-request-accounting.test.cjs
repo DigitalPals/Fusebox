@@ -174,3 +174,63 @@ test('pinned session cards show unknown usage and partial cached totals', () => 
   // Only the explicitly reported complete zero renders as zero cached tokens.
   assert.equal((html.match(/>0<\/span> cached/g) || []).length, 1);
 });
+
+test('provider cache misses show a reason and counts separately from Fusebox controls on desktop and mobile', () => {
+  const d = dashboard();
+  const r = d.record(200, 'complete', 10);
+  r.cache_policy = { requested: 'automatic', applied: 'automatic', key_scope: 'session' };
+  r.cache_diagnostics = { type: 'cache_miss', reason: 'input_changed', comparison_reusable_tokens: 1024, cache_missed_tokens: 0 };
+  for (const render of ['reqItemHTML', 'reqMobileHTML']) {
+    const html = d.run(`${render}(S.requests[0])`);
+    assert.match(html, /Provider-reported result.*Cache miss.*Input changed/);
+    assert.match(html, /Comparison reusable tokens<\/span>: 1024.*Cache missed tokens<\/span>: 0/);
+    assert.match(html, /Fusebox policy.*Requested.*Automatic.*Applied.*Automatic/);
+    assert.doesNotMatch(html, /Cache hit/);
+  }
+});
+
+test('missing diagnostics never present policy controls as confirmed cache reuse', () => {
+  const d = dashboard();
+  const r = d.record(200, 'complete', 10);
+  r.cache_policy = { requested: 'automatic', applied: 'automatic', key_scope: 'session' };
+  for (const render of ['reqItemHTML', 'reqMobileHTML']) {
+    const html = d.run(`${render}(S.requests[0])`);
+    assert.match(html, /No provider cache diagnostics reported\./);
+    assert.match(html, /Requested and applied controls do not confirm cache reuse\./);
+    assert.doesNotMatch(html, /Cache hit|Cache miss/);
+  }
+});
+
+test('provider-reported hit and unavailable outcomes render without requiring policy metadata', () => {
+  for (const [type, label] of [['cache_hit', 'Cache hit'], ['comparison_response_not_found', 'Comparison response not found'], ['unavailable', 'Unavailable']]) {
+    const d = dashboard();
+    d.record(200, 'complete', 10).cache_diagnostics = { type };
+    for (const render of ['reqItemHTML', 'reqMobileHTML']) {
+      const html = d.run(`${render}(S.requests[0])`);
+      assert.ok(html.includes(label));
+      assert.match(html, /Provider-reported result/);
+      assert.doesNotMatch(html, /Fusebox policy|Requested.*Applied/);
+    }
+  }
+});
+
+test('request cache details reject unexpected provider strings and malformed token counts', () => {
+  const d = dashboard();
+  const r = d.record(200, 'complete', 10);
+  r.cache_diagnostics = { type: 'cache_miss', reason: '<script>private-prompt</script>', comparison_reusable_tokens: -1, cache_missed_tokens: 'secret-count', comparison_response_id: 'resp-private' };
+  let html = d.run('reqItemHTML(S.requests[0])');
+  assert.match(html, /Unknown cache miss reason/);
+  assert.doesNotMatch(html, /script|private-prompt|secret-count|resp-private|Comparison reusable tokens|Cache missed tokens/);
+  r.cache_diagnostics = { type: '<script>private-outcome</script>', cache_missed_tokens: 12 };
+  html = d.run('reqMobileHTML(S.requests[0])');
+  assert.match(html, /Unavailable/);
+  assert.doesNotMatch(html, /script|private-outcome|Cache missed tokens/);
+  for (const type of ['__proto__', 'constructor', 'toString']) {
+    r.cache_diagnostics = { type };
+    assert.match(d.run('reqItemHTML(S.requests[0])'), /Unavailable/);
+  }
+  for (const invalid of [1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    r.cache_diagnostics = { type: 'cache_miss', comparison_reusable_tokens: invalid, cache_missed_tokens: invalid };
+    assert.doesNotMatch(d.run('reqItemHTML(S.requests[0])'), /Comparison reusable tokens|Cache missed tokens/);
+  }
+});

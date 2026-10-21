@@ -333,6 +333,15 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     conn.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     ensure!(version == VERSION, "the usage database is at schema {version}; downgrade starts from {VERSION}");
+    let lifetime_rows: i64 = conn.query_row(
+        "SELECT count(*) FROM usage_observations WHERE write_30m IS NOT NULL OR write_12h IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        lifetime_rows == 0,
+        "cannot downgrade: {lifetime_rows} observations contain OpenAI cache lifetimes that older releases cannot preserve; back up the database and use a release supporting usage schema {VERSION}"
+    );
     // Decompress in batches before the single restructuring transaction.
     let mut decompressed = 0_usize;
     loop {
@@ -374,6 +383,10 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     rates.retain(|r| {
         r.get("above_threshold_write_5m_nanos_per_token").is_none()
             && r.get("above_threshold_write_1h_nanos_per_token").is_none()
+            && r.get("cache_write_30m_nanos_per_token").is_none()
+            && r.get("cache_write_12h_nanos_per_token").is_none()
+            && r.get("above_threshold_write_30m_nanos_per_token").is_none()
+            && r.get("above_threshold_write_12h_nanos_per_token").is_none()
     });
     let omitted_rates = before_rates - rates.len();
     for rate in rates {
@@ -397,6 +410,10 @@ pub fn downgrade(path: &Path) -> Result<Value> {
          DROP INDEX usage_entries_imported;
          DELETE FROM usage_meta WHERE key IN ('database_id','active_dictionary','compact_cursor');
          ALTER TABLE usage_observations DROP COLUMN pricing_partial;
+         ALTER TABLE usage_observations DROP COLUMN write_30m;
+         ALTER TABLE usage_observations DROP COLUMN write_12h;
+         ALTER TABLE usage_entries DROP COLUMN write_30m;
+         ALTER TABLE usage_entries DROP COLUMN write_12h;
          CREATE TABLE usage_source_entries AS SELECT {LEGACY_ENTRY_COLUMNS} FROM usage_observations WHERE 0;
          CREATE UNIQUE INDEX usage_source_entries_key ON usage_source_entries(source,canonical_key);
          CREATE INDEX usage_source_entries_event_time ON usage_source_entries(event_at_ms);
@@ -405,7 +422,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
          CREATE INDEX usage_filters ON usage_observations(provider,model,account_id,client_id,event_at_ms);
          CREATE INDEX usage_entries_filters ON usage_entries(provider,model,account_id,client_id,event_at_ms);
          INSERT INTO usage_source_entries SELECT {LEGACY_ENTRY_COLUMNS} FROM (
-           SELECT o.*,row_number() OVER (PARTITION BY o.source,o.canonical_key ORDER BY {WINNER_ORDER}) AS winner
+           SELECT o.*,row_number() OVER (PARTITION BY o.source,o.canonical_key ORDER BY {LEGACY_WINNER_ORDER}) AS winner
            FROM usage_observations o WHERE NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=o.source
              AND s.source_event_id=o.source_event_id AND (s.origin_id='' OR s.origin_id=o.origin_id))
          ) WHERE winner=1;"

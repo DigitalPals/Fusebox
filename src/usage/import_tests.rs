@@ -194,7 +194,7 @@ fn legacy_cache_write_null_is_rejected_but_absence_defaults_zero() {
 }
 
 #[test]
-fn legacy_resume_counts_only_last_response_and_prices_its_context() {
+fn legacy_resume_counts_only_last_response_and_keeps_unknown_write_lifetime_unpriced() {
     let mut state = Context::default();
     parse_record("codex", &meta("openai"), &mut state).unwrap();
     parse_record("codex", &context(), &mut state).unwrap();
@@ -204,7 +204,8 @@ fn legacy_resume_counts_only_last_response_and_prices_its_context() {
     assert_eq!(o.tokens, codex_tokens(&usage()));
     assert_eq!(o.numeric_metadata["per_request_usage"], 1);
     let snapshot = super::super::pricing::Catalogue::load(None).unwrap().price(&o);
-    assert_eq!(snapshot.cost_nanos, Some(2_910_000));
+    assert_eq!(snapshot.cost_nanos, None);
+    assert_eq!(snapshot.basis, "unknown_cache_write_ttl");
     assert!(snapshot.partial, "legacy evidence remains an estimate");
     assert!(parse_record("codex", &row, &mut state).unwrap().is_none());
     // A distinct response with identical counts has a larger cumulative total.

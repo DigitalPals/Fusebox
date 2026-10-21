@@ -201,6 +201,8 @@ fn finalized(mut o: Observation, status: Option<u16>, fallback: Option<&Usage>, 
         o.tokens.output = (u.output > 0).then_some(u.output);
         o.tokens.cache_read = (u.cache_read > 0).then_some(u.cache_read);
         o.tokens.cache_write = (u.cache_write > 0).then_some(u.cache_write);
+        o.tokens.write_30m = u.write_30m;
+        o.tokens.write_12h = u.write_12h;
         o.tokens.reasoning = (u.reasoning > 0).then_some(u.reasoning);
         o.completeness = "partial".into();
     }
@@ -274,6 +276,20 @@ pub fn observe(o: &mut Observation, v: &Value) {
             (&["/cache_creation/ephemeral_1h_input_tokens"][..], "1h"),
             (
                 &[
+                    "/input_tokens_details/cache_write_tokens_details/ttl_30m_tokens",
+                    "/prompt_tokens_details/cache_write_tokens_details/ttl_30m_tokens",
+                ][..],
+                "30m",
+            ),
+            (
+                &[
+                    "/input_tokens_details/cache_write_tokens_details/ttl_12h_tokens",
+                    "/prompt_tokens_details/cache_write_tokens_details/ttl_12h_tokens",
+                ][..],
+                "12h",
+            ),
+            (
+                &[
                     "/output_tokens_details/reasoning_tokens",
                     "/output_tokens_details/thinking_tokens",
                     "/completion_tokens_details/reasoning_tokens",
@@ -296,6 +312,8 @@ pub fn observe(o: &mut Observation, v: &Value) {
                     }
                     "5m" => o.tokens.write_5m = None,
                     "1h" => o.tokens.write_1h = None,
+                    "30m" => o.tokens.write_30m = None,
+                    "12h" => o.tokens.write_12h = None,
                     _ => o.tokens.reasoning = None,
                 }
             }
@@ -348,14 +366,40 @@ pub fn observe(o: &mut Observation, v: &Value) {
             };
             t.cache_read = number(&d["cached_tokens"]);
             let write = d
-                .get("cache_creation_tokens")
-                .or_else(|| d.get("cache_write_tokens"))
+                .get("cache_write_tokens")
+                .or_else(|| d.get("cache_creation_tokens"))
                 .or_else(|| u.get("cache_creation_input_tokens"));
             // OpenAI omits writes when none were reported (including older
             // models). An explicitly null/invalid value remains unknown, as do
             // omitted categories from an arbitrary compatible provider.
-            t.cache_write =
-                write.map(number).unwrap_or_else(|| (o.provider == "openai").then_some(0).filter(|_| input.is_some()));
+            if let (Some(canonical), Some(alias)) = (d.get("cache_write_tokens"), d.get("cache_creation_tokens")) {
+                invalid |= number(canonical) != number(alias);
+            }
+            let lifetime_details = d.get("cache_write_tokens_details");
+            t.cache_write = write.map(number).unwrap_or_else(|| {
+                (o.provider == "openai" && lifetime_details.is_none()).then_some(0).filter(|_| input.is_some())
+            });
+            // Lifetime metadata is evidence of writes, not evidence that their
+            // missing aggregate is zero. Preserve the subsets, with unknown input.
+            if write.is_none() && lifetime_details.is_some() && input.is_some() {
+                o.tokens.cache_write = None;
+            }
+            t.write_30m = number(&d["cache_write_tokens_details"]["ttl_30m_tokens"]);
+            t.write_12h = number(&d["cache_write_tokens_details"]["ttl_12h_tokens"]);
+            // A supplied breakdown replaces the previous breakdown atomically;
+            // an omitted bucket is unknown even when the total is unchanged.
+            if lifetime_details.is_some() {
+                o.tokens.write_30m = None;
+                o.tokens.write_12h = None;
+            }
+            if lifetime_details.is_some_and(|v| !v.is_object()) {
+                invalid = true;
+            }
+            // A new total cannot inherit lifetime counts from an older snapshot.
+            if t.cache_write.is_some() && t.cache_write != o.tokens.cache_write {
+                o.tokens.write_30m = None;
+                o.tokens.write_12h = None;
+            }
             t.input = input.and_then(|n| n.checked_sub(t.cache_read?).and_then(|n| n.checked_sub(t.cache_write?)));
             if input.is_some() && t.input.is_none() {
                 o.tokens.input = None;
@@ -422,18 +466,28 @@ pub fn observe(o: &mut Observation, v: &Value) {
     assign(&mut o.tokens.cache_write, t.cache_write);
     assign(&mut o.tokens.write_5m, t.write_5m);
     assign(&mut o.tokens.write_1h, t.write_1h);
+    assign(&mut o.tokens.write_30m, t.write_30m);
+    assign(&mut o.tokens.write_12h, t.write_12h);
     assign(&mut o.tokens.reasoning, t.reasoning);
     if o.tokens.reasoning.zip(o.tokens.output).is_some_and(|(r, out)| r > out) {
         o.tokens.reasoning = None;
         invalid = true;
     }
-    if o.tokens
-        .cache_write
-        .is_some_and(|w| o.tokens.write_5m.unwrap_or(0).saturating_add(o.tokens.write_1h.unwrap_or(0)) > w)
-    {
+    if o.tokens.cache_write.is_some_and(|w| {
+        [o.tokens.write_5m, o.tokens.write_1h, o.tokens.write_30m, o.tokens.write_12h]
+            .into_iter()
+            .flatten()
+            .fold(0_u64, u64::saturating_add)
+            > w
+    }) {
         o.tokens.write_5m = None;
         o.tokens.write_1h = None;
+        o.tokens.write_30m = None;
+        o.tokens.write_12h = None;
         invalid = true;
+    }
+    if let (Some(total), Some(short), Some(long)) = (o.tokens.cache_write, o.tokens.write_30m, o.tokens.write_12h) {
+        invalid |= short.checked_add(long) != Some(total);
     }
     o.completeness = if !invalid && o.tokens.total().is_some() && o.tokens.validate().is_ok() {
         "complete"
@@ -447,6 +501,8 @@ pub fn observe(o: &mut Observation, v: &Value) {
             o.tokens.reasoning,
             o.tokens.write_5m,
             o.tokens.write_1h,
+            o.tokens.write_30m,
+            o.tokens.write_12h,
         ]
         .iter()
         .any(Option::is_some)

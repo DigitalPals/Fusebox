@@ -2712,12 +2712,28 @@ function errLineText(r) {
 
 function cachePolicyHTML(r) {
   const p = r.cache_policy;
-  if (!p) return '';
+  const d = r.cache_diagnostics;
+  if (!p && !d) return '';
   const labels = { provider_default: 'Provider default', prewarm: 'Prewarm', automatic: 'Automatic', explicit: 'Explicit boundaries',
     explicit_no_breakpoints: 'Explicit without boundaries', none: 'No cache controls', rejected: 'Rejected',
     caller: 'Caller key', session: 'Session', client: 'Client', workspace: 'Workspace',
     session_fallback: 'Session fallback', not_sent: 'No cache key sent' };
-  return `<div class="why-text"><span class="label">Prompt cache</span><p><span>Requested</span>: ${esc(labels[p.requested] || p.requested)} · <span>Applied</span>: ${esc(labels[p.applied] || p.applied)} · ${esc(labels[p.key_scope] || p.key_scope)}</p>${p.downgrade_reason ? `<p>${esc(p.downgrade_reason)}</p>` : ''}</div>`;
+  const results = { cache_hit: 'Cache hit', cache_miss: 'Cache miss', comparison_response_not_found: 'Comparison response not found', unavailable: 'Unavailable' };
+  const reasons = { model_changed: 'Model changed', prompt_cache_key_changed: 'Prompt cache key changed',
+    service_tier_changed: 'Service tier changed', tools_changed: 'Tools changed', text_format_changed: 'Text format changed',
+    reasoning_effort_changed: 'Reasoning effort changed', verbosity_changed: 'Verbosity changed',
+    context_compacted: 'Context compacted', input_changed: 'Input changed' };
+  const counts = [];
+  if (d?.type === 'cache_miss') {
+    for (const [key, label] of [['comparison_reusable_tokens', 'Comparison reusable tokens'], ['cache_missed_tokens', 'Cache missed tokens']]) {
+      if (Number.isSafeInteger(d[key]) && d[key] >= 0) counts.push(`<span>${label}</span>: ${esc(fmt(d[key]))}`);
+    }
+  }
+  const reported = d
+    ? `<p><span>Provider-reported result</span>: <span>${Object.hasOwn(results, d.type) ? results[d.type] : 'Unavailable'}</span>${d.type === 'cache_miss' ? ` · <span>${Object.hasOwn(reasons, d.reason) ? reasons[d.reason] : 'Unknown cache miss reason'}</span>` : ''}</p>${counts.length ? `<p>${counts.join(' · ')}</p>` : ''}`
+    : '<p>No provider cache diagnostics reported.</p>';
+  const policy = p ? `<p><span>Fusebox policy</span> · <span>Requested</span>: ${esc(labels[p.requested] || p.requested)} · <span>Applied</span>: ${esc(labels[p.applied] || p.applied)} · ${esc(labels[p.key_scope] || p.key_scope)}</p>${p.downgrade_reason ? `<p>${esc(p.downgrade_reason)}</p>` : ''}` : '';
+  return `<div class="why-text"><span class="label">Prompt cache</span>${reported}${policy}${!d && p ? '<p>Requested and applied controls do not confirm cache reuse.</p>' : ''}</div>`;
 }
 
 function reqItemHTML(r) {

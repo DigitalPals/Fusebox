@@ -3,22 +3,32 @@
 use super::*;
 use std::collections::BTreeMap;
 
-const METRICS: [&str; 8] =
-    ["estimated_cost_nanos", "input", "cache_read", "cache_write", "write_5m", "write_1h", "output", "reasoning"];
+const METRICS: [&str; 10] = [
+    "estimated_cost_nanos",
+    "input",
+    "cache_read",
+    "cache_write",
+    "write_5m",
+    "write_1h",
+    "output",
+    "reasoning",
+    "write_30m",
+    "write_12h",
+];
 const DIMS: [&str; 4] = ["provider", "model", "account", "client"];
 
 #[derive(Default)]
 struct Metrics {
     observations: i64,
-    sums: [Option<i128>; 8],
-    overflow: [bool; 8],
-    known: [i64; 8],
+    sums: [Option<i128>; 10],
+    overflow: [bool; 10],
+    known: [i64; 10],
     partial: i64,
     missing: i64,
     pricing_partial: i64,
 }
 impl Metrics {
-    fn add(&mut self, amounts: &[Option<i64>; 8], completeness: &str, pricing_partial: bool) {
+    fn add(&mut self, amounts: &[Option<i64>; 10], completeness: &str, pricing_partial: bool) {
         self.observations += 1;
         self.partial += i64::from(completeness == "partial");
         self.missing += i64::from(completeness == "missing");
@@ -34,12 +44,12 @@ impl Metrics {
         }
     }
     /// Adds a rollup bucket: the same result as adding each of its entries.
-    fn merge(&mut self, counts: [i64; 4], known: &[i64; 8], sums: &[i64; 8]) {
+    fn merge(&mut self, counts: [i64; 4], known: &[i64; 10], sums: &[i64; 10]) {
         self.observations += counts[0];
         self.partial += counts[1];
         self.missing += counts[2];
         self.pricing_partial += counts[3];
-        for i in 0..8 {
+        for i in 0..METRICS.len() {
             if known[i] > 0 {
                 self.known[i] += known[i];
                 if !self.overflow[i] {
@@ -144,7 +154,7 @@ impl Summary {
         let mut statement = conn.prepare_cached(&format!(
             "SELECT CASE WHEN o.source='proxy' THEN 0 ELSE EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy') END,
              o.source<>'proxy',COALESCE(o.response_id,'')='',o.event_at_ms,o.provider,o.model,o.account_id,{client},
-             o.cost_nanos,o.input,o.cache_read,o.cache_write,o.write_5m,o.write_1h,o.output,o.reasoning,o.completeness,o.pricing_partial
+             o.cost_nanos,o.input,o.cache_read,o.cache_write,o.write_5m,o.write_1h,o.output,o.reasoning,o.write_30m,o.write_12h,o.completeness,o.pricing_partial
              FROM {table} WHERE {where_sql}"
         ))?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
@@ -162,12 +172,12 @@ impl Summary {
                 .with_timezone(&self.tz)
                 .date_naive();
             let dims: [Option<String>; 4] = [row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?];
-            let mut amounts = [None; 8];
+            let mut amounts = [None; 10];
             for (i, amount) in amounts.iter_mut().enumerate() {
                 *amount = row.get(8 + i)?;
             }
-            let completeness = row.get_ref(16)?.as_str()?;
-            let pricing_partial = row.get::<_, Option<i64>>(17)? == Some(1);
+            let completeness = row.get_ref(18)?.as_str()?;
+            let pricing_partial = row.get::<_, Option<i64>>(19)? == Some(1);
             self.add(date, &dims, |m| m.add(&amounts, completeness, pricing_partial));
         }
         Ok(())
@@ -179,7 +189,7 @@ impl Summary {
     fn rollups(&mut self, conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<bool> {
         let mut statement = conn.prepare_cached(&format!(
             "SELECT bucket,provider,model,account_id,client,observations,partial,missing,pricing_partial,
-               k0,k1,k2,k3,k4,k5,k6,k7,s0,s1,s2,s3,s4,s5,s6,s7 FROM usage_rollup WHERE {where_sql}"
+               k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9 FROM usage_rollup WHERE {where_sql}"
         ))?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         while let Some(row) = rows.next()? {
@@ -199,11 +209,11 @@ impl Summary {
             }
             let dims: [Option<String>; 4] = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
             let counts: [i64; 4] = [row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?];
-            let mut known = [0_i64; 8];
-            let mut sums = [0_i64; 8];
-            for i in 0..8 {
+            let mut known = [0_i64; 10];
+            let mut sums = [0_i64; 10];
+            for i in 0..METRICS.len() {
                 known[i] = row.get(9 + i)?;
-                match row.get_ref(17 + i)? {
+                match row.get_ref(19 + i)? {
                     rusqlite::types::ValueRef::Integer(n) => sums[i] = n,
                     _ => return Ok(false),
                 }

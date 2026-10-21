@@ -460,3 +460,16 @@ test('the page is drawn once; a read or an account change repaints only the sect
   d.run('usageRender()');
   assert.deepEqual(writes, ['render'], 'without the page, it is drawn whole');
 });
+
+
+test('cache write lifetimes are independent subsets and unknown history stays explicit', () => {
+  const d = dashboard();
+  assert.equal(d.run('usageCacheLifetimes({ cache_write: 350, write_30m: 100, write_12h: 200 })'), 'Cache write lifetimes: 100 (30 min), 200 (12 hr), 50 (lifetime unknown)');
+  assert.equal(d.run('usageCacheLifetimes({ cache_write: 300 })'), 'Cache write lifetimes: 300 (lifetime unknown)');
+  assert.equal(d.run('usageCacheLifetimes({ write_12h: 200 })'), 'Cache write lifetimes: 200 (12 hr), total unknown');
+  assert.equal(d.run('usageTokenTotal({ input: 10, cache_read: 20, cache_write: 300, write_30m: 100, write_12h: 200, output: 40 })'), 370);
+  d.seed({ summary: { combined: { totals: { tokens: { cache_write: 300, write_30m: 100, write_12h: 200 } } } } });
+  const html = d.run('usageCostHTML()');
+  assert.match(html, /Cache write lifetimes: 100 \(30 min\), 200 \(12 hr\)/);
+  assert.doesNotMatch(html, /5 min|1 hr/);
+});

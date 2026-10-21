@@ -222,6 +222,15 @@ function usageStaleLine() {
     return `${usageSensitive(c.label || c.id)} has not synced ${since ? `since ${ux(since)}` : 'yet'}, so its recent ${ux(sources)} history may be missing`;
   }).join('. ');
 }
+function usageCacheLifetimes(tokens = {}) {
+  const fields = [['write_5m', '5 min'], ['write_1h', '1 hr'], ['write_30m', '30 min'], ['write_12h', '12 hr']];
+  const parts = fields.filter(([key]) => Number(tokens[key]) > 0).map(([key, label]) => `${usageCount(tokens[key])} (${label})`);
+  const known = fields.reduce((sum, [key]) => sum + Number(tokens[key] || 0), 0);
+  if (tokens.cache_write != null && Number(tokens.cache_write) > known) parts.push(`${usageCount(Number(tokens.cache_write) - known)} (lifetime unknown)`);
+  if (!parts.length) return '';
+  if (tokens.cache_write == null) parts.push('total unknown');
+  return `Cache write lifetimes: ${parts.join(', ')}`;
+}
 function usageCostHTML() {
   const u = Usage, s = u.summary, t = usageCombined().totals || {}, tokens = t.tokens || {}, phone = usagePhone();
   const days = UsageTools.dates(u.range);
@@ -231,11 +240,12 @@ function usageCostHTML() {
   const missingWrite = Number(t.missing_token_counts?.cache_write || 0);
   const stats = [[usageCount(t.observations ?? 0), 'Calls'], [usageCount(t.history_only ?? 0), 'From history only'], [UsageTools.compact(tokens.input), 'Tokens in'], [UsageTools.compact(tokens.output), 'Tokens out'], [UsageTools.compact(tokens.cache_read), 'Cache read'],
     [tokens.cache_write == null ? 'Unknown' : UsageTools.compact(tokens.cache_write), tokens.cache_write != null && missingWrite > 0 ? 'Cache write, partial' : 'Cache write']];
-  const stale = usageStaleLine();
+  const stale = usageStaleLine(), lifetimes = usageCacheLifetimes(tokens);
   return `<section class="card u-cost" aria-labelledby="usage-cost-label">
     <div class="u-cost-top"><div class="u-total"><span class="label" id="usage-cost-label">ESTIMATED COST · ${ux(word)}</span><span class="u-total-v">${t.aggregation_overflow && cost == null ? 'Out of range' : ux(UsageTools.dollars(cost ?? (t.observations ? null : 0)))}</span><span class="u-total-sub">${sub}</span></div>
     <dl class="u-stats">${stats.map(([v, l]) => `<div><dd>${ux(v)}</dd><dt>${ux(l)}</dt></div>`).join('')}</dl></div>
     ${days.length > 1 ? `<div id="usage-chart" class="u-chart">${usageChartHTML()}</div>` : ''}
+    ${lifetimes ? `<div class="u-foot"><span class="fg2">${ux(lifetimes)}</span></div>` : ''}
     <div class="u-foot"><span class="fg2">${ux(usageCoverageLine(t))}</span>${stale ? `<span class="warn">${stale}</span>` : ''}${phone ? '' : `<span class="grow"></span><span>Unknown usage and missing prices are left out, never counted as zero · catalogue ${ux(s.pricing?.version || u.status?.pricing?.version || 'unknown')}</span>`}</div>
   </section>`;
 }

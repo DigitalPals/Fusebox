@@ -16,8 +16,18 @@ use std::collections::BTreeMap;
 
 pub(super) const BUCKET_MS: i64 = 900_000;
 /// Entry columns in the order of the dashboard's metrics.
-pub(super) const AMOUNTS: [&str; 8] =
-    ["cost_nanos", "input", "cache_read", "cache_write", "write_5m", "write_1h", "output", "reasoning"];
+pub(super) const AMOUNTS: [&str; 10] = [
+    "cost_nanos",
+    "input",
+    "cache_read",
+    "cache_write",
+    "write_5m",
+    "write_1h",
+    "output",
+    "reasoning",
+    "write_30m",
+    "write_12h",
+];
 
 fn client(alias: &str) -> String {
     format!("COALESCE({alias}.client_id,CASE WHEN {alias}.origin_id LIKE 'collector:%' THEN {alias}.origin_id END)")
@@ -32,11 +42,11 @@ fn facet_dims(alias: &str) -> String {
 }
 
 fn known_columns() -> String {
-    (0..8).map(|i| format!("k{i}")).collect::<Vec<_>>().join(",")
+    (0..AMOUNTS.len()).map(|i| format!("k{i}")).collect::<Vec<_>>().join(",")
 }
 
 fn sum_columns() -> String {
-    (0..8).map(|i| format!("s{i}")).collect::<Vec<_>>().join(",")
+    (0..AMOUNTS.len()).map(|i| format!("s{i}")).collect::<Vec<_>>().join(",")
 }
 
 fn add_entry(alias: &str) -> String {
@@ -45,7 +55,9 @@ fn add_entry(alias: &str) -> String {
     let updates: Vec<_> = ["observations", "partial", "missing", "pricing_partial"]
         .into_iter()
         .map(|c| format!("{c}={c}+excluded.{c}"))
-        .chain((0..8).flat_map(|i| [format!("k{i}=k{i}+excluded.k{i}"), format!("s{i}=s{i}+excluded.s{i}")]))
+        .chain(
+            (0..AMOUNTS.len()).flat_map(|i| [format!("k{i}=k{i}+excluded.k{i}"), format!("s{i}=s{i}+excluded.s{i}")]),
+        )
         .collect();
     format!(
         "INSERT INTO usage_rollup(bucket,dims,provider,model,account_id,client,observations,partial,missing,pricing_partial,{},{})
@@ -113,7 +125,7 @@ pub(super) const TRIGGERS: [&str; 7] = [
 /// Creates both rollups and their triggers, then fills them from the existing journal.
 pub(super) fn create(tx: &Connection) -> Result<()> {
     let numbers: Vec<_> =
-        (0..8).flat_map(|i| [format!("k{i} INTEGER NOT NULL"), format!("s{i} INTEGER NOT NULL")]).collect();
+        (0..AMOUNTS.len()).flat_map(|i| [format!("k{i} INTEGER NOT NULL"), format!("s{i} INTEGER NOT NULL")]).collect();
     tx.execute_batch(&format!(
         "CREATE TABLE usage_rollup(bucket INTEGER NOT NULL,dims TEXT NOT NULL,provider TEXT,model TEXT,account_id TEXT,client TEXT,
            observations INTEGER NOT NULL,partial INTEGER NOT NULL,missing INTEGER NOT NULL,pricing_partial INTEGER NOT NULL,{},
@@ -148,8 +160,8 @@ struct Sums {
     account: Option<String>,
     client: Option<String>,
     counts: [i64; 4],
-    known: [i64; 8],
-    sums: [i128; 8],
+    known: [i64; 10],
+    sums: [i128; 10],
 }
 
 pub(super) fn backfill(tx: &Connection) -> Result<()> {
@@ -177,7 +189,7 @@ pub(super) fn backfill(tx: &Connection) -> Result<()> {
             for i in 0..3 {
                 group.counts[i + 1] += i64::from(row.get::<_, bool>(6 + i)?);
             }
-            for i in 0..8 {
+            for i in 0..AMOUNTS.len() {
                 if let Some(amount) = row.get::<_, Option<i64>>(9 + i)? {
                     group.known[i] += 1;
                     group.sums[i] += i128::from(amount);
@@ -190,7 +202,7 @@ pub(super) fn backfill(tx: &Connection) -> Result<()> {
          VALUES({})",
         known_columns(),
         sum_columns(),
-        (1..=26).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+        (1..=10 + 2 * AMOUNTS.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
     ))?;
     for ((bucket, dims), g) in groups {
         let mut values: Vec<SqlValue> =

@@ -125,7 +125,9 @@ async fn journal_keeps_sanitized_request_details_after_ring_eviction() {
     first.log.session_id = Some(secret.into());
     first.log.model = secret.into();
     first.first_token();
-    first.observe_wire(&json!({"response":{"id":secret,"usage":{"output_tokens":7}}}));
+    first.observe_wire(&json!({"response":{"id":secret,"usage":{"output_tokens":7},
+        "prompt_cache_diagnostics":{"type":"cache_miss","reason":secret,
+            "comparison_reusable_tokens":120,"cache_missed_tokens":16,"comparison_response_id":secret}}}));
     first.diagnostic_failure(crate::diagnostics::Failure {
         kind: "upstream_body_read",
         causes: vec!["body_decode", "incomplete_message"],
@@ -156,6 +158,10 @@ async fn journal_keeps_sanitized_request_details_after_ring_eviction() {
         "output_tokens=7",
         "reported_input_tokens=None",
         "reported_output_tokens=Some(7)",
+        "provider_cache_result=\"cache_miss\"",
+        "provider_cache_miss_reason=Some(\"unknown\")",
+        "provider_cache_comparison_reusable_tokens=Some(120)",
+        "provider_cache_missed_tokens=Some(16)",
     ] {
         assert!(failed.contains(field), "missing {field}: {failed}");
     }

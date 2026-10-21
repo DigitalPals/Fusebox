@@ -140,9 +140,12 @@ prefix content, model, account, minimum size and provider lifetime still matter.
 A shared routing key does not make different prompts equivalent or guarantee a hit.
 
 Fusebox's `prompt-cache` settings are described in the [README](../README.md).
-Session scope remains the default. For independent sessions using the same large
-prefix, opt into `client` or `workspace` scope and use `namespace` to identify the
-prompt/tool schema version. Caller-supplied keys override derivation. Keep account
+Session scope remains the default. On models before GPT-5.6, stable keys help
+OpenAI route related requests. On GPT-5.6 and later, keys separate cache accounting;
+automatic routing does not require one. Use `client` or `workspace` scope when
+independent sessions should share that accounting group, and use `namespace` to
+identify a prompt/tool schema version. Keep existing keys stable across a model
+upgrade. Caller-supplied keys override derivation. Keep account
 affinity enabled, and verify the account in request diagnostics; separate sessions
 can still be assigned to different accounts. Shared scopes are isolated by the
 authenticated client key; unauthenticated traffic shares a client scope.
@@ -155,6 +158,34 @@ opts into Claude automatic caching after lost boundaries; `reject` helps find
 incompatible requests before provider contact. Inspect provider cached-input and
 cache-write usage alongside these diagnostics. Compare cold and warmed runs on
 the same model/account/prefix before selecting a shared scope for a workload.
+
+For GPT-5.6 and later Responses calls, implicit mode suits growing conversations.
+Append messages and preserve earlier message endings, tool definitions, ordering,
+reasoning effort, verbosity and applied service tier when reuse is intended.
+For independent calls with a fixed rubric or reference document, place an explicit
+breakpoint after the reusable prefix. Explicit-only mode leaves changing suffixes
+at the ordinary input rate instead of paying to write them. A prefix must reach
+the model's minimum cacheable length (1,024 visible tokens for GPT-5.6 and later).
+An explicit-only request without breakpoints performs no cache reads or writes.
+
+The default lifetime is `prompt_cache_options.ttl: "30m"`, at a write rate of
+1.25 times ordinary input. Consider `"12h"`, at 2.5 times ordinary input, for
+stable context reused across longer gaps. A content block's
+`prompt_cache_breakpoint.ttl` overrides the request default. Fusebox preserves
+these overrides during compatible OpenAI translation and preserves reported
+30-minute and 12-hour usage separately. Older models use
+`prompt_cache_retention` with their supported values instead. Public API support
+does not establish support on the separate ChatGPT subscription backend.
+
+On a supported Responses backend, set
+`prompt_cache_options.comparison_response_id` to a recent baseline response id to
+request provider diagnostics. Fusebox shows sanitized results in request details
+and structured logs, including a miss reason and reported comparison token counts.
+This comparison does not restore conversation history or affect cache behavior.
+Use usage counters to measure actual reuse; absent, unavailable or expired
+comparisons cannot establish a hit. See the official
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [diagnostics guide](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
 
 Before compacting, define what a successful answer must retain: the current task,
 constraints, decisions, unresolved questions, tool results needed for the next

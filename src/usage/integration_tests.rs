@@ -55,7 +55,7 @@ impl Drop for Directory {
     }
 }
 fn complete(id: String) -> Value {
-    json!({"id":id,"object":"response","status":"completed","model":"gpt-6.1-sol","service_tier":"default","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"safe answer"}]}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10},"output_tokens":40,"output_tokens_details":{"reasoning_tokens":30}}})
+    json!({"id":id,"object":"response","status":"completed","model":"gpt-6.1-sol","service_tier":"default","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"safe answer"}]}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10,"cache_write_tokens_details":{"ttl_30m_tokens":6,"ttl_12h_tokens":4}},"output_tokens":40,"output_tokens_details":{"reasoning_tokens":30}}})
 }
 async fn mock(State(count): State<Arc<AtomicUsize>>, Json(body): Json<Value>) -> axum::response::Response {
     let n = count.fetch_add(1, Ordering::SeqCst);
@@ -248,6 +248,8 @@ async fn native_websocket_and_translated_http_capture_usage() {
     let s = summary(&app).await;
     assert_eq!(s["proxy"]["attempts"], 2);
     assert_eq!(s["proxy"]["tokens"]["cache_write"], 20);
+    assert_eq!(s["proxy"]["tokens"]["write_30m"], 12);
+    assert_eq!(s["proxy"]["tokens"]["write_12h"], 8);
     assert_eq!(s["proxy"]["tokens"]["reasoning"], 60);
 }
 #[tokio::test]

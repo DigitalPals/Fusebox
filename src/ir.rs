@@ -31,6 +31,8 @@ impl Format {
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     pub system: Vec<String>,
+    /// Original OpenAI instruction roles, keyed by their system-prompt index.
+    pub system_roles: std::collections::BTreeMap<usize, Role>,
     /// Original text-block boundaries for OpenAI system messages with cache markers.
     pub system_cache_blocks: std::collections::BTreeMap<usize, Vec<CacheTextBlock>>,
     pub messages: Vec<Message>,
@@ -84,7 +86,8 @@ pub enum Part {
     Text(String),
     Image(Image),
     /// OpenAI explicit cache boundary immediately after the preceding content part.
-    CacheBreakpoint,
+    /// Keep its complete metadata, including per-boundary lifetime overrides.
+    CacheBreakpoint(Value),
     Reasoning {
         text: String,
         sig: Option<Sig>,
@@ -107,7 +110,7 @@ pub enum Part {
 #[derive(Debug, Clone)]
 pub struct CacheTextBlock {
     pub text: String,
-    pub breakpoint: bool,
+    pub breakpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +223,9 @@ pub struct Usage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// OpenAI cache writes by lifetime. Missing counts remain unknown, not zero.
+    pub write_30m: Option<u64>,
+    pub write_12h: Option<u64>,
     pub reasoning: u64,
 }
 
@@ -228,6 +234,15 @@ impl Usage {
         self.input = self.input.max(o.input);
         self.output = self.output.max(o.output);
         self.cache_read = self.cache_read.max(o.cache_read);
+        if o.cache_write > self.cache_write
+            || (o.cache_write == self.cache_write && (o.write_30m.is_some() || o.write_12h.is_some()))
+        {
+            // Lifetime counts describe one cumulative snapshot. Replace them
+            // together: mixing snapshots can make their sum exceed the total.
+            // An increased total also invalidates an omitted older breakdown.
+            self.write_30m = o.write_30m;
+            self.write_12h = o.write_12h;
+        }
         self.cache_write = self.cache_write.max(o.cache_write);
         self.reasoning = self.reasoning.max(o.reasoning);
     }

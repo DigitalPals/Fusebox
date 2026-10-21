@@ -10,13 +10,15 @@ pub mod gemini;
 pub mod responses;
 
 #[cfg(test)]
+mod cache_translation_tests;
+#[cfg(test)]
 mod efficiency_tests;
 
 use std::borrow::Cow;
 
 use serde_json::Value;
 
-use crate::ir::{Aggregate, CacheTextBlock, Event, Format, Message, Part, Request, Role};
+use crate::ir::{Aggregate, CacheTextBlock, Event, Format, Message, Part, Request, Role, Usage};
 use crate::sse::SseEvent;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -145,6 +147,11 @@ pub fn preserve_cache_hints(
                 .into(),
         ));
     }
+    if target == Format::Chat && !original["prompt_cache_options"]["comparison_response_id"].is_null() {
+        return Ok(Some(
+            "Prompt cache comparison diagnostics require the Responses API; comparison_response_id was dropped".into(),
+        ));
+    }
     Ok(None)
 }
 
@@ -240,15 +247,17 @@ fn carry_cache_hints(source: Format, target: Format, original: &Value, translate
     }
     if let Some(options) = original["prompt_cache_options"].as_object() {
         let mut compatible = serde_json::Map::new();
-        for field in ["mode", "ttl", "prewarm"] {
-            if field == "prewarm" && target == Format::Chat {
+        for field in ["mode", "ttl", "prewarm", "comparison_response_id"] {
+            if matches!(field, "prewarm" | "comparison_response_id") && target == Format::Chat {
                 continue;
             }
             if let Some(value) = options.get(field) {
                 compatible.insert(field.into(), value.clone());
             }
         }
-        translated["prompt_cache_options"] = Value::Object(compatible);
+        if !compatible.is_empty() {
+            translated["prompt_cache_options"] = Value::Object(compatible);
+        }
     }
     Ok(())
 }
@@ -275,7 +284,7 @@ fn openai_breakpoint_count(format: Format, body: &Value) -> usize {
         .sum()
 }
 
-pub(crate) fn parse_openai_system(content: &Value, req: &mut Request) {
+pub(crate) fn parse_openai_system(content: &Value, role: Role, req: &mut Request) {
     let text = text_of(content);
     if text.is_empty() {
         return;
@@ -288,12 +297,14 @@ pub(crate) fn parse_openai_system(content: &Value, req: &mut Request) {
             .filter_map(|block| {
                 Some(CacheTextBlock {
                     text: block["text"].as_str()?.to_string(),
-                    breakpoint: block["prompt_cache_breakpoint"]["mode"] == "explicit",
+                    breakpoint: (block["prompt_cache_breakpoint"]["mode"] == "explicit")
+                        .then(|| block["prompt_cache_breakpoint"].clone()),
                 })
             })
             .collect();
         req.system_cache_blocks.insert(req.system.len(), blocks);
     }
+    req.system_roles.insert(req.system.len(), role);
     req.system.push(text);
 }
 
@@ -336,8 +347,8 @@ pub(crate) fn openai_system_blocks(req: &Request, index: usize, kind: &str) -> V
                 .iter()
                 .map(|block| {
                     let mut value = json!({"type": kind, "text": block.text});
-                    if block.breakpoint {
-                        value["prompt_cache_breakpoint"] = json!({"mode": "explicit"});
+                    if let Some(metadata) = &block.breakpoint {
+                        value["prompt_cache_breakpoint"] = metadata.clone();
                     }
                     value
                 })
@@ -347,15 +358,15 @@ pub(crate) fn openai_system_blocks(req: &Request, index: usize, kind: &str) -> V
     }
 }
 
-pub(crate) fn mark_openai_breakpoint(content: &mut [Value]) {
+pub(crate) fn mark_openai_breakpoint(content: &mut [Value], metadata: &Value) {
     if let Some(last) = content.last_mut() {
-        last["prompt_cache_breakpoint"] = serde_json::json!({"mode": "explicit"});
+        last["prompt_cache_breakpoint"] = metadata.clone();
     }
 }
 
 pub(crate) fn has_openai_breakpoints(parts: &[Part]) -> bool {
     parts.iter().any(|part| match part {
-        Part::CacheBreakpoint => true,
+        Part::CacheBreakpoint(_) => true,
         Part::ToolResult { content, .. } => has_openai_breakpoints(content),
         _ => false,
     })
@@ -377,6 +388,39 @@ pub(crate) fn merge_openai_tool_calls(messages: Vec<Message>) -> Vec<Message> {
         }
     }
     out
+}
+
+/// Apply Chat's assistant tool grouping only at its destination. Other OpenAI
+/// message boundaries remain stable as a conversation grows.
+pub(crate) fn openai_chat_messages(messages: &[Message]) -> Cow<'_, [Message]> {
+    if messages.windows(2).any(|pair| {
+        pair.iter().all(|message| message.role == Role::Assistant)
+            && pair.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall { .. }))
+    }) {
+        Cow::Owned(merge_openai_tool_calls(messages.to_vec()))
+    } else {
+        Cow::Borrowed(messages)
+    }
+}
+
+/// Claude and Gemini require alternating turns; OpenAI accepts consecutive
+/// messages with the same role and uses their boundaries for cache reuse.
+pub(crate) fn alternating_messages(messages: &[Message]) -> Cow<'_, [Message]> {
+    if messages.iter().any(|message| message.parts.is_empty())
+        || messages.windows(2).any(|pair| pair[0].role == pair[1].role)
+    {
+        Cow::Owned(crate::ir::merge_adjacent(messages.to_vec()))
+    } else {
+        Cow::Borrowed(messages)
+    }
+}
+
+pub(crate) fn write_openai_cache_lifetimes(details: &mut Value, usage: &Usage) {
+    for (field, tokens) in [("ttl_30m_tokens", usage.write_30m), ("ttl_12h_tokens", usage.write_12h)] {
+        if let Some(tokens) = tokens {
+            details["cache_write_tokens_details"][field] = tokens.into();
+        }
+    }
 }
 
 pub fn parser(format: Format) -> Box<dyn StreamParser> {

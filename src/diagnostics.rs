@@ -204,6 +204,10 @@ pub fn record(
                 cache_applied = log.cache_policy.as_ref().map(|p| p.applied).unwrap_or("unknown"),
                 cache_key_scope = log.cache_policy.as_ref().map(|p| p.key_scope).unwrap_or("not_sent"),
                 cache_hint_downgrade = ?log.cache_policy.as_ref().and_then(|p| p.downgrade_reason.as_deref()),
+                provider_cache_result = log.cache_diagnostics.as_ref().map(|d| d.kind).unwrap_or("not_reported"),
+                provider_cache_miss_reason = ?log.cache_diagnostics.as_ref().and_then(|d| d.reason),
+                provider_cache_comparison_reusable_tokens = ?log.cache_diagnostics.as_ref().and_then(|d| d.comparison_reusable_tokens),
+                provider_cache_missed_tokens = ?log.cache_diagnostics.as_ref().and_then(|d| d.cache_missed_tokens),
                 "request completed");
         };
     }

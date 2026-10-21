@@ -13,6 +13,10 @@ pub struct Tokens {
     pub cache_write: Option<u64>,
     pub write_5m: Option<u64>,
     pub write_1h: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_30m: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_12h: Option<u64>,
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
 }
@@ -24,10 +28,19 @@ impl Tokens {
         self.input_total()?.checked_add(self.output?)
     }
     pub fn validate(&self) -> Result<(), String> {
-        for v in
-            [self.input, self.cache_read, self.cache_write, self.write_5m, self.write_1h, self.output, self.reasoning]
-                .into_iter()
-                .flatten()
+        for v in [
+            self.input,
+            self.cache_read,
+            self.cache_write,
+            self.write_5m,
+            self.write_1h,
+            self.write_30m,
+            self.write_12h,
+            self.output,
+            self.reasoning,
+        ]
+        .into_iter()
+        .flatten()
         {
             if v > MAX_TOKENS {
                 return Err("token bound exceeded".into());
@@ -39,7 +52,11 @@ impl Tokens {
             return Err("reasoning exceeds output".into());
         }
         if let Some(w) = self.cache_write
-            && self.write_5m.unwrap_or(0).saturating_add(self.write_1h.unwrap_or(0)) > w
+            && [self.write_5m, self.write_1h, self.write_30m, self.write_12h]
+                .into_iter()
+                .flatten()
+                .fold(0_u64, u64::saturating_add)
+                > w
         {
             return Err("cache TTL subsets exceed writes".into());
         }

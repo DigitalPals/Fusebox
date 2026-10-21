@@ -166,7 +166,7 @@ fn late_privileged_instructions_and_cache_boundaries_keep_their_positions() {
     let input = output["input"].as_array().unwrap();
     assert_eq!(
         input.iter().map(|m| m["role"].as_str().unwrap()).collect::<Vec<_>>(),
-        vec!["developer", "user", "assistant", "developer", "user"]
+        vec!["system", "user", "assistant", "developer", "user"]
     );
     assert_eq!(input[3]["content"][0]["prompt_cache_breakpoint"]["mode"], "explicit");
     assert_eq!(output["text"]["verbosity"], "low");
@@ -187,7 +187,7 @@ fn late_privileged_instructions_and_cache_boundaries_keep_their_positions() {
 #[test]
 fn responses_usage_uses_canonical_cache_write_field_without_double_counting() {
     let mut agg = Aggregate::default();
-    agg.usage = Usage { input: 70, cache_read: 20, cache_write: 10, output: 40, reasoning: 30 };
+    agg.usage = Usage { input: 70, cache_read: 20, cache_write: 10, output: 40, reasoning: 30, ..Default::default() };
     let v = formats::responses::render_full(&agg, "model", &Request::default());
     assert_eq!(v["usage"]["input_tokens_details"]["cache_write_tokens"], 10);
     // The legacy alias repeats the same count rather than adding to it.

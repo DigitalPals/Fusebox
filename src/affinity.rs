@@ -30,8 +30,6 @@ const LOAD_IDLE_SECONDS: i64 = 5 * 60;
 const ONGOING_IDLE_SECONDS: i64 = 30 * 60;
 /// Session source for a client that sent no session id: the conversation's first user message.
 pub const INFERRED_SOURCE: &str = "conversation_start";
-/// Provider prompt caches last an hour at most, so an inferred assignment is not kept longer.
-const INFERRED_IDLE_SECONDS: u64 = 60 * 60;
 
 fn digest(parts: &[&str]) -> String {
     let mut h = Sha256::new();
@@ -763,15 +761,15 @@ impl Sessions {
         pool.pick(model, exclude, cfg, pinned, only, &load)
     }
 
-    fn cutoffs(idle: u64) -> (i64, i64) {
-        let now = Utc::now().timestamp();
-        let cutoff = now.saturating_sub(idle.clamp(1, i64::MAX as u64) as i64);
-        (cutoff, cutoff.max(now - INFERRED_IDLE_SECONDS as i64))
+    fn cutoff(idle: u64) -> i64 {
+        // Account affinity has its own configured lifetime. Provider cache entries
+        // may survive for 12 or 24 hours, so an inferred identity must not impose
+        // an unrelated one-hour expiry on an otherwise reusable assignment.
+        Utc::now().timestamp().saturating_sub(idle.clamp(1, i64::MAX as u64) as i64)
     }
 
     fn expired(registry: &Registry, b: &Binding, idle: u64) -> bool {
-        let (cutoff, inferred_cutoff) = Self::cutoffs(idle);
-        b.last_seen <= if b.inferred { inferred_cutoff } else { cutoff } && !registry.active.contains_key(&b.session)
+        b.last_seen <= Self::cutoff(idle) && !registry.active.contains_key(&b.session)
     }
 
     /// The request path's sweep: at most every few seconds.
@@ -784,11 +782,9 @@ impl Sessions {
     }
 
     fn prune_locked(registry: &mut Registry, idle: u64) {
-        let (cutoff, inferred_cutoff) = Self::cutoffs(idle);
+        let cutoff = Self::cutoff(idle);
         let count = registry.bindings.len();
-        registry.bindings.retain(|_, b| {
-            b.last_seen > if b.inferred { inferred_cutoff } else { cutoff } || registry.active.contains_key(&b.session)
-        });
+        registry.bindings.retain(|_, b| b.last_seen > cutoff || registry.active.contains_key(&b.session));
         if count != registry.bindings.len() {
             registry.dirty = true;
             registry.invalidate_index();
@@ -1427,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn inferred_assignments_expire_within_the_cache_lifetime_and_are_evicted_first() {
+    fn inferred_assignments_follow_configured_idle_lifetime_and_are_evicted_first() {
         let cfg = config(Routing::RoundRobin);
         let pool = Pool::default();
         pool.reload(&cfg);
@@ -1436,7 +1432,7 @@ mod tests {
             sessions.pick_session(&pool, &cfg, "gpt-6.1-sol", Some(session), inferred, &[], None).unwrap()
         };
         let guessed = pick("guessed", true);
-        let explicit = pick("explicit", false);
+        pick("explicit", false);
         assert_eq!(pick("guessed", true).account.id, guessed.account.id);
         assert_eq!(pick("guessed", true).reason, "session_reused");
         {
@@ -1446,13 +1442,20 @@ mod tests {
             assert_eq!(stored.matches("\"inferred\":true").count(), 1);
             assert!(!stored.contains("\"inferred\":false"), "explicit assignments keep their old format");
         }
-        // Two hours idle: past a prompt cache's lifetime, well inside the one-day expiry.
+        // A long gap may still reuse an extended cache entry. Inferred account
+        // assignments follow the same configured one-day lifetime as explicit ids.
         sessions.registry.lock().bindings.values_mut().for_each(|b| b.last_seen -= 2 * 3600);
         sessions.prune(cfg.session_affinity_idle_seconds);
         let registry = sessions.registry.lock();
-        assert_eq!(registry.bindings.len(), 1);
-        assert!(registry.bindings.values().all(|b| !b.inferred && b.account == explicit.account.id));
+        assert_eq!(registry.bindings.len(), 2);
         drop(registry);
+        assert_eq!(pick("guessed", true).account.id, guessed.account.id);
+        assert_eq!(pick("guessed", true).reason, "session_reused");
+
+        // A shorter operator-selected timeout still applies to both identity types.
+        sessions.registry.lock().bindings.values_mut().for_each(|b| b.last_seen -= 2 * 3600);
+        sessions.prune(3600);
+        assert!(sessions.registry.lock().bindings.is_empty());
         assert_eq!(pick("guessed", true).reason, "new_session");
 
         // A full table gives up an inferred assignment before an older explicit one.

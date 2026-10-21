@@ -29,6 +29,10 @@ pub struct Rate {
     pub cache_write_nanos_per_token: Option<i64>,
     pub cache_write_5m_nanos_per_token: Option<i64>,
     pub cache_write_1h_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_30m_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_12h_nanos_per_token: Option<i64>,
     pub output_nanos_per_token: i64,
     #[serde(default)]
     pub tier_multipliers: std::collections::BTreeMap<String, [i64; 2]>,
@@ -44,6 +48,10 @@ pub struct Rate {
     pub above_threshold_write_5m_nanos_per_token: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub above_threshold_write_1h_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above_threshold_write_30m_nanos_per_token: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above_threshold_write_12h_nanos_per_token: Option<i64>,
     #[serde(default)]
     pub above_threshold_output_nanos_per_token: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -114,11 +122,15 @@ impl Catalogue {
                 rate.cache_write_nanos_per_token,
                 rate.cache_write_5m_nanos_per_token,
                 rate.cache_write_1h_nanos_per_token,
+                rate.cache_write_30m_nanos_per_token,
+                rate.cache_write_12h_nanos_per_token,
                 rate.above_threshold_input_nanos_per_token,
                 rate.above_threshold_read_nanos_per_token,
                 rate.above_threshold_write_nanos_per_token,
                 rate.above_threshold_write_5m_nanos_per_token,
                 rate.above_threshold_write_1h_nanos_per_token,
+                rate.above_threshold_write_30m_nanos_per_token,
+                rate.above_threshold_write_12h_nanos_per_token,
                 rate.above_threshold_output_nanos_per_token,
             ]
             .into_iter()
@@ -140,6 +152,8 @@ impl Catalogue {
                 || (rate.threshold_input_tokens.is_none()
                     && (rate.above_threshold_write_5m_nanos_per_token.is_some()
                         || rate.above_threshold_write_1h_nanos_per_token.is_some()
+                        || rate.above_threshold_write_30m_nanos_per_token.is_some()
+                        || rate.above_threshold_write_12h_nanos_per_token.is_some()
                         || !rate.long_context_excluded_tiers.is_empty()))
             {
                 bail!("invalid price threshold");
@@ -281,29 +295,56 @@ impl Catalogue {
         let read_rate = if above { rate.above_threshold_read_nanos_per_token } else { rate.cache_read_nanos_per_token };
         let write_rate =
             if above { rate.above_threshold_write_nanos_per_token } else { rate.cache_write_nanos_per_token };
-        let short_write_rate =
-            if above { rate.above_threshold_write_5m_nanos_per_token } else { rate.cache_write_5m_nanos_per_token };
-        let long_write_rate =
-            if above { rate.above_threshold_write_1h_nanos_per_token } else { rate.cache_write_1h_nanos_per_token };
+        let lifetime_rates = [
+            (
+                t.write_5m,
+                if above { rate.above_threshold_write_5m_nanos_per_token } else { rate.cache_write_5m_nanos_per_token },
+            ),
+            (
+                t.write_1h,
+                if above { rate.above_threshold_write_1h_nanos_per_token } else { rate.cache_write_1h_nanos_per_token },
+            ),
+            (
+                t.write_30m,
+                if above {
+                    rate.above_threshold_write_30m_nanos_per_token
+                } else {
+                    rate.cache_write_30m_nanos_per_token
+                },
+            ),
+            (
+                t.write_12h,
+                if above {
+                    rate.above_threshold_write_12h_nanos_per_token
+                } else {
+                    rate.cache_write_12h_nanos_per_token
+                },
+            ),
+        ];
+        // Lifetime-specific rates take precedence over legacy generic write rates.
+        // Generic-only custom catalogues retain their historical interpretation.
+        let lifetime_pricing = rate.cache_write_30m_nanos_per_token.is_some()
+            || rate.cache_write_12h_nanos_per_token.is_some()
+            || rate.above_threshold_write_30m_nanos_per_token.is_some()
+            || rate.above_threshold_write_12h_nanos_per_token.is_some()
+            || write_rate.is_none();
+        let known_writes = lifetime_rates.iter().try_fold(0_u64, |n, (tokens, _)| n.checked_add(tokens.unwrap_or(0)));
         let cost = (|| -> Option<i64> {
             let mul = |n: u64, r: i64| i64::try_from(n).ok()?.checked_mul(r);
             let mut sum = mul(input, input_rate)?.checked_add(mul(output, output_rate)?)?;
             if read > 0 {
                 sum = sum.checked_add(mul(read, read_rate?)?)?;
             }
-            if write > 0 && write_rate.is_some() {
+            if write > 0 && !lifetime_pricing && write_rate.is_some() {
                 sum = sum.checked_add(mul(write, write_rate?)?)?;
             } else if write > 0 {
-                let short = t.write_5m.unwrap_or(0);
-                let long = t.write_1h.unwrap_or(0);
-                if short.checked_add(long)? != write {
+                if known_writes != Some(write) {
                     return None;
                 }
-                if short > 0 {
-                    sum = sum.checked_add(mul(short, short_write_rate?)?)?;
-                }
-                if long > 0 {
-                    sum = sum.checked_add(mul(long, long_write_rate?)?)?;
+                for (tokens, rate) in lifetime_rates {
+                    if let Some(tokens) = tokens.filter(|n| *n > 0) {
+                        sum = sum.checked_add(mul(tokens, rate?)?)?;
+                    }
                 }
             }
             let numerator = tier_n.checked_mul(if regional { 11 } else { 1 })?;
@@ -317,10 +358,7 @@ impl Catalogue {
             && date_ms(&self.verified_at).is_ok_and(|v| o.event_at_ms < v);
         snapshot.basis = if snapshot.cost_nanos.is_some() {
             if rate.effective_from.is_some() { "api_rate_estimate" } else { "current_rate_equivalent" }
-        } else if write > 0
-            && write_rate.is_none()
-            && t.write_5m.unwrap_or(0).checked_add(t.write_1h.unwrap_or(0)) != Some(write)
-        {
+        } else if write > 0 && (lifetime_pricing || write_rate.is_none()) && known_writes != Some(write) {
             "unknown_cache_write_ttl"
         } else {
             "unsupported_rate_or_overflow"
@@ -374,7 +412,14 @@ mod tier_tests {
             write_1h: Some(50),
             output: Some(100),
             reasoning: Some(60),
+            ..Default::default()
         };
+        if provider == "openai" {
+            o.tokens.write_5m = None;
+            o.tokens.write_1h = None;
+            o.tokens.write_30m = Some(100);
+            o.tokens.write_12h = Some(0);
+        }
         o
     }
     #[test]
@@ -453,6 +498,8 @@ mod tier_tests {
         o.tokens.cache_write = Some(0);
         o.tokens.write_5m = None;
         o.tokens.write_1h = None;
+        o.tokens.write_30m = None;
+        o.tokens.write_12h = None;
         o.actual_model = Some("gpt-5.5".into());
         o.service_tier = Some("fast".into());
         assert_eq!(c.price(&o).cost_nanos, Some(20_250_000));

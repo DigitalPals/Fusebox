@@ -4,7 +4,8 @@ use serde_json::json;
 
 #[test]
 fn cache_writes_and_inclusive_reasoning_survive_full_and_stream_translation() {
-    let expected = Usage { input: 70, cache_read: 20, cache_write: 10, output: 40, reasoning: 30 };
+    let expected =
+        Usage { input: 70, cache_read: 20, cache_write: 10, output: 40, reasoning: 30, ..Default::default() };
     let req = Request { include_usage: true, ..Default::default() };
     for format in [Format::Chat, Format::Responses, Format::Claude] {
         let mut agg = Aggregate::default();

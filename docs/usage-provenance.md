@@ -59,7 +59,7 @@ Confidence boundary: official SDK proves envelope and API docs prove `message.us
 
 ## Pricing and provenance
 
-Pricing tables were rechecked against both official pricing pages on **2026-10-18** for catalogue `2026-10-18.1`. The comparison also used [T3 Code pricing](https://github.com/pingdotgg/t3code/blob/6a6ebb278dc70dd859439a3c28960a7d23a1e645/apps/server/src/usage/usagePricing.ts). Provider tables govern model-specific context thresholds, cache TTLs and tiers. The native format evidence above retains its original verification date.
+Pricing tables were rechecked against both official pricing pages on **2026-10-18** for catalogue `2026-10-18.1`. The comparison also used [T3 Code pricing](https://github.com/pingdotgg/t3code/blob/6a6ebb278dc70dd859439a3c28960a7d23a1e645/apps/server/src/usage/usagePricing.ts). Catalogue `2026-10-21.1` subsequently corrects OpenAI lifetime pricing, rechecked against the prompt caching guide on **2026-10-21**. The model, tier and regional price verification remains **2026-10-18**; those tables were not reverified as part of this correction. Provider tables govern model-specific context thresholds, cache TTLs and tiers. The native format evidence above retains its original verification date.
 
 **Current verification date is not rate effective date.** The fetched current tables mostly do not state historical effective dates. Store `verified_at=2026-10-18`, `effective_from=null` (or explicitly labeled assumed current estimate), source URL, currency USD, unit 1M tokens, model/tier/context/region, and rate-card version. Do not backdate new current prices over historical imports and claim historical actual spend. (Fusebox prices such older usage only as a labelled current-rate equivalent with `backdated: true`; see [usage-costs.md](usage-costs.md).) Unknown models/tiers/categories should remain unpriced, not $0. Local USD estimates are not subscription-plan charges, invoices, or provider truth.
 
@@ -67,7 +67,7 @@ Pricing tables were rechecked against both official pricing pages on **2026-10-1
 
 Sources: https://developers.openai.com/api/docs/pricing ; https://developers.openai.com/api/docs/guides/prompt-caching ; https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://developers.openai.com/api/docs/guides/reasoning ; https://developers.openai.com/api/docs/guides/token-counting#understand-output-token-counts . All fetched.
 
-Standard USD/MTok. Columns `input / cache-read / cache-write / output`:
+Standard USD/MTok. Columns `input / cache-read / 30-minute cache-write / output`. For models with a listed cache-write rate, the 12-hour rate is twice that column (2.5 times ordinary input); these are independent replacement categories:
 
 | Model | Short ≤272k request input | Long >272k request input |
 |---|---|---|
@@ -92,7 +92,7 @@ For GPT-5.6+ and GPT-6 family above, Batch/Flex are half Standard, Fast is twice
 
 Long-context threshold uses **individual request total input**, never cumulative session totals or model_context_window. Threshold applies premium to **whole request**, not marginal tokens beyond threshold. Regional processing for models released on/after **2026-03-05** and FedRAMP add 10% where eligible; model capability/context window is not proof this premium occurred.
 
-OpenAI cost formula: `(input-cache_read-cache_write)*input_rate + cache_read*read_rate + cache_write*write_rate + output*output_rate`, divided by 1e6. Cache write is **replacement category, not additive fee**. Older models with absent write rate/zero write count retain ordinary uncached input. Reasoning subset is **already included** in output; don't add it a second time. Don't silently clamp impossible category totals and present them as verified costs.
+OpenAI cost formula: `(input-cache_read-cache_write)*input_rate + cache_read*read_rate + write_30m*write_30m_rate + write_12h*write_12h_rate + output*output_rate`, divided by 1e6. The lifetime counts are disjoint subsets of aggregate cache writes; positive writes without sufficient lifetime evidence remain unpriced under the bundled catalogue. Cache write is **replacement category, not additive fee**. Older models with absent write rate/zero write count retain ordinary uncached input. Reasoning subset is **already included** in output; don't add it a second time. Don't silently clamp impossible category totals and present them as verified costs.
 
 Official Codex subscription source https://learn.chatgpt.com/docs/pricing explicitly says API token prices are **separate from subscription usage** and should not estimate included tasks. Credit-based plans have their own rate table. ChatGPT Work and Codex share usage. Display imported list-price USD as an estimate/equivalent cost, not actual subscription spend or credit balance.
 

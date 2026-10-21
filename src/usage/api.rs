@@ -265,11 +265,22 @@ async fn export(
                 "completeness",
                 "estimated_cost_nanos",
             ];
-            let mut csv = fields.join(",") + ",input,cache_read,cache_write,write_5m,write_1h,output,reasoning\r\n";
+            let mut csv = fields.join(",")
+                + ",input,cache_read,cache_write,write_5m,write_1h,output,reasoning,write_30m,write_12h\r\n";
             if let Some(items) = v["items"].as_array() {
                 for i in items {
                     let mut cells: Vec<String> = fields.iter().map(|f| csv_cell(&i[*f])).collect();
-                    for f in ["input", "cache_read", "cache_write", "write_5m", "write_1h", "output", "reasoning"] {
+                    for f in [
+                        "input",
+                        "cache_read",
+                        "cache_write",
+                        "write_5m",
+                        "write_1h",
+                        "output",
+                        "reasoning",
+                        "write_30m",
+                        "write_12h",
+                    ] {
                         cells.push(csv_cell(&i["tokens"][f]));
                     }
                     csv.push_str(&cells.join(","));

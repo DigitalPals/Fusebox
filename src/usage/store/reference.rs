@@ -6,7 +6,7 @@
 use super::*;
 use chrono::Offset;
 
-const AGG: &str = "COUNT(*),COUNT(DISTINCT logical_request_id),COUNT(DISTINCT COALESCE(attempt_id,source||':'||source_event_id)),usage_sum(cost_nanos),SUM(cost_nanos IS NULL),SUM(completeness='partial'),SUM(completeness='missing'),usage_sum(input),usage_sum(cache_read),usage_sum(cache_write),usage_sum(write_5m),usage_sum(write_1h),usage_sum(output),usage_sum(reasoning),SUM(input IS NULL),SUM(cache_read IS NULL),SUM(cache_write IS NULL),SUM(output IS NULL),SUM(reasoning IS NULL),SUM(pricing_partial=1),SUM(logical_request_id IS NULL),COUNT(cost_nanos),COUNT(input),COUNT(cache_read),COUNT(cache_write),COUNT(write_5m),COUNT(write_1h),COUNT(output),COUNT(reasoning)";
+const AGG: &str = "COUNT(*),COUNT(DISTINCT logical_request_id),COUNT(DISTINCT COALESCE(attempt_id,source||':'||source_event_id)),usage_sum(cost_nanos),SUM(cost_nanos IS NULL),SUM(completeness='partial'),SUM(completeness='missing'),usage_sum(input),usage_sum(cache_read),usage_sum(cache_write),usage_sum(write_5m),usage_sum(write_1h),usage_sum(output),usage_sum(reasoning),SUM(input IS NULL),SUM(cache_read IS NULL),SUM(cache_write IS NULL),SUM(output IS NULL),SUM(reasoning IS NULL),SUM(pricing_partial=1),SUM(logical_request_id IS NULL),COUNT(cost_nanos),COUNT(input),COUNT(cache_read),COUNT(cache_write),COUNT(write_5m),COUNT(write_1h),COUNT(output),COUNT(reasoning),usage_sum(write_30m),usage_sum(write_12h),COUNT(write_30m),COUNT(write_12h)";
 fn aggregate(conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<Value> {
     // Derived tables (the per-source winners) have no index to name.
     let index = if table.starts_with('(') { String::new() } else { format!(" INDEXED BY {table}_event_time") };
@@ -18,7 +18,7 @@ fn aggregate(conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue
 }
 fn aggregate_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Value> {
     let mut nums = Vec::new();
-    for i in 0..29 {
+    for i in 0..33 {
         nums.push(row.get::<_, Option<i64>>(i + offset)?);
     }
     let mut tokens = serde_json::Map::new();
@@ -27,6 +27,8 @@ fn aggregate_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Val
     {
         tokens.insert((*name).into(), json!(nums[7 + i]));
     }
+    tokens.insert("write_30m".into(), json!(nums[29]));
+    tokens.insert("write_12h".into(), json!(nums[30]));
     let mut overflow_fields = Vec::new();
     for (i, (name, sum_index)) in [
         ("estimated_cost_nanos", 3),
@@ -42,6 +44,11 @@ fn aggregate_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Val
     .enumerate()
     {
         if nums[21 + i].unwrap_or(0) > 0 && nums[sum_index].is_none() {
+            overflow_fields.push(name);
+        }
+    }
+    for (name, sum, known) in [("write_30m", 29, 31), ("write_12h", 30, 32)] {
+        if nums[known].unwrap_or(0) > 0 && nums[sum].is_none() {
             overflow_fields.push(name);
         }
     }

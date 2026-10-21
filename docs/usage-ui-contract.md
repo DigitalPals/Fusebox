@@ -252,7 +252,7 @@ The server must use stable ordering and apply filters identically to the dashboa
     "actual_model":"claude-sonnet-4-5","account_id":"stable-account-id",
     "account_label":"Account label","client_id":"stable-client-id","client_label":"Work laptop",
     "origin_id":"local","collector_label":null,
-    "tokens":{"input":1000,"output":200,"cache_read":100,"cache_write":null,"write_5m":null,"write_1h":null,"reasoning":20},
+    "tokens":{"input":1000,"output":200,"cache_read":100,"cache_write":null,"write_5m":null,"write_1h":null,"write_30m":null,"write_12h":null,"reasoning":20},
     "estimated_cost_nanos":12345000,"pricing_basis":"Published API rates",
     "completeness":"partial","state":"complete"
   }],
@@ -275,7 +275,7 @@ Each item has the raw fields plus:
 `superseded` is normally false in the combined view. `completeness` is
 `complete`, `partial` or `missing`; completion `state` remains independently
 visible. Input is non-cache input; cache reads and writes are separate. Write
-5m/1h are subsets of cache_write. Reasoning is a subset of output. None of
+5m/1h (Anthropic) and 30m/12h (OpenAI) are subsets of cache_write. The new `write_30m` and `write_12h` fields are optional; absent means unknown and explicit zero means known zero. Dashboard token totals and CSV exports include them. Reasoning is a subset of output. None of
 these nested categories are added again by the UI.
 
 ## GET /api/usage/status

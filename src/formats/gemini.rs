@@ -120,8 +120,6 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         }
         req.messages.push(Message { role, parts });
     }
-    req.messages = merge_adjacent(req.messages);
-
     for t in v["tools"].as_array().into_iter().flatten() {
         for f in g(t, "functionDeclarations", "function_declarations").as_array().into_iter().flatten() {
             let params = g(f, "parametersJsonSchema", "parameters_json_schema");
@@ -236,7 +234,7 @@ pub fn apply_native_reasoning(body: &mut Value, reasoning: &Reasoning, model: &s
 pub fn build_request(req: &Request, model: &str) -> Value {
     let mut names: HashMap<String, String> = HashMap::new();
     let mut contents = Vec::new();
-    for m in &req.messages {
+    for m in super::alternating_messages(&req.messages).iter() {
         let mut parts = Vec::new();
         for p in &m.parts {
             match p {
@@ -359,6 +357,7 @@ fn usage_of(u: &Value) -> Option<Usage> {
         output: u["candidatesTokenCount"].as_u64().unwrap_or(0) + thoughts,
         reasoning: thoughts,
         cache_write: 0,
+        ..Default::default()
     })
 }
 

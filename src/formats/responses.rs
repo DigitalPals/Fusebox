@@ -108,11 +108,6 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         Value::Array(items) => parse_items(items, &mut req),
         _ => {}
     }
-    if !req.messages.iter().any(|m| super::has_openai_breakpoints(&m.parts)) {
-        req.messages = merge_adjacent(req.messages);
-    } else {
-        req.messages = super::merge_openai_tool_calls(req.messages);
-    }
     Ok(req)
 }
 
@@ -124,7 +119,8 @@ pub fn parse_items(items: &[Value], req: &mut Request) {
                 let role = it["role"].as_str().unwrap_or("user");
                 if role == "system" || role == "developer" {
                     if req.messages.is_empty() {
-                        super::parse_openai_system(&it["content"], req);
+                        let role = if role == "developer" { Role::Developer } else { Role::System };
+                        super::parse_openai_system(&it["content"], role, req);
                     } else {
                         req.messages.push(Message {
                             role: if role == "developer" { Role::Developer } else { Role::System },
@@ -204,7 +200,7 @@ fn content_parts(v: &Value) -> Vec<Part> {
                 };
                 let mut parts: Vec<Part> = part.into_iter().collect();
                 if !parts.is_empty() && c["prompt_cache_breakpoint"]["mode"] == "explicit" {
-                    parts.push(Part::CacheBreakpoint);
+                    parts.push(Part::CacheBreakpoint(c["prompt_cache_breakpoint"].clone()));
                 }
                 parts
             })
@@ -226,20 +222,12 @@ pub struct BuildOpts {
 
 pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
     let mut input = Vec::new();
-    if !req.system.is_empty() {
-        if req.system_cache_blocks.is_empty() {
-            input.push(json!({
-                "type": "message", "role": "developer",
-                "content": [{ "type": "input_text", "text": req.system.join("\n\n") }]
-            }));
-        } else {
-            for index in 0..req.system.len() {
-                input.push(json!({
-                    "type": "message", "role": "developer",
-                    "content": super::openai_system_blocks(req, index, "input_text")
-                }));
-            }
-        }
+    for index in 0..req.system.len() {
+        let role = if req.system_roles.get(&index) == Some(&Role::System) { "system" } else { "developer" };
+        input.push(json!({
+            "type": "message", "role": role,
+            "content": super::openai_system_blocks(req, index, "input_text")
+        }));
     }
     let custom: HashSet<&str> =
         if opts.custom_tools { req.custom_tools.iter().map(String::as_str).collect() } else { HashSet::new() };
@@ -266,7 +254,7 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
                 Part::Image(i) if m.role == Role::User => {
                     content.push(json!({ "type": "input_image", "image_url": i.to_url() }));
                 }
-                Part::CacheBreakpoint => super::mark_openai_breakpoint(&mut content),
+                Part::CacheBreakpoint(metadata) => super::mark_openai_breakpoint(&mut content, metadata),
                 Part::Reasoning { text, sig: Some(sig @ Sig::Codex { .. }) } => {
                     flush(&mut content, &mut input);
                     let summary: Vec<Value> =
@@ -302,7 +290,9 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
                                 Part::Image(image) => {
                                     content.push(json!({"type": "input_image", "image_url": image.to_url()}))
                                 }
-                                Part::CacheBreakpoint => super::mark_openai_breakpoint(&mut content),
+                                Part::CacheBreakpoint(metadata) => {
+                                    super::mark_openai_breakpoint(&mut content, metadata)
+                                }
                                 _ => {}
                             }
                         }
@@ -414,9 +404,9 @@ pub fn usage_of(u: &Value) -> Option<Usage> {
     let input = u["input_tokens"].as_u64().unwrap_or(0);
     let details = &u["input_tokens_details"];
     let cached = details["cached_tokens"].as_u64().unwrap_or(0);
-    let write = details["cache_creation_tokens"]
+    let write = details["cache_write_tokens"]
         .as_u64()
-        .or_else(|| details["cache_write_tokens"].as_u64())
+        .or_else(|| details["cache_creation_tokens"].as_u64())
         .or_else(|| u["cache_creation_input_tokens"].as_u64())
         .unwrap_or(0);
     Some(Usage {
@@ -425,6 +415,8 @@ pub fn usage_of(u: &Value) -> Option<Usage> {
         output: u["output_tokens"].as_u64().unwrap_or(0),
         reasoning: u["output_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
         cache_write: write,
+        write_30m: details["cache_write_tokens_details"]["ttl_30m_tokens"].as_u64(),
+        write_12h: details["cache_write_tokens_details"]["ttl_12h_tokens"].as_u64(),
     })
 }
 
@@ -820,12 +812,13 @@ fn usage_json(u: &Usage) -> Value {
         "output_tokens_details": { "reasoning_tokens": u.reasoning },
         "total_tokens": u.prompt_total() + u.output,
     });
-    if u.cache_write > 0 {
+    if u.cache_write > 0 || u.write_30m.is_some() || u.write_12h.is_some() {
         // Canonical name, read by Codex. The legacy alias carries the same count for
         // clients that read Fusebox's earlier spelling; it is not an additional amount.
         usage["input_tokens_details"]["cache_write_tokens"] = u.cache_write.into();
         usage["input_tokens_details"]["cache_creation_tokens"] = u.cache_write.into();
     }
+    super::write_openai_cache_lifetimes(&mut usage["input_tokens_details"], u);
     usage
 }
 

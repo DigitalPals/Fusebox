@@ -367,6 +367,9 @@ pub struct RequestLog {
     pub routing_attempts: Vec<RoutingAttempt>,
     /// Requested and effective cache controls; contains no prompt text or keys.
     pub cache_policy: Option<crate::cache::Policy>,
+    /// Sanitized provider-reported cache outcome; absence is not a cache hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_diagnostics: Option<crate::cache::Diagnostics>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub control_downgrades: Vec<&'static str>,
     pub status: u16,
@@ -557,6 +560,7 @@ mod tests {
             routing_warning: None,
             routing_attempts: vec![],
             cache_policy: None,
+            cache_diagnostics: None,
             control_downgrades: Vec::new(),
             status: 200,
             latency_ms: 0,
