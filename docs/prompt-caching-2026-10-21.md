@@ -31,7 +31,9 @@ custom rate cards retain their configured behavior.
 Downgrade refuses before mutation when any observation contains the new lifetime
 fields, including explicit zeroes. Legacy-only databases can downgrade, omitting
 unsupported rates from the active legacy catalogue and retaining the original for
-audit. See [usage costs and recovery](usage-costs.md).
+audit. `usage rollback-copy` provides a separate compatibility copy for schema-4
+releases after lifetime capture, retaining the full original journal. See
+[usage costs and recovery](usage-costs.md).
 
 Public Responses API documentation establishes neither Chat Completions support
 nor ChatGPT OAuth backend acceptance. Compatible translation preserves supplied

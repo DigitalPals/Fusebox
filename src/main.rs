@@ -154,11 +154,14 @@ async fn run() -> Result<()> {
         }
         Some(Cmd::Usage {
             command:
-                command @ (usage::imports::UsageCommand::Compact { .. } | usage::imports::UsageCommand::Downgrade { .. }),
+                command @ (usage::imports::UsageCommand::Compact { .. }
+                | usage::imports::UsageCommand::Downgrade { .. }
+                | usage::imports::UsageCommand::RollbackCopy { .. }),
         }) => {
-            let (database, downgrade) = match command {
-                usage::imports::UsageCommand::Compact { database } => (database, false),
-                usage::imports::UsageCommand::Downgrade { database } => (database, true),
+            let (database, downgrade, rollback_to) = match command {
+                usage::imports::UsageCommand::Compact { database } => (database, false, None),
+                usage::imports::UsageCommand::Downgrade { database } => (database, true, None),
+                usage::imports::UsageCommand::RollbackCopy { database, to } => (database, false, Some(to)),
                 _ => unreachable!(),
             };
             let database = match database {
@@ -169,7 +172,13 @@ async fn run() -> Result<()> {
                 }
             };
             let result = tokio::task::spawn_blocking(move || {
-                if downgrade { usage::store::downgrade(&database) } else { usage::store::compact(&database) }
+                if let Some(to) = rollback_to {
+                    usage::store::rollback_copy(&database, &to)
+                } else if downgrade {
+                    usage::store::downgrade(&database)
+                } else {
+                    usage::store::compact(&database)
+                }
             })
             .await??;
             println!("{}", serde_json::to_string_pretty(&result)?);

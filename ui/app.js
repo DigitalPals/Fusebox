@@ -2731,9 +2731,9 @@ function cachePolicyHTML(r) {
   }
   const reported = d
     ? `<p><span>Provider-reported result</span>: <span>${Object.hasOwn(results, d.type) ? results[d.type] : 'Unavailable'}</span>${d.type === 'cache_miss' ? ` · <span>${Object.hasOwn(reasons, d.reason) ? reasons[d.reason] : 'Unknown cache miss reason'}</span>` : ''}</p>${counts.length ? `<p>${counts.join(' · ')}</p>` : ''}`
-    : '<p>No provider cache diagnostics reported.</p>';
+    : '<p>No provider cache diagnostics reported; cache reuse is unconfirmed.</p>';
   const policy = p ? `<p><span>Fusebox policy</span> · <span>Requested</span>: ${esc(labels[p.requested] || p.requested)} · <span>Applied</span>: ${esc(labels[p.applied] || p.applied)} · ${esc(labels[p.key_scope] || p.key_scope)}</p>${p.downgrade_reason ? `<p>${esc(p.downgrade_reason)}</p>` : ''}` : '';
-  return `<div class="why-text"><span class="label">Prompt cache</span>${reported}${policy}${!d && p ? '<p>Requested and applied controls do not confirm cache reuse.</p>' : ''}</div>`;
+  return `<div class="why-text"><span class="label">Prompt cache</span>${reported}${policy}</div>`;
 }
 
 function reqItemHTML(r) {

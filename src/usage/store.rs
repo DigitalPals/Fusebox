@@ -21,9 +21,11 @@ mod codec;
 mod compact;
 mod dashboard;
 mod read;
+mod rollback;
 mod rollup;
 pub use compact::{DatabaseStats, compact, downgrade};
 pub(crate) use read::ReadError;
+pub use rollback::rollback_copy;
 #[cfg(test)]
 mod reference;
 
@@ -773,6 +775,12 @@ pub(super) fn rebuild_entries(conn: &Connection, key: &str) -> Result<()> {
 /// Copies the usage database to `to`, a new private file, with SQLite's online backup:
 /// safe while Fusebox is writing, and checked before it is called done.
 pub fn backup(database: &Path, to: &Path) -> Result<()> {
+    let rows = backup_file(database, to)?;
+    println!("Backed up {} ({rows} observations) to {}", database.display(), to.display());
+    Ok(())
+}
+
+fn backup_file(database: &Path, to: &Path) -> Result<u64> {
     ensure!(database.is_file(), "there is no usage database at {}", database.display());
     {
         // Created first and private, so the copy is never readable by others.
@@ -785,7 +793,7 @@ pub fn backup(database: &Path, to: &Path) -> Result<()> {
         }
         options.open(to).with_context(|| format!("{} exists or can't be created; choose a new file", to.display()))?;
     }
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<u64> {
         let source = Connection::open(database)?;
         source.busy_timeout(std::time::Duration::from_secs(10))?;
         let mut copy = Connection::open(to)?;
@@ -796,9 +804,7 @@ pub fn backup(database: &Path, to: &Path) -> Result<()> {
         )?;
         let check: String = copy.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         ensure!(check == "ok", "the copy failed its integrity check: {check}");
-        let rows: i64 = copy.query_row("SELECT COUNT(*) FROM usage_observations", [], |r| r.get(0)).unwrap_or(0);
-        println!("Backed up {} ({rows} observations) to {}", database.display(), to.display());
-        Ok(())
+        Ok(copy.query_row("SELECT COUNT(*) FROM usage_observations", [], |r| r.get(0))?)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(to);

@@ -16,6 +16,39 @@ fn build(target: Format, req: &Request) -> Value {
 }
 
 #[test]
+fn strict_chat_templates_preserve_block_lifetimes_images_and_parallel_tools() {
+    let mut body = json!({"model":"local", "messages":[
+        {"role":"system","content":"base"},
+        {"role":"developer","content":[{"type":"text","text":"permissions","prompt_cache_breakpoint":{"mode":"explicit","ttl":"12h"}}]},
+        {"role":"user","content":"agents"},
+        {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}},{"type":"text","text":"prompt"}]},
+        {"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"a","arguments":"{}"}}]},
+        {"role":"assistant","content":null,"tool_calls":[{"id":"b","type":"function","function":{"name":"b","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"a","content":"result a"},
+        {"role":"tool","tool_call_id":"b","content":"result b"},
+        {"role":"developer","content":"late instruction"},
+        {"role":"user","content":"next"}
+    ], "tools":[{"type":"function","function":{"name":"a"}}]});
+    let original = body.clone();
+    chat::normalize_strict_template(&mut body);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m["role"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["system", "user", "assistant", "tool", "tool", "user"]
+    );
+    assert_eq!(messages[0]["content"][2], original["messages"][1]["content"][0]);
+    assert_eq!(messages[0]["content"][4]["text"], "late instruction");
+    assert_eq!(messages[1]["content"][2], original["messages"][3]["content"][0]);
+    assert_eq!(
+        messages[2]["tool_calls"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(messages[3], original["messages"][6]);
+    assert_eq!(messages[4], original["messages"][7]);
+    assert_eq!(body["tools"], original["tools"]);
+}
+
+#[test]
 fn mixed_openai_breakpoint_lifetimes_survive_round_trip() {
     let body = json!({
         "prompt_cache_options":{"mode":"explicit","ttl":"30m"},

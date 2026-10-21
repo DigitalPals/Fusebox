@@ -501,6 +501,12 @@ pub fn sanitize_codex_body(body: &mut Value, model: &str, websocket: bool) {
             });
             // Item ids reference server-side state that store=false never kept.
             for it in items.iter_mut() {
+                // ChatGPT plan usage accepts developer instructions, not system
+                // message items. Normalize here for HTTP and WebSocket callers,
+                // retaining message endings and per-block cache metadata.
+                if it["role"] == "system" && matches!(it["type"].as_str(), None | Some("message")) {
+                    it["role"] = "developer".into();
+                }
                 if let Some(io) = it.as_object_mut()
                     && io.get("type").and_then(Value::as_str) != Some("item_reference")
                 {
@@ -854,6 +860,13 @@ fn compat(t: &Target, mut body: Value) -> Prepared {
     body["model"] = t.model.into();
     if !t.passthrough {
         body["stream"] = true.into();
+        if t.cfg
+            .openai_compatibility
+            .iter()
+            .any(|entry| t.acct.group.as_deref() == Some(entry.name.as_str()) && entry.strict_chat_template)
+        {
+            crate::formats::chat::normalize_strict_template(&mut body);
+        }
     }
     let mut headers = vec![
         ("content-type".into(), "application/json".into()),
@@ -1195,6 +1208,96 @@ mod tests {
         cloak_body(&mut body, &acct, None, false, true);
         assert_eq!(body["system"][2]["text"], "<system-reminder>\ninstructions\n</system-reminder>");
         assert_eq!(body["system"][2]["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
+    }
+
+    #[test]
+    fn strict_chat_templates_are_opted_in_per_provider_for_translations() {
+        let source = json!({"instructions":"base", "input":[
+            {"role":"developer","content":"permissions"},
+            {"role":"user","content":"agents"},
+            {"role":"user","content":"prompt"}
+        ]});
+        let translated = crate::formats::chat::build_request(
+            &crate::formats::responses::parse_request(&source).unwrap(),
+            "local-model",
+        );
+        let headers = HeaderMap::new();
+        for strict in [false, true] {
+            let cfg = Config {
+                auth_dir: "/nonexistent".into(),
+                openai_compatibility: vec![crate::config::CompatEntry {
+                    name: "local".into(),
+                    base_url: "http://localhost:11434/v1".into(),
+                    strict_chat_template: strict,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let pool = crate::accounts::Pool::default();
+            pool.reload(&cfg);
+            let acct = pool.all().remove(0);
+            for passthrough in [false, true] {
+                let prepared = prepare(
+                    &Target {
+                        acct: &acct,
+                        cfg: &cfg,
+                        client_headers: &headers,
+                        model: "local-model",
+                        wire: Format::Chat,
+                        passthrough,
+                        stream: true,
+                        count_tokens: false,
+                        cache_key: None,
+                        cache_session: None,
+                        cache_defaults: true,
+                    },
+                    translated.clone(),
+                );
+                if strict && !passthrough {
+                    assert_eq!(
+                        prepared.body["messages"],
+                        json!([
+                            {"role":"system","content":"base\n\npermissions"},
+                            {"role":"user","content":"agents\n\nprompt"}
+                        ])
+                    );
+                } else {
+                    assert_eq!(prepared.body["messages"], translated["messages"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_system_roles_become_developer_without_moving_cache_boundaries() {
+        let original = json!({"messages":[
+            {"role":"system","content":"base"},
+            {"role":"developer","content":"permissions"},
+            {"role":"user","content":"question"},
+            {"role":"system","content":[{"type":"text","text":"late", "prompt_cache_breakpoint":{"mode":"explicit","ttl":"12h"}}]},
+            {"role":"user","content":"next"}
+        ]});
+        let translated = crate::formats::responses::build_request(
+            &crate::formats::chat::parse_request(&original).unwrap(),
+            "gpt-6.1-sol",
+            &crate::formats::responses::BuildOpts {
+                chatgpt_backend: true,
+                custom_tools: true,
+                default_reasoning: true,
+            },
+        );
+        assert_eq!(translated["input"][0]["role"], "system", "public Responses keeps original roles");
+        for websocket in [false, true] {
+            let mut body = translated.clone();
+            sanitize_codex_body(&mut body, "gpt-6.1-sol", websocket);
+            let mut expected = translated["input"].clone();
+            expected[0]["role"] = "developer".into();
+            expected[3]["role"] = "developer".into();
+            assert_eq!(body["input"], expected);
+            let mut native = json!({"input":[{"role":"system","content":"native"}]});
+            sanitize_codex_body(&mut native, "gpt-6.1-sol", websocket);
+            assert_eq!(native["input"][0]["role"], "developer");
+        }
     }
 
     #[test]

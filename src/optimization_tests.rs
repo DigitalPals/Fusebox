@@ -160,7 +160,7 @@ fn late_privileged_instructions_and_cache_boundaries_keep_their_positions() {
     let mut output = formats::responses::build_request(
         &req,
         "gpt-6.1-sol",
-        &formats::responses::BuildOpts { chatgpt_backend: true, custom_tools: true, default_reasoning: true },
+        &formats::responses::BuildOpts { chatgpt_backend: false, custom_tools: true, default_reasoning: true },
     );
     assert!(formats::preserve_cache_hints(Format::Chat, Format::Responses, &original, &mut output).unwrap().is_none());
     let input = output["input"].as_array().unwrap();

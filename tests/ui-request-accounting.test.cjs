@@ -195,8 +195,7 @@ test('missing diagnostics never present policy controls as confirmed cache reuse
   r.cache_policy = { requested: 'automatic', applied: 'automatic', key_scope: 'session' };
   for (const render of ['reqItemHTML', 'reqMobileHTML']) {
     const html = d.run(`${render}(S.requests[0])`);
-    assert.match(html, /No provider cache diagnostics reported\./);
-    assert.match(html, /Requested and applied controls do not confirm cache reuse\./);
+    assert.match(html, /No provider cache diagnostics reported; cache reuse is unconfirmed\./);
     assert.doesNotMatch(html, /Cache hit|Cache miss/);
   }
 });

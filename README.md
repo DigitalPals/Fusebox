@@ -373,6 +373,7 @@ openai-compatibility:
         alias: "kimi-k3"
   - name: ollama
     base-url: "http://127.0.0.1:11434/v1"
+    strict-chat-template: true   # translations: one system message and alternating turns
     models:
       - name: "qwen3-coder:30b"
 ```
@@ -477,7 +478,9 @@ The decoder bounds SSE events and unfinished lines; native WebSocket events also
 
 Output limits are preserved during translation. Manual Claude thinking needs an output limit greater than 1,024 tokens; incompatible requests receive a `400` instead of silently increasing the limit. Gemini reasoning suffixes use the same mapping for native and translated requests.
 
-Chat↔Responses translation retains late system/developer messages in their original positions, with cache boundaries. Routes to Claude, Gemini or Devin add them to the system prompt in their original order, as before, rather than demoting them to user turns. Translated low-verbosity preferences are retained for supported GPT-5/6 models on the Codex provider. Translated OpenAI service tiers require `translation.allow-service-tier: true`; dropped controls appear in request diagnostics. Native requests keep caller controls. Codex subscription preparation still removes output caps that its backend does not accept, so those caps are not a subscription billing limit.
+Chat↔Responses translation retains late system/developer messages in their original positions, with cache boundaries. ChatGPT subscription requests map system roles to developer roles at the OAuth boundary, on HTTP and WebSocket transports. Public OpenAI API requests keep their original roles. Routes to Claude, Gemini or Devin add late instructions to the system prompt in their original order, as before, rather than demoting them to user turns. Translated low-verbosity preferences are retained for supported GPT-5/6 models on the Codex provider. Translated OpenAI service tiers require `translation.allow-service-tier: true`; dropped controls appear in request diagnostics. Native requests keep caller controls. Codex subscription preparation still removes output caps that its backend does not accept, so those caps are not a subscription billing limit.
+
+For a local Chat backend whose template rejects developer roles, multiple system messages or repeated turns, set `strict-chat-template: true` on that `openai-compatibility` entry. Translated requests then collect instructions into one leading system message and merge adjacent user/assistant turns. Tool replies stay separate and explicit cache markers keep their metadata. This changes message endings and the position of late instructions, so enable it only for backends that require that layout. Native Chat requests remain under the caller's control.
 
 Optional `latency-routing: true` breaks exact Smart quota ties for new HTTP or WebSocket sessions using recent comparable first-response timings. It requires three successful single-attempt samples with explicitly zero cache reads per account, matches model, input-size bucket, reasoning effort, cache intent and transport, and leaves existing session assignments intact. It is off by default.
 

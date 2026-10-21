@@ -153,6 +153,68 @@ fn content_parts(v: &Value) -> Vec<Part> {
     }
 }
 
+/// Adapt translated requests for an explicitly configured strict local template.
+/// Native Chat bodies and the default OpenAI translation retain their boundaries.
+pub(crate) fn normalize_strict_template(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    let mut system: Option<Value> = None;
+    let mut turns: Vec<Value> = Vec::new();
+    for mut message in std::mem::take(messages) {
+        match message["role"].as_str() {
+            Some("system" | "developer") => {
+                if let Some(system) = &mut system {
+                    append_content(&mut system["content"], message["content"].take());
+                } else {
+                    message["role"] = "system".into();
+                    system = Some(message);
+                }
+            }
+            Some("user" | "assistant") if turns.last().is_some_and(|last| last["role"] == message["role"]) => {
+                let last = turns.last_mut().unwrap();
+                append_content(&mut last["content"], message["content"].take());
+                if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                    if !last["tool_calls"].is_array() {
+                        last["tool_calls"] = json!([]);
+                    }
+                    last["tool_calls"].as_array_mut().unwrap().append(calls);
+                }
+            }
+            _ => turns.push(message),
+        }
+    }
+    if let Some(system) = system {
+        turns.insert(0, system);
+    }
+    *messages = turns;
+}
+
+fn append_content(left: &mut Value, right: Value) {
+    if right.is_null() {
+        return;
+    }
+    if left.is_null() {
+        *left = right;
+        return;
+    }
+    if let (Value::String(left), Value::String(right)) = (&mut *left, &right) {
+        left.push_str("\n\n");
+        left.push_str(right);
+        return;
+    }
+    let blocks = |content| match content {
+        Value::String(text) => vec![json!({"type":"text","text":text})],
+        Value::Array(blocks) => blocks,
+        other => vec![other],
+    };
+    let mut combined = blocks(left.take());
+    let right = blocks(right);
+    if !combined.is_empty() && !right.is_empty() {
+        combined.push(json!({"type":"text","text":"\n\n"}));
+    }
+    combined.extend(right);
+    *left = Value::Array(combined);
+}
+
 // ----------------------------------------------------------------- request out
 
 pub fn build_request(req: &Request, model: &str) -> Value {

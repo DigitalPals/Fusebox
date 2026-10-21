@@ -176,6 +176,8 @@ The server's collector status distinguishes contact from successful synchronizat
 
 The server usage database is a versioned SQLite file using WAL mode, full synchronous commits, foreign keys, and transactions. The current SQLite schema is version 5. Migrations run in a single transaction: version 1 to 2 adds the writer-session health table, version 2 to 3 adds the `usage_entries(association_key, source)` index used by combined accounting, and version 3 to 4 makes the database smaller and the Usage page faster (below), and version 4 to 5 adds OpenAI lifetime columns and rebuilds the rollups transactionally. After migrations the server prices again any rows saved as unpriced only because they predated the catalogue, in batches of at most 2,000 rows per transaction. Startup also corrects previously priced OpenAI rows only where stored lifetime evidence establishes the proper price, retaining previous price snapshots in revisions. Historical records without that evidence keep their existing estimates: the missing lifetime cannot be recovered. New positive writes with unknown lifetime remain unpriced. This database schema version is separate from the version 1 observation/batch envelopes and the versioned native importer parser. Fusebox applies supported migrations on startup and rejects a database from a newer schema version.
 
+A normal upgrade from schema 4 has no stored OpenAI lifetime evidence to correct. The conditional repair applies to lifetime-bearing observations priced with the earlier generic-rate catalogue; it does not reconstruct lifetime counts for old proxy history or native Codex imports.
+
 Proxy observations go through a bounded background writer so disk latency does not hold up a response. Queue acceptance is not yet a durable commit: a crash can lose queued events and the current uncommitted batch. A full queue increments the current writer's dropped count; a malformed observation increments rejected; a failed insert batch increments dropped and writer errors. Health reports the current session plus best-effort persisted counters from earlier writer sessions. A previous unclosed session can indicate a crash, forced stop, or concurrent process sharing the database. Counters can lag because health snapshots are persisted between commands and on an idle timer, and disk failure can prevent their update. A storage gap remains visible as degraded health rather than an implicit zero. Imports and collector ingestion wait for durable transaction acknowledgment; their data and checkpoints/outbox updates commit together so retries are safe.
 
 ### Size
@@ -189,6 +191,18 @@ Releases before 0.6 read only schema 3. Before going back to one, stop Fusebox a
 ```sh
 fusebox --config config.yaml usage downgrade
 ```
+
+A binary-only rollback to a schema-4 release cannot open schema 5 and leaves usage capture unavailable. Before upgrading, take a consistent backup and allow time and disk space for the rollup migration. Check `/readyz` and Usage health after either activation or rollback; a successful `/healthz` alone does not confirm accounting is running.
+
+If lifetime observations have already been recorded, stop Fusebox and use the new binary to create a separate rollback database:
+
+```sh
+fusebox --config config.yaml usage rollback-copy ./usage-rollback.sqlite3
+```
+
+The output must be a new file. The command retains the original database with its full lifetime evidence and price audit. The copy preserves observations, identities, established costs and revision rows, while omitting OpenAI lifetime counts and unsupported lifetime rate fields from its documents. It uses the existing schema-3 layout, which schema-4 releases migrate on startup, and omits unsupported models from the active legacy rate catalogue rather than guessing a generic write price. Insufficient disk space or a conversion error fails the command and removes the new copy.
+
+Point the older release's `usage.database` at the copy and verify accounting health before accepting traffic. Keep the original as the complete historical archive. When upgrading again, continue with the active copy so usage recorded during rollback is retained; the new release migrates it normally. Switching back to the archive would omit that interval. The existing in-place `usage downgrade` continues to refuse lifetime-bearing databases.
 
 Back up the database through SQLite's backup API while Fusebox is running. `fusebox usage backup` does that for the database your config file uses (or the one `--database` names), writes a new private file, and checks its integrity before saying it's done:
 

@@ -347,6 +347,10 @@ pub struct CompatEntry {
     pub base_url: String,
     pub api_keys: Vec<String>,
     pub models: Vec<ModelAlias>,
+    /// Translations use one leading system message and merge repeated turns for
+    /// local templates that cannot represent OpenAI's instruction/message roles.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub strict_chat_template: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
