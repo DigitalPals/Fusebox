@@ -24,7 +24,7 @@ const CONFIG_KEY_SECTION = {
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'latency-routing': 'routing', 'translation': 'routing', 'embeddings': 'connections', 'stream-limits': 'connections', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
-  'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', notifications: 'notifications', debug: 'diagnostics',
+  'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', 'model-capabilities': 'models', notifications: 'notifications', debug: 'diagnostics',
 };
 const CONFIG_OAUTH = [['claude', 'Claude'], ['codex', 'Codex'], ['antigravity', 'Antigravity'], ['kimi', 'Kimi'], ['xai', 'Grok'], ['meta', 'Meta'], ['devin', 'Devin'], ['vertex', 'Vertex AI']];
 const CONFIG_PROVIDERS = [
@@ -886,7 +886,23 @@ function configModelsHTML() {
     <div class="cfg-divider"></div>
     ${configStrings(['oauth-excluded-models', provider], 'Excluded models', 'Model names or patterns these accounts must not serve. Use * as a wildcard.')}
     <div class="cfg-divider"></div>
-    ${configStrings(['extra-models', provider], 'Added models', 'Models released after this version of Fusebox, served by every account of this provider. Each is removed once Fusebox or the provider’s model list knows it.', false, 'No models added.', { add: 'Add model', item: 'Model', one: 'model', placeholder: 'claude-opus-6' })}`;
+    ${configStrings(['extra-models', provider], 'Added models', 'Models released after this version of Fusebox, served by every account of this provider. Each is removed once Fusebox or the provider’s model list knows it.', false, 'No models added.', { add: 'Add model', item: 'Model', one: 'model', placeholder: 'claude-opus-6' })}
+    <div class="cfg-divider"></div>${configModelMetadataHTML()}`;
+}
+
+function configModelMetadataHTML() {
+  const entries = configGet(['model-capabilities']) || {};
+  const models = S.models || [];
+  const choices = models.filter((m) => !Object.hasOwn(entries, m.id));
+  return `<div class="cfg-list wide">${configListHead('Model metadata overrides', 'Provider discovery supplies model limits where available. Use documented values for custom models here. Empty fields inherit discovery; overrides apply to the exact public model ID, including its prefix or alias.')}
+    <div class="setup-model"><label for="metadata-model">Model</label><select id="metadata-model">${choices.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('')}</select><button type="button" class="btn sm" data-config-act="metadata-add"${choices.length ? '' : ' disabled'}>Add override</button></div>
+    ${Object.keys(entries).map((id) => {
+      const path = ['model-capabilities', id];
+      return `<section class="cfg-entry"><div class="cfg-list-head"><span class="mono">${esc(id)}</span><button type="button" class="btn danger" data-config-act="metadata-remove" data-name="${esc(id)}">Remove override</button></div>
+        <div class="cfg-grid">${configField([...path, 'context_window'], 'Context tokens', { type: 'number', min: 1, nullable: true })}${configField([...path, 'max_output_tokens'], 'Output tokens', { type: 'number', min: 1, nullable: true })}
+        ${configChoice([...path, 'input_modalities'], 'Image input', [[null, 'From provider'], [['text', 'image'], 'Supported'], [['text'], 'Text only']], 'Other input modalities can be set in config.yaml.')}
+        ${configChoice([...path, 'tool_calling'], 'Tool calls', [[null, 'From provider'], [true, 'Supported'], [false, 'Unsupported']])}</div></section>`;
+    }).join('')}</div>`;
 }
 
 function configDiagnosticsHTML() {
@@ -1376,6 +1392,17 @@ document.addEventListener('click', (e) => {
   if (act.startsWith('named-')) return namedAction(act, button.dataset.id);
   if (act.startsWith('shared-')) return sharedAction(act, Number(button.dataset.index));
   if (act.startsWith('group-')) return groupAction(act, button.dataset.name);
+  if (act === 'metadata-add' || act === 'metadata-remove') {
+    const entries = { ...(configGet(['model-capabilities']) || {}) };
+    if (act === 'metadata-add') {
+      const id = $('#metadata-model')?.value;
+      if (!id) return;
+      Object.defineProperty(entries, id, { value: {}, enumerable: true, configurable: true, writable: true });
+    } else delete entries[button.dataset.name];
+    configSet(['model-capabilities'], entries);
+    S.config.msg = null;
+    return render();
+  }
   if (act.startsWith('hook-')) return webhookAction(act, button.dataset.index);
   if (act.startsWith('limits-')) return limitsAction(act, button.dataset.id);
   if (act === 'review-save') return confirmReview();

@@ -14,6 +14,8 @@ use serde_json::Value;
 use crate::accounts::{Account, Credential, Provider};
 use crate::state::App;
 
+mod readings;
+
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_SUBSCRIPTION: &str = "https://chatgpt.com/backend-api/subscriptions";
@@ -41,9 +43,64 @@ pub struct Window {
     pub model: Option<String>,
 }
 
+/// A limit that is not an ordinary subscription window. Feature allowances and
+/// optional paid overages are informative; only account/model limits route chat.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum Scope {
+    Account,
+    Model(String),
+    Models(Vec<String>),
+    ModelFamilies(Vec<String>),
+    Feature(String),
+    Overage,
+    Credits,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Limit {
+    pub id: String,
+    pub name: String,
+    pub scope: Scope,
+    pub used_percent: Option<f64>,
+    pub used: Option<f64>,
+    pub limit: Option<f64>,
+    pub remaining: Option<f64>,
+    /// Provider-reported units. Credits are never implicitly dollars.
+    pub unit: Option<String>,
+    pub unlimited: Option<bool>,
+    pub enabled: Option<bool>,
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+impl Limit {
+    fn applies(&self, model: &str) -> bool {
+        match &self.scope {
+            Scope::Account => true,
+            Scope::Model(m) => m.eq_ignore_ascii_case(model),
+            Scope::Models(models) => models.iter().any(|m| m.eq_ignore_ascii_case(model)),
+            Scope::ModelFamilies(prefixes) => prefixes.iter().any(|p| model.to_ascii_lowercase().starts_with(p)),
+            _ => false,
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.enabled != Some(false) && self.unlimited != Some(true) && self.resets_at.is_none_or(|r| r > Utc::now())
+    }
+}
+
+#[derive(Default)]
+struct Reading {
+    windows: Vec<Window>,
+    limits: Vec<Limit>,
+    plan: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Quota {
     pub windows: Vec<Window>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<Limit>,
     pub updated_at: Option<DateTime<Utc>>,
     /// Last accepted usage-endpoint refresh; partial observations do not advance this.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +129,13 @@ enum PlanDetails {
 }
 
 impl Quota {
+    pub fn limit_remaining(&self, model: &str) -> Option<f64> {
+        self.limit_pressure(model).map(|u| 100.0 - u.clamp(0.0, 100.0)).reduce(f64::min)
+    }
+    fn limit_pressure<'a>(&'a self, model: &'a str) -> impl Iterator<Item = f64> + 'a {
+        self.limits.iter().filter(move |l| l.applies(model) && l.live()).filter_map(|l| l.used_percent)
+    }
+
     fn live(&self, model: &str) -> impl Iterator<Item = &Window> {
         let now = Utc::now();
         let model = model.to_ascii_lowercase();
@@ -84,11 +148,19 @@ impl Quota {
     /// Use of the tightest window that applies to `model` (None = no data).
     pub fn pressure(&self, model: &str) -> Option<f64> {
         self.updated_at?;
-        Some(self.live(model).map(|w| w.used).fold(0.0, f64::max))
+        self.remaining(model).map(|remaining| 100.0 - remaining)
     }
 
     pub fn exhausted(&self, model: &str) -> bool {
-        self.live(model).any(|w| w.used >= 100.0)
+        self.live(model).any(|w| w.used >= 100.0) || self.limit_pressure(model).any(|u| u >= 100.0)
+    }
+
+    /// A routing retry delay is not a provider-reported renewal time.
+    pub fn reset_unknown(&self, model: &str) -> bool {
+        self.live(model).any(|w| w.used >= 100.0 && w.resets_at.is_none())
+            || self.limits.iter().any(|l| {
+                l.applies(model) && l.live() && l.used_percent.is_some_and(|u| u >= 100.0) && l.resets_at.is_none()
+            })
     }
 
     /// The general weekly renewal, ignoring expired, short and model-specific windows.
@@ -117,10 +189,12 @@ impl Quota {
     /// Headroom in the tightest known applicable window, for accounts without 5-hour data.
     pub fn remaining(&self, model: &str) -> Option<f64> {
         let lower = model.to_ascii_lowercase();
-        if !self.windows.iter().any(|w| w.model.as_ref().is_none_or(|m| lower.contains(m))) {
+        if !self.windows.iter().any(|w| w.model.as_ref().is_none_or(|m| lower.contains(m)))
+            && !self.limits.iter().any(|l| l.applies(model) && l.used_percent.is_some())
+        {
             return None;
         }
-        let used = self.live(model).map(|w| w.used).fold(0.0, f64::max);
+        let used = self.live(model).map(|w| w.used).chain(self.limit_pressure(model)).fold(0.0, f64::max);
         Some(100.0 - used.clamp(0.0, 100.0))
     }
 
@@ -137,7 +211,14 @@ impl Quota {
         // A window renewed or a quota pause ended since the last reading: confirm it at
         // the next round rather than up to five minutes later.
         let ended = |t: DateTime<Utc>| t > refreshed && t <= now;
-        if self.windows.iter().filter_map(|w| w.resets_at).chain(pauses).any(ended) {
+        if self
+            .windows
+            .iter()
+            .filter_map(|w| w.resets_at)
+            .chain(self.limits.iter().filter_map(|l| l.resets_at))
+            .chain(pauses)
+            .any(ended)
+        {
             return true;
         }
         let busy = self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
@@ -178,7 +259,16 @@ impl Quota {
 
     /// A window that is used up, and when it resets.
     pub fn exhausted_until(&self, model: &str) -> Option<DateTime<Utc>> {
-        self.live(model).filter(|w| w.used >= 100.0).filter_map(|w| w.resets_at).max()
+        self.live(model)
+            .filter(|w| w.used >= 100.0)
+            .filter_map(|w| w.resets_at)
+            .chain(
+                self.limits
+                    .iter()
+                    .filter(|l| l.applies(model) && l.live() && l.used_percent.is_some_and(|u| u >= 100.0))
+                    .filter_map(|l| l.resets_at),
+            )
+            .max()
     }
 
     pub(crate) fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
@@ -210,9 +300,12 @@ impl Quota {
 
 fn label(secs: i64) -> String {
     match secs {
-        s if s >= 6 * 86_400 => "week".into(),
-        s if s >= 20 * 3600 => "day".into(),
-        s => format!("{}h", (s + 1800) / 3600),
+        604_800 => "week".into(),
+        86_400 => "day".into(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
     }
 }
 
@@ -295,42 +388,14 @@ pub fn observe_codex_event(acct: &Account, v: &Value, epoch: u64) {
     }
 }
 
+#[cfg(test)]
 fn claude_windows(v: &Value) -> Vec<Window> {
-    let rfc = |s: &Value| s.as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|t| t.with_timezone(&Utc));
-    [
-        ("five_hour", "5h", None),
-        ("seven_day", "week", None),
-        ("seven_day_opus", "week opus", Some("opus")),
-        ("seven_day_sonnet", "week sonnet", Some("sonnet")),
-        ("seven_day_overage_included", "week overage", None),
-    ]
-    .iter()
-    .filter_map(|(key, name, model)| {
-        let w = &v[*key];
-        Some(Window {
-            name: (*name).into(),
-            used: w["utilization"].as_f64()?.clamp(0.0, 100.0),
-            resets_at: rfc(&w["resets_at"]),
-            model: model.map(String::from),
-        })
-    })
-    .collect()
+    readings::claude(v).windows
 }
 
+#[cfg(test)]
 fn codex_windows(v: &Value) -> Vec<Window> {
-    let rl = &v["rate_limit"];
-    let reached = rl["limit_reached"] == true;
-    ["primary_window", "secondary_window"]
-        .iter()
-        .filter_map(|key| {
-            let w = &rl[*key];
-            let secs = w["limit_window_seconds"].as_i64().filter(|s| *s > 0)?;
-            let used = w["used_percent"].as_f64()?;
-            let reset = w["reset_at"].as_i64().and_then(ts);
-            let used = if reached && used >= 99.0 { 100.0 } else { used.clamp(0.0, 100.0) };
-            Some(Window { name: label(secs), used, resets_at: reset, model: None })
-        })
-        .collect()
+    readings::codex(v).windows
 }
 
 /// Asks the provider's usage endpoint (free, no tokens) for current quota.
@@ -341,7 +406,7 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
         _ => return Ok(()),
     };
     let http = app.http.control(acct.proxy_url.as_deref());
-    let (windows, plan) = match acct.provider {
+    let reading = match acct.provider {
         Provider::Claude => {
             let v: Value = http
                 .get(CLAUDE_USAGE)
@@ -354,7 +419,7 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
                 .error_for_status()?
                 .json()
                 .await?;
-            (claude_windows(&v), None)
+            readings::claude(&v)
         }
         Provider::Codex => {
             let mut rb = http
@@ -367,14 +432,29 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
                 rb = rb.header("chatgpt-account-id", id);
             }
             let v: Value = rb.send().await?.error_for_status()?.json().await?;
-            (codex_windows(&v), v["plan_type"].as_str().map(String::from))
+            readings::codex(&v)
+        }
+        Provider::Antigravity => {
+            let Some(project) = crate::antigravity::project(acct) else { return Ok(()) };
+            let v: Value = http
+                .post(format!("{}/v1internal:retrieveUserQuotaSummary", crate::antigravity::request_base(acct)))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "project": project }))
+                .header("user-agent", crate::antigravity::user_agent())
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            readings::antigravity(&v)
         }
         _ => return Ok(()),
     };
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
         st.quota_epoch += 1;
-        authoritative(&mut st, windows, plan);
+        apply_reading(&mut st, reading);
     }
     Ok(())
 }
@@ -445,8 +525,14 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
 }
 
 /// Provider usage is authoritative, but absent windows cannot prove a cooldown has ended.
+#[cfg(test)]
 pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window>, plan: Option<String>) {
-    if windows.is_empty() {
+    apply_reading(st, Reading { windows, plan, ..Default::default() });
+}
+
+fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
+    let Reading { windows, limits, plan } = reading;
+    if windows.is_empty() && limits.is_empty() {
         st.quota.set(windows, plan);
         return;
     }
@@ -454,15 +540,28 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
         .quota_cooldowns
         .keys()
         .filter(|model| {
+            let model = if model.as_str() == "*" { "" } else { model.as_str() };
             st.quota
                 .windows
                 .iter()
                 .filter(|old| old.model.as_ref().is_none_or(|m| model.contains(m)))
                 .all(|old| windows.iter().any(|new| new.name == old.name && new.model == old.model))
+                && st
+                    .quota
+                    .limits
+                    .iter()
+                    .filter(|old| old.applies(model))
+                    .all(|old| limits.iter().any(|new| new.id == old.id && new.scope == old.scope))
         })
         .cloned()
         .collect();
     st.set_quota(windows, plan);
+    // An omitted scope cannot erase a spending cap learned on an earlier read.
+    for limit in limits {
+        st.quota.limits.retain(|old| old.id != limit.id || old.scope != limit.scope);
+        st.quota.limits.push(limit);
+    }
+    st.quota.updated_at = Some(Utc::now());
     st.quota.refreshed_at = st.quota.updated_at;
     let quota = &st.quota;
     st.quota_cooldowns.retain(|model, _| {
@@ -472,12 +571,13 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 pub fn usage(st: &mut crate::accounts::AccountState, provider: Provider, value: &Value) {
-    let (windows, plan) = match provider {
-        Provider::Claude => (claude_windows(value), None),
-        Provider::Codex => (codex_windows(value), value["plan_type"].as_str().map(String::from)),
+    let reading = match provider {
+        Provider::Claude => readings::claude(value),
+        Provider::Codex => readings::codex(value),
+        Provider::Antigravity => readings::antigravity(value),
         _ => return,
     };
-    authoritative(st, windows, plan);
+    apply_reading(st, reading);
 }
 
 /// Keeps quota and model lists fresh for signed-in Claude and ChatGPT accounts.
@@ -515,10 +615,10 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
             Err(e) => tracing::debug!(account = %acct.label, "antigravity setup failed: {e:#}"),
         }
     }
-    if !matches!(acct.provider, Provider::Claude | Provider::Codex) || !acct.is_oauth() {
+    if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity) || !acct.is_oauth() {
         return changed;
     }
-    let reset_stale = app.cfg().banked_resets && {
+    let reset_stale = acct.provider != Provider::Antigravity && app.cfg().banked_resets && {
         let st = acct.state.lock();
         !st.disabled
             && st.banked_resets.as_ref().is_none_or(|v| (Utc::now() - v.checked_at).num_seconds() >= RESET_POLL_EVERY)
@@ -528,7 +628,8 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         changed = true;
     }
     changed |= crate::banked_resets::automatic_check(app, &acct).await;
-    let plan_due = matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
+    let plan_due = acct.provider != Provider::Antigravity
+        && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
         && (acct.provider != Provider::Codex || o.account_id.as_ref().is_some_and(|id| !id.is_empty())))
         && {
             let st = acct.state.lock();

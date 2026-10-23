@@ -235,7 +235,7 @@ test('renaming changes the label only', async () => {
 function snippets(overview) {
   const context = { S: { private: false, overview, models: [] }, location: { origin: 'https://fusebox.test' } };
   vm.createContext(context);
-  vm.runInContext(`${helpers}\n${fn('snippet')}`, context);
+  vm.runInContext(`${helpers}\n${fn('setupModelsFor')}\n${fn('setupModel')}\n${fn('snippet')}`, context);
   return (kind, key) => vm.runInContext(`snippet(${JSON.stringify(kind)}, ${JSON.stringify(key ?? null)})`, context);
 }
 

@@ -66,6 +66,7 @@ const S = {
   login: null, // { state, provider, url, callback, status, message }
   keyProvider: 'claude',
   snippet: store.get('snippet') || 'claude',
+  setupModels: Object.create(null), setupContexts: Object.create(null),
   served: store.get('served') === '1', // this browser has seen Fusebox serve a request
   private: store.get('private') === '1', // hide emails and keys
   quotaDisplay: store.get('quota-display') === 'remaining' ? 'remaining' : 'used',
@@ -389,7 +390,7 @@ async function runRefresh() {
     ]);
     if (accounts) S.accounts = accounts;
     if (overview) { S.overview = overview; overviewAt = Date.now(); }
-    if (models) S.models = models;
+    if (models) { S.models = models; refreshSetups(); }
     if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
     if (acc) expireActivity();
     refreshViews();
@@ -871,6 +872,7 @@ function acctState(a) {
   if (cds.length) {
     const [model, until] = cds[0];
     const kind = (a.cooldown_kinds || {})[model] || 'rate_limit';
+    if (kind === 'quota' && model === '*' && a.quota_reset_unknown) return { cls: 'cooling', dot: 'warn', word: 'Quota used up', model, until, kind, resetUnknown: true };
     return { cls: 'cooling', dot: 'warn', word: 'Cooling', model, until, kind, html: `Cooling ${liveLeft(until)}` };
   }
   if (a.last_error) return { cls: 'error', dot: 'err', word: 'Error', signin: a.kind !== 'api-key' && SIGNIN_ERR.test(a.last_error) };
@@ -892,7 +894,7 @@ function statusHTML(a, size = '') {
 }
 const statusWord = (a) => {
   const st = acctState(a);
-  if (st.cls === 'cooling') return `Cooling ${left(st.until)}`;
+  if (st.cls === 'cooling') return st.resetUnknown ? st.word : `Cooling ${left(st.until)}`;
   return st.cls === 'ready' && inFlight(a) ? `Serving ${fmt(inFlight(a))}` : st.word;
 };
 
@@ -933,7 +935,7 @@ function quotaView(q) {
 
 // Subscriptions that can report limits get meters (empty until they do); API keys have none.
 const metered = (a) => (a.kind === 'oauth' && ['claude', 'codex'].includes(a.provider))
-  || (a.quota?.windows || []).some((w) => !w.model);
+  || (a.quota?.windows || []).length > 0 || (a.quota?.limits || []).length > 0;
 
 // The tightest live usage window of a kind: short (5-hour) or long (weekly).
 function windowOf(a, short) {
@@ -944,13 +946,15 @@ function windowOf(a, short) {
     .sort((x, y) => y.used - x.used)[0];
 }
 
-const windowLabel = (w, short) => (short ? (w ? w.name.toUpperCase() : '5H') : w && w.name === 'day' ? 'DAY' : 'WK');
-const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : 'Weekly');
+const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
+const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
 
 // A window's length from its name ("5h", "day", "week"), in seconds.
 function windowSeconds(w) {
   const h = /^(\d+)h$/.exec(w?.name || '');
   if (h) return Number(h[1]) * 3600;
+  const other = /^(\d+)([dms])$/.exec(w?.name || '');
+  if (other) return Number(other[1]) * ({ d: 86400, m: 60, s: 1 }[other[2]]);
   return { day: 86400, week: 7 * 86400 }[w?.name] || null;
 }
 
@@ -1029,9 +1033,10 @@ function meterRowHTML(a, short) {
   }
   return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst${out ? ' out' : ''}"${title}>${reset}</span></div>`;
 }
-const metersHTML = (a) => `<div class="meters">${meterRowHTML(a, true)}${meterRowHTML(a, false)}</div>`;
+const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : `${meterRowHTML(a, true)}${meterRowHTML(a, false)}`}</div>`;
 
 function miniMetersHTML(a) {
+  if (!a.quota?.windows?.length && a.quota?.limits?.length) return quotaLimitsHTML(a, true);
   const row = (short) => {
     const w = windowOf(a, short);
     return `<div class="mrow"><span class="capsm">${esc(windowLabel(w, short))}</span>${segsHTML(w, windowTitle(w || { name: short ? '5h' : 'week' }))}${pctHTML(w)}</div>`;
@@ -1042,13 +1047,38 @@ function miniMetersHTML(a) {
 // A window as a big bar with its reset line (drawer and account page).
 function windowHTML(a, short, size) {
   const w = windowOf(a, short);
-  return windowBlockHTML(a, w, short ? '5-hour' : w && w.name === 'day' ? 'Daily' : 'Weekly', size);
+  return windowBlockHTML(a, w, w ? windowTitle(w) : short ? '5-hour' : 'Weekly', size);
+}
+
+function quotaWindowsHTML(a, size = 'xl') {
+  const windows = (a.quota?.windows || []).filter((w) => quotaOf(w));
+  if (!windows.length) return a.quota?.limits?.length ? '' : `${windowHTML(a, true, size)}${windowHTML(a, false, size)}`;
+  return windows.map((w) => windowBlockHTML(a, w, esc(w.model ? scopedTitle(w) : windowTitle(w)), size)).join('');
+}
+
+function quotaLimitsHTML(a, compact = false) {
+  const limits = (a.quota?.limits || []).filter((l) => !(l.id?.endsWith(':gate') && l.used_percent === 0));
+  const primary = limits.filter((l) => l.scope?.kind === 'account' || l.scope?.kind === 'credits');
+  const rows = compact ? (primary.length ? primary : limits).slice(0, 2) : limits;
+  const amount = (n) => typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : null;
+  return rows.map((l) => {
+    const q = l.enabled === false ? null : quotaOf({ used: l.used_percent, resets_at: l.resets_at });
+    const divisor = l.unit === 'USD cents' ? 100 : 1;
+    const unit = divisor === 100 ? 'USD' : l.unit;
+    const values = l.used != null && l.limit != null ? `${amount(l.used / divisor)} / ${amount(l.limit / divisor)}` : l.remaining != null ? `${amount(l.remaining / divisor)} left` : '';
+    const detail = l.unlimited === true ? 'Unlimited' : values ? `${values}${unit ? ` ${unit}` : ''}` : q ? '' : 'Not reported';
+    const scope = l.scope?.kind === 'account' ? 'Applies to all models' : l.scope?.kind === 'model' ? `Model: ${l.scope.value}` : l.scope?.kind === 'models' ? `Models: ${l.scope.value.join(', ')}` : l.scope?.kind === 'model_families' ? `Model families: ${l.scope.value.join(', ')}` : l.scope?.kind === 'credits' ? 'Extra credits; separate from subscription allowance' : l.scope?.kind === 'overage' ? 'Optional paid usage; separate from subscription allowance' : 'Separate feature allowance';
+    const reset = l.resets_at ? Date.parse(l.resets_at) > Date.now() ? `Resets ${when(l.resets_at)}` : 'Renewal passed; awaiting update' : 'No reset time reported';
+    return `<div class="quota-limit${compact ? ' compact' : ''}"><div class="window-top"><span>${esc(l.name)}</span>${q ? `<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span>` : ''}</div>
+      ${detail ? `<span class="note">${esc(detail)}</span>` : ''}${l.enabled === false ? '<span class="note">Disabled</span>' : ''}
+      ${compact ? '' : `${q ? meterHTML(q, null, l.name, 'lg', l.resets_at) : ''}<span class="note">${esc(scope)}</span><span class="note">${esc(reset)}</span>`}</div>`;
+  }).join('') || (compact ? '<span class="dim">Quota not reported</span>' : '');
 }
 
 // Windows limited to one model ("week opus" on some Claude plans), shown on the account page.
 const scopedWindows = (a) => ((a.quota && a.quota.windows) || []).filter((w) => w.model && quotaOf(w))
   .sort((x, y) => String(x.name).localeCompare(String(y.name)));
-const scopedTitle = (w) => `${cap(w.model)} ${windowTitle(w).toLowerCase()}`;
+const scopedTitle = (w) => `${cap(w.model)} ${windowTitle({ name: w.name.split(' ')[0] }).toLowerCase()}`;
 
 function windowBlockHTML(a, w, title, size) {
   const q = quotaOf(w);
@@ -1165,7 +1195,7 @@ function alertsList() {
       const back = spent?.resets_at || st.until;
       const others = S.overview?.session_affinity && accounts.some((x) => x.id !== a.id && x.provider === a.provider && acctState(x).cls === 'ready');
       out.push({ lvl: 'warn', id: a.id, title: `${spent ? windowTitle(spent) : 'Usage'} limit used up`,
-        detail: `Back at ${when(back)}, in ${left(back)}.${others ? ` Its sessions moved to another ${provName(a)} account.` : ''}`, act: 'View' });
+        detail: `${st.resetUnknown ? 'Provider did not report a reset time. Refresh quota to check availability.' : `Back at ${when(back)}, in ${left(back)}.`}${others ? ` Its sessions moved to another ${provName(a)} account.` : ''}`, act: 'View' });
     } else if (st.cls === 'cooling' && st.kind === 'rate_limit') {
       out.push({ lvl: 'warn', id: a.id, title: 'Rate limited',
         detail: `${st.model === '*' ? 'Every model' : st.model} is paused until ${when(st.until)}, in ${left(st.until)}.`, act: 'View' });
@@ -1340,7 +1370,7 @@ function ovSubsHTML() {
       return `<div class="item click" data-open="${esc(a.id)}">
         <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}</span></div>${statusHTML(a, 7)}</div>
         <div class="meters indent">${meterRowHTML(a, true)}${meterRowHTML(a, false)}</div>
-        <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · back ${esc(when(st.until))}</span>` : ''}${bankedLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
+        <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
       </div>`;
     }).join('');
     return `<div class="sec-head"><div class="stack"><h2 class="h-sec">Subscriptions</h2><span class="meta" data-subs-meta="short">${esc(subsMeta(true))}</span></div>${quotaControlsHTML(true, false)}</div>
@@ -1352,7 +1382,7 @@ function ovSubsHTML() {
       <span class="c-idx idx">${String(i + 1).padStart(2, '0')}</span>
       <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}</span></div></div>
       ${metersHTML(a)}
-      <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · back ${esc(when(st.until))}</span>` : ''}${bankedLineHTML(a)}</div>
+      <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}</div>
       <span class="c-req r">${fmt(a.counters.requests)}</span>
       <div class="c-last c-now" data-now="${esc(a.id)}">${nowHTML(a)}</div>
     </div>`;
@@ -1475,67 +1505,80 @@ function ovOtherHTML() {
     <div class="circuits">${cards}</div>`;
 }
 
-// A tool's setup with a client's key; without one, a placeholder when Fusebox asks for keys.
-function snippet(kind, key = null) {
+// Named clients see only models their key permits, including prefixed aliases.
+function setupModelsFor(key = null) {
+  const client = (S.config?.values?.['named-clients'] || []).find((c) => c.key === key);
+  const allows = (id) => !client?.models?.length || client.models.some((pattern) => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`, 'i').test(id);
+  });
+  return S.models.filter((m) => allows(m.id));
+}
+
+function setupModel(kind, key = null, chosen = null) {
+  const models = setupModelsFor(key);
+  const family = kind === 'codex' ? 'gpt-' : kind === 'gemini' ? 'gemini-' : 'claude-';
+  return models.find((m) => m.id === chosen) || models.find((m) => m.id.split('/').pop().startsWith(family)) || models[0] || null;
+}
+
+function modelCapabilitiesText(model) {
+  if (!model) return 'No models available for this client';
+  const c = model.capabilities || {};
+  return [c.context_window ? `${c.context_window.toLocaleString()} context tokens` : 'Context limit unknown',
+    c.max_output_tokens ? `${c.max_output_tokens.toLocaleString()} output tokens` : 'Output limit unknown',
+    c.input_modalities ? c.input_modalities.includes('image') ? 'Image input supported' : 'Image input not supported' : 'Image support unknown',
+    c.tool_calling == null ? '' : c.tool_calling ? 'Tool calls supported' : 'Tool calls not supported'].filter(Boolean).join(' · ');
+}
+
+// A copyable/downloadable configuration for the selected public model ID. Known
+// provider metadata is kept; unknown limits are omitted rather than guessed.
+function snippet(kind, key = null, modelId = null) {
   const origin = location.origin;
   const keyed = !!key || S.overview.client_keys.length > 0 || S.overview.named_clients > 0;
   const token = key || (keyed ? 'your-client-key' : 'fbx_local');
-  const shown = key ? secret(key) : token; // what the page shows; copy gets the real token
-  const pick = (prefix, fallback) => (S.models.find((m) => m.id.startsWith(prefix)) || {}).id || fallback;
-  const any = (S.models[0] || {}).id || 'claude-sonnet-5-5';
-  const k = (s) => `<span class="k">${esc(s)}</span>`;
-  const v = (s) => `<span class="v">${esc(s)}</span>`;
-  const claude = pick('claude-', 'claude-sonnet-5-5');
-  const gpt = pick('gpt-', 'gpt-6-astra');
-  // The text with the endpoint, key and model ids marked, and the key hidden when private.
-  const marked = (text, models) => [origin, token, ...models].reduce((html, value) => html.split(esc(value)).join(v(value === token ? shown : value)), esc(text));
-  const plain = (text, models, note) => ({ text, html: marked(text, models), note });
+  const model = setupModel(kind, key, modelId);
+  const id = model?.id || (kind === 'codex' ? 'gpt-6-astra' : 'claude-sonnet-5-5');
+  const caps = { ...(model?.capabilities || {}) };
+  const entered = S.setupContexts?.[id];
+  if (!caps.context_window && Number.isSafeInteger(entered) && entered > 0) caps.context_window = entered;
+  const q = JSON.stringify;
+  const sh = (s) => /^[A-Za-z0-9_:/.,@+=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'"'"'`)}'`;
+  const result = (text, filename, note) => ({ text, filename, note, html: esc(text).split(esc(token)).join(esc(key ? secret(key) : token)) });
+  const json = (value, filename, note) => result(`${JSON.stringify(value, null, 2)}\n`, filename, note);
   switch (kind) {
-    case 'opencode':
-      return plain(`// opencode.json\n{\n  "$schema": "https://opencode.ai/config.json",\n  "provider": {\n    "fusebox": {\n      "npm": "@ai-sdk/openai-compatible",\n      "name": "Fusebox",\n      "options": { "baseURL": "${origin}/v1", "apiKey": "${token}" },\n      "models": { "${claude}": {}, "${gpt}": {} }\n    }\n  },\n  "model": "fusebox/${claude}"\n}`,
-        [claude, gpt], 'List any models your accounts serve under models; pick one with /models.');
-    case 'gemini':
-      return plain(`export GOOGLE_GEMINI_BASE_URL=${origin}\nexport GEMINI_API_KEY=${token}\ngemini -m ${pick('gemini-', 'gemini-3.8-flash')}`,
-        [pick('gemini-', 'gemini-3.8-flash')], 'Gemini CLI speaks the Gemini API; any model works, Fusebox translates.');
-    case 'aider':
-      return plain(`export OPENAI_API_BASE=${origin}/v1\nexport OPENAI_API_KEY=${token}\naider --model openai/${claude}`,
-        [claude], 'The openai/ prefix tells Aider to use the OpenAI API; the rest is the model id.');
-    case 'continue':
-      return plain(`# ~/.continue/config.yaml\nname: Fusebox\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Fusebox\n    provider: openai\n    model: ${claude}\n    apiBase: ${origin}/v1\n    apiKey: ${token}`,
-        [claude], 'Add one entry per model you want in the picker.');
+    case 'opencode': {
+      const entry = {};
+      if (caps.context_window || caps.max_output_tokens) entry.limit = { ...(caps.context_window ? { context: caps.context_window } : {}), ...(caps.max_output_tokens ? { output: caps.max_output_tokens } : {}) };
+      if (caps.input_modalities || caps.output_modalities) entry.modalities = { ...(caps.input_modalities ? { input: caps.input_modalities } : {}), ...(caps.output_modalities ? { output: caps.output_modalities } : {}) };
+      if (caps.tool_calling != null) entry.tool_call = caps.tool_calling;
+      return json({ $schema: 'https://opencode.ai/config.json', provider: { fusebox: { npm: '@ai-sdk/openai-compatible', name: 'Fusebox', options: { baseURL: `${origin}/v1`, apiKey: token }, models: { [id]: entry } } }, model: `fusebox/${id}` }, 'opencode.json', 'Merge this into opencode.json. Reported context, output and image capabilities are included.');
+    }
+    case 'continue': {
+      const features = [...(caps.tool_calling ? ['tool_use'] : []), ...(caps.input_modalities?.includes('image') ? ['image_input'] : [])];
+      const options = [caps.context_window ? `      contextLength: ${caps.context_window}` : '', caps.max_output_tokens ? `      maxTokens: ${caps.max_output_tokens}` : ''].filter(Boolean);
+      return result(`name: Fusebox\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: ${q(id)}\n    provider: openai\n    model: ${q(id)}\n    apiBase: ${q(`${origin}/v1`)}\n    apiKey: ${q(token)}${features.length ? `\n    capabilities: ${q(features)}` : ''}${options.length ? `\n    defaultCompletionOptions:\n${options.join('\n')}` : ''}\n`, 'config.yaml', 'Merge into ~/.continue/config.yaml. Unknown model capabilities use the client defaults.');
+    }
     case 'zed':
-      return plain(`// settings.json\n"language_models": {\n  "openai_compatible": {\n    "Fusebox": {\n      "api_url": "${origin}/v1",\n      "available_models": [{ "name": "${claude}", "max_tokens": 200000 }]\n    }\n  }\n}`,
-        [claude], `Then enter the key in the Agent panel's settings for Fusebox.${keyed ? '' : ' No key is required, so any value works.'}`);
+      if (!caps.context_window) return result('Enter the model’s context limit above to generate Zed settings.', null, 'Zed requires a context limit. Use the provider’s documented value.');
+      return json({ language_models: { openai_compatible: { Fusebox: { api_url: `${origin}/v1`, available_models: [{ name: id, max_tokens: caps.context_window, ...(caps.max_output_tokens ? { max_output_tokens: caps.max_output_tokens } : {}), ...(caps.input_modalities || caps.tool_calling != null ? { capabilities: { tools: caps.tool_calling ?? true, images: caps.input_modalities?.includes('image') ?? false, parallel_tool_calls: false, prompt_cache_key: false } } : {}) }] } } } }, 'settings.json', `Merge into Zed settings.json, then enter this client’s key in the Agent panel.${keyed ? '' : ' No key is required, so any value works.'}`);
+    case 'codex': {
+      const catalog = model?.codex_catalog ? `\nmodel_catalog_url = ${q(`${origin}/v1/codex/models.json?model=${encodeURIComponent(id)}`)}` : '';
+      return result(`# ~/.codex/config.toml\nmodel = ${q(id)}\nmodel_provider = "fusebox"${caps.context_window ? `\nmodel_context_window = ${caps.context_window}` : ''}\n\n[model_providers.fusebox]\nname = "Fusebox"\nbase_url = ${q(`${origin}/v1`)}${catalog}\nwire_api = "responses"${keyed ? '\nenv_key = "FUSEBOX_KEY"' : ''}\n`, 'config.toml', `${keyed ? 'Export FUSEBOX_KEY with this client’s key. ' : ''}Merge top-level settings before provider tables, then restart Codex. ${model?.codex_catalog ? 'The catalog preserves the provider’s tools, reasoning and image metadata for this alias.' : 'Complete Codex metadata is not available for this model; Codex uses its built-in defaults.'}`);
+    }
+    case 'gemini':
+      return result(`export GOOGLE_GEMINI_BASE_URL=${sh(origin)}\nexport GEMINI_API_KEY=${sh(token)}\ngemini -m ${sh(id)}\n`, 'fusebox-gemini.sh', 'Gemini CLI speaks the Gemini API; Fusebox translates the selected model.');
+    case 'aider':
+      return result(`export OPENAI_API_BASE=${sh(`${origin}/v1`)}\nexport OPENAI_API_KEY=${sh(token)}\naider --model ${sh(`openai/${id}`)}\n`, 'fusebox-aider.sh', 'The openai/ prefix selects the OpenAI API; the rest is the exact public model ID.');
     case 'cline':
-      return plain(`API Provider   OpenAI Compatible\nBase URL       ${origin}/v1\nAPI Key        ${token}\nModel ID       ${claude}`,
-        [claude], 'The same settings work in Cline, Roo Code and Kilo Code.');
+      return result(`API Provider   OpenAI Compatible\nBase URL       ${origin}/v1\nAPI Key        ${token}\nModel ID       ${id}\n${caps.context_window ? `Context Window ${caps.context_window}\n` : ''}${caps.max_output_tokens ? `Max Output     ${caps.max_output_tokens}\n` : ''}${caps.input_modalities ? `Supports Images ${caps.input_modalities.includes('image')}\n` : ''}`, 'fusebox-cline.txt', 'Use these values in Cline, Roo Code or Kilo Code. Leave unreported capabilities at the client defaults.');
     case 'cursor':
-      return plain(`Settings → Models → API Keys\nOpenAI API Key            ${token}\nOverride OpenAI Base URL  https://your-fusebox-host/v1`,
-        [], 'Cursor sends custom-endpoint requests from its own servers, so Fusebox must be reachable over public HTTPS (a tunnel works); localhost does not.');
-    case 'codex':
-      return {
-        text: `# ~/.codex/config.toml\nmodel = "${pick('gpt-', 'gpt-6-astra')}"\nmodel_provider = "fusebox"\n\n[model_providers.fusebox]\nname = "Fusebox"\nbase_url = "${origin}/v1"\nwire_api = "responses"${keyed ? '\nenv_key = "FUSEBOX_KEY"' : ''}`,
-        html: `${k('# ~/.codex/config.toml')}\nmodel = ${v(`"${pick('gpt-', 'gpt-6-astra')}"`)}\nmodel_provider = ${v('"fusebox"')}\n\n[model_providers.fusebox]\nname = ${v('"Fusebox"')}\nbase_url = ${v(`"${origin}/v1"`)}\nwire_api = ${v('"responses"')}${keyed ? `\nenv_key = ${v('"FUSEBOX_KEY"')}` : ''}`,
-        note: `${keyed ? 'Then export FUSEBOX_KEY with your key. ' : ''}Both HTTP and websocket transports work, and any model your accounts serve can be used.`,
-      };
+      return result(`Settings → Models → API Keys\nOpenAI API Key            ${token}\nOverride OpenAI Base URL  ${origin}/v1\nModel ID                 ${id}`, 'fusebox-cursor.txt', 'Cursor sends requests from its own servers. Use a public HTTPS Fusebox address.');
     case 'sdk':
-      return {
-        text: `from openai import OpenAI\n\nclient = OpenAI(base_url="${origin}/v1", api_key="${token}")\nreply = client.chat.completions.create(\n    model="${any}",\n    messages=[{"role": "user", "content": "Hello"}],\n)`,
-        html: `from openai import OpenAI\n\nclient = OpenAI(base_url=${v(`"${origin}/v1"`)}, api_key=${v(`"${shown}"`)})\nreply = client.chat.completions.create(\n    model=${v(`"${any}"`)},\n    messages=[{"role": "user", "content": "Hello"}],\n)`,
-        note: `Any model works with any client format; Fusebox translates between OpenAI, Anthropic and Gemini.${keyed ? '' : ' No key is required, so any value works.'}`,
-      };
+      return result(`from openai import OpenAI\n\nclient = OpenAI(base_url=${q(`${origin}/v1`)}, api_key=${q(token)})\nreply = client.chat.completions.create(\n    model=${q(id)},\n    messages=[{"role": "user", "content": "Hello"}],\n)\n`, 'fusebox-example.py', `Fusebox translates the selected model into the client’s API format.${keyed ? '' : ' No key is required, so any value works.'}`);
     case 'curl':
-      return {
-        text: `curl ${origin}/v1/chat/completions \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "${any}", "messages": [{"role": "user", "content": "Hello"}]}'`,
-        html: `curl ${v(`${origin}/v1/chat/completions`)} \\\n  -H ${v(`"Authorization: Bearer ${shown}"`)} \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": ${v(`"${any}"`)}, "messages": [{"role": "user", "content": "Hello"}]}'`,
-        note: 'Also available: /v1/messages, /v1/responses (HTTP and websocket) and /v1beta/models.',
-      };
+      return result(`curl ${sh(`${origin}/v1/chat/completions`)} \\\n  -H ${sh(`Authorization: Bearer ${token}`)} \\\n  -H 'Content-Type: application/json' \\\n  -d ${sh(q({ model: id, messages: [{ role: 'user', content: 'Hello' }] }))}\n`, 'fusebox-curl.sh', 'Also available: /v1/messages, /v1/responses (HTTP and websocket) and /v1beta/models.');
     default:
-      return {
-        text: `export ANTHROPIC_BASE_URL=${origin}\nexport ANTHROPIC_AUTH_TOKEN=${token}\nclaude`,
-        html: `export ANTHROPIC_BASE_URL=${v(origin)}\nexport ANTHROPIC_AUTH_TOKEN=${v(shown)}\nclaude`,
-        note: 'Claude Code requests pass through untouched. Set ANTHROPIC_MODEL to use a GPT or Gemini model instead.',
-      };
+      return result(`export ANTHROPIC_BASE_URL=${sh(origin)}\nexport ANTHROPIC_AUTH_TOKEN=${sh(token)}\nexport ANTHROPIC_MODEL=${sh(id)}\nclaude\n`, 'fusebox-claude.sh', 'The selected model ID is sent to Fusebox. Fusebox translates when the model uses another provider’s API.');
   }
 }
 
@@ -1584,17 +1627,36 @@ const SNIPPET_MORE = [['gemini', 'Gemini CLI'], ['aider', 'Aider'], ['continue',
 
 // `uid` keeps ids apart when a page shows more than one setup.
 function setupHTML(key = null, uid = '') {
-  const sn = snippet(S.snippet, key);
+  const client = (S.config?.values?.['named-clients'] || []).find((c) => c.key === key);
+  const scope = `${client?.id || uid || 'main'}:${S.snippet}`;
+  const models = setupModelsFor(key);
+  const selected = setupModel(S.snippet, key, S.setupModels[scope]);
+  const sn = snippet(S.snippet, key, selected?.id);
   const more = SNIPPET_MORE.some(([id]) => id === S.snippet);
   return `<div class="snip-head">
       <div class="snip-tabs" role="group" aria-label="Client">${SNIPPET_TABS.map(([id, label]) => `<button type="button" data-act="snippet" data-id="${id}" aria-pressed="${S.snippet === id}">${label}</button>`).join('')}
         <label class="sr-only" for="snip-more${uid}">More tools</label>
         <select id="snip-more${uid}" class="snip-more${more ? ' on' : ''}"><option value="">More tools</option>${SNIPPET_MORE.map(([id, label]) => `<option value="${id}"${S.snippet === id ? ' selected' : ''}>${label}</option>`).join('')}</select></div>
       <span class="grow"></span>
-      <button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(sn.text)}" data-toast="Snippet copied" aria-label="Copy snippet" title="Copy snippet">${ICON.copy}</button>
+      ${selected ? `<button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(sn.text)}" data-toast="Snippet copied" aria-label="Copy snippet" title="Copy snippet">${ICON.copy}</button>` : ''}
     </div>
-    <pre class="code">${sn.html}</pre>
-    <p class="note">${esc(sn.note)}</p>`;
+    ${selected ? `<div class="setup-model"><label for="setup-model${uid}">Model</label><select id="setup-model${uid}" class="setup-model-select" data-setup-scope="${esc(scope)}">${models.map((m) => `<option value="${esc(m.id)}"${m.id === selected.id ? ' selected' : ''}>${esc(m.id)}</option>`).join('')}</select>
+      ${S.snippet === 'zed' && !selected.capabilities?.context_window ? `<label for="setup-context${uid}">Context tokens</label><input id="setup-context${uid}" class="setup-context" type="number" min="1" step="1" data-model="${esc(selected.id)}" value="${esc(S.setupContexts[selected.id] || '')}" placeholder="Provider’s documented limit">` : ''}</div>
+      <p class="note setup-capabilities">${esc(modelCapabilitiesText(selected))}</p>
+      <pre class="code">${sn.html}</pre>
+      <div class="setup-footer"><p class="note">${esc(sn.note)}</p>${sn.filename ? `<button class="btn sm" type="button" data-act="download-setup" data-filename="${esc(sn.filename)}" data-text="${esc(sn.text)}">Download file</button>` : ''}</div>`
+      : '<p class="note">No models available for this client. Connect an account or update the client’s allowed models.</p>'}`;
+}
+
+function downloadSetup(text, filename) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // Every setup on the page follows the chosen tool; a client's keeps its key.
@@ -1800,7 +1862,7 @@ function renderDrawer() {
 
 function drawerHTML(a) {
   const st = acctState(a);
-  const hasQuota = metered(a) && (windowOf(a, true) || windowOf(a, false));
+  const hasQuota = metered(a) && ((a.quota?.windows || []).some((w) => quotaOf(w)) || a.quota?.limits?.length > 0);
   const banked = hasBankedResets(a) ? a.banked_resets : null;
   const count = banked && !banked.error ? banked.inventory?.available : null;
   return `<div class="scrim" data-act="close-drawer"></div>
@@ -1809,8 +1871,8 @@ function drawerHTML(a) {
       <button class="close-btn" type="button" data-act="close-drawer"><kbd class="kbd">Esc</kbd>Close</button></div>
     <div class="drawer-body">
       <div class="statline">${statusHTML(a)}<span class="dim">· last used ${liveAgo(a.last_used)}</span></div>
-      ${st.cls === 'cooling' ? `<div class="notice warn"><div class="cell2"><span class="mono">${esc(modelScope(st.model))}</span><span class="small warn">${st.kind === 'quota' ? 'Usage limit used up' : 'Cooling down'} · back at ${esc(when(st.until))}, in ${liveLeft(st.until)}</span></div><button class="btn sm" type="button" data-act="reset" data-id="${esc(a.id)}">Clear cooldowns</button></div>` : ''}
-      ${hasQuota ? `<div class="block" style="gap:14px"><span class="label">Limits · ${quotaWord()}</span>${windowHTML(a, true, 'lg')}${windowHTML(a, false, 'lg')}</div>` : ''}
+      ${st.cls === 'cooling' ? `<div class="notice warn"><div class="cell2"><span class="mono">${esc(modelScope(st.model))}</span><span class="small warn">${st.kind === 'quota' ? 'Usage limit used up' : 'Cooling down'} · ${st.resetUnknown ? 'Reset time unknown' : `back at ${esc(when(st.until))}, in ${liveLeft(st.until)}`}</span></div><button class="btn sm" type="button" data-act="reset" data-id="${esc(a.id)}">Clear cooldowns</button></div>` : ''}
+      ${hasQuota ? `<div class="block" style="gap:14px"><span class="label">Limits · ${quotaWord()}</span>${quotaWindowsHTML(a, 'lg')}${quotaLimitsHTML(a)}</div>` : ''}
       ${windowStarterHTML(a)}
       ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">${esc(bankedPolicyText(a))}</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Reset details</button></div>` : ''}
       ${a.last_error ? `<div class="block" style="gap:8px"><span class="label">Last error</span><div class="errbox">${esc(hideEmails(a.last_error))}</div></div>` : ''}
@@ -2184,15 +2246,16 @@ function detailBodyHTML() {
        ${a.last_error ? `<div class="banner err"><span class="dot err"></span><span class="errtext">${esc(hideEmails(a.last_error))}</span><span class="meta" style="font-size:12px">${liveAgo(a.last_used)}</span></div>` : ''}`;
   const limits = metered(a) ? `<section class="card pad block" style="gap:20px" aria-label="Limits">
       <div class="card-head"><span class="label">Limits · ${quotaWord()}</span>${quotaControlsHTML(mob(), false)}</div>
-      <div class="windows">${windowHTML(a, true, 'xl')}${windowHTML(a, false, 'xl')}${scopedWindows(a).map((w) => windowBlockHTML(a, w, scopedTitle(w), 'xl')).join('')}</div>
+      <div class="windows">${quotaWindowsHTML(a)}</div>
+      ${a.quota?.limits?.length ? `<div class="quota-limits">${quotaLimitsHTML(a)}</div>` : ''}
       ${detBankedHTML(a)}${windowStarterHTML(a)}</section>` : '';
   const cds = Object.entries(a.cooldowns || {}).sort((x, y) => Date.parse(x[1]) - Date.parse(y[1]));
   const reasonOf = (m) => ({ quota: 'Usage limit used up', rate_limit: 'Rate limited', checking: 'Checking quota' })[(a.cooldown_kinds || {})[m]] || 'Rate limited';
   const cools = (!mob() || cds.length) ? `<section class="card cools" style="padding:${mob() ? '12px 14px 4px' : '18px 20px 6px'}" aria-label="Cooldowns">
       <div class="card-head" style="margin-bottom:8px"><span class="label">Cooldowns</span>${cds.length ? `<button class="btn sm" type="button" data-act="reset" data-id="${esc(a.id)}">Clear all</button>` : ''}</div>
       ${cds.length ? cds.map(([m, t]) => mob()
-        ? `<div class="tr"><span class="mono">${esc(modelScope(m))}</span><span class="warn" style="font-size:12px">${reasonOf(m)} · back ${esc(when(t))}</span></div>`
-        : `<div class="tr"><span class="mono">${esc(modelScope(m))}</span><span class="fg2">${reasonOf(m)}</span><span class="warn r">back ${esc(when(t))} · ${liveLeft(t)}</span></div>`).join('')
+        ? `<div class="tr"><span class="mono">${esc(modelScope(m))}</span><span class="warn" style="font-size:12px">${reasonOf(m)} · ${m === '*' && a.quota_reset_unknown ? 'Reset time unknown' : `back ${esc(when(t))}`}</span></div>`
+        : `<div class="tr"><span class="mono">${esc(modelScope(m))}</span><span class="fg2">${reasonOf(m)}</span><span class="warn r">${m === '*' && a.quota_reset_unknown ? 'Reset time unknown' : `back ${esc(when(t))} · ${liveLeft(t)}`}</span></div>`).join('')
         : '<div class="tr" style="display:block;padding:12px 0 14px;color:var(--fg-3)">No models cooling down. A rate limit pauses only that model on this account.</div>'}</section>` : '';
   const load = `<section class="card pad load" style="flex:none" aria-label="Load in the last 60 minutes" id="det-load">${detLoadHTML()}</section>`;
   const reqs = `<div id="det-reqs" style="display:contents">${detRequestsHTML()}</div>`;
@@ -2946,6 +3009,7 @@ function routeStepText(step, a) {
   const st = acctState(a);
   if (step.state === 'disabled' || a.disabled) return { txt: 'Disabled · skipped', short: 'Disabled', cls: 'off' };
   if (step.state === 'cooling' || st.cls === 'cooling') {
+    if (st.resetUnknown) return { txt: 'Quota used up · Reset time unknown', short: 'Quota used up', cls: 'warn' };
     const until = step.until || st.until;
     return { txt: `Cooling · back ${when(until)}`, short: `Back ${hm(until)}`, cls: 'warn' };
   }
@@ -3247,6 +3311,7 @@ function famHTML(f, q) {
   const chipTitle = (c) => [
     c.prefix ? `${c.id} only goes to ${c.only.length ? c.only.map(acctLabel).join(', ') : `accounts with the ${c.prefix}/ prefix`}` : '',
     c.target ? `${c.prefix ? c.base : c.id} is an alias for ${c.target}` : '',
+    modelCapabilitiesText(modelInfo(c.id)),
     c.bad ? `${c.id} is failing` : '',
     c.added ? 'You added this model; it goes once Fusebox knows it' : '',
   ].filter(Boolean).join('. ') || `Copy ${c.id}`;
@@ -3735,6 +3800,8 @@ document.addEventListener('click', (e) => {
       S.reqChip = 'errors';
       location.hash = '#/requests';
       return;
+    case 'download-setup':
+      return downloadSetup(el.dataset.text, el.dataset.filename);
     case 'snippet':
       S.snippet = id;
       store.set('snippet', id);
@@ -3801,6 +3868,19 @@ document.addEventListener('input', (e) => {
       for (const b of $$('[data-act="add-model-provider"]')) b.setAttribute('aria-pressed', String(b.dataset.id === guess));
       e.target.placeholder = MODEL_EXAMPLE[guess] || '';
     }
+  } else if (e.target.classList.contains('setup-model-select')) {
+    S.setupModels[e.target.dataset.setupScope] = e.target.value;
+    const id = e.target.id;
+    refreshSetups();
+    document.getElementById(id)?.focus();
+  } else if (e.target.classList.contains('setup-context')) {
+    const value = e.target.value === '' ? null : Number(e.target.value);
+    if (value != null && (!Number.isSafeInteger(value) || value <= 0)) { e.target.setCustomValidity('Enter a positive whole number.'); e.target.reportValidity(); return; }
+    if (value == null) delete S.setupContexts[e.target.dataset.model];
+    else S.setupContexts[e.target.dataset.model] = value;
+    const id = e.target.id;
+    refreshSetups();
+    document.getElementById(id)?.focus();
   } else if (e.target.classList.contains('snip-more')) {
     if (!e.target.value) return;
     const select = e.target.id;

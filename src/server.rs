@@ -36,6 +36,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/videos/{kind}", post(video_create).get(video_status))
         .route("/v1/models", get(models))
+        .route("/v1/codex/models.json", get(codex_models))
         .route("/v1beta/models", get(gemini_models))
         .route("/v1beta/models/{*rest}", post(gemini))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::decoded_body))
@@ -575,15 +576,28 @@ fn listed_models(app: &App) -> Vec<(String, &'static str)> {
     list
 }
 
-async fn models(State(app): State<Arc<App>>) -> Response {
+async fn models(State(app): State<Arc<App>>, Extension(auth): Extension<ClientAuth>) -> Response {
     let created = app.started.timestamp();
+    let cfg = app.cfg();
     let data: Vec<Value> = listed_models(&app)
         .into_iter()
+        .filter(|(id, _)| auth.named(&cfg).is_none_or(|client| crate::policy::model_allowed(client, id)))
         .map(|(id, provider)| {
-            json!({
+            let caps = crate::model_catalog::capabilities(&app, &id);
+            let mut model = json!({
                 "id": id, "object": "model", "created": created, "owned_by": provider,
                 "type": "model", "display_name": id, "created_at": app.started.to_rfc3339(),
-            })
+                "capabilities": caps,
+            });
+            if let Some(n) = caps.context_window {
+                model["context_window"] = n.into();
+                model["max_input_tokens"] = n.into();
+            }
+            if let Some(n) = caps.max_output_tokens {
+                model["max_output_tokens"] = n.into();
+                model["max_tokens"] = n.into();
+            }
+            model
         })
         .collect();
     let first = data.first().and_then(|m| m["id"].as_str()).map(String::from);
@@ -592,17 +606,65 @@ async fn models(State(app): State<Arc<App>>) -> Response {
         .into_response()
 }
 
-async fn gemini_models(State(app): State<Arc<App>>) -> Response {
+async fn gemini_models(State(app): State<Arc<App>>, Extension(auth): Extension<ClientAuth>) -> Response {
+    let cfg = app.cfg();
     let models: Vec<Value> = listed_models(&app)
         .into_iter()
+        .filter(|(id, _)| auth.named(&cfg).is_none_or(|client| crate::policy::model_allowed(client, id)))
         .map(|(id, _)| {
-            json!({
+            let caps = crate::model_catalog::capabilities(&app, &id);
+            let mut model = json!({
                 "name": format!("models/{id}"), "displayName": id, "version": "001",
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent", "countTokens"],
-            })
+                "capabilities": caps,
+            });
+            if let Some(n) = caps.context_window {
+                model["inputTokenLimit"] = n.into();
+            }
+            if let Some(n) = caps.max_output_tokens {
+                model["outputTokenLimit"] = n.into();
+            }
+            model
         })
         .collect();
     axum::Json(json!({ "models": models })).into_response()
+}
+
+/// Codex needs its full provider template for custom aliases, rather than an
+/// OpenAI model-name list. Cached discovery supplies the versioned template.
+async fn codex_models(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> Response {
+    let cfg = app.cfg();
+    let version = |s: &str| -> Option<Vec<u64>> { s.split('.').map(str::parse).collect::<Result<Vec<_>, _>>().ok() };
+    let requested_version = query.get("client_version").and_then(|s| version(s));
+    let models: Vec<Value> = listed_models(&app)
+        .into_iter()
+        .filter(|(id, _)| query.get("model").is_none_or(|selected| selected == id))
+        .filter(|(id, _)| auth.named(&cfg).is_none_or(|client| crate::policy::model_allowed(client, id)))
+        .filter_map(|(id, _)| crate::model_catalog::codex_template(&app, &id))
+        .filter(|m| {
+            requested_version.as_ref().is_none_or(|requested| {
+                m["minimal_client_version"].as_str().and_then(version).is_none_or(|min| requested >= &min)
+            })
+        })
+        .collect();
+    if models.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({"error":"No complete Codex model metadata is available for the selected models/client version. Check for new models in Fusebox or use the client's built-in catalog."}))).into_response();
+    }
+    let body = serde_json::to_vec(&json!({ "models": models })).unwrap();
+    if body.len() > 1_048_576 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::Json(
+                json!({"error":"Codex catalogs must fit in 1 MiB. Select one model with the model query parameter."}),
+            ),
+        )
+            .into_response();
+    }
+    ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-cache")], body).into_response()
 }
 
 // -------------------------------------------------------------------- replies

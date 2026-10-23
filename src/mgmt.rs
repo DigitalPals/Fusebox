@@ -768,7 +768,8 @@ async fn models(State(app): State<Arc<App>>) -> Json<Value> {
 /// What `/api/models` returns; its fingerprint decides when dashboards refetch it.
 pub fn model_list(app: &App) -> Value {
     let models = app.pool.models().into_iter().map(|(m, p)| {
-        let mut v = json!({ "id": m, "provider": p });
+        let mut v = json!({ "id": m, "provider": p, "capabilities": crate::model_catalog::capabilities(app, &m),
+            "codex_catalog": crate::model_catalog::codex_template(app, &m).is_some() });
         match app.pool.route(&m) {
             (Some(Only::Prefix(prefix)), _) => v["prefix"] = prefix.into(),
             (_, base) if crate::discovery::added(app, p, &base) => v["added"] = true.into(),
@@ -776,7 +777,13 @@ pub fn model_list(app: &App) -> Value {
         }
         v
     });
-    Value::Array(models.collect())
+    let mut models: Vec<Value> = models.collect();
+    for id in app.cfg().model_groups.keys() {
+        if !models.iter().any(|m| m["id"] == *id) {
+            models.push(json!({ "id": id, "provider": "fusebox", "capabilities": crate::model_catalog::capabilities(app, id), "codex_catalog": false }));
+        }
+    }
+    Value::Array(models)
 }
 
 #[derive(Deserialize)]

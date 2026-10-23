@@ -96,6 +96,9 @@ pub struct Config {
     /// order, or spread across new sessions with `balance: true`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub model_groups: BTreeMap<String, ModelGroup>,
+    /// User-maintained metadata for public model IDs, including prefixes/aliases.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_capabilities: BTreeMap<String, crate::model_catalog::Capabilities>,
     /// Claude Code's quick background calls (its Haiku model) go to this model instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_model: Option<String>,
@@ -424,6 +427,7 @@ impl Default for Config {
             extra_models: BTreeMap::new(),
             client_identities: BTreeMap::new(),
             model_groups: BTreeMap::new(),
+            model_capabilities: BTreeMap::new(),
             background_model: None,
             ignored: vec![],
             legacy_auth_dir: false,
@@ -773,6 +777,10 @@ impl Config {
         );
         for hook in &cfg.notifications.webhooks {
             check_webhook_url(hook).map_err(|e| anyhow::anyhow!("notifications.webhooks: {e}"))?;
+        }
+        for (name, caps) in &cfg.model_capabilities {
+            anyhow::ensure!(!name.trim().is_empty(), "model-capabilities: empty model name");
+            caps.validate()?;
         }
         for (name, group) in &cfg.model_groups {
             anyhow::ensure!(

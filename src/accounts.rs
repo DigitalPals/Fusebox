@@ -415,7 +415,7 @@ impl AccountState {
     pub fn settle_quota_error(&mut self, now: DateTime<Utc>) {
         let Some(p) = self.last_error.as_ref().and_then(|e| e.pause.as_ref()).filter(|p| p.quota) else { return };
         let paused = [p.model.as_str(), "*"].iter().any(|m| self.quota_cooldowns.get(*m).is_some_and(|t| *t > now));
-        let spent = self.quota.exhausted_until(if p.model == "*" { "" } else { &p.model }).is_some();
+        let spent = self.quota.exhausted(if p.model == "*" { "" } else { &p.model });
         if !paused && !spent {
             self.last_error = None;
         }
@@ -435,7 +435,10 @@ impl AccountState {
             pauses.insert("*".into(), (now + chrono::Duration::seconds(30), "checking"));
         }
         // A used-up usage window blocks every model until it resets.
-        if let Some(t) = self.quota.exhausted_until("")
+        if let Some(t) = self
+            .quota
+            .exhausted_until("")
+            .or_else(|| self.quota.exhausted("").then(|| now + chrono::Duration::minutes(5)))
             && !pauses.contains_key("*")
         {
             pauses.insert("*".into(), (t, "quota"));
@@ -745,6 +748,7 @@ impl Account {
             "disabled": st.disabled,
             "cooldowns": cooldowns,
             "cooldown_kinds": kinds,
+            "quota_reset_unknown": st.quota.reset_unknown(""),
             "last_error": st.last_error(now),
             "last_used": st.last_used.map(|t| t.to_rfc3339()),
             "expires_at": expires,
@@ -1764,6 +1768,7 @@ fn smart_score(a: &Account, upstream: &str, cfg: &Config, session_load: &HashMap
     // Use known weekly/model-specific headroom when no 5-hour window is
     // reported. The reserve still applies only to real 5-hour data.
     let headroom = remaining.or_else(|| st.quota.remaining(upstream)).unwrap_or(crate::quota::UNKNOWN);
+    let headroom = st.quota.limit_remaining(upstream).map_or(headroom, |limit| headroom.min(limit));
     let weekly_remaining = st.quota.weekly_remaining(upstream);
     let weekly = weekly_remaining.map_or(1.0, |left| (left / SMART_WEEKLY_RESERVE).min(1.0));
     SmartQuotaScore {

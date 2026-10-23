@@ -118,3 +118,14 @@ test('combined weekly limits read in Chinese', () => {
   assert.equal(tr('Claude weighted by plan price, Codex equally'), 'Claude 按套餐价格加权，Codex 权重相同');
   assert.match(tr('Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10'), /^每个账号按套餐月费计权/);
 });
+
+test('model setup and scoped quota explanations translate without changing model identifiers', () => {
+  const { tr } = load().FUSEBOX_I18N;
+  assert.equal(tr('Context limit unknown'),'上下文上限未知');
+  assert.equal(tr('128,000 context tokens · Image input supported'),'128,000 个上下文 token · 支持图片输入');
+  assert.equal(tr('Individual spending limit'),'个人支出上限');
+  assert.equal(tr('Applies to all models'),'适用于所有模型');
+  assert.equal(tr('Model: team/coding'),'模型：team/coding');
+  assert.equal(tr('Model metadata overrides'),'模型元数据覆盖');
+  assert.equal(tr('Download file'),'下载文件');
+});

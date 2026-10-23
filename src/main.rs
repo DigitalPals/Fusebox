@@ -26,6 +26,7 @@ mod latency;
 mod media;
 mod metrics;
 mod mgmt;
+mod model_catalog;
 mod oauth;
 mod policy;
 mod pools;

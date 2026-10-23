@@ -290,6 +290,135 @@ async fn higher_priority_accounts_answer_first() {
 }
 
 #[tokio::test]
+async fn spending_caps_route_around_an_alias_without_blocking_unrelated_feature_limits() {
+    let s = setup(|cfg, _| {
+        for entry in &mut cfg.codex_api_key {
+            entry.models = vec![crate::config::ModelAlias { name: "gpt-up".into(), alias: Some("coding".into()) }];
+        }
+        cfg.codex_api_key[0].priority = 10;
+    })
+    .await;
+    let a = s.app.pool.all().into_iter().find(|a| a.label == "a").unwrap();
+    let b = s.app.pool.all().into_iter().find(|a| a.label == "b").unwrap();
+    crate::quota::usage(
+        &mut a.state.lock(),
+        crate::accounts::Provider::Codex,
+        &json!({
+            "spend_control":{"individual_limit":{"limit":10,"remaining":0,"unit":"credits"}}
+        }),
+    );
+    crate::quota::usage(
+        &mut b.state.lock(),
+        crate::accounts::Provider::Codex,
+        &json!({
+            "code_review_rate_limit":{"allowed":false},"credits":{"balance":0}
+        }),
+    );
+    assert_eq!(ask(&s, "client", "coding", &[]).await, (200, "b:gpt-up".into()));
+    assert_eq!(s.mock.calls.lock().as_slice(), &[("b".into(), "gpt-up".into())]);
+    assert!(a.state.lock().pauses(chrono::Utc::now()).contains_key("*"), "a cap without a reset is shown as a pause");
+    assert_eq!(a.snapshot()["quota_reset_unknown"], true);
+    crate::quota::usage(
+        &mut a.state.lock(),
+        crate::accounts::Provider::Codex,
+        &json!({
+            "spend_control":{"individual_limit":{"limit":10,"remaining":5,"unit":"credits"}}
+        }),
+    );
+    assert_eq!(ask(&s, "client", "coding", &[]).await, (200, "a:gpt-up".into()));
+}
+
+#[tokio::test]
+async fn model_capabilities_and_codex_catalogs_follow_aliases_prefixes_and_client_access() {
+    use crate::accounts::Provider;
+    use crate::model_catalog::Capabilities;
+    let s = setup(|cfg, _| {
+        cfg.codex_api_key.clear();
+        cfg.oauth_model_alias.insert("codex".into(), vec![crate::config::OAuthAlias {
+            name: "gpt-native".into(), alias: "coding".into(), fork: false,
+        }]);
+        cfg.named_clients = vec![NamedClient { id: "limited".into(), label: "Limited".into(), key: "limited-key".into(), models: vec!["team/coding".into()], ..Default::default() }];
+        cfg.model_groups.insert("fallback".into(), ModelGroup { models: vec!["team/coding".into(), "budget/coding".into()], balance:false });
+        for prefix in ["team", "budget"] {
+            std::fs::write(std::path::Path::new(&cfg.auth_dir).join(format!("{prefix}.json")), json!({
+                "type":"codex", "prefix":prefix, "access_token":"synthetic-provider-secret", "expired":"2099-01-01T00:00:00Z"
+            }).to_string()).unwrap();
+        }
+    }).await;
+    for account in s.app.pool.all() {
+        let large = account.prefix.as_deref() == Some("team");
+        let context = if large { 500_000 } else { 128_000 };
+        let modalities = if large { vec!["text".into(), "image".into()] } else { vec!["text".into()] };
+        let listed = crate::discovery::Listed {
+            id: "gpt-native".into(),
+            capabilities: Capabilities {
+                context_window: Some(context),
+                max_output_tokens: Some(16000),
+                input_modalities: Some(modalities),
+                ..Default::default()
+            },
+            codex: Some(
+                json!({"slug":"gpt-native","display_name":"Native","context_window":context,"input_modalities":["text","image"],"minimal_client_version":"0.150.0",
+                "supported_reasoning_levels":[{"effort":"high","description":"Thorough"}],"base_instructions":"Provider instructions", "supports_parallel_tool_calls":true,
+                "upgrade":{"id":"another-model"}}),
+            ),
+            ..Default::default()
+        };
+        s.app.models.record(&account, chrono::Utc::now(), Ok((vec![listed], None))).unwrap();
+    }
+    s.app.models.apply(&s.app.pool);
+    let caps = crate::model_catalog::capabilities(&s.app, "team/coding");
+    assert_eq!(caps.context_window, Some(500000));
+    assert!(caps.input_modalities.unwrap().contains(&"image".into()));
+    let caps = crate::model_catalog::capabilities(&s.app, "coding");
+    assert_eq!(caps.context_window, Some(128000));
+    assert_eq!(caps.input_modalities, Some(vec!["text".into()]));
+    assert_eq!(crate::model_catalog::capabilities(&s.app, "fallback").context_window, Some(128000));
+    let http = reqwest::Client::new();
+    let get = |path: &str| http.get(format!("{}{path}", s.proxy.url)).bearer_auth("limited-key");
+    let list: Value = get("/v1/models").send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["data"].as_array().unwrap().len(), 1);
+    assert_eq!(list["data"][0]["id"], "team/coding");
+    assert_eq!(list["data"][0]["max_input_tokens"], 500000);
+    assert_eq!(list["data"][0]["max_output_tokens"], 16000);
+    let gemini: Value = get("/v1beta/models").send().await.unwrap().json().await.unwrap();
+    assert_eq!(gemini["models"].as_array().unwrap().len(), 1);
+    assert_eq!(gemini["models"][0]["inputTokenLimit"], 500000);
+    let response = get("/v1/codex/models.json?model=team%2Fcoding&client_version=0.160.0").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(body.len() <= 1_048_576 && !body.contains("synthetic-provider-secret"));
+    let catalog: Value = serde_json::from_str(&body).unwrap();
+    let model = &catalog["models"][0];
+    assert_eq!(model["slug"], "team/coding");
+    assert_eq!(model["base_instructions"], "Provider instructions");
+    assert_eq!(model["supports_parallel_tool_calls"], true);
+    assert!(model["upgrade"].is_null());
+    assert_eq!(get("/v1/codex/models.json?model=budget%2Fcoding").send().await.unwrap().status(), 422);
+    assert_eq!(
+        get("/v1/codex/models.json?model=team%2Fcoding&client_version=0.100.0").send().await.unwrap().status(),
+        422
+    );
+    assert_eq!(http.get(format!("{}/v1/codex/models.json", s.proxy.url)).send().await.unwrap().status(), 401);
+    let reloaded = crate::discovery::Store::load(&s.dir);
+    let account = s.app.pool.all().into_iter().find(|a| a.prefix.as_deref() == Some("team")).unwrap();
+    assert_eq!(reloaded.listed(&account, "gpt-native").unwrap().capabilities.context_window, Some(500000));
+    // A different provider serving the same public ID cannot borrow Codex metadata.
+    let mut cfg = (*s.app.cfg()).clone();
+    cfg.claude_api_key.push(KeyEntry {
+        api_key: "custom-key".into(),
+        prefix: Some("other".into()),
+        models: vec![crate::config::ModelAlias { name: "gpt-native".into(), alias: Some("coding".into()) }],
+        ..Default::default()
+    });
+    s.app.pool.reload(&cfg);
+    s.app.models.apply(&s.app.pool);
+    assert!(crate::model_catalog::capabilities(&s.app, "coding").is_empty());
+    assert!(crate::model_catalog::codex_template(&s.app, "coding").is_none());
+    assert!(s.app.pool.all().iter().any(|a| a.provider == Provider::Claude));
+}
+
+#[tokio::test]
 async fn model_groups_move_on_and_background_calls_go_elsewhere() {
     let s = setup(|cfg, _| {
         cfg.model_groups = BTreeMap::from([(

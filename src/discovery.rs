@@ -38,7 +38,7 @@ const MIN_GAP: i64 = 10 * 60;
 const REMOVED_KEEP_DAYS: i64 = 30;
 
 /// One model as a provider lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Listed {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,11 +49,18 @@ pub struct Listed {
     /// Effort levels the model takes, when the provider says.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "crate::model_catalog::Capabilities::is_empty")]
+    pub capabilities: crate::model_catalog::Capabilities,
+    /// Full provider template for Codex catalogs; never included in management lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Entry {
     models: Vec<Listed>,
+    #[serde(default)]
+    provider: Option<String>,
     /// Last attempt, successful or not.
     checked_at: Option<DateTime<Utc>>,
     /// Last successful fetch.
@@ -129,6 +136,17 @@ fn next_after_failure(now: DateTime<Utc>, failures: u32) -> DateTime<Utc> {
 }
 
 impl Store {
+    pub fn listed(&self, account: &Account, model: &str) -> Option<Listed> {
+        if !eligible(account) {
+            return None;
+        }
+        let stored = self.stored.lock();
+        let entry = stored.accounts.get(&account.id)?;
+        if entry.provider.as_deref().is_some_and(|p| Provider::parse(p) != Some(account.provider)) {
+            return None;
+        }
+        entry.models.iter().find(|m| m.id.eq_ignore_ascii_case(model)).cloned()
+    }
     pub fn load(auth_dir: &Path) -> Self {
         let path = auth_dir.join(STATE_FILE);
         let stored: Stored = match std::fs::read(&path) {
@@ -214,7 +232,7 @@ impl Store {
         }
     }
 
-    fn record(
+    pub(crate) fn record(
         &self,
         acct: &Account,
         now: DateTime<Utc>,
@@ -222,6 +240,7 @@ impl Store {
     ) -> Result<bool> {
         let mut stored = self.stored.lock();
         let entry = stored.accounts.entry(acct.id.clone()).or_default();
+        entry.provider = Some(acct.provider.as_str().into());
         entry.checked_at = Some(now);
         let outcome = match result {
             Ok((models, etag)) => {
@@ -408,6 +427,8 @@ fn parse_claude(page: &Value, now: DateTime<Utc>) -> Vec<Listed> {
                 name: m["display_name"].as_str().map(String::from),
                 thinking_always_on: supported(&caps["thinking"]["types"]["disabled"]) == Some(false),
                 efforts,
+                capabilities: crate::model_catalog::claude(m),
+                codex: None,
             })
         })
         .collect()
@@ -433,6 +454,12 @@ fn parse_codex(v: &Value) -> Vec<Listed> {
                 name: m["display_name"].as_str().map(String::from),
                 thinking_always_on: false,
                 efforts,
+                capabilities: crate::model_catalog::codex(m),
+                codex: (m["context_window"].is_number()
+                    && m["input_modalities"].is_array()
+                    && (m["base_instructions"].is_string() || m["model_messages"].is_object())
+                    && m["supported_reasoning_levels"].is_array())
+                .then(|| m.clone()),
             })
         })
         .collect()
@@ -639,7 +666,7 @@ mod tests {
         let store = Store::load(&dir);
         let now = Utc::now();
         let at = |s: i64| now + chrono::Duration::seconds(s);
-        let list = |id: &str| vec![Listed { id: id.into(), name: None, thinking_always_on: false, efforts: vec![] }];
+        let list = |id: &str| vec![Listed { id: id.into(), ..Default::default() }];
 
         assert!(store.due(&claude, now), "never fetched");
         assert!(store.record(&claude, now, Ok((list("claude-haiku-9"), None))).unwrap());
@@ -666,6 +693,7 @@ mod tests {
             name: None,
             thinking_always_on: always_on,
             efforts: efforts.iter().map(|e| e.to_string()).collect(),
+            ..Default::default()
         };
         let caps =
             vec![rules("claude-test-thinks", true, &["low", "high", "max"]), rules("claude-test-plain", false, &[])];

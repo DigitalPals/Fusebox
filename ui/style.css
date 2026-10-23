@@ -1406,3 +1406,19 @@ details[open] > summary .cfg-chevron { transform: rotate(90deg); }
 .cfg-starter-account input { flex:none; }
 .cfg-starter-account span { min-width:0; }
 .window-starter { padding-top:16px; border-top:1px solid var(--line); }
+
+.quota-limits { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:20px; }
+.quota-limit { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.quota-limit .window-top { gap:12px; overflow-wrap:anywhere; }
+.quota-limit .pct { width:auto; flex-shrink:0; }
+.quota-limit.compact { gap:3px; font-size:12px; }
+.quota-limit.compact .window-top { font-size:12px; }
+.setup-model { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:12px 0 0; }
+.setup-model label { font-size:12px; color:var(--fg-2); }
+.setup-model select { max-width:100%; min-width:0; flex:1; }
+.setup-model input { width:180px; min-width:0; }
+.setup-capabilities { margin:10px 0; line-height:1.6; }
+.setup-footer { display:flex; gap:16px; align-items:flex-start; justify-content:space-between; }
+.setup-footer .btn { flex-shrink:0; }
+.setup-footer .note { margin:0; }
+@media (max-width:600px) { .setup-footer { flex-direction:column; } }

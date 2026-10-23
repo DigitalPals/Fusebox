@@ -111,6 +111,10 @@ Changes made from the dashboard keep your file's layout, YAML comments, and sett
 
 ## Connect your tools
 
+In **Config → Clients**, choose a tool and a model, then copy or download its setup. Fusebox includes reported context/output limits and image support where the client accepts them. The picker respects each named client's allowed models and keeps the exact public alias or prefix. Unknown capabilities stay marked unknown; Zed asks for a documented context limit before generating settings.
+
+Codex setups can use `/v1/codex/models.json?model=<public-model-id>` when discovery has supplied a complete Codex model template. The endpoint uses the same client authentication and allowed-model policy as `/v1/models`, preserves the provider's tools/instructions/reasoning metadata, and removes upgrade links that would bypass the alias. It filters incompatible minimum client versions and enforces Codex's 1 MiB catalog limit. Merge the downloaded TOML's top-level settings before its provider table and restart Codex. An existing `model_catalog_json` setting takes precedence over the remote catalog; remove it to use Fusebox's catalog. See the [official gateway documentation](https://learn.chatgpt.com/docs/enterprise/roll-out-a-gateway#distribute-a-local-catalog).
+
 **Claude Code**
 
 ```sh
@@ -212,6 +216,21 @@ extra-models:
 
 Every account of that provider then serves and lists it, apart from API keys with their own `models` list. Once a Fusebox release or the provider's model list includes it, Fusebox removes the entry from `config.yaml` and says so on the Models page. **Check Claude and Codex for new models** in the Add model form asks every signed-in Claude and Codex account now, skipping any checked in the last 10 minutes.
 
+### Model capabilities
+
+Discovery retains provider-reported context and output token limits, input/output modalities, tool support, and reasoning levels. `/v1/models`, `/v1beta/models`, and the dashboard expose known values. Metadata follows the actual upstream model through aliases and prefixes. A shared model name or fallback group uses the smallest limits and common capabilities across all its possible routes; an unreported route leaves that information unknown.
+
+For custom models, use **Config → Models → Model metadata overrides**, or `model-capabilities` in `config.yaml`. Overrides apply to the exact public model ID and update client setup and model lists. Removing an override restores discovery. These are client metadata; they do not change the provider's actual limits or add capabilities to a model.
+
+```yaml
+model-capabilities:
+  team/coding:
+    context_window: 128000
+    max_output_tokens: 16000
+    input_modalities: [text, image]
+    tool_calling: true
+```
+
 ### Reasoning effort, from the model name
 
 Append an effort level or a token budget to any model:
@@ -234,6 +253,10 @@ curl http://127.0.0.1:8317/v1/images/generations \
 `gpt-image-*` runs on a ChatGPT account through Codex's image tool (or an OpenAI key), `grok-imagine-*` on xAI, `imagen-*` on Vertex, and Gemini image models such as `gemini-3.1-flash-image-preview` on Gemini, Vertex or Antigravity. Image models also work in chat: the picture comes back as an image part in whatever format the client speaks.
 
 ## The dashboard
+
+Account details and drawers show each reported usage window separately, alongside spending limits, credit balances, feature allowances, and optional paid usage. Codex Business spending-only responses are usable quota readings: a spent individual cap pauses the account even when no five-hour or weekly window exists. A missing reset time stays unknown, and a partial response cannot erase exhaustion learned earlier. Numeric strings and explicit zero balances are preserved; provider credits are not treated as dollars.
+
+Claude model limits, OAuth-app limits, and optional extra usage are kept distinct. Code-review/Cowork allowances and extra credits do not block ordinary chat or grant permission to spend on overages. Additional Codex limits with explicit model IDs (or a model ID as their metered-feature identifier) apply only to that model. Antigravity quota groups preserve independent bucket reset times; the provider's Gemini and Claude/GPT groups, or explicit model IDs, determine which models they constrain. Unknown groups remain informational. Smart quota routing also accounts for the tightest applicable spending/model cap.
 
 Everything is served from the binary at `/`, with no external requests.
 
