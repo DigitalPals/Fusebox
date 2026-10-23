@@ -371,7 +371,7 @@ log-format: text              # or json, one object per line (needs a restart)
 model-groups:                 # one name, several models; see "Model groups" below
   smart: [claude-opus-5-5, gpt-6-astra]
 background-model: gemini-3.8-flash # Claude Code's quick Haiku calls go here
-# client-identities:          # claim a newer client release before Fusebox ships it (see Client versions)
+# client-identities:          # claim a newer client release before Fusebox ships it (see Client compatibility)
 #   claude-code: 2.1.310
 
 claude-api-key:
@@ -456,7 +456,7 @@ Cache hints carry across formats: compatible OpenAI cache settings and content-b
 
 Requests translated to Anthropic use its automatic prompt caching when the caller has not supplied explicit cache controls. So do requests that are made to look like Claude Code on a subscription account, which also cache the shared tools and system prompt. This covers the growing conversation, including caller instructions moved by OAuth cloaking. Explicit controls take precedence; cache hits still depend on the provider's minimum prompt size and reuse within its cache lifetime.
 
-On models before GPT-5.6, a stable `prompt_cache_key` helps OpenAI route requests to a reusable cache. GPT-5.6 and later handle routing automatically; the optional key separates cache accounting for customers, workspaces or sessions. Fusebox keeps existing keys stable: requests to ChatGPT accounts or to OpenAI's own API that arrive without one, including Claude-format requests translated for a GPT model, get a key derived from their session. xAI receives the same key as its conversation id. A key the client sends is passed on unchanged, and API keys with a custom `base-url` never get one added. Cache-key scope and account affinity are separate choices.
+On models before GPT-5.6, a stable `prompt_cache_key` helps OpenAI route requests to a reusable cache. GPT-5.6 and later handle routing automatically; the optional key separates cache accounting for customers, workspaces or sessions. Fusebox keeps existing keys stable: requests to ChatGPT accounts or to OpenAI's own API that arrive without one, including Claude-format requests translated for a GPT model, get a key derived from their session. Native Codex clients can deliberately omit that key; Fusebox preserves their choice on HTTP and WebSockets, independently of their session header and any shared cache scope. xAI receives a derived key as its conversation id. A key the client sends is passed on unchanged, and API keys with a custom `base-url` never get one added. Cache-key scope and account affinity are separate choices.
 
 The Requests page and structured completion logs show the requested and applied cache controls, derived key scope, and any translation downgrade. These describe what Fusebox sent; provider usage determines how much cache was actually reused. When an upstream returns `prompt_cache_diagnostics`, request details also show its comparison result, miss reason and reported token counts. Request a comparison with `prompt_cache_options.comparison_response_id` on a supported Responses backend; this does not load previous conversation state or enable caching. Missing or unavailable diagnostics do not imply a hit. Defaults preserve the behavior above. Optional controls are available under Routing in the dashboard or in YAML:
 
@@ -685,9 +685,13 @@ cargo run -- --config dev.yaml
 
 The dashboard lives in `ui/`. Its text assets are compressed and embedded at build time, so rebuild after editing them.
 
-### Client versions
+### Client compatibility
 
-Requests Fusebox builds for other clients look like one release of Claude Code, the Codex CLI, Grok Build, Muse Code, the Devin CLI and Antigravity. Those releases are listed in `.github/client-versions.json`, and `cargo test` checks the code says the same. Every morning the **Client versions** workflow compares them with each client's latest release and keeps one issue (label `client-version`) open per client that is behind, closing it once Fusebox catches up. To catch up, check what the new release sends, update the code to match, and bump the version in both places.
+Requests Fusebox builds for other clients look like one release of Claude Code, the Codex CLI, Grok Build, Muse Code, the Devin CLI and Antigravity. `.github/client-versions.json` records each bundled identity in `version`, and `cargo test` checks the matching Rust constants. Its separate `reviewed` field records the latest upstream release checked for compatibility. A compatible release can advance `reviewed` without changing the bundled identity or shipping a Fusebox release.
+
+The **Client compatibility** workflow checks release channels daily at 06:17 UTC and writes the results to the Actions summary. On Mondays it also maintains one review issue (label `client-compatibility`) covering all releases newer than `reviewed`. Later releases edit the issue without comments or version-specific titles. When everything is reviewed, it closes the issue. A manual run can reconcile the issue immediately; uncheck **update_issues** for a report only. Any failed release check fails visibly and leaves issues untouched. The first reconciliation retires the old automated `client-version` issues; manually filed issues remain open.
+
+Review every intervening release's authentication, headers, request bodies and WebSocket messages, fix differences when needed, and record evidence in [Client compatibility reviews](docs/client-compatibility.md). Then advance `reviewed`. Update `version` and its Rust constants together only when changing the bundled identity. New model availability is handled by discovery and **Add model**, separately from client compatibility.
 
 Real Claude Code and Codex clients keep their own identity on the way through. Everything Fusebox sends in their name, cloaked and translated requests as well as its own small requests (usage, model lists), claims the newest release it knows: the built-in one, a newer one your real clients sent through it, or one set in `client-identities`. Claude Code's runtime headers (its SDK and Node versions, OS and architecture) are learned the same way, so cloaked requests look like your own installation. A release that only bumps the version therefore needs no Fusebox release; one that changes what the client sends still does, and the identity tests catch that.
 
@@ -698,6 +702,8 @@ client-identities:     # claim a newer release before Fusebox ships it
 ```
 
 An entry older than the built-in release is ignored, so a forgotten one can't hold Fusebox back. `fusebox check` prints the release it claims for each client. Muse Code's identity includes a build hash, so it can't be set this way.
+
+For a local report, run `python3 .github/scripts/client_versions.py --dry-run`. Issue changes require `--update-issues` plus `GITHUB_TOKEN` and `GITHUB_REPOSITORY`; `--dry-run` always suppresses writes. The monitor's regression tests run with the normal Python checks in CI.
 
 See [release binary size](docs/binary-size.md) for compiler comparisons, measured
 savings, and Linux packed-relocation compatibility.

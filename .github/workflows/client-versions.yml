@@ -1,22 +1,38 @@
-name: Client versions
+name: Client compatibility
 
-# Daily: compare the client releases Fusebox speaks as (.github/client-versions.json)
-# with the latest ones, and keep one issue per client that is behind.
+# Daily reports; one quiet, consolidated compatibility review each Monday.
 on:
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "17 6 * * 0,2-6"
+    - cron: "17 6 * * 1"
   workflow_dispatch:
+    inputs:
+      update_issues:
+        description: Reconcile the weekly review issue and retire legacy version alerts
+        type: boolean
+        default: true
 
 permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: client-compatibility
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Compare with the latest releases
-        run: python3 .github/scripts/client_versions.py
+      - name: Check upstream client compatibility reviews
+        run: |
+          if [ "$UPDATE_ISSUES" = "true" ]; then
+            python3 .github/scripts/client_versions.py --update-issues
+          else
+            python3 .github/scripts/client_versions.py
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_ISSUES: ${{ (github.event_name == 'workflow_dispatch' && inputs.update_issues) || github.event.schedule == '17 6 * * 1' }}

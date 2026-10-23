@@ -1535,6 +1535,43 @@ async fn soft_retries_preserve_the_temporary_detour_account() {
 }
 
 #[tokio::test]
+async fn codex_cache_key_omission_and_explicit_keys_survive_http_and_native_websockets() {
+    let fixture = Fixture::new(Routing::RoundRobin, true).await;
+    let mut cfg = fixture.cfg.clone();
+    // A shared policy would otherwise supply a key even when the client omitted it.
+    cfg.prompt_cache.scope = crate::cache::Scope::Client;
+    fixture.app.set_config(cfg);
+    let headers =
+        [("user-agent", "codex_cli_rs/0.164.0"), ("originator", "codex_cli_rs"), ("session-id", "native-session")];
+    let mut request =
+        format!("{}/v1/responses", fixture.proxy.url.replace("http://", "ws://")).into_client_request().unwrap();
+    request.headers_mut().insert("authorization", "Bearer client-one".parse().unwrap());
+    for (name, value) in headers {
+        request.headers_mut().insert(name, value.parse().unwrap());
+    }
+    let mut socket = tokio_tungstenite::connect_async(request).await.unwrap().0;
+    let mut omitted = prompt();
+    let mut null = prompt();
+    null["prompt_cache_key"] = Value::Null;
+    let mut explicit = prompt();
+    explicit["prompt_cache_key"] = "caller-choice".into();
+    // Client metadata must also survive passthrough when the cache key is absent.
+    omitted["client_metadata"] = json!({"turn":"native"});
+    for body in [omitted, null, explicit] {
+        fixture.request_with(&headers, body.clone()).await;
+        turn(&mut socket, body.clone()).await;
+        let calls = fixture.mock.calls.lock();
+        for (_, upstream, transport) in &calls[calls.len() - 2..] {
+            assert_eq!(upstream.get("prompt_cache_key"), body.get("prompt_cache_key"), "{transport}");
+            assert_eq!(upstream.get("client_metadata"), body.get("client_metadata"), "{transport}");
+        }
+    }
+    let calls = fixture.mock.calls.lock().clone();
+    assert_eq!(calls.iter().filter(|(_, _, transport)| *transport == "ws").count(), 3);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn shared_cache_scope_matches_http_and_native_websockets_without_changing_affinity() {
     let fixture = Fixture::new(Routing::RoundRobin, true).await;
     let mut cfg = fixture.cfg.clone();

@@ -44,8 +44,9 @@ impl Config {
     }
 }
 
-/// The caller's explicit key always wins. Only derived keys use shared scopes;
-/// account assignments remain tied to sessions and authenticated client scopes.
+/// The caller's explicit key, or a native Codex client's omitted key, always wins.
+/// Only derived keys use shared scopes; account assignments remain tied to sessions
+/// and authenticated client scopes.
 pub fn key(
     headers: &HeaderMap,
     body: &Value,
@@ -55,6 +56,12 @@ pub fn key(
 ) -> (Option<String>, &'static str) {
     if body["prompt_cache_key"].is_string() {
         return (None, "caller");
+    }
+    // Codex 0.164 can deliberately omit this field independently of session-id.
+    // HTTP and native WebSocket requests share this decision: do not synthesize
+    // a key that undoes the client's policy, even under a shared cache scope.
+    if body["prompt_cache_key"].is_null() && crate::clients::is_codex(headers) {
+        return (None, "caller_omitted");
     }
     let session_key = || {
         session.filter(|_| source != Some("generated_response")).map(|session| {
@@ -338,6 +345,27 @@ mod tests {
         assert_eq!(derive(Some("task"), Some("generated_response")), None);
         assert_eq!(derive(None, None), None);
         assert_eq!(key(&headers, &json!({"prompt_cache_key":"caller"}), Some("task"), None, &config), (None, "caller"));
+    }
+
+    #[test]
+    fn native_codex_can_omit_cache_keys_independently_of_session_and_shared_scopes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "codex_cli_rs/0.164.0".parse().unwrap());
+        headers.insert("originator", "codex_cli_rs".parse().unwrap());
+        headers.insert("session-id", "native-session".parse().unwrap());
+        headers.insert("x-fusebox-cache-workspace", "repo".parse().unwrap());
+        for scope in [Scope::Session, Scope::Client, Scope::Workspace] {
+            let config = Config { scope, ..Default::default() };
+            for body in [json!({}), json!({"prompt_cache_key":null}), json!({"type":"response.create"})] {
+                assert_eq!(key(&headers, &body, Some("task"), None, &config), (None, "caller_omitted"));
+            }
+            assert_eq!(
+                key(&headers, &json!({"prompt_cache_key":"caller"}), Some("task"), None, &config),
+                (None, "caller")
+            );
+        }
+        headers.remove("originator");
+        assert!(key(&headers, &json!({}), Some("task"), None, &Config::default()).0.is_some());
     }
 
     #[test]

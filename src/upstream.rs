@@ -14,14 +14,14 @@ pub const CODEX_BACKEND: &str = "https://chatgpt.com/backend-api/codex";
 pub const OPENAI_API: &str = "https://api.openai.com/v1";
 pub const GEMINI_API: &str = "https://generativelanguage.googleapis.com";
 
-pub const CC_VERSION: &str = "2.1.302";
-pub const CC_USER_AGENT: &str = "claude-cli/2.1.302 (external, cli)";
+pub const CC_VERSION: &str = "2.1.309";
+pub const CC_USER_AGENT: &str = "claude-cli/2.1.309 (external, cli)";
 const CC_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const CC_FINGERPRINT_SALT: &str = "59cf53e54c78";
-pub const CODEX_USER_AGENT: &str = "codex-tui/0.163.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.163.0)";
+pub const CODEX_USER_AGENT: &str = "codex-tui/0.164.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.164.0)";
 pub const CODEX_ORIGINATOR: &str = "codex-tui";
 /// The Codex release `CODEX_USER_AGENT` claims; its model list depends on it.
-pub const CODEX_VERSION: &str = "0.163.0";
+pub const CODEX_VERSION: &str = "0.164.0";
 pub const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
 
 pub struct Prepared {
@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn muse_requests_match_1_4_6_identity() {
+    fn muse_requests_match_1_4_12_identity() {
         let cfg = Config {
             auth_dir: "/nonexistent".into(),
             meta_api_key: vec![crate::config::KeyEntry { api_key: "test".into(), ..Default::default() }],
@@ -928,7 +928,7 @@ mod tests {
         for (name, expected) in [
             (
                 "user-agent",
-                "muse-build/1.4.6 (interactive; macos-aarch64; build db2475a6bd32831a854b97282a12b867123d6520)",
+                "muse-build/1.4.12 (interactive; macos-aarch64; build 80d5266d8a4cb84d6d4ec595a4ef39cc596fa128)",
             ),
             ("x-client-id", "tbh:tui"),
             ("x-tbh-agent-role", "main"),
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_subscription_requests_match_1_0_52_identity() {
+    fn grok_subscription_requests_match_1_0_67_identity() {
         let cfg = Config {
             auth_dir: "/nonexistent".into(),
             xai_api_key: vec![crate::config::KeyEntry { api_key: "test".into(), ..Default::default() }],
@@ -973,8 +973,8 @@ mod tests {
         );
         assert_eq!(prepared.url, "https://cli-chat-proxy.grok.com/v1/responses");
         for (name, expected) in [
-            ("x-grok-client-version", "1.0.52"),
-            ("user-agent", "grok-pager/1.0.52 grok-shell/1.0.52 (macos; aarch64)"),
+            ("x-grok-client-version", "1.0.67"),
+            ("user-agent", "grok-pager/1.0.67 grok-shell/1.0.67 (macos; aarch64)"),
             ("x-grok-client-identifier", "grok-shell"),
             ("x-grok-client-mode", "interactive"),
             ("x-xai-token-auth", "xai-grok-cli"),
@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_generated_requests_match_2_1_302_identity() {
+    fn claude_generated_requests_match_2_1_309_identity() {
         let acct = claude_account();
         *acct.cred.write() = Credential::OAuth(crate::accounts::OAuth {
             access_token: "test".into(),
@@ -1030,12 +1030,12 @@ mod tests {
         );
         assert_eq!(
             prepared.headers.iter().find(|(name, _)| name == "user-agent").unwrap().1,
-            "claude-cli/2.1.302 (external, cli)"
+            "claude-cli/2.1.309 (external, cli)"
         );
-        // 8d2 is the fingerprint captured from the published 2.1.302 client for "Reply OK".
+        // The published 2.1.309 client's algorithm uses the same salt and samples.
         assert_eq!(
             prepared.body["system"][0]["text"],
-            "x-anthropic-billing-header: cc_version=2.1.302.8d2; cc_entrypoint=cli;"
+            "x-anthropic-billing-header: cc_version=2.1.309.c22; cc_entrypoint=cli;"
         );
     }
 

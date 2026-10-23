@@ -25,7 +25,7 @@ pub mod xai {
     pub const API_BASE: &str = "https://api.x.ai/v1";
     /// Grok Build subscriptions are served by the CLI chat proxy.
     pub const CLI_BASE: &str = "https://cli-chat-proxy.grok.com/v1";
-    pub const CLIENT_VERSION: &str = "1.0.52";
+    pub const CLIENT_VERSION: &str = "1.0.67";
 }
 
 pub mod meta {
@@ -35,9 +35,9 @@ pub mod meta {
     pub const MINT_URL: &str = "https://api.meta.ai/muse-code/key";
     pub const API_BASE: &str = "https://api.meta.ai/v1";
     pub const AUTH_UA: &str = "muse-code/1.0.2";
-    /// Muse Code 1.4.6 for macOS arm64; the build hash is the commit compiled into that release.
+    /// Muse Code 1.4.12 for macOS arm64; the build hash is the commit compiled into that release.
     pub const API_UA: &str =
-        "muse-build/1.4.6 (interactive; macos-aarch64; build db2475a6bd32831a854b97282a12b867123d6520)";
+        "muse-build/1.4.12 (interactive; macos-aarch64; build 80d5266d8a4cb84d6d4ec595a4ef39cc596fa128)";
 }
 
 const GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";

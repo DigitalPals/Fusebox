@@ -3,8 +3,8 @@
 //! Requests Fusebox builds for other clients (translated requests, cloaking) and its
 //! own small requests (usage, model lists, limit resets) claim the newest release it
 //! knows of each client: the built-in one (the constants listed in
-//! `client-versions.json`, which the daily CI check compares with the latest
-//! releases), a newer one set in `client-identities`, or, for Claude Code and Codex,
+//! `client-versions.json`, whose separate `reviewed` baselines drive a weekly
+//! compatibility review), a newer one set in `client-identities`, or, for Claude Code and Codex,
 //! the newest one the user's real clients sent through Fusebox. A version-only
 //! release therefore needs no Fusebox release for anyone who runs the real client
 //! through it. Claude Code's runtime headers (package and Node versions, OS and
