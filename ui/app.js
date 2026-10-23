@@ -982,6 +982,15 @@ function runsOutAt(w, now = Date.now()) {
   return at < Date.parse(w.resets_at) ? at : null;
 }
 
+// A usage-limit cooldown lasting until the window renews means the window is used up,
+// even while its meter still shows a sliver left.
+function windowSpent(a, w) {
+  if (!w || !w.resets_at) return false;
+  const renews = Date.parse(w.resets_at) - 60000;
+  const kinds = a.cooldown_kinds || {};
+  return Object.entries(a.cooldowns || {}).some(([model, until]) => kinds[model] === 'quota' && Date.parse(until) >= renews);
+}
+
 // 20 segments of 5%, lit for the displayed share, coloured by how much is used. A thin
 // mark shows even pace: where usage would be now if spread evenly over the window.
 const segsHTML = (w, label, cls = '') => meterHTML(quotaOf(w), windowElapsed(w), label, cls, w && w.resets_at);
@@ -1004,11 +1013,12 @@ function pctHTML(w) {
 }
 
 // One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover. When the
-// pace so far would use the window up before it resets, the row says when instead.
+// pace so far would use the window up before it resets, the row says when instead,
+// unless it is already used up: then the reset is when the account is back.
 function meterRowHTML(a, short) {
   const w = windowOf(a, short);
   const label = windowLabel(w, short);
-  const out = w && runsOutAt(w);
+  const out = w && !windowSpent(a, w) && runsOutAt(w);
   const rate = w && burnRate(w);
   const pace = rate == null ? '' : ` · using ${rate < 1 ? rate.toFixed(1) : Math.round(rate)}% an hour`;
   let reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
@@ -1042,10 +1052,11 @@ const scopedTitle = (w) => `${cap(w.model)} ${windowTitle(w).toLowerCase()}`;
 
 function windowBlockHTML(a, w, title, size) {
   const q = quotaOf(w);
+  const spent = windowSpent(a, w);
   let note = 'Not reported yet';
-  if (w && w.resets_at) note = `${q && q.exhausted ? 'Back' : 'Resets'} ${esc(when(w.resets_at))} · in ${liveLeft(w.resets_at)}`;
+  if (w && w.resets_at) note = `${q && (q.exhausted || spent) ? 'Back' : 'Resets'} ${esc(when(w.resets_at))} · in ${liveLeft(w.resets_at)}`;
   else if (q) note = 'No reset time reported';
-  const out = w && runsOutAt(w);
+  const out = w && !spent && runsOutAt(w);
   if (out) note += ` · <span class="warn">at this pace, used up ${esc(when(new Date(out).toISOString()))}</span>`;
   const big = size === 'xl';
   return `<div class="window"><div class="window-top"><span>${title}${big ? ' window' : ''}</span>${q ? `<span class="pct ${q.cls}${big ? ' big' : ''}" style="width:auto">${quotaPercent(q[S.quotaDisplay])}</span>` : '<span class="dim">–</span>'}</div>
