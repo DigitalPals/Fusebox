@@ -284,6 +284,8 @@ Choose **Used** or **Remaining** beside the quota meters (or press <kbd>U</kbd>)
 
 **Banked resets** (off by default). Claude and ChatGPT sometimes give subscribers saved resets that clear a usage limit early. Turn on `banked-resets` (Config, Connections) and subscriptions that have some show “↻ 2 resets banked” under their status; click it to see expiry dates and spend one with confirmation. Smart quota balancing prefers accounts with a reset expiring within seven days. Automatic use is separately opt-in under Config, Routing: redeem at 95% weekly use, or one hour before expiry regardless of usage, including 0%. It shares the crash-safe reset journal. See [banked resets](docs/banked-resets.md).
 
+**Start idle usage windows** (off by default). Under Config, Routing, choose Claude subscription accounts and start their inactive five-hour windows automatically, always or during selected working hours. Each starter sends one small model request and consumes a little subscription quota; it brings the next reset forward without increasing weekly allowance. Supported accounts also have a manual **Start now** action. Active windows, real work, exhausted limits and uncertain provider data are skipped. Attempts survive restarts and share locking with banked resets. See [window starters](docs/window-starters.md).
+
 <sub>Screenshots use sample data.</sub>
 
 ## Usage and costs

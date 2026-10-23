@@ -20,7 +20,7 @@ const CONFIG_DESCRIPTIONS = {
 const CONFIG_KEY_SECTION = {
   host: 'server', port: 'server', 'auth-dir': 'server', tls: 'server',
   'api-keys': 'clients', 'management-key': 'access', 'management-allow-remote': 'access',
-  routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
+  routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'window-starter': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'latency-routing': 'routing', 'translation': 'routing', 'embeddings': 'connections', 'stream-limits': 'connections', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
@@ -630,6 +630,8 @@ function configRoutingHTML() {
       'Drop keeps the current behavior. Provider defaults enables automatic Claude caching after explicit boundaries are lost in translation. Explicit mode without boundaries remains uncached. Reject returns an error before contacting the provider.')}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['latency-routing'], 'Prefer a faster account when quota scores tie', 'For new sessions under Smart quota balancing. Uses recent comparable first-response timings after at least three cold samples per account. Existing sessions keep their account.')}
+    <div class="cfg-divider wide"></div>
+    ${configWindowStarterHTML()}
     ${configSwitch(['translation', 'allow-service-tier'], 'Preserve a caller’s OpenAI service tier during translation', 'Off by default. A requested fast or priority tier can cost more. Supported OpenAI targets only; native requests already preserve the caller’s settings.')}
     ${configSwitch(['force-model-prefix'], 'Require model prefixes', 'Unprefixed requests only use accounts without a prefix. Use prefix/model to select a prefixed account.')}
     <div class="cfg-divider wide"></div>
@@ -637,6 +639,26 @@ function configRoutingHTML() {
     ${configField(['background-model'], 'Background model', { nullable: true, wide: true, placeholder: 'What Claude Code asks for',
       help: 'Claude Code asks its Haiku model for titles, summaries and quick checks. Name another model or group to send those calls there.' })}
   </div>`;
+}
+
+function configWindowStarterHTML() {
+  const path = ['window-starter'];
+  const p = configGet(path) || { mode: 'off', accounts: [] };
+  const accounts = (S.accounts || []).filter((a) => a.window_starter_supported);
+  const missing = (p.accounts || []).filter((id) => !accounts.some((a) => a.id === id));
+  const select = (id, name) => `<label class="cfg-starter-account"><input type="checkbox" data-config-act="window-account" data-id="${esc(id)}" ${(p.accounts || []).includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`;
+  const days = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [7, 'Sun']];
+  return `${configChoice([...path, 'mode'], 'Start idle usage windows', [['off', 'Off'], ['always', 'Always'], ['working-hours', 'During working hours']],
+    'Sends a small Claude request to start an inactive five-hour window, even without a job. Uses a little subscription quota, brings its next reset forward and does not increase weekly allowance. Manual starting is available on each supported account.')}
+    ${p.mode !== 'off' ? `<div class="cfg-list wide"><span class="label">Starter accounts</span>
+      ${accounts.length ? accounts.map((a) => select(a.id, `${acctLabel(a)}${a.disabled ? ' · disabled' : ''}`)).join('') : '<p class="cfg-description">Connect a Claude subscription with a verified account ID to select it here.</p>'}
+      ${missing.map((id) => select(id, `Unavailable account · ${id}`)).join('')}
+      <p class="cfg-description">Only selected accounts start automatically. No selection means no automatic requests. Disabled accounts, real work, active windows and exhausted limits are skipped.</p></div>
+      ${configField([...path, 'model'], 'Starter model', { required: true, help: 'A native Claude model available on the selected accounts. Default: claude-haiku-4-5-20251001. No model groups, fallback or premium options.' })}
+      ${p.mode === 'working-hours' ? `${configField([...path, 'timezone'], 'Working hours timezone', { required: true, help: 'IANA timezone, such as Europe/Amsterdam. Daylight saving changes are applied automatically.' })}
+        <div class="cfg-choice wide" id="${configId([...path, 'weekdays'])}"><span id="starter-days-label">Working days</span><div class="seg" role="group" aria-labelledby="starter-days-label">${days.map(([n, name]) => `<button type="button" data-config-act="window-day" data-day="${n}" aria-pressed="${(p.weekdays || []).includes(n)}">${name}</button>`).join('')}</div><small class="cfg-error" id="${configId([...path, 'weekdays'])}-error" data-error-for="${configId([...path, 'weekdays'])}">${esc(S.config.errors[configId([...path, 'weekdays'])] || '')}</small></div>
+        ${configField([...path, 'start'], 'Start time', { type: 'time', required: true })}
+        ${configField([...path, 'end'], 'End time', { type: 'time', required: true, help: 'The end is exclusive. Overnight hours belong to the day on which they start.' })}` : ''}` : ''}`;
 }
 
 // Model groups: one name for several models. A group is a list (tried in order) or,
@@ -1146,6 +1168,14 @@ function configValidate() {
   if ('auth-dir' in changed && !v['auth-dir']?.trim()) invalid(['auth-dir'], 'Enter a credentials directory.');
   if ('request-retry' in changed && (!Number.isInteger(v['request-retry']) || v['request-retry'] < 0 || v['request-retry'] > 4294967295)) invalid(['request-retry'], 'Enter a nonnegative whole number.');
   if ('five-hour-reserve-percent' in changed && (!Number.isInteger(v['five-hour-reserve-percent']) || v['five-hour-reserve-percent'] < 0 || v['five-hour-reserve-percent'] > 100)) invalid(['five-hour-reserve-percent'], 'Enter a whole percentage between 0 and 100.');
+  if ('window-starter' in changed) {
+    const p = v['window-starter'];
+    if (!/^claude-[a-zA-Z0-9._-]+$/.test(p.model || '')) invalid(['window-starter', 'model'], 'Enter a native Claude model name without options or a prefix.');
+    try { new Intl.DateTimeFormat('en', { timeZone: p.timezone }).format(); } catch { invalid(['window-starter', 'timezone'], 'Enter a valid IANA timezone.'); }
+    if (!p.weekdays?.length) invalid(['window-starter', 'weekdays'], 'Choose at least one working day.');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(p.start || '') || p.start === p.end) invalid(['window-starter', 'start'], 'Enter a start time different from the end time.');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(p.end || '')) invalid(['window-starter', 'end'], 'Enter a valid end time.');
+  }
   if ('session-affinity-idle-seconds' in changed && (!Number.isInteger(v['session-affinity-idle-seconds']) || v['session-affinity-idle-seconds'] < 60)) invalid(['session-affinity-idle-seconds'], 'Enter at least 60 seconds.');
   if ('first-token-timeout-seconds' in changed && (!Number.isInteger(v['first-token-timeout-seconds']) || v['first-token-timeout-seconds'] < 0 || v['first-token-timeout-seconds'] > 3600)) invalid(['first-token-timeout-seconds'], 'Enter 0 to 3600 seconds.');
   if ('model-groups' in changed) {
@@ -1200,7 +1230,7 @@ function configValidate() {
       const provider = CONFIG_PROVIDERS.find(([, , field]) => path[0] === field);
       if (provider) { c.section = 'providers'; c.provider = provider[0];
         for (let i = 0; i < v[provider[2]].length; i++) { c.opens[`${provider[2]}:${i}`] = true; c.opens[`${provider[2]}:${i}:advanced`] = true; }
-      } else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent', 'first-token-timeout-seconds', 'model-groups', 'background-model'].includes(path[0])) c.section = 'routing';
+      } else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent', 'first-token-timeout-seconds', 'model-groups', 'background-model', 'window-starter'].includes(path[0])) c.section = 'routing';
       else if (path[0] === 'proxy-url') c.section = 'connections';
       else c.section = 'server';
     }
@@ -1376,6 +1406,16 @@ document.addEventListener('click', (e) => {
   }
   if (act === 'switch') {
     configSet(path, !configGet(path)); c.msg = null; render(); document.getElementById(configId(path))?.focus(); return;
+  }
+  if (act === 'window-account' || act === 'window-day') {
+    const key = act === 'window-account' ? 'accounts' : 'weekdays';
+    const value = act === 'window-account' ? button.dataset.id : Number(button.dataset.day);
+    const selected = configGet(['window-starter', key]) || [];
+    configSet(['window-starter', key], selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
+    c.msg = null; render();
+    const attr = act === 'window-account' ? 'data-id' : 'data-day';
+    $(`[data-config-act="${act}"][${attr}="${CSS.escape(String(value))}"]`)?.focus();
+    return;
   }
   if (act === 'reveal') {
     const input = document.getElementById(configId(path));

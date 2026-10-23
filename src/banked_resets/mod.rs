@@ -1,6 +1,6 @@
 //! Banked reset redemption. Tokens and upstream identities never leave the server.
 mod automation;
-mod ledger;
+pub(crate) mod ledger;
 mod provider;
 #[cfg(test)]
 mod tests;
@@ -491,6 +491,14 @@ impl QuotaGuard {
                 st.quota_cooldowns.remove(&model);
             }
             st.quota.windows.retain(|w| !affected(w));
+            if clears.iter().any(|w| w == "5h" || w == "*")
+                && let Some(view) = st.window_starter.as_mut()
+            {
+                view.resets_at = None;
+                view.status = "checking".into();
+                view.message = "Usage window changed after a banked reset; check provider status".into();
+                view.next_check_at = Utc::now();
+            }
             st.settle_quota_error(Utc::now());
             st.quota.updated_at = None;
             st.quota.refreshed_at = None;

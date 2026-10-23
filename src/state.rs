@@ -35,6 +35,8 @@ pub struct App {
     pub models: crate::discovery::Store,
     #[cfg(test)]
     pub reset_test_origin: Mutex<Option<String>>,
+    #[cfg(test)]
+    pub window_starter_test_origin: Mutex<Option<String>>,
     pub started: DateTime<Utc>,
     pub live: broadcast::Sender<String>,
     /// Hash of the last model list dashboards were told about.
@@ -112,6 +114,8 @@ impl App {
             models,
             #[cfg(test)]
             reset_test_origin: Mutex::new(None),
+            #[cfg(test)]
+            window_starter_test_origin: Mutex::new(None),
             started: Utc::now(),
             live,
             models_fingerprint: Default::default(),

@@ -300,6 +300,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/reset", post(reset_account))
         .route("/accounts/{id}/banked-resets", get(banked_resets).post(apply_banked_reset))
         .route("/accounts/{id}/quota/refresh", post(refresh_quota))
+        .route("/accounts/{id}/window-starter", post(start_window))
         .route("/accounts/{id}/activity", get(account_activity))
         .route("/accounts/{id}/priority", post(set_priority))
         .route("/clients/usage", get(client_usage))
@@ -538,6 +539,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "routing": cfg.routing,
         "banked_resets": cfg.banked_resets,
         "banked_reset_policy": cfg.banked_reset_policy,
+        "window_starter": cfg.window_starter,
         "session_affinity": cfg.session_affinity,
         "request_retry": cfg.request_retry.max(1),
         "management_key": !cfg.management_key.is_empty(),
@@ -564,6 +566,8 @@ async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
                 snapshot["banked_reset_plan"] =
                     serde_json::to_value(crate::banked_resets::plan(a, &cfg)).unwrap_or_default();
                 snapshot["quota_attribution"] = attribution_json(&a.state.lock().attribution, &cfg);
+                snapshot["window_starter_supported"] = json!(crate::window_starter::supported(a));
+                snapshot["window_starter_selected"] = json!(cfg.window_starter.selected(a));
                 snapshot
             })
             .collect(),
@@ -572,6 +576,9 @@ async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
 
 /// A client key as people know it: the named client's label, the program, or neither.
 pub fn client_label(cfg: &Config, key: &str) -> String {
+    if key == "system:window-starter" {
+        return "Window starter".into();
+    }
     let name = |c: &crate::config::NamedClient| if c.label.trim().is_empty() { c.id.clone() } else { c.label.clone() };
     // A shared key's usage id is a hash of the key. One that has since been named keeps
     // its value, so its earlier use goes by the client's name too.
@@ -873,6 +880,22 @@ async fn reset_account(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
 }
 
 const RESETS_OFF: &str = "Banked resets are turned off. Turn them on under Config, Connections.";
+
+async fn start_window(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(action): Json<crate::window_starter::Action>,
+) -> Response {
+    let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
+    // The journal remains authoritative if the browser disconnects mid-request.
+    match tokio::spawn(crate::window_starter::start(app, acct, action, false)).await {
+        Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(e)) => err(StatusCode::CONFLICT, e.to_string()),
+        Err(_) => {
+            err(StatusCode::INTERNAL_SERVER_ERROR, "Window starter interrupted; check provider status before retrying")
+        }
+    }
+}
 
 async fn banked_resets(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
     if !app.cfg().banked_resets {

@@ -1811,6 +1811,7 @@ function drawerHTML(a) {
       <div class="statline">${statusHTML(a)}<span class="dim">· last used ${liveAgo(a.last_used)}</span></div>
       ${st.cls === 'cooling' ? `<div class="notice warn"><div class="cell2"><span class="mono">${esc(modelScope(st.model))}</span><span class="small warn">${st.kind === 'quota' ? 'Usage limit used up' : 'Cooling down'} · back at ${esc(when(st.until))}, in ${liveLeft(st.until)}</span></div><button class="btn sm" type="button" data-act="reset" data-id="${esc(a.id)}">Clear cooldowns</button></div>` : ''}
       ${hasQuota ? `<div class="block" style="gap:14px"><span class="label">Limits · ${quotaWord()}</span>${windowHTML(a, true, 'lg')}${windowHTML(a, false, 'lg')}</div>` : ''}
+      ${windowStarterHTML(a)}
       ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">${esc(bankedPolicyText(a))}</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Reset details</button></div>` : ''}
       ${a.last_error ? `<div class="block" style="gap:8px"><span class="label">Last error</span><div class="errbox">${esc(hideEmails(a.last_error))}</div></div>` : ''}
       <div class="block"><span class="label">Since start</span><div class="figs" id="drawer-since">${drawerSinceHTML()}</div></div>
@@ -2184,7 +2185,7 @@ function detailBodyHTML() {
   const limits = metered(a) ? `<section class="card pad block" style="gap:20px" aria-label="Limits">
       <div class="card-head"><span class="label">Limits · ${quotaWord()}</span>${quotaControlsHTML(mob(), false)}</div>
       <div class="windows">${windowHTML(a, true, 'xl')}${windowHTML(a, false, 'xl')}${scopedWindows(a).map((w) => windowBlockHTML(a, w, scopedTitle(w), 'xl')).join('')}</div>
-      ${detBankedHTML(a)}</section>` : '';
+      ${detBankedHTML(a)}${windowStarterHTML(a)}</section>` : '';
   const cds = Object.entries(a.cooldowns || {}).sort((x, y) => Date.parse(x[1]) - Date.parse(y[1]));
   const reasonOf = (m) => ({ quota: 'Usage limit used up', rate_limit: 'Rate limited', checking: 'Checking quota' })[(a.cooldown_kinds || {})[m]] || 'Rate limited';
   const cools = (!mob() || cds.length) ? `<section class="card cools" style="padding:${mob() ? '12px 14px 4px' : '18px 20px 6px'}" aria-label="Cooldowns">
@@ -2213,6 +2214,44 @@ function detBankedHTML(a) {
   const review = ['pending', 'unknown'].includes(r?.operation?.status);
   if (!count && !review) return `<div class="banked"><span>↻ ${esc(bankedLabel(a))}</span><span class="grow"></span><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Details</button></div>`;
   return `<div class="banked"><span${review ? ' class="warn"' : ''}>↻ ${review ? 'Reset needs review' : `${count} reset${count === 1 ? '' : 's'} banked`}</span><span class="grow">${esc(bankedPolicyText(a))}</span><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">${review ? 'Review' : 'Reset details'}</button></div>`;
+}
+
+function windowStarterHTML(a) {
+  if (!a.window_starter_supported) return '';
+  const v = a.window_starter;
+  const busy = !!S.windowStarterBusy?.[a.id];
+  const reset = windowOf(a, true)?.resets_at || v?.resets_at;
+  const active = reset && Date.parse(reset) > Date.now();
+  const held = v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
+  const status = active ? `Window resets ${when(reset)}` : v?.message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
+  return `<div class="window-starter block" aria-label="Window starter"><div class="cell2"><span class="label">Window starter</span>
+    <span class="fg2">${esc(status)}</span>
+    ${held ? `<span class="small dim">${esc(`Next starter allowed ${when(v.retry_after)}`)}</span>` : ''}
+    ${v?.attempted_at ? `<span class="small dim">${esc(`Last requested ${when(v.attempted_at)}${v.automatic ? ' · automatic' : ' · manual'}`)}</span>` : ''}
+    <span class="small dim">Starting sends a small Claude request and uses subscription quota.</span></div>
+    <div><button type="button" class="btn sm" data-act="${active || held ? 'window-check' : 'window-start'}" data-id="${esc(a.id)}" ${busy || a.disabled ? 'disabled' : ''}>${busy ? 'Checking…' : active || held ? 'Check status' : 'Start now'}</button></div></div>`;
+}
+
+async function windowStarterAction(id, checkOnly) {
+  const a = accountById(id);
+  if (!a || S.windowStarterBusy?.[id]) return;
+  S.windowStarterBusy ||= {};
+  S.windowStarterBusy[id] = true;
+  refreshViews();
+  try {
+    const view = await api(`/accounts/${encodeURIComponent(id)}/window-starter`, {
+      method: 'POST', body: JSON.stringify({ request_id: crypto.randomUUID(), check_only: checkOnly }),
+    });
+    a.window_starter = view;
+    toast(view.message);
+  } catch (e) {
+    a.window_starter = { status: 'unavailable', message: e.message };
+    toast(e.message);
+  } finally {
+    delete S.windowStarterBusy[id];
+    await refreshAccounts();
+    refreshViews();
+  }
 }
 
 function detLoadHTML() {
@@ -3727,6 +3766,9 @@ document.addEventListener('click', (e) => {
       S.confirm = null;
       return refreshViews();
     case 'banked-close': return closeResetModal();
+    case 'window-start': case 'window-check':
+      e.stopPropagation();
+      return windowStarterAction(id, act === 'window-check');
     case 'banked-details': case 'banked-refresh': case 'banked-open': case 'banked-confirm': case 'banked-cancel': case 'banked-retry': case 'banked-resolve':
       e.stopPropagation();
       return bankedAction(act, id, el.dataset.resolution);

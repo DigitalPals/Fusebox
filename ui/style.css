@@ -1401,3 +1401,8 @@ details[open] > summary .cfg-chevron { transform: rotate(90deg); }
 .snip-more { flex: none; height: 28px; padding: 0 8px; font-size: 13px; color: var(--fg-3); background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
 .snip-more:hover { color: var(--fg); }
 .snip-more.on { background: var(--seg-on); color: var(--fg); }
+/* Subscription window starters use the existing settings and account surfaces. */
+.cfg-starter-account { display:flex; align-items:center; gap:10px; padding:6px 0; overflow-wrap:anywhere; }
+.cfg-starter-account input { flex:none; }
+.cfg-starter-account span { min-width:0; }
+.window-starter { padding-top:16px; border-top:1px solid var(--line); }

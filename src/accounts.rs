@@ -370,6 +370,9 @@ pub struct AccountState {
     pub identity_epoch: u64,
     pub quota_refreshing: bool,
     pub banked_resets: Option<crate::banked_resets::View>,
+    pub window_starter: Option<crate::window_starter::View>,
+    /// Foreground attempts cancel an idle-window preflight or pending send.
+    pub window_starter_cancel: Option<Arc<tokio_util::sync::CancellationToken>>,
     pub strikes: u32,
     last_error: Option<AccountError>,
     pub last_used: Option<DateTime<Utc>>,
@@ -446,7 +449,11 @@ pub struct RequestLoad(Arc<AtomicUsize>);
 
 impl RequestLoad {
     pub fn new(account: &Account) -> Self {
-        let active = account.state.lock().active_requests.clone();
+        let state = account.state.lock();
+        if let Some(cancel) = &state.window_starter_cancel {
+            cancel.cancel();
+        }
+        let active = state.active_requests.clone();
         active.fetch_add(1, Ordering::Relaxed);
         Self(active)
     }
@@ -745,6 +752,7 @@ impl Account {
             "priority": self.priority,
             "quota": st.quota,
             "banked_resets": st.banked_resets,
+            "window_starter": st.window_starter,
             "models": self.public_models(),
         })
     }
@@ -1173,6 +1181,10 @@ impl Pool {
                     st.latency.clear();
                     st.quota_cooldowns.clear();
                     st.banked_resets = None;
+                    st.window_starter = None;
+                    if let Some(cancel) = st.window_starter_cancel.take() {
+                        cancel.cancel();
+                    }
                     st.attribution = Default::default();
                     st.attribution.dirty = true;
                 }
@@ -1214,6 +1226,8 @@ impl Pool {
                         counters: st.counters.clone(),
                         latency: st.latency.clone(),
                         quota: st.quota.clone(),
+                        window_starter: st.window_starter.clone(),
+                        window_starter_cancel: st.window_starter_cancel.clone(),
                         attribution: st.attribution.clone(),
                         ..Default::default()
                     }

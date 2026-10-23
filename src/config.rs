@@ -68,6 +68,8 @@ pub struct Config {
     pub banked_resets: bool,
     /// Expiry-aware smart routing and separately authorized automatic redemption.
     pub banked_reset_policy: crate::banked_resets::Policy,
+    /// Optional, account-specific requests to start idle Claude subscription windows.
+    pub window_starter: crate::window_starter::Config,
     pub debug: bool,
     /// `text` (default) or `json` log lines. Needs a restart.
     pub log_format: LogFormat,
@@ -411,6 +413,7 @@ impl Default for Config {
             claude_cloak: true,
             banked_resets: false,
             banked_reset_policy: Default::default(),
+            window_starter: Default::default(),
             debug: false,
             log_format: LogFormat::Text,
             tls: Tls::default(),
@@ -491,6 +494,14 @@ stream-limits:
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
+window-starter:
+  mode: off                # off | always | working-hours; sends small subscription requests
+  accounts: []             # explicit account IDs from the dashboard; empty selects nobody
+  model: claude-haiku-4-5-20251001
+  timezone: UTC            # IANA timezone; applies to working-hours mode
+  weekdays: [1, 2, 3, 4, 5] # Monday=1, Sunday=7
+  start: "08:00"
+  end: "18:00"             # exclusive; overnight hours belong to their start day
 banked-reset-policy:
   expiry-priority-hours: 168 # smart-quota: prefer accounts with a reset expiring within 7 days; 0 disables
   auto-redeem: false        # spend expiring resets automatically after substantial use (opt-in)
@@ -681,6 +692,7 @@ impl Config {
         cfg.embeddings.validate().map_err(anyhow::Error::msg)?;
         cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
         cfg.banked_reset_policy.validate().map_err(anyhow::Error::msg)?;
+        cfg.window_starter.validate()?;
         for (client, version) in &cfg.client_identities {
             crate::clients::validate(client, version).map_err(anyhow::Error::msg)?;
         }

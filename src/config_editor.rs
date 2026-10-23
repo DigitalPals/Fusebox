@@ -160,6 +160,7 @@ fn setting_path(doc: &Yaml, field: &str) -> (Vec<Value>, bool) {
         "force-model-prefix" => &["routing", "force-model-prefix"],
         "session-affinity" => &["routing", "session-affinity"],
         "banked-reset-policy" => &["routing", "banked-reset-policy"],
+        "window-starter" => &["routing", "window-starter"],
         "five-hour-reserve-percent" => &["routing", "five-hour-reserve-percent"],
         "proxy-url" => &["requests", "proxy-url"],
         "oauth-model-alias" => &["oauth", "model-alias"],
@@ -520,6 +521,11 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                 let policy: crate::banked_resets::Policy =
                     serde_json::from_value(value.clone()).context("Invalid banked-reset-policy")?;
                 policy.validate().map_err(anyhow::Error::msg)?;
+            }
+            "window-starter" => {
+                let policy: crate::window_starter::Config =
+                    serde_json::from_value(value.clone()).context("Invalid window-starter")?;
+                policy.validate()?;
             }
             "codex-websockets" | "claude-cloak" | "banked-resets" | "session-affinity" | "force-model-prefix"
             | "debug" | "latency-routing" => {
