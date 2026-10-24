@@ -13,6 +13,51 @@ do not keep generating work. All intervening releases after the last review stil
 need inspection. A failed channel check prevents all issue changes. This is a
 review queue, not an automated claim that an unreviewed release is incompatible.
 
+## 2026-10-24 identity hardening
+
+The current working tree addresses the identity boundaries described in the
+[dated Claude/Codex audit](../notes/claude-codex-identity-audit-2026-10-24.md).
+This entry documents implementation behavior; the
+[verification report](../notes/provider-identity-verification-2026-10-24.md)
+records local checks and latency measurements. Production has not been deployed.
+The audit remains a historical record.
+
+- Native recognition preserves supported application attribution, including
+  Codex Desktop and custom app-server identities, with validated version syntax
+  and consistent fields. Recognition grants no identity-learning permission.
+- Only authenticated named clients with `trust-client-identity: true` can update
+  shared Claude/Codex versions and Claude runtime profiles. The default is
+  `false`; shared keys and open access cannot learn. Saved observations include
+  trusted-source provenance and are revalidated on restore. Runtime profiles
+  must match the effective release; invalid, stale or legacy unproven records
+  fall back to bundled defaults.
+- Generated provider sessions follow the conversation's current account and
+  rotate on every switch, including A → B → A, identity replacement, inactivity
+  (`provider-session-idle-seconds`, default 1800, range 1–86400) and restart.
+  Logical chat/history/tools and prompt-cache-key policy remain separate.
+- Claude native requests use filtered provider header namespaces. All Claude
+  OAuth Messages identities are rebound to the selected account/device and
+  generated conversation session, even with cloaking off. Caller beta values
+  survive and the mandatory OAuth beta is added when missing.
+- Codex HTTP and native WebSockets preserve managed residency and
+  `stream_options.reasoning_summary_delivery`, apply the same safe configured
+  headers and bind account/session identity. Routes unable to honor a requested
+  Codex residency constraint are rejected rather than silently dropping it.
+- OAuth operation errors expose safe classifications rather than raw endpoint
+  bodies or transport details; normal inference error-body behavior is retained.
+  Outbound HTTP clients do not follow redirects. Subscription inference,
+  control/reset pools and TLS resumption state are isolated by account identity.
+  Ordinary token refresh preserves sessions, connections and the selected Codex
+  workspace; actual identity replacement invalidates that reuse.
+
+**Config → Clients → More** toggles learning for each named client.
+**Config → Connections → Client identities** inspects and resets saved profiles;
+`GET /api/client-identities` and `POST /api/client-identities/reset` use management
+authentication. Reset retains configured versions. See [provider identity](provider-identity.md)
+for configuration examples, header precedence and the limits of these controls.
+Supported native context and outbound IP/transport remain provider-visible;
+these changes make no invisibility or fixed latency claim.
+
 ## 2026-10-23
 
 Reviewed the six public stable release channels and refreshed their bundled
@@ -48,12 +93,13 @@ billing fingerprint still uses salt `59cf53e54c78` and UTF-16 positions 4, 7 and
 20. Its 2.1.309 fingerprint for `Reply OK` is `c22`. The bundled user agent and
 billing fixture now use this release.
 
-The 2.1.307 change omits `prompt-caching-scope` behind custom gateways. Fusebox
-already forwards native Claude Code headers and adds its cloak betas only when
-building its own OAuth requests; no additional change was required. The
+The 2.1.307 change omits `prompt-caching-scope` behind custom gateways. That
+review found no additional change required for the omission. The current
+header policy preserves allowed native beta values and ensures the mandatory
+OAuth beta, as described in the 2026-10-24 entry above. The
 changelog's `/claude-api api-version` item changes a bundled skill's advice,
-not the CLI's Messages API version. Real clients continue to retain their
-headers and to teach Fusebox newer identities and runtime profiles.
+not the CLI's Messages API version. Native attribution and permission to teach
+shared identities are separate decisions under the current policy.
 
 ### Grok Build 1.0.67
 

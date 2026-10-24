@@ -155,7 +155,7 @@ impl App {
     }
 
     fn retain_account_pools(&self) {
-        self.http.retain_accounts(&self.pool.all().iter().map(|a| a.id.clone()).collect());
+        self.http.retain_accounts(&self.pool.all());
     }
 
     pub fn suppress_reload(&self) {
@@ -190,11 +190,35 @@ impl App {
 
 pub struct Http {
     default_proxy: Mutex<String>,
-    clients: Mutex<HashMap<String, reqwest::Client>>,
+    clients: Mutex<HashMap<ClientPool, reqwest::Client>>,
+    account_tls: Mutex<HashMap<AccountPool, Arc<crate::tls::AccountTls>>>,
 }
 
-/// Separates the parts of a pool key; never valid in a proxy URL or an account id.
-const SEP: char = '\0';
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AccountPool {
+    id: String,
+    identity: String,
+    epoch: u64,
+}
+
+impl AccountPool {
+    fn new(acct: &crate::accounts::Account) -> Self {
+        // An invalidated old allocation still holds its original credentials.
+        // Read separately: snapshot/publication take state before credentials.
+        let identity = acct.cred.read().identity(acct.provider);
+        let epoch = acct.state.lock().identity_epoch;
+        Self { id: acct.id.clone(), identity, epoch }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ClientPool {
+    proxy: String,
+    account: Option<AccountPool>,
+    http1: bool,
+    reset: bool,
+    control: bool,
+}
 
 /// How long a TCP connection may be silent before the OS checks it is still alive,
 /// then how often it asks and how many unanswered checks close it. A connection
@@ -206,7 +230,11 @@ const KEEPALIVE_RETRIES: u32 = 3;
 
 impl Http {
     fn new(proxy: &str) -> Self {
-        Self { default_proxy: Mutex::new(proxy.to_string()), clients: Mutex::new(HashMap::new()) }
+        Self {
+            default_proxy: Mutex::new(proxy.to_string()),
+            clients: Mutex::new(HashMap::new()),
+            account_tls: Mutex::new(HashMap::new()),
+        }
     }
 
     fn set_default_proxy(&self, proxy: &str) {
@@ -224,17 +252,17 @@ impl Http {
     }
 
     pub fn control_for_account(&self, acct: &crate::accounts::Account) -> reqwest::Client {
-        let pool = if acct.provider == crate::accounts::Provider::Antigravity {
-            Sharing::Http1(&acct.id)
-        } else {
-            Sharing::Shared
-        };
-        self.build(acct.proxy_url.as_deref(), pool, false, true)
+        self.build(acct.proxy_url.as_deref(), Sharing::for_account(acct), false, true)
     }
 
     /// Spending requests must never follow redirects or retry in the HTTP layer.
+    #[cfg(test)]
     pub fn for_reset(&self, proxy: Option<&str>) -> reqwest::Client {
         self.build(proxy, Sharing::Shared, true, false)
+    }
+
+    pub fn reset_for_account(&self, acct: &crate::accounts::Account) -> reqwest::Client {
+        self.build(acct.proxy_url.as_deref(), Sharing::for_account(acct), true, false)
     }
 
     /// Each signed-in subscription gets its own connections, as its own CLI would:
@@ -242,45 +270,59 @@ impl Http {
     /// accounts use HTTP/1.1, as the IDE does; Google's backend treats shared HTTP/2
     /// connections less kindly. API keys share a pool per proxy.
     pub fn for_account(&self, acct: &crate::accounts::Account) -> reqwest::Client {
-        let pool = match acct.provider {
-            crate::accounts::Provider::Antigravity => Sharing::Http1(&acct.id),
-            _ if acct.is_oauth() => Sharing::Account(&acct.id),
-            _ => Sharing::Shared,
-        };
-        self.build(acct.proxy_url.as_deref(), pool, false, false)
+        self.build(acct.proxy_url.as_deref(), Sharing::for_account(acct), false, false)
     }
 
-    /// Close the pools of accounts that no longer exist.
-    pub fn retain_accounts(&self, ids: &std::collections::HashSet<String>) {
+    /// WebSocket TLS uses the same account-owned tickets as its HTTP clients.
+    pub fn websocket_tls_for_account(&self, acct: &crate::accounts::Account) -> Arc<rustls::ClientConfig> {
+        self.tls_for_account(&AccountPool::new(acct)).websocket()
+    }
+
+    fn tls_for_account(&self, account: &AccountPool) -> Arc<crate::tls::AccountTls> {
+        let mut stores = self.account_tls.lock();
+        stores.retain(|key, _| key.id != account.id || key == account);
+        stores.entry(account.clone()).or_insert_with(|| Arc::new(crate::tls::AccountTls::new())).clone()
+    }
+
+    /// Drop removed accounts and obsolete identities, including TLS tickets.
+    pub fn retain_accounts(&self, accounts: &[Arc<crate::accounts::Account>]) {
+        let default_proxy = self.default_proxy.lock().clone();
+        let current: HashMap<_, _> = accounts
+            .iter()
+            .map(|a| {
+                let proxy = a.proxy_url.as_deref().filter(|p| !p.is_empty()).unwrap_or(&default_proxy).to_string();
+                (AccountPool::new(a), proxy)
+            })
+            .collect();
         self.clients.lock().retain(|key, _| {
-            key.split(SEP)
-                .find_map(|part| part.strip_prefix("acct:").or_else(|| part.strip_prefix("h1:")))
-                .is_none_or(|id| ids.contains(id))
+            key.account.as_ref().is_none_or(|a| current.get(a).is_some_and(|proxy| proxy == &key.proxy))
         });
+        self.account_tls.lock().retain(|key, _| current.contains_key(key));
     }
 
     fn build(&self, proxy: Option<&str>, pool: Sharing, reset: bool, control: bool) -> reqwest::Client {
         let proxy =
             proxy.filter(|p| !p.is_empty()).map(String::from).unwrap_or_else(|| self.default_proxy.lock().clone());
-        let mut key = proxy.clone();
-        match pool {
-            Sharing::Shared => {}
-            Sharing::Account(id) => key.extend([SEP.to_string(), format!("acct:{id}")]),
-            Sharing::Http1(id) => key.extend([SEP.to_string(), format!("h1:{id}")]),
-        }
-        if reset {
-            key.extend([SEP.to_string(), "reset".into()]);
-        }
-        if control {
-            key.extend([SEP.to_string(), "control".into()]);
-        }
+        let account = match pool {
+            Sharing::Shared => None,
+            Sharing::Account(acct) | Sharing::Http1(acct) => Some(AccountPool::new(acct)),
+        };
+        let http1 = matches!(pool, Sharing::Http1(_));
+        let key = ClientPool { proxy: proxy.clone(), account, http1, reset, control };
         let mut clients = self.clients.lock();
         if let Some(c) = clients.get(&key) {
             return c.clone();
         }
-        let http1 = matches!(pool, Sharing::Http1(_));
+        if let Some(account) = &key.account {
+            clients.retain(|key, _| key.account.as_ref().is_none_or(|old| old.id != account.id || old == account));
+        }
+        let tls = match &key.account {
+            Some(account) => self.tls_for_account(account).http(http1),
+            None => crate::tls::http(http1),
+        };
         let mut b = reqwest::Client::builder()
-            .use_preconfigured_tls(crate::tls::http(http1))
+            .use_preconfigured_tls(tls)
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(Duration::from_secs(600))
             .pool_idle_timeout(Duration::from_secs(90))
@@ -294,7 +336,7 @@ impl Http {
                 .timeout(Duration::from_secs(30));
         }
         if reset {
-            b = b.redirect(reqwest::redirect::Policy::none()).retry(reqwest::retry::never());
+            b = b.retry(reqwest::retry::never());
         }
         if proxy == "direct" || proxy == "none" {
             // CLIProxyAPI's spelling for "no proxy, not even the default one".
@@ -326,9 +368,19 @@ impl Http {
 enum Sharing<'a> {
     Shared,
     /// One account's own HTTP/2-capable pool.
-    Account(&'a str),
+    Account(&'a crate::accounts::Account),
     /// One account's own HTTP/1.1 pool.
-    Http1(&'a str),
+    Http1(&'a crate::accounts::Account),
+}
+
+impl<'a> Sharing<'a> {
+    fn for_account(acct: &'a crate::accounts::Account) -> Self {
+        match acct.provider {
+            crate::accounts::Provider::Antigravity => Self::Http1(acct),
+            _ if acct.is_oauth() => Self::Account(acct),
+            _ => Self::Shared,
+        }
+    }
 }
 
 // ----------------------------------------------------------------------- stats
@@ -610,12 +662,217 @@ mod tests {
         assert_eq!(count(), 3, "API keys share the default pool");
         http.for_account(&accounts[0]);
         http.control_for_account(&accounts[0]);
-        assert_eq!(count(), 4, "pools are reused; control requests stay shared");
-        http.retain_accounts(&[accounts[1].id.clone(), accounts[2].id.clone()].into());
-        assert_eq!(count(), 3);
-        assert!(http.clients.lock().keys().all(|k| !k.contains(&accounts[0].id)));
-        http.retain_accounts(&Default::default());
-        assert_eq!(count(), 2, "shared pools are never pruned");
+        assert_eq!(count(), 4, "pools are reused; control requests belong to the account");
+        assert_eq!(http.account_tls.lock().len(), 2);
+        http.retain_accounts(&accounts[1..]);
+        assert_eq!(count(), 2);
+        assert!(http.clients.lock().keys().all(|k| k.account.as_ref().is_none_or(|a| a.id != accounts[0].id)));
+        assert_eq!(http.account_tls.lock().len(), 1);
+        http.retain_accounts(&[]);
+        assert_eq!(count(), 1, "shared pools are never pruned");
+        assert!(http.account_tls.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_clients_never_follow_307_with_credentials_or_request_bodies() {
+        use std::sync::atomic::AtomicUsize;
+        let redirected = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/start",
+                axum::routing::post({
+                    let attempts = attempts.clone();
+                    move |headers: axum::http::HeaderMap, body: String| {
+                        let attempts = attempts.clone();
+                        async move {
+                            assert_eq!(headers["authorization"], "Bearer FAKE_ACCESS_MARKER");
+                            assert_eq!(headers["x-api-key"], "FAKE_KEY_MARKER");
+                            assert!(body.contains("FAKE_PROMPT_OR_REFRESH_MARKER"));
+                            attempts.fetch_add(1, Ordering::Relaxed);
+                            (
+                                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                                [("location", "/target?secret=FAKE_REDIRECT_TARGET_MARKER")],
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/target",
+                axum::routing::any({
+                    let redirected = redirected.clone();
+                    move || {
+                        let redirected = redirected.clone();
+                        async move {
+                            redirected.fetch_add(1, Ordering::Relaxed);
+                            "unexpected"
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/start", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "fake".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let account = pool.all().pop().unwrap();
+        *account.cred.write() = crate::accounts::Credential::OAuth(crate::accounts::OAuth {
+            access_token: "fake".into(),
+            account_id: Some("fake-account".into()),
+            ..Default::default()
+        });
+        let http = Http::new("direct");
+        let clients = [
+            http.client(None),
+            http.control(None),
+            http.for_reset(None),
+            http.for_account(&account),
+            http.control_for_account(&account),
+            http.reset_for_account(&account),
+        ];
+        for client in &clients {
+            let response = client
+                .post(&endpoint)
+                .bearer_auth("FAKE_ACCESS_MARKER")
+                .header("x-api-key", "FAKE_KEY_MARKER")
+                .body("FAKE_PROMPT_OR_REFRESH_MARKER")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), clients.len());
+        assert_eq!(redirected.load(Ordering::Relaxed), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn account_connections_and_tls_survive_rotation_but_expire_on_identity_change() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/",
+            axum::routing::get(
+                |axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>| async move {
+                    peer.to_string()
+                },
+            ),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap()
+        });
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: ["one", "two"]
+                .map(|key| crate::config::KeyEntry { api_key: key.into(), ..Default::default() })
+                .to_vec(),
+            ..Default::default()
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let accounts = pool.all();
+        for (i, account) in accounts.iter().enumerate() {
+            crate::oauth::publish_refreshed(
+                account,
+                crate::accounts::OAuth {
+                    access_token: "FAKE_ACCESS".into(),
+                    account_id: Some(format!("fake-workspace-{i}")),
+                    ..Default::default()
+                },
+                vec![],
+            );
+        }
+        let http = Http::new("direct");
+        let peer = |client: reqwest::Client| {
+            let endpoint = endpoint.clone();
+            async move { client.get(endpoint).send().await.unwrap().text().await.unwrap() }
+        };
+        let inference = peer(http.for_account(&accounts[0])).await;
+        let control = peer(http.control_for_account(&accounts[0])).await;
+        let second = peer(http.for_account(&accounts[1])).await;
+        let second_control = peer(http.control_for_account(&accounts[1])).await;
+        assert_ne!(inference, second);
+        assert_ne!(control, second_control);
+        let tls = http.websocket_tls_for_account(&accounts[0]);
+        assert!(!Arc::ptr_eq(&tls, &http.websocket_tls_for_account(&accounts[1])));
+        let crate::accounts::Credential::OAuth(mut credential) = accounts[0].cred.read().clone() else {
+            unreachable!()
+        };
+        credential.access_token = "FAKE_ROTATED_ACCESS".into();
+        crate::oauth::publish_refreshed(&accounts[0], credential.clone(), vec![]);
+        assert_eq!(inference, peer(http.for_account(&accounts[0])).await);
+        assert_eq!(control, peer(http.control_for_account(&accounts[0])).await);
+        assert!(Arc::ptr_eq(&tls, &http.websocket_tls_for_account(&accounts[0])));
+        credential.account_id = Some("different-workspace".into());
+        crate::oauth::publish_refreshed(&accounts[0], credential, vec![]);
+        assert_ne!(inference, peer(http.for_account(&accounts[0])).await);
+        assert_ne!(control, peer(http.control_for_account(&accounts[0])).await);
+        assert!(!Arc::ptr_eq(&tls, &http.websocket_tls_for_account(&accounts[0])));
+        assert_eq!(http.clients.lock().len(), 4, "obsolete identity pools were removed");
+        assert_eq!(http.account_tls.lock().len(), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn account_reload_prunes_replaced_and_removed_pools_without_pruning_token_rotations() {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory =
+            Directory(std::env::temp_dir().join(format!("fusebox-transport-reload-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let path = directory.0.join("same-account.json");
+        let write = |workspace: &str, access: &str| {
+            std::fs::write(
+                &path,
+                serde_json::json!({"type":"codex", "account_id":workspace, "access_token":access}).to_string(),
+            )
+            .unwrap();
+        };
+        write("fake-workspace-a", "FAKE_ACCESS_A");
+        let mut cfg =
+            Config { auth_dir: directory.0.to_string_lossy().into(), proxy_url: "direct".into(), ..Default::default() };
+        let app = App::new(cfg.clone(), directory.0.join("config.yaml"));
+        let account = app.pool.all().pop().unwrap();
+        app.http.for_account(&account);
+        app.http.control_for_account(&account);
+        app.http.reset_for_account(&account);
+        let tls = app.http.websocket_tls_for_account(&account);
+        write("fake-workspace-a", "FAKE_ROTATED_ACCESS_A");
+        app.reload_accounts();
+        assert_eq!(app.http.clients.lock().len(), 3);
+        assert!(Arc::ptr_eq(&tls, &app.http.websocket_tls_for_account(&app.pool.all()[0])));
+        cfg.oauth_excluded_models.insert("codex".into(), vec!["unused-model".into()]);
+        app.set_config(cfg);
+        assert_eq!(app.http.clients.lock().len(), 3);
+        assert!(Arc::ptr_eq(&tls, &app.http.websocket_tls_for_account(&app.pool.all()[0])));
+        write("fake-workspace-b", "FAKE_ACCESS_B");
+        app.reload_accounts();
+        assert!(app.http.clients.lock().is_empty());
+        assert!(app.http.account_tls.lock().is_empty());
+        let replacement = app.pool.all().pop().unwrap();
+        assert_ne!(AccountPool::new(&account).identity, AccountPool::new(&replacement).identity);
+        assert_ne!(
+            app.sessions.provider_session(Some("replacement-race"), &account, 1800),
+            app.sessions.provider_session(Some("replacement-race"), &replacement, 1800)
+        );
+        let invalidated_tls = app.http.websocket_tls_for_account(&account);
+        assert!(!Arc::ptr_eq(&invalidated_tls, &app.http.websocket_tls_for_account(&replacement)));
+        assert!(!Arc::ptr_eq(&tls, &app.http.websocket_tls_for_account(&replacement)));
+        app.http.control_for_account(&replacement);
+        std::fs::remove_file(&path).unwrap();
+        app.reload_accounts();
+        assert!(app.http.clients.lock().is_empty());
+        assert!(app.http.account_tls.lock().is_empty());
     }
 
     #[test]

@@ -449,7 +449,7 @@ fn check_url(value: &str, label: &str) -> Result<()> {
 
 /// Settings left out of `values` while unset, so the settings a dashboard reads don't
 /// change for those who never use them, but that can still be set.
-const OPTIONAL: &[&str] = &["trusted-proxies", "proxy-protocol-port"];
+const OPTIONAL: &[&str] = &["trusted-proxies", "proxy-protocol-port", "upstream-header-allowlist"];
 
 fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
     for (field, value) in changes {
@@ -493,6 +493,12 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
             ),
             "session-affinity-idle-seconds" => {
                 ensure!(value.as_u64().is_some_and(|n| n >= 60), "Forget idle sessions after at least 60 seconds")
+            }
+            "provider-session-idle-seconds" => {
+                ensure!(
+                    value.as_u64().is_some_and(|n| (1..=86400).contains(&n)),
+                    "Provider session inactivity must be between 1 and 86400 seconds"
+                )
             }
             "prompt-cache" => {
                 let config: crate::cache::Config = serde_json::from_value(value.clone())

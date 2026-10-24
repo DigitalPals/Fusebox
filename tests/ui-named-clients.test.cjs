@@ -250,3 +250,25 @@ test('setup snippets carry the client’s key, never a shared one', () => {
   assert.ok(open('sdk').note.includes('No key is required'));
   assert.ok(!open('codex').text.includes('env_key'));
 });
+
+test('identity learning requires an explicit named-client opt-in and can be revoked', async () => {
+  const page = clients({ 'api-keys': [], 'named-clients': [laptop] });
+  page.named.open = laptop.id;
+  assert.ok(page.html().includes('Allow identity learning'));
+  await page.run(`namedAction('named-trust-identity', '${laptop.id}')`);
+  assert.equal(page.values()['named-clients'][0]['trust-client-identity'], true);
+  assert.ok(page.html().includes('Stop identity learning'));
+  await page.run(`namedAction('named-trust-identity', '${laptop.id}')`);
+  assert.equal(page.values()['named-clients'][0]['trust-client-identity'], false);
+  assert.equal(page.values()['named-clients'][0].key, laptop.key);
+});
+
+test('learned identity inspection escapes values and respects privacy mode', () => {
+  const page = clients({});
+  page.run(`S.config.identities = { source: '<script>private-client</script>' }`);
+  const html = page.run('clientIdentitiesHTML()');
+  assert.ok(html.includes('&lt;script&gt;'));
+  assert.ok(!html.includes('<script>'));
+  page.run('S.private = true');
+  assert.ok(!page.run('clientIdentitiesHTML()').includes('private-client'));
+});

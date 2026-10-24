@@ -42,6 +42,8 @@ fn app(base: &str, native: bool) -> Arc<App> {
             base_url: Some(base.into()),
             ..Default::default()
         });
+        let account = &app.pool.all()[0];
+        account.state.lock().credential_identity = account.cred.read().identity(account.provider);
     }
     app
 }

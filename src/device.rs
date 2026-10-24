@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
 
@@ -127,13 +127,7 @@ pub async fn start(app: &App, provider: Provider) -> Result<Device> {
     for (k, v) in headers {
         rb = rb.header(k, v);
     }
-    let resp = rb.send().await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("device authorization returned {status}: {}", text.chars().take(300).collect::<String>());
-    }
-    let v: Value = serde_json::from_str(&text).context("invalid device authorization response")?;
+    let v = crate::oauth::read_json(rb.send().await.map_err(crate::oauth::transport_error)?).await?;
     let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
     let verification =
         Some(s("verification_uri_complete")).filter(|u| !u.is_empty()).unwrap_or_else(|| s("verification_uri"));
@@ -190,10 +184,11 @@ pub async fn wait(app: &App, provider: Provider, d: &Device) -> Result<Signed> {
         let resp = match rb.send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!("device token poll failed: {e}");
+                tracing::debug!("device token poll failed: {}", crate::oauth::transport_error(e));
                 continue;
             }
         };
+        let status = resp.status();
         let v: Value = resp.json().await.unwrap_or_default();
         match v["error"].as_str() {
             Some("authorization_pending") => continue,
@@ -203,8 +198,13 @@ pub async fn wait(app: &App, provider: Provider, d: &Device) -> Result<Signed> {
             }
             Some("access_denied") => bail!("the sign-in was denied"),
             Some("expired_token") => bail!("the code expired before it was approved"),
-            Some(e) => bail!("{e}: {}", v["error_description"].as_str().unwrap_or_default()),
+            Some(_) => {
+                bail!("device sign-in failed ({})", crate::oauth::error_classification(&v).unwrap_or("oauth_error"))
+            }
             None => {}
+        }
+        if !status.is_success() {
+            bail!("device token endpoint returned HTTP {}", status.as_u16());
         }
         let Some(access) = v["access_token"].as_str().filter(|t| !t.is_empty()) else { continue };
         return finish(app, provider, d, access, &v).await;
@@ -265,13 +265,9 @@ pub async fn meta_mint(http: &reqwest::Client, dca_token: &str) -> Result<Value>
         .header("accept", "application/json")
         .json(&json!({ "dca_token": dca_token }))
         .send()
-        .await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("minting a Meta API key returned {status}: {}", text.chars().take(300).collect::<String>());
-    }
-    let v: Value = serde_json::from_str(&text).context("invalid mint response")?;
+        .await
+        .map_err(crate::oauth::transport_error)?;
+    let v = crate::oauth::read_json(resp).await?;
     if v["api_key"].as_str().is_none_or(str::is_empty) {
         bail!("mint response has no api_key");
     }

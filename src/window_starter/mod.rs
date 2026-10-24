@@ -313,7 +313,7 @@ impl Api {
         let origin = crate::upstream::CLAUDE_API.to_string();
         #[cfg(test)]
         let origin = app.window_starter_test_origin.lock().clone().unwrap_or(origin);
-        Ok(Self { http: app.http.for_reset(acct.proxy_url.as_deref()), token, origin })
+        Ok(Self { http: app.http.reset_for_account(acct), token, origin })
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -471,7 +471,7 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
             stream: false,
             count_tokens: false,
             cache_key: None,
-            cache_session: None,
+            provider_session: None,
             cache_defaults: false,
         },
         json!({"model":model,"messages":[{"role":"user","content":"Reply OK."}],"max_tokens":8,"stream":false,"thinking":{"type":"disabled"}}),

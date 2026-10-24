@@ -264,7 +264,7 @@ pub enum Credential {
 impl Credential {
     /// A stable fingerprint for subscription state; access and refresh tokens
     /// change routinely and must not reset attribution.
-    fn identity(&self, provider: Provider) -> String {
+    pub(crate) fn identity(&self, provider: Provider) -> String {
         use sha2::{Digest, Sha256};
         let (kind, owner, base_url) = match self {
             Self::OAuth(o) => ("oauth", o.account_id.as_deref().or(o.email.as_deref()), o.base_url.as_deref()),
@@ -300,6 +300,8 @@ impl OAuth {
 #[derive(Clone)]
 pub struct PendingOAuthSave {
     pub credential: OAuth,
+    /// Owner on disk before this rotation; a replacement must never be overwritten.
+    pub expected_identity: String,
     pub extra: Vec<(String, Value)>,
     pub retry_at: std::time::Instant,
 }
@@ -385,6 +387,33 @@ pub struct AccountState {
 }
 
 impl AccountState {
+    /// Invalidate subscription-specific observations while keeping lifetime
+    /// counters and in-flight accounting attached to this configured slot.
+    pub(crate) fn update_identity(&mut self, identity: String) -> bool {
+        if self.credential_identity == identity {
+            return false;
+        }
+        self.quota_epoch += 1;
+        self.identity_epoch += 1;
+        self.credential_identity = identity;
+        self.quota_refreshing = false;
+        self.quota = Default::default();
+        self.latency.clear();
+        self.cooldowns.clear();
+        self.quota_cooldowns.clear();
+        self.models_etag = None;
+        self.banked_resets = None;
+        self.window_starter = None;
+        if let Some(cancel) = self.window_starter_cancel.take() {
+            cancel.cancel();
+        }
+        self.attribution = Default::default();
+        self.attribution.dirty = true;
+        self.strikes = 0;
+        self.clear_error();
+        true
+    }
+
     /// A quota reading: the windows, and the attribution of whatever rose since the last one.
     pub fn set_quota(&mut self, windows: Vec<crate::quota::Window>, plan: Option<String>) {
         self.attribution.reading(&windows, Utc::now());
@@ -486,7 +515,9 @@ pub struct Account {
     pub headers: BTreeMap<String, String>,
     pub proxy_url: Option<String>,
     pub cred: Arc<RwLock<Credential>>,
-    pub state: Mutex<AccountState>,
+    /// Shared by config-only replacements so an in-flight refresh publishes its
+    /// identity epoch to the currently selected Account allocation as well.
+    pub state: Arc<Mutex<AccountState>>,
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Rotated credentials that still need saving. Shared with in-flight users
     /// across account/config reloads, as are the credentials and refresh lock.
@@ -1162,46 +1193,43 @@ impl Pool {
             self.accounts.read().iter().map(|a| (a.id.clone(), a.clone())).collect();
         let mut next = Vec::with_capacity(specs.len());
         for mut s in specs {
+            let mut identity_changed = false;
             if let Some(prev) = old.get(&s.id) {
                 // Never replace a successfully rotated token with its older disk
                 // copy. A shared refresh lock also prevents a changed config from
                 // starting a second refresh while the old Account is in flight.
                 let guard = prev.refresh_lock.try_lock();
                 let pending = prev.pending_oauth_save.lock();
-                if guard.is_err() || pending.is_some() {
-                    s.cred = prev.cred.read().clone();
-                } else if let Some(path) = &s.path {
+                if let Some(path) = &s.path {
                     // Collection happened before taking the refresh lock; reread
                     // here in case a refresh completed while files were scanned.
                     if let Some((_, oauth, _, _)) = read_oauth_file(path) {
                         s.cred = Credential::OAuth(oauth);
                     }
                 }
+                let current = prev.cred.read().clone();
+                let current_identity = current.identity(prev.provider);
+                let disk_identity = s.cred.identity(s.provider);
+                let older_copy = disk_identity == current_identity
+                    || pending.as_ref().is_some_and(|save| save.expected_identity == disk_identity);
+                if (guard.is_err() || pending.is_some()) && older_copy {
+                    s.cred = current;
+                }
                 let identity = s.cred.identity(s.provider);
-                let identity_changed = prev.state.lock().credential_identity != identity;
-                if guard.is_ok() && pending.is_none() {
+                identity_changed = current_identity != identity || prev.state.lock().credential_identity != identity;
+                if !identity_changed && guard.is_ok() && pending.is_none() {
                     *prev.cred.write() = s.cred.clone();
                 }
                 if identity_changed {
-                    let mut st = prev.state.lock();
-                    st.quota_epoch += 1;
-                    st.identity_epoch += 1;
-                    st.credential_identity = identity;
-                    st.quota_refreshing = false;
-                    st.quota = Default::default();
-                    st.latency.clear();
-                    st.quota_cooldowns.clear();
-                    st.banked_resets = None;
-                    st.window_starter = None;
-                    if let Some(cancel) = st.window_starter_cancel.take() {
-                        cancel.cancel();
-                    }
-                    st.attribution = Default::default();
-                    st.attribution.dirty = true;
+                    prev.state.lock().update_identity(identity);
                 }
                 // Keep counters and cooldowns; refresh credentials from disk/config.
-                let same_shape = prev.provider == s.provider
-                    && prev.models.len() == s.models.len()
+                let same_shape = !identity_changed
+                    && prev.provider == s.provider
+                    && prev.label == s.label
+                    && prev.path == s.path
+                    && prev.group == s.group
+                    && prev.models.iter().map(|m| (&m.name, &m.alias)).eq(s.models.iter().map(|m| (&m.name, &m.alias)))
                     && prev.headers == s.headers
                     && prev.proxy_url == s.proxy_url
                     && prev.prefix == s.prefix
@@ -1220,7 +1248,8 @@ impl Pool {
                     continue;
                 }
             }
-            let discovered = old.get(&s.id).map(|p| p.discovered.read().clone()).unwrap_or_default();
+            let previous_identity = old.get(&s.id).filter(|_| !identity_changed);
+            let discovered = previous_identity.map(|p| p.discovered.read().clone()).unwrap_or_default();
             let mut state = old
                 .get(&s.id)
                 .map(|p| {
@@ -1231,6 +1260,9 @@ impl Pool {
                         quota_cooldowns: st.quota_cooldowns.clone(),
                         quota_epoch: st.quota_epoch,
                         identity_epoch: st.identity_epoch,
+                        models_etag: st.models_etag.clone(),
+                        quota_refreshing: st.quota_refreshing,
+                        banked_resets: st.banked_resets.clone(),
                         strikes: st.strikes,
                         last_error: st.last_error.clone(),
                         last_used: st.last_used,
@@ -1249,9 +1281,41 @@ impl Pool {
             if let Some(problem) = &s.problem {
                 state.set_error(problem.clone());
             }
-            let cred = old.get(&s.id).map(|prev| prev.cred.clone()).unwrap_or_else(|| Arc::new(RwLock::new(s.cred)));
-            let refresh_lock = old.get(&s.id).map(|prev| prev.refresh_lock.clone()).unwrap_or_default();
-            let pending_oauth_save = old.get(&s.id).map(|prev| prev.pending_oauth_save.clone()).unwrap_or_default();
+            // Config changes keep one coherent state for both current and
+            // in-flight users. A real replacement gets a separate state below.
+            if let Some(prev) = previous_identity {
+                let mut shared = prev.state.lock();
+                shared.disabled = state.disabled;
+                if let Some(problem) = &s.problem {
+                    shared.set_error(problem.clone());
+                }
+            }
+            let cred = previous_identity.map(|prev| prev.cred.clone()).unwrap_or_else(|| Arc::new(RwLock::new(s.cred)));
+            let refresh_lock = previous_identity.map(|prev| prev.refresh_lock.clone()).unwrap_or_default();
+            let pending_oauth_save = previous_identity.map(|prev| prev.pending_oauth_save.clone()).unwrap_or_default();
+            let device_id = previous_identity.map(|prev| prev.device_id.clone()).unwrap_or_else(|| {
+                // A copied credential file can carry the previous owner's device
+                // id. Accept an explicitly different device, otherwise rotate it.
+                s.device_id
+                    .filter(|device| old.get(&s.id).is_none_or(|prev| *device != prev.device_id))
+                    .unwrap_or_else(|| random_hex(32))
+            });
+            if identity_changed && s.provider == Provider::Claude {
+                let devices = serde_json::json!([device_id]);
+                if let Credential::OAuth(oauth) = &mut *cred.write() {
+                    oauth.raw.insert("claude_device_ids".into(), devices.clone());
+                }
+                // Keep a regenerated device after restart too: a copied auth
+                // file must not restore the previous identity's imported id.
+                if let Some(path) = &s.path
+                    && set_file_field(path, "claude_device_ids", Some(devices)).is_err()
+                {
+                    state.set_error("saving replacement account device failed");
+                }
+            }
+            let session_id = previous_identity
+                .map(|prev| prev.session_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             next.push(Arc::new(Account {
                 id: s.id,
                 provider: s.provider,
@@ -1262,11 +1326,11 @@ impl Pool {
                 headers: s.headers,
                 proxy_url: s.proxy_url,
                 cred,
-                state: Mutex::new(state),
+                state: previous_identity.map(|prev| prev.state.clone()).unwrap_or_else(|| Arc::new(Mutex::new(state))),
                 refresh_lock,
                 pending_oauth_save,
-                device_id: s.device_id.unwrap_or_else(|| random_hex(32)),
-                session_id: uuid::Uuid::new_v4().to_string(),
+                device_id,
+                session_id,
                 discovered: RwLock::new(discovered),
                 extra: s.extra,
                 prefix: s.prefix,
@@ -1797,6 +1861,100 @@ fn least_used_score(a: &Account, model: &str) -> f64 {
 mod tests {
     use super::*;
 
+    struct AuthDirectory(PathBuf);
+
+    impl AuthDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("fusebox-account-identity-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, owner: &str, token: &str, device: Option<&str>) {
+            let mut value = serde_json::json!({
+                "type": "claude", "account_uuid": owner, "email": "fake@example.test",
+                "access_token": token, "refresh_token": "FAKE_REFRESH",
+            });
+            if let Some(device) = device {
+                value["claude_device_ids"] = serde_json::json!([device]);
+            }
+            std::fs::write(self.0.join("same-filename.json"), value.to_string()).unwrap();
+        }
+    }
+
+    impl Drop for AuthDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn same_filename_identity_replacement_rotates_devices_and_sessions_but_keeps_accounting() {
+        let directory = AuthDirectory::new();
+        let imported_device = "a".repeat(64);
+        directory.write("fake-owner-a", "FAKE_ACCESS_A", Some(&imported_device));
+        let cfg = Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let original = pool.all().pop().unwrap();
+        let identity = original.state.lock().credential_identity.clone();
+        original.state.lock().counters.requests = 17;
+        original.discovered.write().push("claude-fake-model".into());
+        let load = RequestLoad::new(&original);
+        let epoch = original.state.lock().identity_epoch;
+        directory.write("fake-owner-b", "FAKE_ACCESS_B", Some(&imported_device));
+        pool.reload(&cfg);
+        let replacement = pool.all().pop().unwrap();
+        assert_eq!(replacement.id, original.id);
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        assert!(!Arc::ptr_eq(&original.cred, &replacement.cred));
+        assert!(!Arc::ptr_eq(&original.refresh_lock, &replacement.refresh_lock));
+        assert_ne!(replacement.device_id, original.device_id);
+        assert_ne!(replacement.session_id, original.session_id);
+        assert_eq!(replacement.device_id.len(), 64);
+        assert_eq!(replacement.state.lock().identity_epoch, epoch + 1);
+        assert_eq!(original.state.lock().identity_epoch, epoch + 1, "old sessions are invalidated");
+        assert_ne!(replacement.state.lock().credential_identity, identity);
+        assert_eq!(replacement.state.lock().counters.requests, 17);
+        assert_eq!(replacement.state.lock().active_requests.load(Ordering::Relaxed), 1);
+        assert!(replacement.discovered.read().is_empty());
+        let Credential::OAuth(new) = replacement.cred.read().clone() else { unreachable!() };
+        assert_eq!(new.access_token, "FAKE_ACCESS_B");
+        let Credential::OAuth(old) = original.cred.read().clone() else { unreachable!() };
+        assert_eq!(old.access_token, "FAKE_ACCESS_A", "old work cannot refresh the replacement's credentials");
+        drop(load);
+        assert_eq!(replacement.state.lock().active_requests.load(Ordering::Relaxed), 0);
+        pool.reload(&cfg);
+        assert!(Arc::ptr_eq(&replacement, &pool.all()[0]));
+        let fresh_pool = Pool::default();
+        fresh_pool.reload(&cfg);
+        assert_eq!(fresh_pool.all()[0].device_id, replacement.device_id, "restart retains the replacement's device");
+    }
+
+    #[test]
+    fn token_and_configuration_reload_preserve_account_device_session_and_epoch() {
+        let directory = AuthDirectory::new();
+        directory.write("fake-owner", "FAKE_ACCESS_OLD", None);
+        let mut cfg = Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let original = pool.all().pop().unwrap();
+        let epoch = original.state.lock().identity_epoch;
+        directory.write("fake-owner", "FAKE_ACCESS_NEW", None);
+        pool.reload(&cfg);
+        assert!(Arc::ptr_eq(&original, &pool.all()[0]));
+        cfg.oauth_excluded_models.insert("claude".into(), vec!["claude-excluded".into()]);
+        pool.reload(&cfg);
+        let updated = pool.all().pop().unwrap();
+        assert!(!Arc::ptr_eq(&original, &updated));
+        assert!(Arc::ptr_eq(&original.cred, &updated.cred));
+        assert_eq!(updated.device_id, original.device_id);
+        assert_eq!(updated.session_id, original.session_id);
+        assert_eq!(updated.state.lock().identity_epoch, epoch);
+        let Credential::OAuth(credential) = updated.cred.read().clone() else { unreachable!() };
+        assert_eq!(credential.access_token, "FAKE_ACCESS_NEW");
+    }
+
     #[test]
     fn errors_that_explain_a_pause_end_with_it() {
         let cfg = Config {
@@ -2276,7 +2434,7 @@ claude-api-key:
             headers: BTreeMap::new(),
             proxy_url: None,
             cred: Arc::new(RwLock::new(Credential::ApiKey { key: "k".into(), base_url: None })),
-            state: Mutex::new(AccountState::default()),
+            state: Arc::new(Mutex::new(AccountState::default())),
             refresh_lock: Arc::default(),
             pending_oauth_save: Arc::default(),
             device_id: String::new(),

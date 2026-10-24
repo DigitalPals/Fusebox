@@ -104,7 +104,7 @@ async fn api(app: &App, acct: &Arc<Account>) -> Result<HttpProvider> {
     };
     Ok(HttpProvider {
         provider: acct.provider,
-        client: app.http.for_reset(acct.proxy_url.as_deref()),
+        client: app.http.reset_for_account(acct),
         token,
         account_id: id,
         #[cfg(test)]

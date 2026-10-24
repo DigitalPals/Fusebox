@@ -53,6 +53,8 @@ pub struct Config {
     pub session_affinity: bool,
     /// Forget inactive sessions after this many seconds (default one day).
     pub session_affinity_idle_seconds: u64,
+    /// Rotate generated provider sessions after inactivity, independently of routing.
+    pub provider_session_idle_seconds: u64,
     /// Derived cache-key scope and handling of incompatible explicit cache hints.
     pub prompt_cache: crate::cache::Config,
     pub translation: crate::formats::TranslationConfig,
@@ -104,9 +106,12 @@ pub struct Config {
     pub background_model: Option<String>,
     /// Client releases to speak as when newer than this build's (`claude-code: 2.1.310`),
     /// for catching up before a Fusebox release does. Claude Code and Codex are also
-    /// learned from the real clients that send requests through Fusebox.
+    /// learned from authenticated named clients explicitly trusted to teach identities.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub client_identities: BTreeMap<String, String>,
+    /// Explicit additional inbound header names permitted to reach each provider.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub upstream_header_allowlist: BTreeMap<String, Vec<String>>,
     /// CLIProxyAPI settings found in the file that have no effect here.
     #[serde(skip)]
     pub ignored: Vec<String>,
@@ -224,6 +229,9 @@ pub struct NamedClient {
     pub id: String,
     pub label: String,
     pub key: String,
+    /// Allow this authenticated client to update the shared emulation profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trust_client_identity: bool,
     /// Model patterns this client may use (`*` wildcards); empty allows every model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
@@ -407,6 +415,7 @@ impl Default for Config {
             five_hour_reserve_percent: 30,
             session_affinity: true,
             session_affinity_idle_seconds: 86_400,
+            provider_session_idle_seconds: 1800,
             prompt_cache: Default::default(),
             translation: Default::default(),
             embeddings: Default::default(),
@@ -426,6 +435,7 @@ impl Default for Config {
             oauth_excluded_models: BTreeMap::new(),
             extra_models: BTreeMap::new(),
             client_identities: BTreeMap::new(),
+            upstream_header_allowlist: BTreeMap::new(),
             model_groups: BTreeMap::new(),
             model_capabilities: BTreeMap::new(),
             background_model: None,
@@ -607,6 +617,36 @@ pub fn check_proxy_url(value: &str) -> Result<(), String> {
     reqwest::Proxy::all(value).map(|_| ()).map_err(|e| format!("{value}: {e}"))
 }
 
+fn validate_upstream_header(provider: &str, name: &str) -> Result<(), String> {
+    let parsed = axum::http::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| "upstream-header-allowlist needs exact HTTP header names".to_string())?;
+    let provider = crate::accounts::Provider::parse(provider)
+        .ok_or_else(|| "upstream-header-allowlist needs a supported provider".to_string())?;
+    if !crate::upstream::header_extension_allowed(provider, parsed.as_str()) {
+        return Err(format!("upstream-header-allowlist: {} is reserved or private", parsed.as_str()));
+    }
+    Ok(())
+}
+
+fn validate_custom_headers(
+    provider: crate::accounts::Provider,
+    headers: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    for (name, value) in headers {
+        anyhow::ensure!(
+            crate::upstream::custom_header_allowed(provider, false, name),
+            "{} configured header is invalid or protected: {name}",
+            provider.as_str()
+        );
+        anyhow::ensure!(
+            axum::http::HeaderValue::from_str(value).is_ok(),
+            "{} configured header has an invalid value: {name}",
+            provider.as_str()
+        );
+    }
+    Ok(())
+}
+
 /// Webhook destinations are plain HTTPS (or HTTP, for a local relay) URLs.
 pub fn check_webhook_url(value: &str) -> Result<(), String> {
     let shown = crate::push::webhook_name(value);
@@ -697,8 +737,38 @@ impl Config {
         cfg.request_limits.validate().map_err(anyhow::Error::msg)?;
         cfg.banked_reset_policy.validate().map_err(anyhow::Error::msg)?;
         cfg.window_starter.validate()?;
+        anyhow::ensure!(
+            (1..=86_400).contains(&cfg.provider_session_idle_seconds),
+            "provider-session-idle-seconds must be between 1 and 86400"
+        );
+        for (provider, names) in &cfg.upstream_header_allowlist {
+            anyhow::ensure!(
+                matches!(provider.as_str(), "claude" | "codex"),
+                "upstream-header-allowlist supports claude and codex"
+            );
+            anyhow::ensure!(names.len() <= 128, "upstream-header-allowlist: too many header names");
+            for name in names {
+                validate_upstream_header(provider, name).map_err(anyhow::Error::msg)?;
+            }
+        }
         for (client, version) in &cfg.client_identities {
             crate::clients::validate(client, version).map_err(anyhow::Error::msg)?;
+        }
+        for (provider, entries) in [
+            (crate::accounts::Provider::Claude, &cfg.claude_api_key),
+            (crate::accounts::Provider::Codex, &cfg.codex_api_key),
+            (crate::accounts::Provider::Gemini, &cfg.gemini_api_key),
+            (crate::accounts::Provider::Vertex, &cfg.vertex_api_key),
+            (crate::accounts::Provider::Kimi, &cfg.kimi_api_key),
+            (crate::accounts::Provider::Xai, &cfg.xai_api_key),
+            (crate::accounts::Provider::Meta, &cfg.meta_api_key),
+        ] {
+            for entry in entries {
+                validate_custom_headers(provider, &entry.headers)?;
+            }
+        }
+        for entry in &cfg.openai_compatibility {
+            validate_custom_headers(crate::accounts::Provider::Compat, &entry.headers)?;
         }
         // An explicit auth-dir always wins; otherwise keep using an existing legacy directory.
         if !explicit && default_auth_dir() == LEGACY_AUTH_DIR {
@@ -812,6 +882,48 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_headers_preserve_gateway_credentials_and_reject_protected_names_and_invalid_values() {
+        let allowed = "openai-compatibility:\n  - name: gateway\n    base-url: https://gateway.example.invalid/v1\n    api-keys: [FAKE_KEY]\n    headers:\n      cf-access-client-secret: FAKE_OPERATOR_SECRET\n      x-portkey-api-key: FAKE_OPERATOR_GATEWAY\n";
+        assert!(Config::parse(allowed).is_ok());
+        for name in ["authorization", "user-agent", "session-id", "via", "x-fusebox-secret"] {
+            assert!(
+                Config::parse(&format!(
+                    "codex-api-key:\n  - api-key: FAKE_KEY\n    headers:\n      {name}: FAKE_VALUE\n"
+                ))
+                .is_err(),
+                "{name}"
+            );
+        }
+        let error = Config::parse(
+            "codex-api-key:\n  - api-key: FAKE_KEY\n    headers:\n      x-feature: \"FAKE_SECRET\\nINVALID\"\n",
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains("FAKE_SECRET"));
+    }
+
+    #[test]
+    fn provider_identity_settings_are_explicit_and_reject_private_header_extensions() {
+        let cfg = Config::parse("named-clients:\n  - id: laptop\n    label: Laptop\n    key: fake-client-key\n    trust-client-identity: true\nprovider-session-idle-seconds: 600\nupstream-header-allowlist:\n  claude: [x-provider-feature]\n").unwrap();
+        assert!(cfg.named_clients[0].trust_client_identity);
+        assert_eq!(cfg.provider_session_idle_seconds, 600);
+        assert_eq!(Config::default().provider_session_idle_seconds, 1800);
+        for name in [
+            "authorization",
+            "x-gateway-key",
+            "via",
+            "x-fusebox-session-id",
+            "chatgpt-account-id",
+            "x-auth-request-email",
+            "connection",
+        ] {
+            assert!(Config::parse(&format!("upstream-header-allowlist:\n  claude: [{name}]\n")).is_err(), "{name}");
+        }
+        for idle in [0, 86401] {
+            assert!(Config::parse(&format!("provider-session-idle-seconds: {idle}\n")).is_err());
+        }
+    }
 
     #[test]
     fn renamed_variables_fall_back_to_their_old_names() {

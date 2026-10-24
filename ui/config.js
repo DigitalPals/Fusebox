@@ -21,7 +21,7 @@ const CONFIG_KEY_SECTION = {
   host: 'server', port: 'server', 'auth-dir': 'server', tls: 'server',
   'api-keys': 'clients', 'management-key': 'access', 'management-allow-remote': 'access',
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'window-starter': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
-  'session-affinity-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
+  'session-affinity-idle-seconds': 'routing', 'provider-session-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'latency-routing': 'routing', 'translation': 'routing', 'embeddings': 'connections', 'stream-limits': 'connections', 'request-limits': 'connections', 'log-format': 'diagnostics',
   'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
   'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', 'model-capabilities': 'models', notifications: 'notifications', debug: 'diagnostics',
@@ -227,7 +227,7 @@ function namedClientsHTML() {
     return `<div class="named-row"><span class="cell2"><span>${name}</span>${sub ? `<span class="meta named-sub">${sub}</span>` : ''}${limits ? `<span class="meta named-limits">${esc(limits)}</span>` : ''}</span>
       <span class="named-key"><span class="mono">${esc(key)}</span>${copyBtn(client.key, `Copy the key for ${name}`, 'Key copied')}</span>
       ${asking ? '<span></span>' : `<span class="named-btns">${btn('named-setup', 'Set up', `Set up a tool with the key for ${name}`, '', ` aria-expanded="${n.setup === client.id}"`)}${btn('limits-edit', 'Limits', `Limits for ${name}`)}${btn('named-more', 'More', `More for ${name}`, ' ghost', ` aria-expanded="${n.open === client.id}"`)}</span>`}</div>
-      ${n.open === client.id && !asking ? `<div class="named-more" role="group" aria-label="More for ${name}">${S.private ? '' : btn('named-reveal', shown ? 'Hide key' : 'Show key', `${shown ? 'Hide' : 'Show'} the key for ${name}`, ' ghost')}${btn('named-addresses', 'Addresses', `Where the key for ${name} was used from`, ' ghost', ` aria-expanded="${n.addresses === client.id}"`)}${btn('named-rename', 'Rename', `Rename ${name}`, ' ghost')}${btn('named-replace', 'Replace key', `Replace the key for ${name}`, ' ghost')}${btn('named-remove', 'Remove', `Remove ${name}`, ' danger')}</div>` : ''}
+      ${n.open === client.id && !asking ? `<div class="named-more" role="group" aria-label="More for ${name}">${S.private ? '' : btn('named-reveal', shown ? 'Hide key' : 'Show key', `${shown ? 'Hide' : 'Show'} the key for ${name}`, ' ghost')}${btn('named-addresses', 'Addresses', `Where the key for ${name} was used from`, ' ghost', ` aria-expanded="${n.addresses === client.id}"`)}${btn('named-trust-identity', client['trust-client-identity'] ? 'Stop identity learning' : 'Allow identity learning', `${client['trust-client-identity'] ? 'Stop' : 'Allow'} identity learning for ${name}`, ' ghost')}${btn('named-rename', 'Rename', `Rename ${name}`, ' ghost')}${btn('named-replace', 'Replace key', `Replace the key for ${name}`, ' ghost')}${btn('named-remove', 'Remove', `Remove ${name}`, ' danger')}</div>` : ''}
       ${n.setup === client.id ? `<div class="setup named-setup" data-setup="${id}" data-setup-uid="-row">${setupHTML(client.key, '-row')}</div>` : ''}
       ${n.addresses === client.id ? namedAddressesHTML(client, seen[client.id] || []) : ''}
       ${n.rename === client.id ? namedRenameForm(client) : ''}
@@ -374,7 +374,7 @@ async function saveLimits(form) {
   const list = configGet(['named-clients']) || [];
   const client = list.find((x) => x.id === form.dataset.id);
   if (!client || S.config.busy || namedBlocked()) return;
-  const updated = { id: client.id, label: client.label, key: client.key };
+  const updated = { id: client.id, label: client.label, key: client.key, ...(client['trust-client-identity'] ? { 'trust-client-identity': true } : {}) };
   for (const [key, label, , kind] of LIMITS) {
     const raw = form.elements[key].value.trim();
     if (!raw) continue;
@@ -418,7 +418,7 @@ function namedBlocked() {
   return true;
 }
 
-async function saveClients(changes, text, onSaved) {
+async function saveClients(changes, text, onSaved = () => {}) {
   const c = S.config;
   c.busy = true; c.msg = null; render();
   try {
@@ -506,6 +506,13 @@ function namedAction(act, id) {
   if (act === 'named-keep') return row({ open: id }, byId('named-remove'));
   if (act === 'named-replace-confirm') return replaceNamedKey(id);
   if (act === 'named-confirm') return removeNamedClient(id);
+  if (act === 'named-trust-identity') {
+    const list = configGet(['named-clients']) || [];
+    const client = list.find((x) => x.id === id);
+    if (!client || namedBlocked()) return;
+    return saveClients(namedEdit(list, client, { 'trust-client-identity': !client['trust-client-identity'] }),
+      client['trust-client-identity'] ? 'This client can no longer update learned identities.' : 'This client can now update learned identities.');
+  }
   if (namedBlocked()) return;
   if (act === 'named-rename') {
     const client = (configGet(['named-clients']) || []).find((x) => x.id === id);
@@ -623,6 +630,7 @@ function configRoutingHTML() {
     <div class="cfg-divider wide"></div>
     ${configSwitch(['session-affinity'], 'Keep sessions on one account', 'A coding session stays on the account it started on, so its prompt cache keeps working. It moves when that subscription runs out or the account is disabled; while an account is busy, its requests briefly use another.')}
     ${configField(['session-affinity-idle-seconds'], 'Forget idle sessions after (seconds)', { type: 'number', min: 60, required: true, disabled: !affinity, help: '86400 is one day.' })}
+    ${configField(['provider-session-idle-seconds'], 'Rotate provider sessions after inactivity (seconds)', { type: 'number', min: 1, max: 86400, required: true, help: 'Default 1800 (30 minutes). Switching subscriptions always creates a fresh provider session; chat history stays intact.' })}
     ${configChoice(['prompt-cache', 'scope'], 'Prompt cache key scope', [['session', 'Session'], ['client', 'Client'], ['workspace', 'Workspace']],
       'Session keeps the existing cache key. Client shares a key across that client’s sessions. Workspace uses the x-fusebox-cache-workspace header, falling back to session when absent. Account selection still follows the session; caller cache keys always win.')}
     ${configField(['prompt-cache', 'namespace'], 'Prompt version', { help: 'Optional cache namespace for a shared prompt or tool schema version. Changing it starts a new derived cache key.' })}
@@ -730,12 +738,42 @@ document.addEventListener('input', (e) => {
   S.config.msg = null; configUpdateFoot();
 });
 
+function clientIdentitiesHTML() {
+  const c = S.config;
+  const details = c.identities ? (S.private ? 'Profiles hidden in privacy mode.' : JSON.stringify(c.identities, null, 2)) : 'Load the effective client versions, runtime profile and source.';
+  return `<div class="cfg-list wide"><h3 class="h-sec">Client identities</h3>
+    <p class="meta">Only clients explicitly allowed under Clients can update learned identities. Reset clears learned versions and profiles while retaining configured versions.</p>
+    <div class="named-actions"><button type="button" class="btn sm" data-config-act="identity-reload"${c.identitiesBusy ? ' disabled' : ''}>Refresh profiles</button>
+    <button type="button" class="btn sm" data-config-act="identity-reset"${c.identitiesBusy ? ' disabled' : ''}>Reset learned profiles</button></div>
+    ${c.identitiesError ? `<p class="cfg-error" role="alert">${esc(c.identitiesError)}</p>` : ''}
+    <details><summary>Versions and profile sources</summary><pre>${esc(details)}</pre></details></div>`;
+}
+
+async function loadClientIdentities() {
+  const c = S.config;
+  if (c.identitiesBusy) return;
+  c.identitiesBusy = true; c.identitiesError = '';
+  try { c.identities = await api('/client-identities'); }
+  catch (e) { c.identitiesError = e.message; }
+  finally { c.identitiesBusy = false; if (S.route === 'config' && c.section === 'connections') render(); }
+}
+
+async function resetClientIdentities() {
+  const c = S.config;
+  if (c.identitiesBusy) return;
+  c.identitiesBusy = true; c.identitiesError = '';
+  try { c.identities = await api('/client-identities/reset', { method: 'POST' }); }
+  catch (e) { c.identitiesError = e.message; }
+  finally { c.identitiesBusy = false; if (S.route === 'config') render(); }
+}
+
 function configConnectionsHTML() {
   return `<div class="cfg-grid">${configField(['proxy-url'], 'Upstream proxy', { wide: true,
     placeholder: 'socks5://127.0.0.1:1080', help: 'Default proxy for upstream requests. Supports HTTP, HTTPS and SOCKS5; individual providers can override it.' })}
     <div class="cfg-divider wide"></div>
     ${configSwitch(['codex-websockets'], 'Native Codex websockets', 'Keep a native upstream websocket connection for clients using Codex over websockets.')}
     ${configSwitch(['claude-cloak'], 'Claude Code compatibility', 'Make requests through Claude OAuth accounts resemble Claude Code requests for other clients.')}
+    ${clientIdentitiesHTML()}
     ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}
     <div class="cfg-divider wide"></div>
     ${configField(['embeddings', 'concurrency'], 'Concurrent embedding chunks', { type: 'number', min: 1, max: 16, required: true, help: 'Google embedding batches can send up to this many chunks at once. Default: 1. Higher values use more provider capacity.' })}
@@ -1140,7 +1178,7 @@ async function loadConfig() {
   if (c.loading || c.busy) return;
   c.loading = true;
   c.msg = null;
-  try { acceptConfig(await api('/config/settings')); }
+  try { acceptConfig(await api('/config/settings')); if (c.section === 'connections') await loadClientIdentities(); }
   catch (e) { c.msg = { kind: 'err', text: e.message }; }
   c.loading = false;
   if (S.route === 'config') render();
@@ -1183,6 +1221,7 @@ function configValidate() {
   }
   if ('auth-dir' in changed && !v['auth-dir']?.trim()) invalid(['auth-dir'], 'Enter a credentials directory.');
   if ('request-retry' in changed && (!Number.isInteger(v['request-retry']) || v['request-retry'] < 0 || v['request-retry'] > 4294967295)) invalid(['request-retry'], 'Enter a nonnegative whole number.');
+  if ('provider-session-idle-seconds' in changed && (!Number.isInteger(v['provider-session-idle-seconds']) || v['provider-session-idle-seconds'] < 1 || v['provider-session-idle-seconds'] > 86400)) invalid(['provider-session-idle-seconds'], 'Enter 1 to 86400 seconds.');
   if ('five-hour-reserve-percent' in changed && (!Number.isInteger(v['five-hour-reserve-percent']) || v['five-hour-reserve-percent'] < 0 || v['five-hour-reserve-percent'] > 100)) invalid(['five-hour-reserve-percent'], 'Enter a whole percentage between 0 and 100.');
   if ('window-starter' in changed) {
     const p = v['window-starter'];
@@ -1387,6 +1426,8 @@ document.addEventListener('click', (e) => {
   const c = S.config;
   const act = button.dataset.configAct;
   const path = button.dataset.path ? JSON.parse(button.dataset.path) : null;
+  if (act === 'identity-reload') return loadClientIdentities();
+  if (act === 'identity-reset') return resetClientIdentities();
   if (act === 'save') return saveConfig();
   if (act === 'discard') return discardConfig();
   if (act.startsWith('named-')) return namedAction(act, button.dataset.id);
@@ -1418,6 +1459,7 @@ document.addEventListener('click', (e) => {
       c.msg = { kind: 'err', text: 'Save or revert the file first.' }; configUpdateFoot(); return;
     }
     c.section = button.dataset.section; c.msg = null;
+    if (c.section === 'connections') loadClientIdentities();
     history.replaceState(null, '', `#/config/${c.section}`);
     render();
     $(`.cfg-nav [data-section="${c.section}"], .cfg-chips [data-section="${c.section}"]`)?.focus({ preventScroll: true });

@@ -27,7 +27,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 ## Why Fusebox
 
 - **One small binary.** The dashboard and SQLite storage ship inside one executable. No Docker, no Node, no runtime to install.
-- **Any model from any tool.** Use GPT inside Claude Code, Claude inside Codex, or Gemini behind the OpenAI SDK. Requests are translated between formats automatically. When the client and the provider already speak the same format, the request passes through untouched.
+- **Any model from any tool.** Use GPT inside Claude Code, Claude inside Codex, or Gemini behind the OpenAI SDK. Requests are translated between formats automatically. When the client and the provider already speak the same format, supported native content is preserved while authentication, account/session identity and header policy are applied.
 - **Ten providers.** Subscription sign-in for Claude, ChatGPT (Codex), Antigravity, Grok, Kimi, Meta and Devin; service accounts for Vertex AI; API keys for Anthropic, OpenAI, Gemini, Vertex, Kimi, xAI, Meta and anything OpenAI-compatible.
 - **Images and video too.** `/v1/images/generations` and `/v1/images/edits` work with ChatGPT accounts, OpenAI and xAI keys, Vertex Imagen and Gemini image models. xAI video generation is behind `/v1/videos`.
 - **WebSockets.** Codex WebSocket sessions are relayed to ChatGPT's own WebSocket upstream, so `previous_response_id` works on the server side. Switch to a Claude or Gemini model mid-session and Fusebox carries the conversation over.
@@ -330,6 +330,7 @@ named-clients:
   - id: laptop
     label: Work laptop
     key: fbx_...
+    trust-client-identity: false     # default; opt in only for clients allowed to teach shared identities
     models: [claude-*, gpt-6-astra]   # model patterns it may ask for
     user-agents: [claude-cli/*]       # programs it may use (User-Agent patterns)
     requests-per-minute: 60           # over it: 429 with Retry-After
@@ -338,6 +339,8 @@ named-clients:
     expires: 2026-12-31               # the last day the key works, server time
     addresses: [10.10.0.0/24]         # addresses or ranges it may come from (see below)
 ```
+
+Under **Config → Clients → More**, **Allow identity learning** / **Stop identity learning** toggles `trust-client-identity`. Only an authenticated named client with this setting enabled can teach Fusebox Claude Code/Codex releases and Claude runtime profiles. Shared keys and open access cannot learn; recognizing a native client alone does not grant trust. Learned profiles are shared, so enable this only for clients you control. Inspect or reset them under **Config → Connections → Client identities**. See [provider identity](docs/provider-identity.md#trusted-identity-learning).
 
 Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it, with when each key was last used since Fusebox started, the addresses each named key was used from, and which keys and addresses are connected now. A named key used from an address it wasn't used from before sends a notification (`client-new-address`, on by default), as does one refused by its `addresses` list. Where an address comes from behind a proxy is in [Source addresses](docs/source-addresses.md).
 
@@ -353,6 +356,7 @@ first-token-timeout-seconds: 120 # a stream silent this long moves to the next a
 routing: least-used           # new sessions: most quota left; or smart-quota, round-robin, fill-first
 session-affinity: true        # keep each coding session on one account, for prompt caching
 session-affinity-idle-seconds: 86400 # forget assignments after a day without requests
+provider-session-idle-seconds: 1800 # fresh provider identity after 30 minutes idle; 1–86400
 codex-websockets: true        # native WebSocket relay to ChatGPT
 claude-cloak: true            # present non-Claude-Code clients as Claude Code on OAuth accounts
 banked-resets: false          # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
@@ -371,8 +375,11 @@ log-format: text              # or json, one object per line (needs a restart)
 model-groups:                 # one name, several models; see "Model groups" below
   smart: [claude-opus-5-5, gpt-6-astra]
 background-model: gemini-3.8-flash # Claude Code's quick Haiku calls go here
-# client-identities:          # claim a newer client release before Fusebox ships it (see Client compatibility)
+# client-identities:          # operator-selected emulation versions (see Client compatibility)
 #   claude-code: 2.1.310
+# upstream-header-allowlist:  # optional exact extra inbound names; reserved/private names are rejected
+#   claude: [x-provider-feature]
+#   codex: [x-provider-feature]
 
 claude-api-key:
   - api-key: "sk-ant-..."
@@ -451,6 +458,8 @@ Sessions are recognised from what clients already send: Claude Code's session me
 An HTTP request without any of them is recognised by its conversation's first user message, which every turn repeats, so the conversation's turns still share one account and its prompt cache. Cache markers are ignored for this, since clients move them from turn to turn. Conversations that start with the same message share an account; send an explicit session id to distinguish them. These inferred assignments use the same configured idle timeout as explicit sessions (a day by default), allowing reuse across longer cache lifetimes. The Requests page marks them as **Inferred session**. A request with no user message at all is routed on its own.
 
 Assignments are saved to `.routing-sessions.state` in the auth directory (hashed ids, owner-only permissions), so they survive restarts, and forgotten after `session-affinity-idle-seconds` without requests (a day by default). Send `x-fusebox-session-end: true` (or `x-cliproxy-session-end: true`) with a task's last request to release it early. Responses history for `previous_response_id` is kept in memory only, up to 64 MiB. Run one proxy per auth directory.
+
+Claude/Codex provider sessions have a separate lifetime. Each conversation gets a generated provider session for its current account; every account/subscription switch starts a fresh one, including a temporary A → B → A fallback. Inactivity expires it after `provider-session-idle-seconds` (default 1800; range 1–86400), and restart starts fresh provider sessions. The logical chat, available history and tool state continue across rotation. Routing assignments and prompt-cache keys remain separate; rotating the provider session does not itself replace a cache key. See [session and account identity](docs/provider-identity.md#conversation-and-account-sessions).
 
 The Requests page shows each request's session fingerprint (click it to see the whole session), why its account was chosen, and its cached tokens.
 
@@ -695,15 +704,19 @@ The **Client compatibility** workflow checks release channels daily at 06:17 UTC
 
 Review every intervening release's authentication, headers, request bodies and WebSocket messages, fix differences when needed, and record evidence in [Client compatibility reviews](docs/client-compatibility.md). Then advance `reviewed`. Update `version` and its Rust constants together only when changing the bundled identity. New model availability is handled by discovery and **Add model**, separately from client compatibility.
 
-Real Claude Code and Codex clients keep their own identity on the way through. Everything Fusebox sends in their name, cloaked and translated requests as well as its own small requests (usage, model lists), claims the newest release it knows: the built-in one, a newer one your real clients sent through it, or one set in `client-identities`. Claude Code's runtime headers (its SDK and Node versions, OS and architecture) are learned the same way, so cloaked requests look like your own installation. A release that only bumps the version therefore needs no Fusebox release; one that changes what the client sends still does, and the identity tests catch that.
+Recognized Claude Code and Codex clients retain supported native application attribution. Fusebox binds subscription authentication and provider-session identity to the selected account and filters incoming headers. Generated requests use the newest bundled, configured or validly learned release. Learning requires an authenticated named client with `trust-client-identity: true` (off by default); shared keys and open access cannot update identities. Claude runtime profiles are validated, carry source provenance and apply only to their matching release, with bundled runtime defaults used otherwise. Saved observations are revalidated on restore; legacy records without trusted provenance are ignored.
+
+Inspect effective versions, runtime values and their sources under **Config → Connections → Client identities**, or management-authenticated `GET /api/client-identities`. **Reset learned profiles**, or `POST /api/client-identities/reset`, clears saved observations while keeping `client-identities` configuration. Stopping learning does not clear earlier observations. A version-only release may need no Fusebox release; a changed wire protocol still needs compatibility review.
 
 ```yaml
-client-identities:     # claim a newer release before Fusebox ships it
+client-identities:     # explicit operator override for generated identities
   claude-code: 2.1.310
   codex: 0.164.0       # also grok-build, devin-cli, antigravity
 ```
 
 An entry older than the built-in release is ignored, so a forgotten one can't hold Fusebox back. `fusebox check` prints the release it claims for each client. Muse Code's identity includes a build hash, so it can't be set this way.
+
+See [provider identity and header policy](docs/provider-identity.md) for account/session rebinding, extra inbound header configuration, outbound-header precedence and HTTP/WebSocket behavior. Supported native attribution still includes client-requested context, and providers see the outbound network/proxy IP and transport behavior. Compatibility does not promise invisibility or a particular latency improvement. The [dated audit](notes/claude-codex-identity-audit-2026-10-24.md) records the earlier findings; it is not a validation sign-off for these changes.
 
 For a local report, run `python3 .github/scripts/client_versions.py --dry-run`. Issue changes require `--update-issues` plus `GITHUB_TOKEN` and `GITHUB_REPOSITORY`; `--dry-run` always suppresses writes. The monitor's regression tests run with the normal Python checks in CI.
 

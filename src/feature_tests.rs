@@ -43,6 +43,7 @@ enum Act {
 struct Mock {
     acts: Mutex<HashMap<(String, String), Act>>,
     calls: Mutex<Vec<(String, String)>>,
+    response_headers: Mutex<Vec<HeaderMap>>,
     hooks: Mutex<Vec<Value>>,
     embedding_calls: Mutex<Vec<(String, Value)>>,
     embedding_delay: std::sync::atomic::AtomicBool,
@@ -62,6 +63,7 @@ fn key(headers: &HeaderMap) -> String {
 }
 
 async fn responses(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    mock.response_headers.lock().push(headers.clone());
     let account = key(&headers);
     let model = body["model"].as_str().unwrap_or_default().to_string();
     mock.calls.lock().push((account.clone(), model.clone()));
@@ -1196,7 +1198,7 @@ fn fusebox_headers_never_reach_a_provider() {
         stream: true,
         count_tokens: false,
         cache_key: None,
-        cache_session: None,
+        provider_session: None,
         cache_defaults: true,
     };
     let p = crate::upstream::prepare(&t, json!({"model":"claude-sonnet-5-5","messages":[]}));
@@ -1927,6 +1929,8 @@ async fn codex_image_streams_use_the_media_limit_and_report_exceeding_it() {
         project_id: None,
         raw: Default::default(),
     });
+    let account = &s.app.pool.all()[0];
+    account.state.lock().credential_identity = account.cred.read().identity(account.provider);
     s.mock.acts.lock().insert(("a".into(), "gpt-5.4-mini".into()), Act::BigImage);
     let response = reqwest::Client::new()
         .post(format!("{}/v1/images/generations", s.proxy.url))
@@ -1938,6 +1942,64 @@ async fn codex_image_streams_use_the_media_limit_and_report_exceeding_it() {
     assert_eq!(response.status(), 502);
     let text = response.text().await.unwrap();
     assert!(text.contains(crate::sse::LIMIT_ERROR), "{text}");
+}
+
+#[tokio::test]
+async fn codex_images_apply_conversation_identity_extensions_custom_headers_and_residency() {
+    let s = setup(|cfg, _| {
+        cfg.codex_api_key.truncate(1);
+        cfg.codex_api_key[0].headers.insert("x-provider-feature".into(), "operator-feature".into());
+        cfg.upstream_header_allowlist.insert("codex".into(), vec!["x-provider-extra".into()]);
+    })
+    .await;
+    let account = &s.app.pool.all()[0];
+    *account.cred.write() = crate::accounts::Credential::OAuth(crate::accounts::OAuth {
+        access_token: "a".into(),
+        account_id: Some("selected-account".into()),
+        base_url: Some(format!("{}/v1", s._provider.url)),
+        ..Default::default()
+    });
+    account.state.lock().credential_identity = account.cred.read().identity(account.provider);
+    s.mock.acts.lock().insert(("a".into(), "gpt-5.4-mini".into()), Act::BigImage);
+    for caller_session in ["caller-A", "caller-B"] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/images/generations", s.proxy.url))
+            .bearer_auth("client")
+            .header("thread-id", "image-chat")
+            .header("session_id", caller_session)
+            .header("x-provider-extra", "explicit-extra")
+            .header("x-openai-internal-codex-residency", "us")
+            .header("x-gateway-secret", "FAKE_PRIVATE_SECRET")
+            .json(&json!({"model":"gpt-image-2","prompt":"a lighthouse"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    }
+    {
+        let captures = s.mock.response_headers.lock();
+        assert_eq!(captures.len(), 2);
+        assert_eq!(captures[0]["session-id"], captures[1]["session-id"]);
+        assert!(uuid::Uuid::parse_str(captures[0]["session-id"].to_str().unwrap()).is_ok());
+        for headers in captures.iter() {
+            assert!(!headers.contains_key("session_id"));
+            assert!(!headers.contains_key("x-gateway-secret"));
+            assert_eq!(headers["chatgpt-account-id"], "selected-account");
+            assert_eq!(headers["x-provider-feature"], "operator-feature");
+            assert_eq!(headers["x-provider-extra"], "explicit-extra");
+            assert_eq!(headers["x-openai-internal-codex-residency"], "us");
+        }
+    }
+    let rejected = reqwest::Client::new()
+        .post(format!("{}/v1/images/generations", s.proxy.url))
+        .bearer_auth("client")
+        .header("x-openai-internal-codex-residency", "us,eu")
+        .json(&json!({"model":"gpt-image-2","prompt":"a lighthouse"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 400);
+    assert_eq!(s.mock.response_headers.lock().len(), 2);
 }
 
 async fn embed(s: &Setup, model: &str, input: Value) -> (u16, Value) {

@@ -75,7 +75,7 @@ fn final_claude_preparation_honors_cache_intent_for_api_keys_and_oauth_cloak() {
                         stream: true,
                         count_tokens: false,
                         cache_key: None,
-                        cache_session: None,
+                        provider_session: None,
                         cache_defaults: defaults,
                     },
                     body,
@@ -91,7 +91,7 @@ fn final_claude_preparation_honors_cache_intent_for_api_keys_and_oauth_cloak() {
 }
 
 #[test]
-fn codex_shared_cache_keys_keep_sessions_separate_and_preserve_caller_overrides() {
+fn codex_shared_cache_keys_keep_provider_sessions_separate_and_preserve_cache_overrides() {
     let cfg = Config {
         auth_dir: "/nonexistent".into(),
         codex_api_key: vec![KeyEntry { api_key: "test".into(), ..Default::default() }],
@@ -115,7 +115,7 @@ fn codex_shared_cache_keys_keep_sessions_separate_and_preserve_caller_overrides(
     for scope in [crate::cache::Scope::Client, crate::cache::Scope::Workspace] {
         let cache_cfg = crate::cache::Config { scope, ..Default::default() };
         let prepare = |session: &str, headers: &HeaderMap, body: serde_json::Value| {
-            let (key, scope) = crate::cache::key(headers, &body, Some(session), Some("header"), &cache_cfg);
+            let (key, _) = crate::cache::key(headers, &body, Some(session), Some("header"), &cache_cfg);
             upstream::prepare(
                 &Target {
                     acct: &acct,
@@ -127,7 +127,7 @@ fn codex_shared_cache_keys_keep_sessions_separate_and_preserve_caller_overrides(
                     stream: true,
                     count_tokens: false,
                     cache_key: key.as_deref(),
-                    cache_session: matches!(scope, "client" | "workspace").then_some(session),
+                    provider_session: Some(session),
                     cache_defaults: true,
                 },
                 body,
@@ -143,11 +143,11 @@ fn codex_shared_cache_keys_keep_sessions_separate_and_preserve_caller_overrides(
         for name in ["session_id", "session-id"] {
             let mut custom = headers.clone();
             custom.insert(name, "caller-session".parse().unwrap());
-            assert_eq!(session_header(&prepare("one", &custom, json!({"input":"q"}))), "caller-session");
+            assert_eq!(session_header(&prepare("one", &custom, json!({"input":"q"}))), "one");
         }
         let caller = prepare("one", &headers, json!({"input":"q","prompt_cache_key":"caller-key"}));
         assert_eq!(caller.body["prompt_cache_key"], "caller-key");
-        assert_eq!(session_header(&caller), "caller-key");
+        assert_eq!(session_header(&caller), "one");
     }
 }
 

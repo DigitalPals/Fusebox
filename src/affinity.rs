@@ -410,6 +410,7 @@ fn weighs_session_load(cfg: &Config) -> bool {
 pub struct Sessions {
     registry: Arc<Mutex<Registry>>,
     persistence: Option<Persistence>,
+    provider_sessions: crate::provider_sessions::Sessions,
 }
 
 /// Keep an assignment alive until a call (including its response stream) ends.
@@ -486,6 +487,7 @@ impl Sessions {
     }
 
     pub fn end(&self, session: &str) {
+        self.provider_sessions.end(session);
         let owner = digest(&["owner", session]);
         let mut registry = self.registry.lock();
         registry.bindings.retain(|_, b| b.session != owner);
@@ -511,14 +513,24 @@ impl Sessions {
         }
         let registry = Arc::new(Mutex::new(registry));
         let persistence = Persistence::new(registry.clone(), path);
-        let sessions = Self { registry, persistence };
+        let sessions = Self { registry, persistence, provider_sessions: Default::default() };
         sessions.prune(idle);
         sessions
     }
 
     #[cfg(test)]
     pub fn memory() -> Self {
-        Self { registry: Arc::new(Mutex::new(Registry::default())), persistence: None }
+        Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            persistence: None,
+            provider_sessions: Default::default(),
+        }
+    }
+
+    /// Provider-visible identity follows only the current account stint. It is
+    /// never restored from a previous process or conflated with cache routing.
+    pub fn provider_session(&self, conversation: Option<&str>, account: &Account, idle: u64) -> String {
+        self.provider_sessions.get(conversation, account, idle)
     }
 
     #[cfg(test)]

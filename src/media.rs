@@ -104,8 +104,15 @@ pub(crate) fn openai_base(
     acct: &Account,
     headers: &HeaderMap,
     model: &str,
+    body: &Value,
 ) -> (String, Vec<(String, String)>) {
     let cfg = app.cfg();
+    let conversation = crate::affinity::session_identity(headers, body);
+    let session = app.sessions.provider_session(
+        conversation.as_ref().map(|s| s.key.as_str()),
+        acct,
+        cfg.provider_session_idle_seconds,
+    );
     let t = Target {
         acct,
         cfg: &cfg,
@@ -116,7 +123,7 @@ pub(crate) fn openai_base(
         stream: false,
         count_tokens: false,
         cache_key: None,
-        cache_session: None,
+        provider_session: Some(&session),
         cache_defaults: true,
     };
     let p = upstream::prepare(&t, json!({}));
@@ -201,20 +208,28 @@ async fn codex_image(app: &App, acct: &Account, headers: &HeaderMap, body: &Valu
         "tool_choice": { "type": "image_generation" }, "tools": [tool],
         "input": [{ "type": "message", "role": "user", "content": content }],
     });
-    let (token, _) = creds(acct);
-    let account_id = match &*acct.cred.read() {
-        Credential::OAuth(o) => o.account_id.clone(),
-        _ => None,
+    let cfg = app.cfg();
+    let conversation = crate::affinity::session_identity(headers, body);
+    let session = app.sessions.provider_session(
+        conversation.as_ref().map(|s| s.key.as_str()),
+        acct,
+        cfg.provider_session_idle_seconds,
+    );
+    let target = Target {
+        acct,
+        cfg: &cfg,
+        client_headers: headers,
+        model: CODEX_IMAGE_HOST_MODEL,
+        wire: Format::Responses,
+        passthrough: true,
+        stream: true,
+        count_tokens: false,
+        cache_key: None,
+        provider_session: Some(&session),
+        cache_defaults: true,
     };
-    let base = match &*acct.cred.read() {
-        Credential::OAuth(o) => o.base_url.clone(),
-        _ => None,
-    }
-    .unwrap_or_else(|| upstream::CODEX_BACKEND.into());
-    let mut h = upstream::codex_headers(headers, &token, account_id.as_deref(), true);
-    h.push(("content-type".into(), "application/json".into()));
-    h.push(("accept".into(), "text/event-stream".into()));
-    let resp = send(app, acct, &format!("{}/responses", base.trim_end_matches('/')), &h, &req).await?;
+    let prepared = upstream::prepare(&target, req);
+    let resp = send(app, acct, &prepared.url, &prepared.headers, &prepared.body).await?;
     if !resp.status().is_success() {
         return read_json(resp).await;
     }
@@ -299,7 +314,7 @@ async fn imagen(app: &App, acct: &Account, headers: &HeaderMap, model: &str, bod
         stream: false,
         count_tokens: false,
         cache_key: None,
-        cache_session: None,
+        provider_session: None,
         cache_defaults: true,
     };
     let p = upstream::prepare(&t, json!({}));
@@ -354,7 +369,7 @@ async fn gemini_image(app: &App, acct: &Account, headers: &HeaderMap, model: &st
         stream: false,
         count_tokens: false,
         cache_key: None,
-        cache_session: None,
+        provider_session: None,
         cache_defaults: true,
     };
     let n = body["n"].as_u64().unwrap_or(1).clamp(1, 4);
@@ -381,7 +396,7 @@ async fn image_once(app: &App, acct: &Account, headers: &HeaderMap, model: &str,
     match acct.provider {
         Provider::Codex if oauth => codex_image(app, acct, headers, body, edit).await,
         Provider::Codex | Provider::Xai | Provider::Compat => {
-            let (base, h) = openai_base(app, acct, headers, model);
+            let (base, h) = openai_base(app, acct, headers, model, body);
             let mut req = body.clone();
             req["model"] = model.into();
             if let Some(o) = req.as_object_mut() {
@@ -412,6 +427,17 @@ where
     Fut: std::future::Future<Output = Outcome>,
 {
     let cfg = app.cfg();
+    let residency = upstream::residency_requirement(client_headers).map_err(|message| fail(400, message))?;
+    let residency_excluded: Vec<_> = if residency.is_some() {
+        app.pool
+            .all()
+            .into_iter()
+            .filter(|a| a.provider != Provider::Codex || !a.is_oauth())
+            .map(|a| a.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let session_key = session.as_ref().map(|s| s.key.as_str());
     let _lease = session_key.map(|s| app.sessions.hold(s, cfg.session_affinity_idle_seconds));
     let (only, model) = app.pool.route(model);
@@ -422,15 +448,20 @@ where
     let mut tried: Vec<String> = Vec::new();
     let mut last: Option<(u16, Value)> = None;
     while tried.len() < cfg.request_retry.max(1) as usize {
-        let selected = match app.sessions.pick_with_reason(&app.pool, &cfg, &model, session_key, &tried, only.as_ref())
-        {
-            Ok(pair) => pair,
-            Err((status, msg)) => {
-                let (s, b) = last.unwrap_or_else(|| fail(status, msg));
-                tracker.finish(s, &Usage::default(), Some(error_message(&b.to_string())));
-                return Err((s, b));
-            }
-        };
+        let excluded: Vec<_> = tried.iter().chain(&residency_excluded).cloned().collect();
+        let selected =
+            match app.sessions.pick_with_reason(&app.pool, &cfg, &model, session_key, &excluded, only.as_ref()) {
+                Ok(pair) => pair,
+                Err((mut status, mut msg)) => {
+                    if residency.is_some() && status == 404 {
+                        status = 400;
+                        msg = "Requested Codex residency requires an available Codex subscription route".into();
+                    }
+                    let (s, b) = last.unwrap_or_else(|| fail(status, msg));
+                    tracker.finish(s, &Usage::default(), Some(error_message(&b.to_string())));
+                    return Err((s, b));
+                }
+            };
         tracker.selected(&selected);
         app.sessions.persist_selection(&selected).await;
         let (acct, upstream_model) = (selected.account, selected.model);
@@ -552,7 +583,7 @@ pub async fn video_create(app: Arc<App>, headers: HeaderMap, body: Value, kind: 
             if acct.provider != Provider::Xai {
                 return Err(fail(400, "video generation needs an xAI account"));
             }
-            let (base, mut h) = openai_base(&app, &acct, &headers, &upstream_model);
+            let (base, mut h) = openai_base(&app, &acct, &headers, &upstream_model, &body);
             if let Some(k) = headers.get("x-idempotency-key").and_then(|v| v.to_str().ok()) {
                 h.push(("x-idempotency-key".into(), k.to_string()));
             }
@@ -584,7 +615,7 @@ pub async fn video_status(app: Arc<App>, headers: HeaderMap, id: String) -> Outc
         if crate::oauth::ensure_ready(&app, &acct).await.is_err() {
             continue;
         }
-        let (base, h) = openai_base(&app, &acct, &headers, DEFAULT_VIDEO_MODEL);
+        let (base, h) = openai_base(&app, &acct, &headers, DEFAULT_VIDEO_MODEL, &Value::Null);
         let mut rb = app.http.client(acct.proxy_url.as_deref()).get(format!("{base}/videos/{id}"));
         for (k, v) in &h {
             rb = rb.header(k.as_str(), v.as_str());
@@ -625,7 +656,7 @@ pub async fn compact(app: Arc<App>, headers: HeaderMap, body: Value) -> Outcome 
             if let Some(o) = req.as_object_mut() {
                 o.remove("stream");
             }
-            let (mut base, h) = openai_base(&app, &acct, &headers, &upstream_model);
+            let (mut base, h) = openai_base(&app, &acct, &headers, &upstream_model, &req);
             if acct.provider == Provider::Xai && base == crate::device::xai::CLI_BASE {
                 base = crate::device::xai::API_BASE.into();
             }

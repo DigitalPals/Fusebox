@@ -3,6 +3,7 @@
 use axum::http::HeaderMap;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use crate::accounts::{Account, Credential, Provider};
 use crate::config::Config;
@@ -44,8 +45,8 @@ pub struct Target<'a> {
     pub count_tokens: bool,
     /// A stable per-session key for providers that route their prompt cache by one.
     pub cache_key: Option<&'a str>,
-    /// Separate session identity when a derived cache key is shared.
-    pub cache_session: Option<&'a str>,
+    /// Provider-visible identity for this conversation's stint on the selected account.
+    pub provider_session: Option<&'a str>,
     /// Whether final Claude preparation may add default cache boundaries.
     pub cache_defaults: bool,
 }
@@ -65,7 +66,12 @@ const HOP: &[&str] = &[
     "te",
     "keep-alive",
     "proxy-authorization",
+    "proxy-authenticate",
     "proxy-connection",
+    "trailer",
+    "via",
+    "set-cookie",
+    "www-authenticate",
     "x-fusebox-usage-request",
     "x-fusebox-usage-client",
     "x-forwarded-for",
@@ -89,6 +95,172 @@ fn forwardable(name: &str) -> bool {
         && !name.starts_with("x-fusebox-")
         && !name.starts_with("x-cliproxy-")
         && !name.starts_with("tailscale-")
+        && !name.starts_with("x-forwarded-")
+        && !name.starts_with("x-real-")
+        && !name.starts_with("x-auth-")
+        && !name.starts_with("x-authenticated-")
+        && !name.starts_with("x-original-")
+        && !name.starts_with("x-envoy-")
+        && !name.starts_with("x-amzn-")
+        && !name.starts_with("cf-")
+        && !name.starts_with("sec-")
+        && !name.split(['-', '_']).any(|part| {
+            matches!(
+                part,
+                "authorization"
+                    | "authentication"
+                    | "auth"
+                    | "apikey"
+                    | "key"
+                    | "token"
+                    | "secret"
+                    | "password"
+                    | "credential"
+                    | "credentials"
+                    | "cookie"
+                    | "internal"
+                    | "private"
+                    | "forwarded"
+                    | "gateway"
+                    | "management"
+                    | "proxy"
+            )
+        })
+}
+
+const CODEX_RESIDENCY: &str = "x-openai-internal-codex-residency";
+const CODEX_HEADERS: &[&str] = &[
+    "user-agent",
+    "originator",
+    "version",
+    "session_id",
+    "session-id",
+    "thread-id",
+    "x-codex-turn-metadata",
+    "x-codex-turn-state",
+    "x-codex-beta-features",
+    "x-client-request-id",
+    "x-codex-window-id",
+    "x-openai-internal-codex-responses-lite",
+    CODEX_RESIDENCY,
+];
+
+fn safe_header(provider: Provider, name: &str) -> bool {
+    axum::http::HeaderName::from_bytes(name.as_bytes()).is_ok()
+        && (forwardable(name)
+            || (provider == Provider::Codex
+                && matches!(name, CODEX_RESIDENCY | "x-openai-internal-codex-responses-lite")))
+}
+
+fn reserved_header(name: &str) -> bool {
+    matches!(
+        name,
+        "chatgpt-account-id"
+            | "session_id"
+            | "session-id"
+            | "x-claude-code-session-id"
+            | "user-agent"
+            | "originator"
+            | "version"
+            | "anthropic-version"
+            | "anthropic-beta"
+            | "openai-beta"
+            | "content-type"
+            | "accept"
+            | "x-client-request-id"
+            | "x-app"
+    )
+}
+
+/// Extensions cannot override authentication, provider identity or transport controls.
+pub fn header_extension_allowed(provider: Provider, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    safe_header(provider, &name) && !reserved_header(&name)
+}
+
+/// Operator-supplied gateway credentials are intentional on API/custom routes.
+/// Subscription identities retain the stricter provider privacy policy.
+pub fn custom_header_allowed(provider: Provider, oauth: bool, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    axum::http::HeaderName::from_bytes(name.as_bytes()).is_ok()
+        && !HOP.contains(&name.as_str())
+        && !name.starts_with("x-fusebox-")
+        && !name.starts_with("x-cliproxy-")
+        && !reserved_header(&name)
+        && (!(oauth && matches!(provider, Provider::Claude | Provider::Codex)) || safe_header(provider, &name))
+}
+
+fn connection_headers(client: &HeaderMap) -> HashSet<String> {
+    client
+        .get_all("connection")
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .filter_map(|value| std::str::from_utf8(value).ok())
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Validate a managed-residency constraint before routing, without reflecting caller values.
+pub fn residency_requirement(headers: &HeaderMap) -> Result<Option<String>, String> {
+    if headers.contains_key(CODEX_RESIDENCY) && connection_headers(headers).contains(CODEX_RESIDENCY) {
+        return Err("Codex residency cannot be nominated by Connection".into());
+    }
+    let mut requirement: Option<String> = None;
+    for value in headers.get_all(CODEX_RESIDENCY) {
+        let value = value.to_str().map_err(|_| "Invalid Codex residency requirement")?;
+        if value.is_empty()
+            || value.len() > 64
+            || value.trim() != value
+            || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || !value.as_bytes()[0].is_ascii_lowercase()
+            || value.ends_with('-')
+        {
+            return Err("Invalid Codex residency requirement".into());
+        }
+        if requirement.as_deref().is_some_and(|existing| existing != value) {
+            return Err("Conflicting Codex residency requirements".into());
+        }
+        requirement = Some(value.into());
+    }
+    Ok(requirement)
+}
+
+fn inbound_headers(provider: Provider, cfg: Option<&Config>, client: &HeaderMap) -> Vec<(String, String)> {
+    let nominated = connection_headers(client);
+    let extensions = cfg.and_then(|cfg| cfg.upstream_header_allowlist.get(provider.as_str()));
+    client
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.as_str();
+            let documented = match provider {
+                Provider::Claude => {
+                    name.starts_with("anthropic-")
+                        || name.starts_with("x-claude-code-")
+                        || name.starts_with("x-stainless-")
+                        || matches!(name, "user-agent" | "x-app" | "x-client-request-id" | "x-request-id")
+                }
+                Provider::Codex => CODEX_HEADERS.contains(&name),
+                _ => false,
+            };
+            let extended = header_extension_allowed(provider, name)
+                && extensions.is_some_and(|names| names.iter().any(|n| n.eq_ignore_ascii_case(name)));
+            if !nominated.contains(name)
+                && safe_header(provider, name)
+                && (documented || extended)
+                && let Ok(value) = value.to_str()
+            {
+                return Some((name.to_string(), value.to_string()));
+            }
+            tracing::debug!(provider = provider.as_str(), header = name, "dropping upstream header");
+            None
+        })
+        .collect()
+}
+
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+    headers.push((name.to_string(), value));
 }
 
 fn header(h: &HeaderMap, name: &str) -> Option<String> {
@@ -96,7 +268,7 @@ fn header(h: &HeaderMap, name: &str) -> Option<String> {
 }
 
 pub fn is_claude_code(h: &HeaderMap) -> bool {
-    header(h, "user-agent").is_some_and(|ua| ua.to_ascii_lowercase().starts_with("claude-cli/"))
+    crate::clients::is_claude_code(h)
 }
 
 /// A request-local memoization stamp. Credentials themselves are never retained
@@ -141,10 +313,22 @@ fn creds(acct: &Account) -> (String, Option<String>, bool, Option<String>) {
     }
 }
 
-fn push_custom(acct: &Account, headers: &mut Vec<(String, String)>) {
+fn push_custom(acct: &Account, client: &HeaderMap, headers: &mut Vec<(String, String)>) {
+    let nominated = connection_headers(client);
     for (k, v) in &acct.headers {
-        headers.retain(|(n, _)| !n.eq_ignore_ascii_case(k));
-        headers.push((k.clone(), v.clone()));
+        let name = k.to_ascii_lowercase();
+        if !custom_header_allowed(acct.provider, acct.is_oauth(), &name)
+            || nominated.contains(&name)
+            || axum::http::HeaderValue::from_str(v).is_err()
+        {
+            tracing::debug!(provider = acct.provider.as_str(), header = name, "dropping configured upstream header");
+            continue;
+        }
+        // A caller's residency requirement must survive account configuration.
+        if name == CODEX_RESIDENCY && headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        set_header(headers, &name, v.clone());
     }
 }
 
@@ -161,7 +345,7 @@ pub fn prepare(t: &Target, body: Value) -> Prepared {
         Devin => crate::devin::prepare(t, body),
         Compat => compat(t, body),
     };
-    push_custom(t.acct, &mut p.headers);
+    push_custom(t.acct, t.client_headers, &mut p.headers);
     p
 }
 
@@ -181,24 +365,17 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
         body["cache_control"] = json!({"type":"ephemeral"});
     }
     let native_cc = t.passthrough && is_claude_code(t.client_headers);
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut betas: Vec<String> = Vec::new();
-    if let Some(b) = header(t.client_headers, "anthropic-beta") {
-        betas.extend(b.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
-    }
+    let mut headers = inbound_headers(Provider::Claude, Some(t.cfg), t.client_headers);
 
-    if native_cc {
-        // Claude Code already speaks the right dialect: forward it untouched.
-        for (k, v) in t.client_headers {
-            let name = k.as_str();
-            if !forwardable(name) || name == "anthropic-beta" {
-                continue;
-            }
-            if let Ok(v) = v.to_str() {
-                headers.push((name.to_string(), v.to_string()));
-            }
-        }
-    } else if oauth && t.cfg.claude_cloak {
+    if !native_cc && oauth && t.cfg.claude_cloak {
+        // A generated Node/Claude Code profile must not retain another SDK's
+        // async/runtime/helper headers. Operator extensions are explicit.
+        let extensions = t.cfg.upstream_header_allowlist.get(Provider::Claude.as_str());
+        headers.retain(|(name, _)| {
+            name == "anthropic-beta"
+                || (header_extension_allowed(Provider::Claude, name)
+                    && extensions.is_some_and(|names| names.iter().any(|n| n.eq_ignore_ascii_case(name))))
+        });
         let mut cc = vec![
             "claude-code-20250219",
             "oauth-2025-04-20",
@@ -206,63 +383,106 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
             "context-management-2025-06-27",
             "prompt-caching-scope-2026-01-05",
         ];
-        if body["output_config"]["effort"].is_string() {
+        if body["output_config"]["effort"].is_string() && !has_claude_beta_family(&headers, "effort-") {
             cc.push("effort-2025-11-24");
         }
         if body["output_config"]["format"].is_object() {
             cc.push("structured-outputs-2025-12-15");
         }
-        let caller = std::mem::take(&mut betas);
-        betas = cc.into_iter().map(String::from).collect();
-        betas.extend(caller);
-        cloak_body(&mut body, t.acct, account_uuid.as_deref(), t.count_tokens, t.cache_defaults);
+        for beta in cc {
+            ensure_claude_beta(&mut headers, beta);
+        }
+        cloak_body(&mut body, t.count_tokens, t.cache_defaults);
         // The newest Claude Code release known, with the runtime headers the user's
         // own installation sends (see `clients`).
-        let profile = crate::clients::claude_profile();
+        let (user_agent, profile) = crate::clients::claude_identity();
         let learned = |name: &str| profile.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap_or_default();
-        headers.extend(
-            [
-                ("anthropic-version", "2023-06-01".to_string()),
-                ("anthropic-dangerous-direct-browser-access", "true".to_string()),
-                ("x-app", "cli".to_string()),
-                ("user-agent", crate::clients::claude_user_agent()),
-                ("x-stainless-lang", "js".to_string()),
-                ("x-stainless-package-version", learned("x-stainless-package-version")),
-                ("x-stainless-os", learned("x-stainless-os")),
-                ("x-stainless-arch", learned("x-stainless-arch")),
-                ("x-stainless-runtime", "node".to_string()),
-                ("x-stainless-runtime-version", learned("x-stainless-runtime-version")),
-                ("x-stainless-retry-count", "0".to_string()),
-                ("x-stainless-timeout", "600".to_string()),
-                ("x-claude-code-session-id", t.acct.session_id.clone()),
-            ]
-            .map(|(k, v)| (k.to_string(), v)),
-        );
-    } else {
-        let version = header(t.client_headers, "anthropic-version").unwrap_or_else(|| "2023-06-01".into());
-        headers.push(("anthropic-version".into(), version));
-        headers.push(("user-agent".into(), format!("Fusebox/{}", env!("CARGO_PKG_VERSION"))));
-        if body["output_config"]["effort"].is_string() && !betas.iter().any(|b| b.starts_with("effort-")) {
-            betas.push("effort-2025-11-24".into());
+        for (name, value) in [
+            ("anthropic-version", "2023-06-01".to_string()),
+            ("anthropic-dangerous-direct-browser-access", "true".to_string()),
+            ("x-app", "cli".to_string()),
+            ("user-agent", user_agent),
+            ("x-stainless-lang", "js".to_string()),
+            ("x-stainless-package-version", learned("x-stainless-package-version")),
+            ("x-stainless-os", learned("x-stainless-os")),
+            ("x-stainless-arch", learned("x-stainless-arch")),
+            ("x-stainless-runtime", "node".to_string()),
+            ("x-stainless-runtime-version", learned("x-stainless-runtime-version")),
+            ("x-stainless-retry-count", "0".to_string()),
+            ("x-stainless-timeout", "600".to_string()),
+        ] {
+            set_header(&mut headers, name, value);
         }
+    } else if !native_cc && body["output_config"]["effort"].is_string() && !has_claude_beta_family(&headers, "effort-")
+    {
+        ensure_claude_beta(&mut headers, "effort-2025-11-24");
     }
-    if oauth && !betas.iter().any(|b| b == "oauth-2025-04-20") {
-        betas.insert(0, "oauth-2025-04-20".into());
+    if !headers.iter().any(|(name, _)| name == "anthropic-version") {
+        headers.push(("anthropic-version".into(), "2023-06-01".into()));
     }
-    let mut seen = std::collections::HashSet::new();
-    betas.retain(|b| seen.insert(b.clone()));
-    if !betas.is_empty() {
-        headers.push(("anthropic-beta".into(), betas.join(",")));
+    if !headers.iter().any(|(name, _)| name == "user-agent") {
+        headers.push(("user-agent".into(), format!("Fusebox/{}", env!("CARGO_PKG_VERSION"))));
     }
     if oauth {
+        ensure_claude_beta(&mut headers, "oauth-2025-04-20");
+        let session = t.provider_session.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        set_header(&mut headers, "x-claude-code-session-id", session.clone());
+        if !t.count_tokens {
+            // Caller identity belongs to a different credential/account until rebound.
+            // Preserve other metadata, but never retain unvalidated compound identity.
+            if !body["metadata"].is_object() {
+                body["metadata"] = json!({});
+            }
+            body["metadata"]["user_id"] = json!({
+                "device_id": t.acct.device_id,
+                "account_uuid": account_uuid.unwrap_or_default(),
+                "session_id": session,
+            })
+            .to_string()
+            .into();
+        }
         headers.push(("authorization".into(), format!("Bearer {token}")));
     } else {
         headers.push(("x-api-key".into(), token));
+    }
+    if t.count_tokens
+        && let Some(object) = body.as_object_mut()
+    {
+        object.remove("metadata");
+    }
+    if !headers.iter().any(|(name, value)| name == "x-client-request-id" && !value.trim().is_empty()) {
+        set_header(&mut headers, "x-client-request-id", uuid::Uuid::new_v4().to_string());
     }
     headers.retain(|(k, _)| k != "content-type" && k != "accept");
     headers.push(("content-type".into(), "application/json".into()));
     headers.push(("accept".into(), if t.stream { "text/event-stream" } else { "application/json" }.into()));
     Prepared { url, headers, body, raw: None }
+}
+
+/// Keep native beta formatting and unknown provider flags; append only missing requirements.
+fn has_claude_beta_family(headers: &[(String, String)], prefix: &str) -> bool {
+    headers
+        .iter()
+        .filter(|(name, _)| name == "anthropic-beta")
+        .any(|(_, value)| value.split(',').any(|flag| flag.trim().starts_with(prefix)))
+}
+
+fn ensure_claude_beta(headers: &mut Vec<(String, String)>, beta: &str) {
+    if headers
+        .iter()
+        .filter(|(name, _)| name == "anthropic-beta")
+        .any(|(_, value)| value.split(',').any(|flag| flag.trim() == beta))
+    {
+        return;
+    }
+    if let Some((_, value)) = headers.iter_mut().find(|(name, _)| name == "anthropic-beta") {
+        if !value.is_empty() {
+            value.push(',');
+        }
+        value.push_str(beta);
+    } else {
+        headers.push(("anthropic-beta".into(), beta.into()));
+    }
 }
 
 /// Thinking blocks that carried another provider's reasoning through a Claude
@@ -304,9 +524,9 @@ fn first_user_text(body: &Value) -> (Option<usize>, String) {
 }
 
 /// Makes a third-party request look like Claude Code: Claude Code system
-/// prompt on top, caller instructions moved into the first user turn, and a
-/// Claude-Code-shaped metadata.user_id.
-fn cloak_body(body: &mut Value, acct: &Account, account_uuid: Option<&str>, count_tokens: bool, cache_defaults: bool) {
+/// prompt on top and caller instructions moved into the first user turn.
+/// Account/session identity is bound separately for native and cloaked requests alike.
+fn cloak_body(body: &mut Value, count_tokens: bool, cache_defaults: bool) {
     let configured_cache = !cache_defaults || crate::cache::has_claude_controls(body);
     let original: Vec<Value> = match &body["system"] {
         Value::String(s) => vec![json!({"type": "text", "text": s})],
@@ -391,29 +611,6 @@ fn cloak_body(body: &mut Value, acct: &Account, account_uuid: Option<&str>, coun
     } else if first_user.is_none() {
         body["system"] = cloaked_system_in_original_order(&original, &body["system"], caller);
     }
-
-    if count_tokens {
-        if let Some(o) = body.as_object_mut() {
-            o.remove("metadata");
-        }
-        return;
-    }
-    let valid = body["metadata"]["user_id"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .is_some_and(|v| v["device_id"].as_str().is_some_and(|d| d.len() == 64));
-    if !valid {
-        let user_id = json!({
-            "device_id": acct.device_id,
-            "account_uuid": account_uuid.unwrap_or_default(),
-            "session_id": acct.session_id,
-        })
-        .to_string();
-        if !body["metadata"].is_object() {
-            body["metadata"] = json!({});
-        }
-        body["metadata"]["user_id"] = user_id.into();
-    }
 }
 
 fn cloaked_system_in_original_order(original: &[Value], identity: &Value, caller: Vec<Value>) -> Value {
@@ -456,7 +653,6 @@ const CODEX_STRIP: &[&str] = &[
     "generate",
     "user",
     "truncation",
-    "stream_options",
     "background",
 ];
 
@@ -468,6 +664,16 @@ pub fn sanitize_codex_body(body: &mut Value, model: &str, websocket: bool) {
     if let Some(o) = body.as_object_mut() {
         for k in CODEX_STRIP.iter().filter(|k| !(websocket && **k == "generate")) {
             o.remove(*k);
+        }
+        // Native Codex requests use this summary-delivery control on both transports.
+        // Chat Completions stream options such as include_usage are unsupported here.
+        if let Some(options) = o.get_mut("stream_options") {
+            if let Some(options) = options.as_object_mut() {
+                options.retain(|name, _| name == "reasoning_summary_delivery");
+            }
+            if !options.is_object() || options.as_object().is_some_and(|options| options.is_empty()) {
+                o.remove("stream_options");
+            }
         }
         // The ChatGPT backend only takes a list ("Input must be a list").
         if let Some(Value::String(text)) = o.get("input").cloned() {
@@ -551,47 +757,57 @@ pub fn order_codex_body(body: &mut Value) {
     o.extend(rest);
 }
 
+#[cfg(test)]
 pub fn codex_headers(client: &HeaderMap, token: &str, account_id: Option<&str>, oauth: bool) -> Vec<(String, String)> {
-    let mut h: Vec<(String, String)> = vec![("authorization".into(), format!("Bearer {token}"))];
-    for name in [
-        "version",
-        "session_id",
-        "session-id",
-        "thread-id",
-        "x-codex-turn-metadata",
-        "x-codex-turn-state",
-        "x-codex-beta-features",
-        "x-client-request-id",
-        "x-codex-window-id",
-        "x-openai-internal-codex-responses-lite",
-    ] {
-        if let Some(v) = header(client, name) {
-            h.push((name.into(), v));
-        }
-    }
-    if oauth && crate::clients::is_codex(client) {
-        // A real Codex client keeps its own identity, as Claude Code does.
-        for name in ["user-agent", "originator"] {
-            if let Some(v) = header(client, name) {
-                h.push((name.into(), v));
+    codex_headers_with_config(client, token, account_id, oauth, None)
+}
+
+fn codex_headers_with_config(
+    client: &HeaderMap,
+    token: &str,
+    account_id: Option<&str>,
+    oauth: bool,
+    cfg: Option<&Config>,
+) -> Vec<(String, String)> {
+    let mut h = inbound_headers(Provider::Codex, cfg, client);
+    set_header(&mut h, "authorization", format!("Bearer {token}"));
+    if oauth {
+        let generated_version = crate::clients::codex_version();
+        let generated_agent = CODEX_USER_AGENT.replace(CODEX_VERSION, &generated_version);
+        // Recognition chooses the client profile, never the forwarding policy.
+        let nominated = connection_headers(client);
+        let native = crate::clients::is_codex(client)
+            && !["user-agent", "originator", "version"].iter().any(|name| nominated.contains(*name));
+        if !native {
+            set_header(&mut h, "version", generated_version);
+            set_header(&mut h, "user-agent", generated_agent);
+            set_header(&mut h, "originator", CODEX_ORIGINATOR.into());
+        } else {
+            // Connection-nominated profile fields must not be copied back in.
+            for (name, value) in [
+                ("version", crate::clients::native_codex_version(client).unwrap_or(generated_version)),
+                ("user-agent", generated_agent),
+                ("originator", CODEX_ORIGINATOR.into()),
+            ] {
+                if !h.iter().any(|(key, _)| key == name) {
+                    h.push((name.into(), value));
+                }
             }
         }
         if let Some(a) = account_id {
             h.push(("chatgpt-account-id".into(), a.into()));
         }
-    } else if oauth {
-        if !h.iter().any(|(k, _)| k == "version") {
-            h.push(("version".into(), crate::clients::codex_version()));
-        }
-        h.push(("user-agent".into(), crate::clients::codex_user_agent()));
-        h.push(("originator".into(), CODEX_ORIGINATOR.into()));
-        if let Some(a) = account_id {
-            h.push(("chatgpt-account-id".into(), a.into()));
-        }
     } else {
-        h.push(("user-agent".into(), format!("Fusebox/{}", env!("CARGO_PKG_VERSION"))));
+        set_header(&mut h, "user-agent", format!("Fusebox/{}", env!("CARGO_PKG_VERSION")));
+        h.retain(|(name, _)| name != "originator");
     }
     h
+}
+
+/// Replaces caller/cache-derived session identity while retaining thread/window/turn metadata.
+pub fn bind_codex_session(headers: &mut Vec<(String, String)>, session: &str) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("session_id") && !name.eq_ignore_ascii_case("session-id"));
+    headers.push(("session-id".into(), session.into()));
 }
 
 fn codex(t: &Target, mut body: Value) -> Prepared {
@@ -616,24 +832,25 @@ fn codex(t: &Target, mut body: Value) -> Prepared {
     if oauth {
         order_codex_body(&mut body);
     }
-    let mut headers = codex_headers(t.client_headers, &token, account_id.as_deref(), oauth);
-    let separate_session = t.cache_session.map(crate::affinity::prompt_cache_key);
-    if let Some(key) = separate_session.as_deref().or(body["prompt_cache_key"].as_str()).filter(|_| oauth)
-        && !headers.iter().any(|(k, _)| k == "session_id" || k == "session-id")
-    {
-        headers.push(("session_id".into(), key.to_string()));
+    let mut headers = codex_headers_with_config(t.client_headers, &token, account_id.as_deref(), oauth, Some(t.cfg));
+    if let Some(session) = t.provider_session {
+        bind_codex_session(&mut headers, session);
+    } else if oauth && !headers.iter().any(|(k, _)| k == "session_id" || k == "session-id") {
+        // Background calls without a conversation binding must not share account identity.
+        bind_codex_session(&mut headers, &uuid::Uuid::new_v4().to_string());
     }
     headers.push(("content-type".into(), "application/json".into()));
     headers.push(("accept".into(), if oauth || t.stream { "text/event-stream" } else { "application/json" }.into()));
     Prepared { url: format!("{base}/responses"), headers, body, raw: None }
 }
 
-pub fn codex_ws_url(acct: &Account, client_headers: &HeaderMap) -> (String, Vec<(String, String)>) {
+pub fn codex_ws_url(acct: &Account, cfg: &Config, client_headers: &HeaderMap) -> (String, Vec<(String, String)>) {
     let (token, base, oauth, account_id) = creds(acct);
     let base = base.unwrap_or_else(|| if oauth { CODEX_BACKEND.into() } else { OPENAI_API.into() });
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
-    let mut h = codex_headers(client_headers, &token, account_id.as_deref(), oauth);
+    let mut h = codex_headers_with_config(client_headers, &token, account_id.as_deref(), oauth, Some(cfg));
     h.push(("openai-beta".into(), CODEX_WS_BETA.into()));
+    push_custom(acct, client_headers, &mut h);
     (format!("{ws}/responses"), h)
 }
 
@@ -882,6 +1099,665 @@ fn compat(t: &Target, mut body: Value) -> Prepared {
 mod tests {
     use super::*;
 
+    fn request_headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(), value.parse().unwrap());
+        }
+        headers
+    }
+
+    fn get_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+    }
+
+    fn oauth_account(provider: Provider) -> std::sync::Arc<Account> {
+        let mut cfg = Config { auth_dir: "/nonexistent".into(), ..Default::default() };
+        let key = crate::config::KeyEntry { api_key: "synthetic-key-B".into(), ..Default::default() };
+        match provider {
+            Provider::Claude => cfg.claude_api_key.push(key),
+            Provider::Codex => cfg.codex_api_key.push(key),
+            _ => panic!("unsupported test provider"),
+        }
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        *acct.cred.write() = Credential::OAuth(crate::accounts::OAuth {
+            access_token: "synthetic-selected-token-B".into(),
+            account_id: Some("selected-account-B".into()),
+            ..Default::default()
+        });
+        acct
+    }
+
+    fn test_target<'a>(acct: &'a Account, cfg: &'a Config, headers: &'a HeaderMap) -> Target<'a> {
+        Target {
+            acct,
+            cfg,
+            client_headers: headers,
+            model: if acct.provider == Provider::Claude { "claude-sonnet-4-6" } else { "gpt-6.1-sol" },
+            wire: if acct.provider == Provider::Claude { Format::Claude } else { Format::Responses },
+            passthrough: true,
+            stream: true,
+            count_tokens: false,
+            cache_key: None,
+            provider_session: Some("11111111-2222-4333-8444-555555555555"),
+            cache_defaults: true,
+        }
+    }
+
+    #[test]
+    fn claude_header_policy_applies_to_native_cloaked_and_api_key_requests() {
+        let dangerous = [
+            "authorization",
+            "x-api-key",
+            "x-goog-api-key",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "via",
+            "cf-connecting-ip",
+            "x-forwarded-user",
+            "x-auth-request-email",
+            "x-gateway-key",
+            "x-management-key",
+            "x-fusebox-source",
+            "x-cliproxy-source",
+            "tailscale-user-login",
+            "x-private-feature",
+            "anthropic-api-key",
+            "x-claude-code-access-token",
+            "x-stainless-internal",
+            "x-unknown-feature",
+            "x-codex-only-feature",
+            "x-provider-nominated",
+            "anthropic-nominated",
+        ];
+        for oauth in [false, true] {
+            for native in [false, true] {
+                for cloak in [false, true] {
+                    let acct = if oauth { oauth_account(Provider::Claude) } else { claude_account() };
+                    let mut cfg = Config { claude_cloak: cloak, ..Default::default() };
+                    // Even unvalidated extension config cannot bypass private-header filtering.
+                    cfg.upstream_header_allowlist.insert(
+                        "claude".into(),
+                        [
+                            "x-provider-feature",
+                            "x-provider-nominated",
+                            "x-gateway-key",
+                            "authorization",
+                            "chatgpt-account-id",
+                        ]
+                        .map(String::from)
+                        .into(),
+                    );
+                    cfg.upstream_header_allowlist.insert("codex".into(), vec!["x-codex-only-feature".into()]);
+                    let mut headers = request_headers(&[
+                        ("user-agent", if native { CC_USER_AGENT } else { "third-party/1.0" }),
+                        ("anthropic-version", "2023-06-01"),
+                        ("anthropic-feature", "approved-provider-value"),
+                        ("x-claude-code-feature", "approved-client-value"),
+                        ("x-stainless-os", "Linux"),
+                        ("x-app", "cli"),
+                        ("x-client-request-id", "approved-request-id"),
+                        ("x-provider-feature", "approved-extension"),
+                        ("connection", "keep-alive, X-Provider-Nominated"),
+                        ("connection", "Anthropic-Nominated"),
+                        ("chatgpt-account-id", "synthetic-caller-account-A"),
+                    ]);
+                    for name in dangerous {
+                        headers.insert(
+                            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                            "SYNTHETIC_GATEWAY_CREDENTIAL".parse().unwrap(),
+                        );
+                    }
+                    let prepared = prepare(
+                        &test_target(&acct, &cfg, &headers),
+                        json!({"messages":[{"role":"user","content":"hello"}]}),
+                    );
+                    for name in dangerous.into_iter().filter(|name| *name != "authorization" && *name != "x-api-key") {
+                        assert_eq!(
+                            get_header(&prepared.headers, name),
+                            None,
+                            "{name}: oauth={oauth}, native={native}, cloak={cloak}"
+                        );
+                    }
+                    assert_eq!(get_header(&prepared.headers, "chatgpt-account-id"), None);
+                    assert_eq!(get_header(&prepared.headers, "connection"), None);
+                    let generated = oauth && !native && cloak;
+                    assert_eq!(
+                        get_header(&prepared.headers, "anthropic-feature"),
+                        (!generated).then_some("approved-provider-value")
+                    );
+                    assert_eq!(
+                        get_header(&prepared.headers, "x-claude-code-feature"),
+                        (!generated).then_some("approved-client-value")
+                    );
+                    assert_eq!(get_header(&prepared.headers, "x-provider-feature"), Some("approved-extension"));
+                    if generated {
+                        assert!(
+                            uuid::Uuid::parse_str(get_header(&prepared.headers, "x-client-request-id").unwrap())
+                                .is_ok()
+                        );
+                    } else {
+                        assert_eq!(get_header(&prepared.headers, "x-client-request-id"), Some("approved-request-id"));
+                    }
+                    if native {
+                        assert_eq!(get_header(&prepared.headers, "user-agent"), Some(CC_USER_AGENT));
+                        assert_eq!(get_header(&prepared.headers, "x-stainless-os"), Some("Linux"));
+                    }
+                    let selected = if oauth { "Bearer synthetic-selected-token-B" } else { "test" };
+                    assert_eq!(
+                        get_header(&prepared.headers, if oauth { "authorization" } else { "x-api-key" }),
+                        Some(selected)
+                    );
+                    assert!(!prepared.headers.iter().any(|(_, value)| value.contains("SYNTHETIC_GATEWAY_CREDENTIAL")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_native_betas_keep_formatting_unknown_flags_and_required_oauth() {
+        let acct = oauth_account(Provider::Claude);
+        let cfg = Config::default();
+        for beta in ["future-beta , oauth-2025-04-20, future-beta", "future-beta , another-beta"] {
+            let headers = request_headers(&[("user-agent", CC_USER_AGENT), ("anthropic-beta", beta)]);
+            let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+            let expected =
+                if beta.contains("oauth-2025-04-20") { beta.into() } else { format!("{beta},oauth-2025-04-20") };
+            assert_eq!(get_header(&prepared.headers, "anthropic-beta"), Some(expected.as_str()));
+        }
+        let headers = request_headers(&[
+            ("user-agent", CC_USER_AGENT),
+            ("anthropic-beta", "native-first"),
+            ("anthropic-beta", "oauth-2025-04-20 , native-second"),
+        ]);
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+        assert_eq!(
+            prepared
+                .headers
+                .iter()
+                .filter(|(name, _)| name == "anthropic-beta")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["native-first", "oauth-2025-04-20 , native-second"]
+        );
+    }
+
+    #[test]
+    fn claude_nominated_betas_are_not_reintroduced_but_oauth_is_synthesized() {
+        let acct = oauth_account(Provider::Claude);
+        let cfg = Config::default();
+        let headers = request_headers(&[
+            ("user-agent", CC_USER_AGENT),
+            ("anthropic-beta", "private-caller-beta"),
+            ("connection", "ANTHROPIC-BETA, x-client-request-id"),
+            ("x-client-request-id", "caller-nominated"),
+        ]);
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+        assert_eq!(get_header(&prepared.headers, "anthropic-beta"), Some("oauth-2025-04-20"));
+        assert!(uuid::Uuid::parse_str(get_header(&prepared.headers, "x-client-request-id").unwrap()).is_ok());
+        let mut headers = headers;
+        headers.insert("connection", axum::http::HeaderValue::from_bytes(b"\xff, anthropic-beta").unwrap());
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+        assert_eq!(get_header(&prepared.headers, "anthropic-beta"), Some("oauth-2025-04-20"));
+    }
+
+    #[test]
+    fn claude_rebinds_account_a_metadata_to_selected_account_b_in_every_oauth_path() {
+        let acct = oauth_account(Provider::Claude);
+        let caller_identity = json!({"device_id":"a".repeat(64), "account_uuid":"caller-account-A", "session_id":"caller-session-A", "untrusted":"discard"}).to_string();
+        for native in [false, true] {
+            for cloak in [false, true] {
+                let cfg = Config { claude_cloak: cloak, ..Default::default() };
+                let headers = request_headers(&[
+                    ("user-agent", if native { CC_USER_AGENT } else { "third-party/1.0" }),
+                    ("x-claude-code-session-id", "caller-session-A"),
+                ]);
+                let body = json!({"messages":[{"role":"user","content":"preserve this"}],
+                    "metadata":{"user_id":caller_identity,"unrelated":{"keep":true}},"tools":[{"name":"lookup","input_schema":{"type":"object"}}]});
+                let prepared = prepare(&test_target(&acct, &cfg, &headers), body.clone());
+                let identity: Value =
+                    serde_json::from_str(prepared.body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    identity,
+                    json!({"device_id":acct.device_id,"account_uuid":"selected-account-B","session_id":"11111111-2222-4333-8444-555555555555"})
+                );
+                assert_eq!(get_header(&prepared.headers, "x-claude-code-session-id"), identity["session_id"].as_str());
+                assert_eq!(get_header(&prepared.headers, "authorization"), Some("Bearer synthetic-selected-token-B"));
+                assert_eq!(prepared.body["metadata"]["unrelated"], body["metadata"]["unrelated"]);
+                assert_eq!(prepared.body["tools"], body["tools"]);
+                if native || !cloak {
+                    assert_eq!(prepared.body["messages"], body["messages"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_malformed_identity_is_replaced_and_background_sessions_are_request_local() {
+        let acct = oauth_account(Provider::Claude);
+        let cfg = Config::default();
+        let headers = request_headers(&[("user-agent", CC_USER_AGENT), ("x-claude-code-session-id", "caller-session")]);
+        let mut target = test_target(&acct, &cfg, &headers);
+        target.provider_session = None;
+        let mut sessions = HashSet::new();
+        for metadata in [
+            Value::Null,
+            json!("malformed"),
+            json!({"user_id":"not JSON", "unrelated":42}),
+            json!({"user_id":{"device_id":"bad"}}),
+        ] {
+            let prepared = prepare(&target, json!({"messages":[],"metadata":metadata}));
+            let identity: Value = serde_json::from_str(prepared.body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+            let session = identity["session_id"].as_str().unwrap();
+            assert_eq!(get_header(&prepared.headers, "x-claude-code-session-id"), Some(session));
+            assert_ne!(session, acct.session_id);
+            assert!(uuid::Uuid::parse_str(session).is_ok());
+            assert!(sessions.insert(session.to_string()));
+            if metadata.is_object() && metadata.get("unrelated").is_some() {
+                assert_eq!(prepared.body["metadata"]["unrelated"], metadata["unrelated"]);
+            }
+            assert!(uuid::Uuid::parse_str(get_header(&prepared.headers, "x-client-request-id").unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn claude_count_tokens_never_has_message_metadata_in_any_path() {
+        for oauth in [false, true] {
+            for native in [false, true] {
+                for cloak in [false, true] {
+                    let acct = if oauth { oauth_account(Provider::Claude) } else { claude_account() };
+                    let cfg = Config { claude_cloak: cloak, ..Default::default() };
+                    let headers =
+                        request_headers(&[("user-agent", if native { CC_USER_AGENT } else { "third-party/1.0" })]);
+                    let mut target = test_target(&acct, &cfg, &headers);
+                    target.count_tokens = true;
+                    let prepared =
+                        prepare(&target, json!({"messages":[],"metadata":{"user_id":"malformed","unrelated":1}}));
+                    assert!(prepared.body.get("metadata").is_none());
+                    assert!(prepared.url.contains("/messages/count_tokens"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_claude_headers_cannot_replace_selected_identity_or_authentication() {
+        let mut acct = oauth_account(Provider::Claude);
+        std::sync::Arc::get_mut(&mut acct).unwrap().headers = [
+            ("Authorization", "synthetic-operator-token-A"),
+            ("x-api-key", "synthetic-operator-key-A"),
+            ("x-claude-code-session-id", "operator-session-A"),
+            ("anthropic-beta", "operator-beta"),
+            ("user-agent", "operator-agent"),
+            ("x-client-request-id", "operator-request"),
+            ("x-gateway-key", "synthetic-operator-gateway-key"),
+            ("x-provider-feature", "operator-feature"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect();
+        let cfg = Config::default();
+        let headers = request_headers(&[("user-agent", CC_USER_AGENT), ("x-client-request-id", "native-request")]);
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+        assert_eq!(get_header(&prepared.headers, "authorization"), Some("Bearer synthetic-selected-token-B"));
+        assert_eq!(get_header(&prepared.headers, "x-api-key"), None);
+        assert_eq!(
+            get_header(&prepared.headers, "x-claude-code-session-id"),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
+        assert_eq!(get_header(&prepared.headers, "anthropic-beta"), Some("oauth-2025-04-20"));
+        assert_eq!(get_header(&prepared.headers, "user-agent"), Some(CC_USER_AGENT));
+        assert_eq!(get_header(&prepared.headers, "x-client-request-id"), Some("native-request"));
+        assert_eq!(get_header(&prepared.headers, "x-gateway-key"), None);
+        assert_eq!(get_header(&prepared.headers, "x-provider-feature"), Some("operator-feature"));
+    }
+
+    #[test]
+    fn generated_claude_profile_drops_foreign_sdk_headers_but_keeps_betas_and_explicit_extensions() {
+        let acct = oauth_account(Provider::Claude);
+        let mut cfg = Config::default();
+        cfg.upstream_header_allowlist.insert("claude".into(), vec!["x-provider-feature".into()]);
+        let headers = request_headers(&[
+            ("user-agent", "anthropic-python/1.0.0"),
+            ("x-stainless-async", "async:asyncio"),
+            ("x-stainless-read-timeout", "30"),
+            ("x-claude-code-helper", "foreign-helper"),
+            ("anthropic-custom-feature", "foreign-feature"),
+            ("anthropic-beta", " effort-2026-10-01 ,custom-beta"),
+            ("x-provider-feature", "explicit-feature"),
+        ]);
+        let prepared =
+            prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[],"output_config":{"effort":"high"}}));
+        for name in
+            ["x-stainless-async", "x-stainless-read-timeout", "x-claude-code-helper", "anthropic-custom-feature"]
+        {
+            assert_eq!(get_header(&prepared.headers, name), None);
+        }
+        assert_eq!(get_header(&prepared.headers, "x-stainless-lang"), Some("js"));
+        assert_eq!(get_header(&prepared.headers, "x-stainless-runtime"), Some("node"));
+        assert_eq!(get_header(&prepared.headers, "x-provider-feature"), Some("explicit-feature"));
+        let beta = get_header(&prepared.headers, "anthropic-beta").unwrap();
+        assert!(beta.starts_with(" effort-2026-10-01 ,custom-beta"));
+        assert!(!beta.contains("effort-2025-11-24"));
+    }
+
+    #[test]
+    fn intentional_gateway_credentials_survive_custom_routes_and_never_come_from_the_caller() {
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            openai_compatibility: vec![crate::config::CompatEntry {
+                name: "gateway".into(),
+                base_url: "https://gateway.example.invalid/v1".into(),
+                api_keys: vec!["FAKE_OPERATOR_KEY".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let mut acct = pool.all().remove(0);
+        drop(pool);
+        std::sync::Arc::get_mut(&mut acct).unwrap().headers = [
+            ("CF-Access-Client-Id".into(), "FAKE_OPERATOR_ID".into()),
+            ("CF-Access-Client-Secret".into(), "FAKE_OPERATOR_SECRET".into()),
+            ("x-portkey-api-key".into(), "FAKE_OPERATOR_GATEWAY".into()),
+        ]
+        .into_iter()
+        .collect();
+        let headers = request_headers(&[
+            ("cf-access-client-secret", "FAKE_CALLER_SECRET"),
+            ("x-portkey-api-key", "FAKE_CALLER_GATEWAY"),
+        ]);
+        let cfg = Config::default();
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"messages":[]}));
+        assert_eq!(get_header(&prepared.headers, "cf-access-client-secret"), Some("FAKE_OPERATOR_SECRET"));
+        assert_eq!(get_header(&prepared.headers, "x-portkey-api-key"), Some("FAKE_OPERATOR_GATEWAY"));
+        assert!(!prepared.headers.iter().any(|(_, value)| value.contains("FAKE_CALLER")));
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert!(!custom_header_allowed(provider, true, "cf-access-client-secret"));
+            assert!(custom_header_allowed(provider, false, "cf-access-client-secret"));
+        }
+    }
+
+    #[test]
+    fn codex_stream_options_preserve_summary_delivery_on_http_and_websocket() {
+        let original = json!({"input":"hello","stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true,"unsupported":1},
+            "client_metadata":{"turn_id":"turn", "workspace":"permitted-workspace"}, "generate":false});
+        let acct = oauth_account(Provider::Codex);
+        let cfg = Config::default();
+        let headers = HeaderMap::new();
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), original.clone());
+        let mut websocket = original.clone();
+        sanitize_codex_body(&mut websocket, "gpt-6.1-sol", true);
+        order_codex_body(&mut websocket);
+        for body in [&prepared.body, &websocket] {
+            assert_eq!(body["stream_options"], json!({"reasoning_summary_delivery":"sequential_cutoff"}));
+            assert_eq!(body["client_metadata"], original["client_metadata"]);
+        }
+        assert_eq!(websocket["generate"], false);
+        assert!(prepared.body.get("generate").is_none());
+        for websocket in [false, true] {
+            for options in [json!({"include_usage":true}), Value::Null, json!(true)] {
+                let mut body = json!({"input":[],"stream_options":options});
+                sanitize_codex_body(&mut body, "gpt-6.1-sol", websocket);
+                assert!(body.get("stream_options").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn codex_http_and_websocket_share_safe_custom_headers_residency_and_selected_identity() {
+        let mut acct = oauth_account(Provider::Codex);
+        std::sync::Arc::get_mut(&mut acct).unwrap().headers = [
+            ("Authorization", "synthetic-operator-token-A"),
+            ("chatgpt-account-id", "operator-account-A"),
+            ("session-id", "operator-session-A"),
+            ("session_id", "operator-session-A"),
+            ("user-agent", "operator-agent"),
+            ("originator", "operator-originator"),
+            ("version", "999.0.0"),
+            ("x-api-key", "synthetic-operator-key"),
+            ("x-gateway-key", "synthetic-operator-gateway-key"),
+            ("x-forwarded-user", "operator-private-user"),
+            ("x-provider-feature", "operator-feature"),
+            ("x-provider-nominated", "operator-nominated"),
+            ("openai-beta", "operator-beta"),
+            (CODEX_RESIDENCY, "eu"),
+            ("x-bad-value", "not\na header"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect();
+        let mut cfg = Config::default();
+        cfg.upstream_header_allowlist
+            .insert("codex".into(), vec!["x-client-feature".into(), "chatgpt-account-id".into()]);
+        let headers = request_headers(&[
+            ("user-agent", CODEX_USER_AGENT),
+            ("originator", CODEX_ORIGINATOR),
+            ("version", CODEX_VERSION),
+            ("authorization", "Bearer SYNTHETIC_GATEWAY_CREDENTIAL"),
+            ("chatgpt-account-id", "caller-account-A"),
+            ("session_id", "caller-session-A"),
+            ("session-id", "caller-session-A"),
+            (CODEX_RESIDENCY, "us"),
+            ("x-client-feature", "approved-extension"),
+            ("thread-id", "native-thread"),
+            ("x-codex-window-id", "native-window"),
+            ("x-codex-turn-metadata", "native-turn"),
+            ("x-provider-nominated", "caller-nominated"),
+            ("connection", "X-Provider-Nominated"),
+            ("x-gateway-key", "SYNTHETIC_GATEWAY_CREDENTIAL"),
+        ]);
+        let target = test_target(&acct, &cfg, &headers);
+        let prepared = prepare(&target, json!({"input":[],"prompt_cache_key":"unrelated-cache-key"}));
+        let (url, mut websocket) = codex_ws_url(&acct, &cfg, &headers);
+        bind_codex_session(&mut websocket, target.provider_session.unwrap());
+        assert_eq!(url, "wss://chatgpt.com/backend-api/codex/responses");
+        for outbound in [&prepared.headers, &websocket] {
+            for (name, value) in [
+                ("authorization", "Bearer synthetic-selected-token-B"),
+                ("chatgpt-account-id", "selected-account-B"),
+                ("session-id", "11111111-2222-4333-8444-555555555555"),
+                (CODEX_RESIDENCY, "us"),
+                ("user-agent", CODEX_USER_AGENT),
+                ("originator", CODEX_ORIGINATOR),
+                ("version", CODEX_VERSION),
+                ("x-provider-feature", "operator-feature"),
+                ("x-client-feature", "approved-extension"),
+                ("thread-id", "native-thread"),
+                ("x-codex-window-id", "native-window"),
+                ("x-codex-turn-metadata", "native-turn"),
+            ] {
+                assert_eq!(get_header(outbound, name), Some(value), "{name}");
+                assert_eq!(outbound.iter().filter(|(key, _)| key.eq_ignore_ascii_case(name)).count(), 1, "{name}");
+            }
+            for name in [
+                "session_id",
+                "x-api-key",
+                "x-gateway-key",
+                "x-forwarded-user",
+                "x-provider-nominated",
+                "connection",
+                "x-bad-value",
+            ] {
+                assert_eq!(get_header(outbound, name), None, "{name}");
+            }
+        }
+        assert_eq!(get_header(&websocket, "openai-beta"), Some(CODEX_WS_BETA));
+        let mut http = prepared.headers;
+        http.retain(|(name, _)| name != "content-type" && name != "accept");
+        websocket.retain(|(name, _)| name != "openai-beta");
+        http.sort();
+        websocket.sort();
+        assert_eq!(http, websocket);
+        assert_eq!(prepared.body["prompt_cache_key"], "unrelated-cache-key");
+    }
+
+    #[test]
+    fn codex_api_key_transports_preserve_safe_headers_and_replace_caller_credentials() {
+        let acct = oauth_account(Provider::Codex);
+        *acct.cred.write() = Credential::ApiKey { key: "synthetic-selected-api-key-B".into(), base_url: None };
+        let cfg = Config::default();
+        let headers = request_headers(&[
+            ("authorization", "Bearer caller-key-A"),
+            ("x-api-key", "caller-key-A"),
+            ("chatgpt-account-id", "caller-account-A"),
+            ("x-codex-turn-state", "preserved"),
+            (CODEX_RESIDENCY, "us"),
+        ]);
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"input":[]}));
+        let (_, websocket) = codex_ws_url(&acct, &cfg, &headers);
+        for outbound in [&prepared.headers, &websocket] {
+            assert_eq!(get_header(outbound, "authorization"), Some("Bearer synthetic-selected-api-key-B"));
+            assert_eq!(get_header(outbound, "x-api-key"), None);
+            assert_eq!(get_header(outbound, "chatgpt-account-id"), None);
+            assert_eq!(get_header(outbound, "x-codex-turn-state"), Some("preserved"));
+            assert_eq!(get_header(outbound, CODEX_RESIDENCY), Some("us"));
+        }
+    }
+
+    #[test]
+    fn codex_recognition_preserves_desktop_and_legacy_native_identity_on_both_builders() {
+        let acct = oauth_account(Provider::Codex);
+        let cfg = Config::default();
+        for (agent, originator, version) in [
+            (
+                "Codex Desktop/0.164.0 (Mac OS 26.5.2; arm64) unknown (Codex Desktop; 2026.1024.1)",
+                "Codex Desktop",
+                Some("0.164.0"),
+            ),
+            ("codex_cli_rs/0.163.0 (Linux 6.12; x86_64) xterm", "codex_cli_rs", None),
+        ] {
+            let mut headers = request_headers(&[("user-agent", agent), ("originator", originator)]);
+            if let Some(version) = version {
+                headers.insert("version", version.parse().unwrap());
+            }
+            let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"input":[]}));
+            let (_, websocket) = codex_ws_url(&acct, &cfg, &headers);
+            for outbound in [&prepared.headers, &websocket] {
+                assert_eq!(get_header(outbound, "user-agent"), Some(agent));
+                assert_eq!(get_header(outbound, "originator"), Some(originator));
+                assert_eq!(get_header(outbound, "version"), Some(version.unwrap_or("0.163.0")));
+            }
+        }
+        let headers = request_headers(&[
+            ("user-agent", "codex-tui/0.170.0 (Linux 6.12; x86_64) xterm"),
+            ("originator", "codex-tui"),
+            ("version", "0.170.0"),
+            ("connection", "USER-AGENT"),
+        ]);
+        let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"input":[]}));
+        let (_, websocket) = codex_ws_url(&acct, &cfg, &headers);
+        for outbound in [&prepared.headers, &websocket] {
+            assert_eq!(get_header(outbound, "user-agent"), Some(CODEX_USER_AGENT));
+            assert_eq!(get_header(outbound, "originator"), Some(CODEX_ORIGINATOR));
+            assert_eq!(get_header(outbound, "version"), Some(CODEX_VERSION));
+        }
+    }
+
+    #[test]
+    fn codex_configured_residency_fills_absence_and_connection_nominations_stay_filtered() {
+        let mut acct = oauth_account(Provider::Codex);
+        std::sync::Arc::get_mut(&mut acct).unwrap().headers.insert(CODEX_RESIDENCY.into(), "us".into());
+        let cfg = Config::default();
+        for nominated in [false, true] {
+            let headers = if nominated {
+                request_headers(&[
+                    ("connection", "x-codex-turn-state, X-OpenAI-Internal-Codex-Residency"),
+                    ("x-codex-turn-state", "private-nominated-state"),
+                    (CODEX_RESIDENCY, "us"),
+                ])
+            } else {
+                HeaderMap::new()
+            };
+            let prepared = prepare(&test_target(&acct, &cfg, &headers), json!({"input":[]}));
+            let (_, websocket) = codex_ws_url(&acct, &cfg, &headers);
+            for outbound in [&prepared.headers, &websocket] {
+                assert_eq!(get_header(outbound, CODEX_RESIDENCY), if nominated { None } else { Some("us") });
+                assert_eq!(get_header(outbound, "x-codex-turn-state"), None);
+            }
+        }
+    }
+
+    #[test]
+    fn codex_explicit_sessions_replace_aliases_without_changing_cache_and_background_gets_fresh_uuid() {
+        let acct = oauth_account(Provider::Codex);
+        let cfg = Config::default();
+        let headers = request_headers(&[("session_id", "caller-session"), ("session-id", "other-caller-session")]);
+        let mut target = test_target(&acct, &cfg, &headers);
+        target.cache_key = Some("shared-cache");
+        let prepared = prepare(&target, json!({"input":[]}));
+        assert_eq!(get_header(&prepared.headers, "session-id"), target.provider_session);
+        assert_eq!(get_header(&prepared.headers, "session_id"), None);
+        assert_eq!(prepared.body["prompt_cache_key"], "shared-cache");
+        let headers = HeaderMap::new();
+        let mut target = test_target(&acct, &cfg, &headers);
+        target.provider_session = None;
+        target.cache_key = Some("shared-cache");
+        let mut sessions = HashSet::new();
+        for _ in 0..2 {
+            let prepared = prepare(&target, json!({"input":[]}));
+            let session = get_header(&prepared.headers, "session-id").unwrap();
+            assert!(uuid::Uuid::parse_str(session).is_ok());
+            assert_ne!(session, acct.session_id);
+            assert_ne!(session, "shared-cache");
+            assert!(sessions.insert(session.to_string()));
+        }
+    }
+
+    #[test]
+    fn residency_validation_rejects_malformed_conflicting_and_hop_by_hop_requirements() {
+        assert_eq!(residency_requirement(&HeaderMap::new()).unwrap(), None);
+        assert_eq!(
+            residency_requirement(&request_headers(&[(CODEX_RESIDENCY, "us"), (CODEX_RESIDENCY, "us")])).unwrap(),
+            Some("us".into())
+        );
+        assert!(residency_requirement(&request_headers(&[(CODEX_RESIDENCY, "us"), (CODEX_RESIDENCY, "eu")])).is_err());
+        assert!(
+            residency_requirement(&request_headers(&[
+                (CODEX_RESIDENCY, "us"),
+                ("connection", "keep-alive, X-OpenAI-Internal-Codex-Residency")
+            ]))
+            .is_err()
+        );
+        for value in ["", " ", " us", "us ", "us,eu", "us,us", "US", "../us", "us eu", "-us", "us-", "region=us"] {
+            let error = residency_requirement(&request_headers(&[(CODEX_RESIDENCY, value)])).unwrap_err();
+            assert_eq!(error, "Invalid Codex residency requirement");
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(CODEX_RESIDENCY, axum::http::HeaderValue::from_bytes(b"\xff").unwrap());
+        assert!(residency_requirement(&headers).is_err());
+    }
+
+    #[test]
+    fn extension_validation_never_authorizes_private_or_reserved_names() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for name in [
+                "Authorization",
+                "x-private-feature",
+                "anthropic-access-token",
+                "x-forwarded-user",
+                "cf-connecting-ip",
+                "x-gateway-key",
+                "connection",
+                "session-id",
+                "session_id",
+                "chatgpt-account-id",
+                "x-claude-code-session-id",
+                "user-agent",
+                "not a header",
+            ] {
+                assert!(!header_extension_allowed(provider, name), "{name}");
+            }
+            assert!(header_extension_allowed(provider, "x-provider-feature"));
+        }
+        assert!(!header_extension_allowed(Provider::Claude, CODEX_RESIDENCY));
+        assert!(header_extension_allowed(Provider::Codex, CODEX_RESIDENCY));
+    }
+
     #[test]
     fn where_a_client_is_never_reaches_a_provider() {
         for name in [
@@ -919,7 +1795,7 @@ mod tests {
                 stream: true,
                 count_tokens: false,
                 cache_key: None,
-                cache_session: None,
+                provider_session: None,
                 cache_defaults: true,
             },
             json!({"input":"Reply OK"}),
@@ -966,7 +1842,7 @@ mod tests {
                 stream: true,
                 count_tokens: false,
                 cache_key: Some("conversation"),
-                cache_session: None,
+                provider_session: None,
                 cache_defaults: true,
             },
             json!({"input":"Reply OK"}),
@@ -1023,7 +1899,7 @@ mod tests {
                 stream: true,
                 count_tokens: false,
                 cache_key: None,
-                cache_session: None,
+                provider_session: None,
                 cache_defaults: true,
             },
             json!({"messages":[{"role":"user","content":"Reply OK"}]}),
@@ -1041,7 +1917,6 @@ mod tests {
 
     #[test]
     fn claude_cloak_preserves_four_caller_breakpoints_and_ttl_order() {
-        let acct = claude_account();
         let mut body = json!({
             "tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],
             "system":[
@@ -1050,7 +1925,7 @@ mod tests {
             ],
             "messages":[{"role":"user","content":[{"type":"text","text":"question","cache_control":{"type":"ephemeral"}}]}]
         });
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert!(body["system"][1]["cache_control"].is_null());
         let blocks = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(blocks.len(), 3);
@@ -1063,15 +1938,14 @@ mod tests {
 
     #[test]
     fn claude_cloak_respects_automatic_caching_and_retains_default_when_unconfigured() {
-        let acct = claude_account();
         let request = json!({"system":"instructions","messages":[{"role":"user","content":"question"}]});
         let mut automatic = request.clone();
         automatic["cache_control"] = json!({"type":"ephemeral","ttl":"1h"});
-        cloak_body(&mut automatic, &acct, None, false, true);
+        cloak_body(&mut automatic, false, true);
         assert!(automatic["system"][1]["cache_control"].is_null());
         assert_eq!(automatic["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
         let mut default = request.clone();
-        cloak_body(&mut default, &acct, None, false, true);
+        cloak_body(&mut default, false, true);
         assert_eq!(default["system"][1]["cache_control"], json!({"type":"ephemeral"}));
         // The conversation, which now holds the caller's instructions, is cached too.
         assert_eq!(default["cache_control"], json!({"type":"ephemeral"}));
@@ -1079,18 +1953,17 @@ mod tests {
         assert!(default["messages"][0]["content"][0]["cache_control"].is_null());
         // Token counting has nothing to cache.
         let mut counted = request;
-        cloak_body(&mut counted, &acct, None, true, true);
+        cloak_body(&mut counted, true, true);
         assert!(counted["cache_control"].is_null());
     }
 
     #[test]
     fn translated_automatic_cache_covers_instructions_after_cloaking() {
-        let acct = claude_account();
         let original = json!({"instructions":"stable instructions","input":"question"});
         let req = crate::formats::responses::parse_request(&original).unwrap();
         let mut body = crate::formats::claude::build_request(&req, "claude-sonnet-5-5");
         crate::formats::claude::apply_translated_cache_policy(&original, &mut body);
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert_eq!(body["cache_control"], json!({"type":"ephemeral"}));
         assert!(body["system"][1]["cache_control"].is_null());
         assert_eq!(
@@ -1102,7 +1975,6 @@ mod tests {
 
     #[test]
     fn claude_cloak_does_not_move_long_ttl_after_short_cached_tool_result() {
-        let acct = claude_account();
         let mut body = json!({
             "system":[{"type":"text","text":"instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}],
             "messages":[
@@ -1111,7 +1983,7 @@ mod tests {
             ]
         });
         let messages = body["messages"].clone();
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert_eq!(body["messages"], messages);
         assert_eq!(body["system"][2]["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
         assert_eq!(body["system"][2]["text"], "<system-reminder>\ninstructions\n</system-reminder>");
@@ -1119,7 +1991,6 @@ mod tests {
 
     #[test]
     fn claude_cloak_preserves_ttl_order_before_assistant_and_identity_markers() {
-        let acct = claude_account();
         let mut body = json!({
             "system":[{"type":"text","text":"instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}],
             "messages":[
@@ -1128,7 +1999,7 @@ mod tests {
             ]
         });
         let messages = body["messages"].clone();
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert_eq!(body["messages"], messages);
         assert_eq!(body["system"][2]["cache_control"]["ttl"], "1h");
 
@@ -1139,7 +2010,7 @@ mod tests {
             ],
             "messages":[{"role":"user","content":"question"}]
         });
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
         assert_eq!(body["system"][2]["text"], CC_IDENTITY);
         assert_eq!(body["system"][2]["cache_control"], json!({"type":"ephemeral"}));
@@ -1179,33 +2050,33 @@ mod tests {
                 stream: false,
                 count_tokens: false,
                 cache_key: None,
-                cache_session: None,
+                provider_session: None,
                 cache_defaults: true,
             },
             body.clone(),
         );
-        assert_eq!(prepared.body, body);
+        let mut actual = prepared.body.clone();
+        actual.as_object_mut().unwrap().remove("metadata");
+        assert_eq!(actual, body);
     }
 
     #[test]
     fn claude_cloak_adds_no_breakpoints_when_the_caller_marked_a_nested_block() {
-        let acct = claude_account();
         let mut body = json!({"system":"instructions","messages":[
             {"role":"assistant","content":[{"type":"tool_use","id":"t","name":"lookup","input":{}}]},
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[
                 {"type":"text","text":"result","cache_control":{"type":"ephemeral"}}
             ]}]}
         ]});
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert!(body["cache_control"].is_null());
         assert!(body["system"][1]["cache_control"].is_null());
     }
 
     #[test]
     fn claude_cloak_keeps_instructions_without_a_user_turn() {
-        let acct = claude_account();
         let mut body = json!({"system":[{"type":"text","text":"instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]});
-        cloak_body(&mut body, &acct, None, false, true);
+        cloak_body(&mut body, false, true);
         assert_eq!(body["system"][2]["text"], "<system-reminder>\ninstructions\n</system-reminder>");
         assert_eq!(body["system"][2]["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
     }
@@ -1248,7 +2119,7 @@ mod tests {
                         stream: true,
                         count_tokens: false,
                         cache_key: None,
-                        cache_session: None,
+                        provider_session: None,
                         cache_defaults: true,
                     },
                     translated.clone(),

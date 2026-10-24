@@ -60,13 +60,9 @@ pub async fn mint(http: &reqwest::Client, sa: &Value) -> Result<(String, DateTim
         .post(uri)
         .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", jwt.as_str())])
         .send()
-        .await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("service account token exchange returned {status}: {}", text.chars().take(300).collect::<String>());
-    }
-    let v: Value = serde_json::from_str(&text).context("invalid token response")?;
+        .await
+        .map_err(crate::oauth::transport_error)?;
+    let v = crate::oauth::read_json(resp).await?;
     let token = v["access_token"].as_str().ok_or_else(|| anyhow!("missing access_token"))?.to_string();
     let expires = Utc::now() + Duration::seconds(v["expires_in"].as_i64().unwrap_or(3600));
     Ok((token, expires))

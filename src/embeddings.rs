@@ -201,6 +201,9 @@ fn failure(error: (u16, Value), completed: bool) -> Failure {
 }
 
 pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outcome {
+    if crate::upstream::residency_requirement(&headers).map_err(|message| fail(400, message))?.is_some() {
+        return Err(fail(400, "Codex subscription residency is unavailable on the embeddings endpoint"));
+    }
     let Some(requested) = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty()) else {
         return Err(fail(400, "`model` is required"));
     };
@@ -301,7 +304,7 @@ async fn openai(
     body: &Value,
     tracker: &mut Tracker,
 ) -> Result<(Value, Usage), Failure> {
-    let (base, auth) = openai_base(app, acct, headers, model);
+    let (base, auth) = openai_base(app, acct, headers, model, body);
     let mut req = body.clone();
     req["model"] = model.into();
     let v = request(app, acct, &format!("{base}/embeddings"), &auth, &req, model, tracker)
@@ -329,7 +332,7 @@ fn google_url(app: &App, acct: &Account, headers: &HeaderMap, model: &str) -> (S
         stream: false,
         count_tokens: false,
         cache_key: None,
-        cache_session: None,
+        provider_session: None,
         cache_defaults: true,
     };
     let p = upstream::prepare(&t, json!({}));

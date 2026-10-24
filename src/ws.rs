@@ -124,6 +124,7 @@ struct Session {
     upstream_quota_epoch: u64,
     /// Credential identity used by the upstream handshake, independent of quota polls.
     upstream_identity_epoch: u64,
+    upstream_session: Option<String>,
     key: Option<String>,
     source: Option<&'static str>,
     pending_selection: Option<crate::affinity::Selected>,
@@ -139,6 +140,7 @@ impl Default for Session {
             upstream_responses: HashSet::new(),
             upstream_quota_epoch: 0,
             upstream_identity_epoch: 0,
+            upstream_session: None,
             key: None,
             source: None,
             pending_selection: None,
@@ -153,6 +155,7 @@ impl Session {
         self.upstream_responses.clear();
         self.upstream_quota_epoch = 0;
         self.upstream_identity_epoch = 0;
+        self.upstream_session = None;
         self.upstream.take()
     }
 
@@ -276,7 +279,8 @@ fn input_items(body: &Value) -> Vec<Value> {
 }
 
 pub async fn handle(app: Arc<App>, headers: HeaderMap, auth: crate::server::ClientAuth, socket: WebSocket) {
-    if crate::clients::observe(&headers) {
+    let cfg = app.cfg();
+    if crate::clients::observe_trusted(&headers, crate::policy::trusted_identity_source(&cfg, &headers)) {
         app.models.save_clients();
     }
     // An open socket shows on the dashboard's connected list until it closes.
@@ -561,8 +565,14 @@ enum Native {
     Fallback(&'static str),
 }
 
-async fn connect(acct: &Arc<Account>, client_headers: &HeaderMap) -> Result<Upstream, UpstreamFailure> {
-    let (url, headers) = crate::upstream::codex_ws_url(acct, client_headers);
+async fn connect(
+    app: &App,
+    acct: &Arc<Account>,
+    client_headers: &HeaderMap,
+    session: &str,
+) -> Result<Upstream, UpstreamFailure> {
+    let (url, mut headers) = crate::upstream::codex_ws_url(acct, &app.cfg(), client_headers);
+    crate::upstream::bind_codex_session(&mut headers, session);
     let mut req = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())
         .map_err(|e| UpstreamFailure::socket("handshake", &e))?;
     for (k, v) in headers {
@@ -574,7 +584,7 @@ async fn connect(acct: &Arc<Account>, client_headers: &HeaderMap) -> Result<Upst
     }
     // The shared TLS setup: roots are read once, sessions resume, and frames go out
     // without waiting for Nagle's algorithm.
-    let tls = Some(tokio_tungstenite::Connector::Rustls(crate::tls::websocket()));
+    let tls = Some(tokio_tungstenite::Connector::Rustls(app.http.websocket_tls_for_account(acct)));
     let connecting = tokio_tungstenite::connect_async_tls_with_config(req, None, true, tls);
     let (ws, _) = tokio::time::timeout(Duration::from_secs(20), connecting)
         .await
@@ -592,6 +602,13 @@ async fn native_turn(
     tx: &mut ClientTx,
 ) -> Native {
     let cfg = app.cfg();
+    if let Err(message) = crate::upstream::residency_requirement(headers) {
+        return if send(tx, error_event(400, &json!({"error":{"message":message}}))).await.is_ok() {
+            Native::Done
+        } else {
+            Native::Gone
+        };
+    }
     // Native websockets don't go through HTTP proxies.
     if !cfg.proxy_url.is_empty() {
         return Native::Fallback("global_proxy");
@@ -639,29 +656,20 @@ async fn native_turn(
     let (cache_key, cache_scope) =
         crate::cache::key(headers, body, sess.key.as_deref(), sess.source, &cfg.prompt_cache);
     let identity_epoch = acct.state.lock().identity_epoch;
-    let reuse =
-        sess.upstream.as_ref().is_some_and(|(a, _)| a.id == acct.id) && sess.upstream_identity_epoch == identity_epoch;
+    let provider_session = app.sessions.provider_session(sess.key.as_deref(), &acct, cfg.provider_session_idle_seconds);
+    let reuse = sess.upstream.as_ref().is_some_and(|(a, _)| a.id == acct.id)
+        && sess.upstream_identity_epoch == identity_epoch
+        && sess.upstream_session.as_deref() == Some(provider_session.as_str());
     if !reuse {
         sess.close_upstream("account_changed").await;
         if crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
             return Native::Fallback("oauth_refresh");
         }
-        let mut upstream_headers = headers.clone();
-        let separate_session = matches!(cache_scope, "client" | "workspace")
-            .then(|| sess.key.as_deref().map(crate::affinity::prompt_cache_key))
-            .flatten();
-        if !upstream_headers.contains_key("session_id")
-            && !upstream_headers.contains_key("session-id")
-            && let Some(key) =
-                separate_session.as_deref().or(body["prompt_cache_key"].as_str()).or(cache_key.as_deref())
-            && let Ok(value) = key.parse()
-        {
-            upstream_headers.insert("session_id", value);
-        }
-        match connect(&acct, &upstream_headers).await {
+        match connect(app, &acct, headers, &provider_session).await {
             Ok(ws) => {
                 sess.upstream_quota_epoch = acct.quota_epoch();
                 sess.upstream_identity_epoch = identity_epoch;
+                sess.upstream_session = Some(provider_session);
                 sess.upstream = Some((acct, ws));
             }
             Err(e) => {

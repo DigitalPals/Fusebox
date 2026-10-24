@@ -405,7 +405,7 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
         Credential::OAuth(o) if o.base_url.is_none() => (o.access_token.clone(), o.account_id.clone()),
         _ => return Ok(()),
     };
-    let http = app.http.control(acct.proxy_url.as_deref());
+    let http = app.http.control_for_account(acct);
     let reading = match acct.provider {
         Provider::Claude => {
             let v: Value = http
@@ -487,7 +487,7 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
         Credential::OAuth(o) if o.base_url.is_none() => (o.access_token.clone(), o.account_id.clone()),
         _ => return Ok(()),
     };
-    let http = app.http.control(acct.proxy_url.as_deref());
+    let http = app.http.control_for_account(acct);
     let details = match acct.provider {
         Provider::Claude => crate::oauth::claude_profile(&http, &token)
             .await

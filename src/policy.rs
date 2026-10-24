@@ -347,6 +347,11 @@ pub fn named_client<'a>(cfg: &'a crate::config::Config, headers: &HeaderMap) -> 
     cfg.named_clients.iter().find(|c| c.id == id)
 }
 
+/// Uses the authenticated named-client marker; user-agent text cannot grant trust.
+pub fn trusted_identity_source<'a>(cfg: &'a crate::config::Config, headers: &HeaderMap) -> Option<&'a str> {
+    named_client(cfg, headers).filter(|client| client.trust_client_identity).map(|client| client.id.as_str())
+}
+
 /// Refuses a model the client's key may not use.
 pub fn check_model(app: &App, headers: &HeaderMap, model: &str) -> Result<(), Denied> {
     let cfg = app.cfg();

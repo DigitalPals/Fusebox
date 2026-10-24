@@ -1199,8 +1199,10 @@ fn replacing_credential_identity_discards_old_quota_and_reset_state() {
     raw["account_id"] = json!("new-account");
     std::fs::write(path, raw.to_string()).unwrap();
     app.reload_accounts();
-    assert!(Arc::ptr_eq(&app.pool.get(&acct.id).unwrap(), &acct));
-    let st = acct.state.lock();
+    let replacement = app.pool.get(&acct.id).unwrap();
+    assert!(!Arc::ptr_eq(&replacement, &acct));
+    assert_ne!(replacement.device_id, acct.device_id);
+    let st = replacement.state.lock();
     assert!(st.quota.windows.is_empty());
     assert!(st.quota.refreshed_at.is_none());
     assert!(!st.quota_refreshing);

@@ -30,6 +30,7 @@ mod model_catalog;
 mod oauth;
 mod policy;
 mod pools;
+mod provider_sessions;
 mod proxy;
 mod push;
 mod quota;

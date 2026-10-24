@@ -25,6 +25,7 @@ struct Mock {
     mode: AtomicU8,
     sequence: AtomicU64,
     calls: Mutex<Vec<(String, Value, &'static str)>>,
+    headers: Mutex<Vec<(String, HeaderMap, &'static str)>>,
     ws_connections: AtomicU64,
     ws_mode: Mutex<WsMode>,
     ws_rich_output: AtomicBool,
@@ -126,6 +127,7 @@ fn rich_events(response: &mut Value) -> Vec<Value> {
 
 async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let account = account(&headers);
+    mock.headers.lock().push((account.clone(), headers.clone(), "http"));
     mock.calls.lock().push((account.clone(), body.clone(), "http"));
     let mode = mock.mode.load(Ordering::Relaxed);
     if mode == 7 && account != "a" && mock.calls.lock().iter().filter(|(a, _, _)| a == &account).count() == 1 {
@@ -179,6 +181,7 @@ async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
 
 async fn mock_chat(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let account = account(&headers);
+    mock.headers.lock().push((account.clone(), headers.clone(), "chat"));
     mock.calls.lock().push((account.clone(), body.clone(), "chat"));
     Json(json!({
         "id":"chat-response", "object":"chat.completion", "model":body["model"],
@@ -190,6 +193,7 @@ async fn mock_chat(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
 
 async fn mock_ws(State(mock): State<Arc<Mock>>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
     let account = account(&headers);
+    mock.headers.lock().push((account.clone(), headers.clone(), "ws"));
     upgrade.on_upgrade(move |socket| async move {
         mock.ws_connections.fetch_add(1, Ordering::Relaxed);
         if matches!(*mock.ws_mode.lock(), WsMode::DropOnHandshake) {
@@ -462,7 +466,7 @@ fn prompt() -> Value {
     json!({"model":"gpt-6.1-sol","input":"question"})
 }
 fn answer(response: &Value) -> &str {
-    response["output"][0]["content"][0]["text"].as_str().unwrap()
+    response["output"].as_array().unwrap().iter().find_map(|item| item["content"][0]["text"].as_str()).unwrap()
 }
 
 async fn turn(
@@ -1774,6 +1778,7 @@ async fn translated_cache_intent_survives_oauth_cloak_for_each_incompatible_poli
                 project_id: None,
                 raw: Default::default(),
             });
+            acct.state.lock().credential_identity = acct.cred.read().identity(acct.provider);
             let mut body = json!({"model":"claude-sonnet-5-5","prompt_cache_options":{"mode":"explicit"},
                 "input":[{"role":"user","content":[{"type":"input_text","text":"q"}]}]});
             if markers {
@@ -1795,6 +1800,242 @@ async fn translated_cache_intent_survives_oauth_cloak_for_each_incompatible_poli
                 let sent = fixture.mock.calls.lock().last().unwrap().1.clone();
                 assert_eq!(crate::cache::has_claude_controls(&sent), handling == Incompatible::Automatic && markers);
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_sessions_rotate_on_subscription_switch_and_return_without_losing_http_history() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let first = fixture.request(Some("chat-42"), prompt()).await.1;
+    assert_eq!(answer(&first), "a");
+    fixture.mock.mode.store(2, Ordering::Relaxed); // temporary rate limit, preserving the original assignment
+    let second = fixture
+        .request(
+            Some("chat-42"),
+            json!({"model":"gpt-6.1-sol","previous_response_id":first["id"],"input":[
+                {"type":"function_call","call_id":"call_42","name":"lookup","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_42","output":"retained tool result"}
+            ]}),
+        )
+        .await
+        .1;
+    assert_eq!(answer(&second), "b");
+    fixture.recover();
+    let third = fixture
+        .request(Some("chat-42"), json!({"model":"gpt-6.1-sol","previous_response_id":second["id"],"input":"continue"}))
+        .await
+        .1;
+    assert_eq!(answer(&third), "a");
+    let headers = fixture.mock.headers.lock();
+    let sessions: Vec<_> = headers
+        .iter()
+        .map(|(account, h, _)| (account.as_str(), h.get("session-id").unwrap().to_str().unwrap()))
+        .collect();
+    assert_eq!(sessions.iter().map(|(a, _)| *a).collect::<Vec<_>>(), ["a", "a", "b", "a"]);
+    assert_eq!(sessions[0].1, sessions[1].1);
+    assert_ne!(sessions[0].1, sessions[2].1);
+    assert_ne!(sessions[0].1, sessions[3].1);
+    assert_ne!(sessions[2].1, sessions[3].1);
+    let calls = fixture.mock.calls.lock();
+    let last = &calls.last().unwrap().1;
+    assert!(last.get("previous_response_id").is_none());
+    assert!(
+        last["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["type"] == "function_call_output" && v["output"] == "retained tool result")
+    );
+    assert!(
+        last["input"].as_array().unwrap().iter().any(|v| v["role"] == "user" && v["content"][0]["text"] == "question")
+    );
+}
+
+#[tokio::test]
+async fn provider_session_rotation_reconnects_native_ws_and_replays_tools_on_account_return() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    fixture.mock.ws_rich_output.store(true, Ordering::Relaxed);
+    let mut socket = fixture.socket("chat-42").await;
+    let first = turn(&mut socket, prompt()).await;
+    fixture.mock.mode.store(1, Ordering::Relaxed);
+    let second = turn(&mut socket,json!({"model":"gpt-6.1-sol","previous_response_id":first["id"],"input":[{"type":"function_call_output","call_id":"call_local","output":"result before failover"}]})).await;
+    assert!(second["id"].is_string());
+    assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "b");
+    fixture.recover();
+    let replacement = fixture.app.pool.all().into_iter().find(|a| a.label == "b").unwrap();
+    replacement.state.lock().disabled = true;
+    let third = turn(
+        &mut socket,
+        json!({"model":"gpt-6.1-sol","previous_response_id":second["id"],"input":"continue after returning"}),
+    )
+    .await;
+    assert!(third["id"].is_string());
+    assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "a");
+    let captures = fixture.mock.headers.lock();
+    let original = captures.iter().find(|(account, _, kind)| account == "a" && *kind == "ws").unwrap();
+    let returned = captures.iter().rev().find(|(account, _, kind)| account == "a" && *kind == "ws").unwrap();
+    assert_ne!(original.1.get("session-id"), returned.1.get("session-id"));
+    let calls = fixture.mock.calls.lock();
+    let body = &calls.last().unwrap().1;
+    assert!(body.get("previous_response_id").is_none());
+    assert!(
+        body["input"].as_array().unwrap().iter().any(|v| v["type"] == "function_call" && v["call_id"] == "call_local")
+    );
+    assert!(
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["type"] == "function_call_output" && v["output"] == "result before failover")
+    );
+}
+
+#[tokio::test]
+async fn residency_is_preserved_on_http_and_ws_and_invalid_requirements_never_reach_upstream() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.push(KeyEntry {
+        api_key: "ineligible-api-key".into(),
+        base_url: Some(format!("{}/v1", fixture.provider.url)),
+        priority: 100,
+        ..Default::default()
+    });
+    fixture.app.set_config(cfg);
+    let body = json!({"model":"gpt-6.1-sol","input":"question","stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true}});
+    let response = fixture
+        .request_with(&[("thread-id", "residency-http"), ("x-openai-internal-codex-residency", "us")], body.clone())
+        .await;
+    assert_eq!(answer(&response), "a");
+    // Exercise the native socket too, independently of the API-key fallback above.
+    fixture.app.set_config(fixture.cfg.clone());
+    let mut request =
+        format!("{}/v1/responses", fixture.proxy.url.replacen("http://", "ws://", 1)).into_client_request().unwrap();
+    request.headers_mut().insert("authorization", "Bearer client-one".parse().unwrap());
+    request.headers_mut().insert("x-openai-internal-codex-residency", "us".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    turn(&mut socket, body).await;
+    for (_, headers, _) in fixture.mock.headers.lock().iter() {
+        assert_eq!(headers.get("x-openai-internal-codex-residency").unwrap(), "us");
+    }
+    assert!(fixture.mock.headers.lock().iter().any(|(_, _, kind)| *kind == "ws"));
+    for (_, body, _) in fixture.mock.calls.lock().iter() {
+        assert_eq!(body["stream_options"], json!({"reasoning_summary_delivery":"sequential_cutoff"}));
+    }
+    let before = fixture.mock.calls.lock().len();
+    let rejected = fixture
+        .request_with(
+            &[("x-openai-internal-codex-residency", "us"), ("connection", "x-openai-internal-codex-residency")],
+            prompt(),
+        )
+        .await;
+    assert!(rejected["error"].is_object(), "{rejected}");
+    assert_eq!(fixture.mock.calls.lock().len(), before);
+    let api_key = Fixture::new(Routing::FillFirst, false).await;
+    let rejected = api_key.request_with(&[("x-openai-internal-codex-residency", "us")], prompt()).await;
+    assert!(rejected["error"].is_object());
+    assert!(api_key.mock.calls.lock().is_empty());
+}
+
+#[tokio::test]
+async fn claude_native_and_emulated_requests_bind_selected_identity_and_filter_gateway_headers() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    for name in ["a", "b"] {
+        std::fs::write(fixture.directory.join(format!("{name}.json")),json!({"type":"claude","access_token":name,"account_id":format!("account-{name}"),"email":name,"base_url":format!("{}/v1",fixture.provider.url)}).to_string()).unwrap();
+    }
+    // Claude endpoints use /v1/messages, so use the mock origin without /v1 here.
+    for name in ["a", "b"] {
+        let path = fixture.directory.join(format!("{name}.json"));
+        let mut cred: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        cred["base_url"] = fixture.provider.url.clone().into();
+        std::fs::write(path, cred.to_string()).unwrap();
+    }
+    fixture.app.reload_accounts();
+    for (conversation, ua) in [("native", "claude-cli/2.1.309 (external, cli)"), ("translated", "example-client/1.0.0")]
+    {
+        let response = reqwest::Client::new().post(format!("{}/v1/messages",fixture.proxy.url)).bearer_auth("client-one")
+            .header("user-agent",ua).header("x-claude-code-session-id",conversation)
+            .header("via","1.1 private-gateway").header("x-gateway-key","FAKE_GATEWAY_KEY")
+            .header("x-auth-request-email","private@example.invalid").header("cf-connecting-ip","192.0.2.42")
+            .header("connection","x-private-hop").header("x-private-hop","PRIVATE_HOP")
+            .header("anthropic-beta","context-management-2025-06-27")
+            .json(&json!({"model":"claude-sonnet-4-6","max_tokens":8,"messages":[{"role":"user","content":"question"}],"metadata":{"user_id":json!({"device_id":"a".repeat(64),"account_uuid":"wrong-account","session_id":"wrong-session","private":"marker"}).to_string()}}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+    }
+    let captures = fixture.mock.headers.lock();
+    let calls = fixture.mock.calls.lock();
+    for ((account, headers, _), (_, body, _)) in captures.iter().zip(calls.iter()) {
+        for name in ["via", "x-gateway-key", "x-auth-request-email", "cf-connecting-ip", "x-private-hop"] {
+            assert!(headers.get(name).is_none(), "{name}");
+        }
+        assert!(headers.get("anthropic-beta").unwrap().to_str().unwrap().contains("context-management-2025-06-27"));
+        let user: Value = serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(user["account_uuid"], format!("account-{account}"));
+        assert_eq!(
+            user["session_id"].as_str().unwrap(),
+            headers.get("x-claude-code-session-id").unwrap().to_str().unwrap()
+        );
+        assert_ne!(user["device_id"], "a".repeat(64));
+        assert!(user.get("private").is_none());
+    }
+    assert_ne!(captures[0].1.get("x-claude-code-session-id"), captures[1].1.get("x-claude-code-session-id"));
+}
+
+#[tokio::test]
+async fn identity_learning_requires_authenticated_opt_in_and_management_reset_is_protected() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.named_clients = vec![crate::config::NamedClient {
+        id: "trusted-laptop".into(),
+        label: "Laptop".into(),
+        key: "trusted-key".into(),
+        trust_client_identity: true,
+        ..Default::default()
+    }];
+    cfg.management_key = "fake-management-key".into();
+    fixture.app.set_config(cfg);
+    let request = |key: &str| {
+        reqwest::Client::new()
+            .post(format!("{}/v1/responses", fixture.proxy.url))
+            .bearer_auth(key)
+            .header("x-fusebox-usage-client", "trusted-laptop")
+            .header("user-agent", crate::upstream::CC_USER_AGENT)
+            .header("x-stainless-package-version", "0.128.0")
+            .header("x-stainless-os", "Linux")
+            .header("x-stainless-arch", "x64")
+            .header("x-stainless-runtime", "node")
+            .header("x-stainless-runtime-version", "v26.3.0")
+            .json(&prompt())
+    };
+    crate::clients::reset();
+    assert_eq!(request("client-one").send().await.unwrap().status(), StatusCode::OK);
+    assert!(crate::clients::seen().is_empty(), "shared key cannot spoof trusted client identity");
+    assert_eq!(request("trusted-key").send().await.unwrap().status(), StatusCode::OK);
+    assert!(!crate::clients::seen().is_empty());
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/client-identities/reset", fixture.proxy.url);
+    assert_eq!(client.post(&url).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert!(!crate::clients::seen().is_empty());
+    assert_eq!(client.post(&url).bearer_auth("fake-management-key").send().await.unwrap().status(), StatusCode::OK);
+    assert!(crate::clients::seen().is_empty());
+}
+
+#[tokio::test]
+async fn oauth_error_markers_do_not_escape_to_downstream_status_or_request_logs() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let provider = serve(axum::Router::new().route("/token",post(||async {
+        (StatusCode::BAD_REQUEST,Json(json!({"error":"invalid_grant","error_description":"FAKE_CREDENTIAL_MARKER","refresh_token":"FAKE_CREDENTIAL_MARKER"})))
+    }))).await;
+    std::fs::write(fixture.directory.join("xai.json"),json!({"type":"xai","access_token":"FAKE_ACCESS","refresh_token":"FAKE_REFRESH","expired":"2000-01-01T00:00:00Z","token_endpoint":format!("{}/token",provider.url),"base_url":provider.url}).to_string()).unwrap();
+    fixture.app.reload_accounts();
+    let response = fixture.request(Some("refresh-error"), json!({"model":"grok-4.20","input":"hello"})).await;
+    assert_eq!(response.0, 401, "{}", response.1);
+    let accounts = reqwest::get(format!("{}/api/accounts", fixture.proxy.url)).await.unwrap().text().await.unwrap();
+    let logs = serde_json::to_string(&fixture.logs(1).await).unwrap();
+    for text in [response.1.to_string(), accounts, logs] {
+        for marker in ["FAKE_CREDENTIAL_MARKER", "FAKE_REFRESH", "FAKE_ACCESS"] {
+            assert!(!text.contains(marker), "{text}");
         }
     }
 }

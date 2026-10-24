@@ -304,6 +304,8 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/activity", get(account_activity))
         .route("/accounts/{id}/priority", post(set_priority))
         .route("/clients/usage", get(client_usage))
+        .route("/client-identities", get(client_identities))
+        .route("/client-identities/reset", post(reset_client_identities))
         .route("/playground", post(crate::server::playground))
         .route("/routes", get(routes))
         .route("/keys", post(add_key))
@@ -319,6 +321,17 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/login/{target}/code", post(login_code))
         .route("/live", get(live))
         .layer(middleware::from_fn_with_state(app, auth))
+}
+
+async fn client_identities() -> Json<Value> {
+    Json(crate::clients::snapshot())
+}
+
+async fn reset_client_identities(State(app): State<Arc<App>>) -> Json<Value> {
+    crate::clients::reset();
+    app.models.save_clients();
+    app.broadcast("client-identities", Value::Null);
+    Json(crate::clients::snapshot())
 }
 
 pub(crate) async fn auth(
