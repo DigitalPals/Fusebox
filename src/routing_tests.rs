@@ -132,11 +132,12 @@ async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"message":"temporary detour overload"}})))
             .into_response();
     }
-    if account == "a" && ((1..=3).contains(&mode) || mode == 6) {
+    if account == "a" && ((1..=3).contains(&mode) || mode == 6 || mode == 8) {
         let (status, code) = match mode {
             1 => (429, "usage_limit_reached"),
             2 => (429, "rate_limit_exceeded"),
             6 => (401, "invalid_api_key"),
+            8 => (529, "overloaded_error"),
             _ => (503, "server_is_overloaded"),
         };
         return (
@@ -148,6 +149,10 @@ async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
     }
     if account == "a" && mode == 4 {
         let event = json!({"type":"response.failed", "response":{"error":{"code":"usage_limit_reached", "message":"mock error"}}});
+        return ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response();
+    }
+    if account == "a" && mode == 9 {
+        let event = json!({"type":"response.failed", "response":{"error":{"code":"server_is_overloaded", "message":"mock overloaded"}}});
         return ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response();
     }
     if body["messages"].is_array() {
@@ -753,6 +758,33 @@ async fn temporary_failures_detour_and_the_session_returns_to_its_subscription()
         // ...and the session goes back to its own once that recovers.
         fixture.recover();
         assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
+    }
+}
+
+#[tokio::test]
+async fn overload_errors_expire_without_another_inference_over_http_and_streams() {
+    for (mode, expected_status) in [(8, 529), (9, 503)] {
+        let fixture = Fixture::new(Routing::RoundRobin, false).await;
+        assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
+        let account = fixture.app.pool.all().into_iter().find(|a| a.label == "a").unwrap();
+        fixture.mock.mode.store(mode, Ordering::Relaxed);
+        let (status, body) = fixture.request(Some("task"), prompt()).await;
+        assert_eq!(status, 200);
+        assert_eq!(answer(&body), "b", "another account answers the failed request");
+        let snapshot = account.snapshot();
+        assert!(snapshot["last_error"].as_str().unwrap().starts_with(&format!("{expected_status}:")));
+        let until = chrono::DateTime::parse_from_rfc3339(snapshot["last_error_until"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now = chrono::Utc::now();
+        assert!(until > now && until <= now + chrono::Duration::seconds(30));
+        let calls = fixture.mock.calls.lock().len();
+        assert_eq!(account.state.lock().last_error(until), None, "no successful inference is required");
+        assert_eq!(fixture.mock.calls.lock().len(), calls);
+        fixture.mock.mode.store(0, Ordering::Relaxed);
+        assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a", "the session keeps its account");
+        assert_eq!(account.snapshot()["last_error"], Value::Null);
+        assert_eq!(account.snapshot()["last_error_until"], Value::Null);
     }
 }
 

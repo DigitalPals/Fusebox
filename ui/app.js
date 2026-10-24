@@ -4019,7 +4019,7 @@ function setTimerText(el, text) {
 }
 function tickTimers() {
   const now = Date.now();
-  let expired = false;
+  let expired = S.accounts.some((a) => a.last_error_until && Date.parse(a.last_error_until) <= now);
   let quota = false;
   for (const el of document.querySelectorAll(TIMED)) {
     const d = el.dataset;

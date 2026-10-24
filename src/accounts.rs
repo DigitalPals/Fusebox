@@ -336,6 +336,8 @@ impl Counters {
 #[derive(Debug, Clone)]
 struct AccountError {
     message: String,
+    /// Temporary upstream failures and pauses stop being current at this deadline.
+    until: Option<DateTime<Utc>>,
     /// Set when the problem is only a pause (spent quota or a rate limit): it ends
     /// with that pause instead of waiting for a request to succeed.
     pause: Option<ErrorPause>,
@@ -346,7 +348,6 @@ struct ErrorPause {
     quota: bool,
     /// The paused model, as the cooldown is keyed ("*" = every model).
     model: String,
-    until: DateTime<Utc>,
 }
 
 #[derive(Debug, Default)]
@@ -390,15 +391,20 @@ impl AccountState {
         self.quota.set(windows, plan);
     }
 
-    /// The latest problem, unless it was a pause that has ended since.
+    /// The latest problem, unless its temporary-error or pause deadline has passed.
     pub fn last_error(&self, now: DateTime<Utc>) -> Option<&str> {
         let error = self.last_error.as_ref()?;
-        error.pause.as_ref().is_none_or(|p| p.until > now).then_some(error.message.as_str())
+        error.until.is_none_or(|until| until > now).then_some(error.message.as_str())
     }
 
     /// Records a problem that stays until a request succeeds or the account is reset.
     pub fn set_error(&mut self, message: impl Into<String>) {
-        self.last_error = Some(AccountError { message: message.into(), pause: None });
+        self.last_error = Some(AccountError { message: message.into(), until: None, pause: None });
+    }
+
+    /// A recent upstream failure, without requiring another inference to clear it.
+    pub fn set_temporary_error(&mut self, message: impl Into<String>, until: DateTime<Utc>) {
+        self.last_error = Some(AccountError { message: message.into(), until: Some(until), pause: None });
     }
 
     pub fn clear_error(&mut self) {
@@ -406,8 +412,8 @@ impl AccountState {
     }
 
     fn pause_error(&mut self, message: &str, quota: bool, model: &str, until: DateTime<Utc>) {
-        let pause = Some(ErrorPause { quota, model: model.to_string(), until });
-        self.last_error = Some(AccountError { message: message.to_string(), pause });
+        let pause = Some(ErrorPause { quota, model: model.to_string() });
+        self.last_error = Some(AccountError { message: message.to_string(), until: Some(until), pause });
     }
 
     /// Ends a spent-quota error early once nothing keeps that model paused for quota,
@@ -750,6 +756,7 @@ impl Account {
             "cooldown_kinds": kinds,
             "quota_reset_unknown": st.quota.reset_unknown(""),
             "last_error": st.last_error(now),
+            "last_error_until": st.last_error.as_ref().and_then(|e| e.until).filter(|t| *t > now),
             "last_used": st.last_used.map(|t| t.to_rfc3339()),
             "expires_at": expires,
             "counters": st.counters,
@@ -1809,6 +1816,16 @@ mod tests {
         acct.rate_limit(model, now + chrono::Duration::seconds(15), "429: slow down");
         assert_eq!(at(now).as_deref(), Some("429: slow down"));
         assert_eq!(at(now + chrono::Duration::seconds(15)), None);
+        let until = now + chrono::Duration::seconds(30);
+        let cooldowns = acct.snapshot()["cooldowns"].clone();
+        acct.state.lock().set_temporary_error("529: Overloaded", until);
+        assert_eq!(at(now).as_deref(), Some("529: Overloaded"));
+        assert_eq!(acct.snapshot()["last_error_until"], serde_json::json!(until));
+        assert_eq!(at(until), None, "an idle account does not need another inference to clear an overload");
+        assert_eq!(acct.snapshot()["cooldowns"], cooldowns, "the error deadline does not change routing pauses");
+        acct.state.lock().set_temporary_error("529: Overloaded", now - chrono::Duration::seconds(1));
+        assert_eq!(acct.snapshot()["last_error"], Value::Null);
+        assert_eq!(acct.snapshot()["last_error_until"], Value::Null);
         // Problems that may need attention stay until a request succeeds.
         acct.cool(None, now + chrono::Duration::minutes(10), "403: forbidden");
         assert_eq!(at(later).as_deref(), Some("403: forbidden"));

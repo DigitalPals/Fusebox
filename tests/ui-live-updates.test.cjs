@@ -123,3 +123,26 @@ test('the model list hears of a request only when a model starts or stops failin
   d.request({ model: 'm', status: 200 });
   assert.equal(marks().get('m'), '3\u0000502\u0000bad', 'a success changes nothing');
 });
+
+test('an idle account refreshes when its temporary error expires', () => {
+  let refreshes = 0;
+  const now = Date.now();
+  const account = { last_error: '529: Overloaded', last_error_until: new Date(now + 30_000).toISOString() };
+  const context = {
+    S: { accounts: [account] },
+    Date: class extends Date { static now() { return now; } },
+    document: { querySelectorAll: () => [] },
+    refreshAccounts: () => { refreshes++; },
+    refreshViews() {}, syncResetModal() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(section('const TIMED =', 'setInterval(() => { if (!document.hidden) tickTimers();'), context);
+  context.tickTimers();
+  assert.equal(refreshes, 0, 'a recent error stays visible');
+  account.last_error_until = new Date(now).toISOString();
+  context.tickTimers();
+  assert.equal(refreshes, 1, 'expiry is checked without any countdown element or request');
+  account.last_error_until = null;
+  context.tickTimers();
+  assert.equal(refreshes, 1, 'a permanent error does not cause polling');
+});

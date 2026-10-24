@@ -1535,7 +1535,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 if status == 429 {
                     acct.rate_limit(&model, Utc::now() + Duration::seconds(15), &format!("429: {msg}"));
                 } else {
-                    acct.state.lock().set_error(format!("{status}: {msg}"));
+                    acct.state
+                        .lock()
+                        .set_temporary_error(format!("{status}: {msg}"), Utc::now() + Duration::seconds(30));
                 }
                 app.broadcast("accounts", Value::Null);
                 tried.push(acct.id.clone());
@@ -1609,6 +1611,10 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                         mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
                     } else if status == 429 {
                         acct.rate_limit(&model, Utc::now() + Duration::seconds(30), &format!("429: {message}"));
+                    } else if matches!(status, 500 | 502 | 503 | 529) {
+                        acct.state
+                            .lock()
+                            .set_temporary_error(format!("{status}: {message}"), Utc::now() + Duration::seconds(30));
                     } else {
                         acct.state.lock().set_error(format!("{status}: {message}"));
                     }
