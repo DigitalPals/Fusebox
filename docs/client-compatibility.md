@@ -15,12 +15,14 @@ review queue, not an automated claim that an unreviewed release is incompatible.
 
 ## 2026-10-24 identity hardening
 
-The current working tree addresses the identity boundaries described in the
+Fusebox 0.9.0 addresses the identity boundaries described in the
 [dated Claude/Codex audit](../notes/claude-codex-identity-audit-2026-10-24.md).
 This entry documents implementation behavior; the
 [verification report](../notes/provider-identity-verification-2026-10-24.md)
-records local checks and latency measurements. Production has not been deployed.
-The audit remains a historical record.
+records local checks and latency measurements. The
+[production deployment record](../notes/provider-identity-production-2026-10-24.md)
+records the subsequent deployment and real-traffic checks. The audit remains a
+historical record.
 
 - Native recognition preserves supported application attribution, including
   Codex Desktop and custom app-server identities, with validated version syntax
