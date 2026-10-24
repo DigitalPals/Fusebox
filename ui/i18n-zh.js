@@ -1122,16 +1122,13 @@
       [/^(.+) weighted by plan price, (.+) equally$/, (m, a, b) => `${a} 按套餐价格加权，${b} 权重相同`],
       [/^(.+) quota (used|remaining)$/, (m, w, mode) => `${T(w)}额度${mode === 'used' ? '已用' : '剩余'}`],
       [/^(.+): not reported$/, (m, w) => `${T(w)}：未报告`],
-      [/^(5-hour|Weekly|Daily|Week|Day) window resets (.+?)(?: · using ([\d.]+)% an hour)?$/, (m, w, t, r) => `${WINDOW[w]}窗口将于 ${full(t)} 重置${r ? ` · 每小时用掉 ${r}%` : ''}`],
-      [/^At this pace(?: \(using ([\d.]+)% an hour\))? the (.+) window runs out (.+), before it resets (.+)$/, (m, r, w, out, at) => `按当前速度${r ? `（每小时 ${r}%）` : ''}，${WINDOW[w] || w}窗口将在 ${full(out)} 用完，早于 ${full(at)} 的重置`],
-      [/^at this pace, used up (.+)$/, (m, t) => `按当前速度，${day(t)} 用完`],
+      [/^(5-hour|Weekly|Daily|Week|Day) window resets (.+)$/, (m, w, t) => `${WINDOW[w]}窗口将于 ${full(t)} 重置`],
       [/^(Resets|Back) (.+) · in$/, (m, w, t) => `${day(t)} ${w === 'Back' ? '恢复' : '重置'} · 还有`],
       [/^Resets (.+)$/, (m, t) => `${day(t)} 重置`],
       [/^[Bb]ack ((?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) )?\d\d:\d\d)( ·)?$/, (m, t, dot) => `${day(t)} 恢复${dot || ''}`],
       [/^resets (.+)$/, (m, t) => `${full(t)} 重置`],
       [/^(.+), (.+?): ([\d.]+)% (used|left), resets (.+)$/, (m, a, p, n, mode, t) => `${a}，${p}：${mode === 'used' ? '已用' : '剩余'} ${n}%，${full(t)} 重置`],
       [/^Next: (.+) ((?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) )?\d\d:\d\d)$/, (m, a, t) => `下一个：${a} ${day(t)}`],
-      [/^out ((?:\d+[dhms] ?)+)$/, '$1 后用完'],
       [/^token valid (.+)$/, '令牌有效期 $1'],
       [/^valid (.+)$/, '有效期 $1'],
       [/^Updated (\d\d:\d\d)$/, '$1 更新'],
@@ -1217,8 +1214,6 @@
       [/^([\d,.]+ MB) left where the usage database is; usage recording stops when the disk is full\.$/, '用量数据库所在磁盘仅剩 $1；磁盘写满后将停止记录用量。'],
       [/^It is ([\d,.]+ MB) and grows about ([\d,.]+ MB) a day\. Lower usage\.retention-days, or raise usage\.warn-database-mb\.$/, '数据库已有 $1，每天约增长 $2。请调低 usage.retention-days，或调高 usage.warn-database-mb。'],
     ],
-    // The reset column says how long until a window runs out: "out 2h".
-    scoped: [['.rst', { out: '距用完' }]],
     sentenceJoin: '',
   };
 })();

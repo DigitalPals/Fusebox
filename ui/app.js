@@ -966,26 +966,6 @@ function windowElapsed(w, now = Date.now()) {
   return left >= 0 && left <= len ? 1 - left / len : null;
 }
 
-// Percent of the window used per hour so far, once a little of the window has passed.
-function burnRate(w, now = Date.now()) {
-  const q = quotaOf(w, now);
-  const t = windowElapsed(w, now);
-  if (!q || t == null || t < 0.02) return null;
-  return q.used / ((t * windowSeconds(w)) / 3600);
-}
-
-// When the window runs out at the pace used so far, if that is before it resets.
-// Before a quarter of the window has passed, or with little used, the pace is too
-// unsettled to say.
-function runsOutAt(w, now = Date.now()) {
-  const q = quotaOf(w, now);
-  const t = windowElapsed(w, now);
-  if (!q || q.exhausted || t == null || t < 0.25 || q.used < 20) return null;
-  const perMs = q.used / (t * windowSeconds(w) * 1000);
-  const at = now + (100 - q.used) / perMs;
-  return at < Date.parse(w.resets_at) ? at : null;
-}
-
 // A usage-limit cooldown lasting until the window renews means the window is used up,
 // even while its meter still shows a sliver left.
 function windowSpent(a, w) {
@@ -1016,22 +996,13 @@ function pctHTML(w) {
   return `<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span>`;
 }
 
-// One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover. When the
-// pace so far would use the window up before it resets, the row says when instead,
-// unless it is already used up: then the reset is when the account is back.
+// One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover.
 function meterRowHTML(a, short) {
   const w = windowOf(a, short);
   const label = windowLabel(w, short);
-  const out = w && !windowSpent(a, w) && runsOutAt(w);
-  const rate = w && burnRate(w);
-  const pace = rate == null ? '' : ` · using ${rate < 1 ? rate.toFixed(1) : Math.round(rate)}% an hour`;
-  let reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
-  let title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}${pace}"` : '';
-  if (out) {
-    reset = `out ${liveLeft(new Date(out).toISOString(), true)}`;
-    title = ` title="At this pace${pace ? ` (${esc(pace.slice(3))})` : ''} the ${esc(windowTitle(w).toLowerCase())} window runs out ${esc(fullResetTime(new Date(out).toISOString()))}, before it resets ${esc(fullResetTime(w.resets_at))}"`;
-  }
-  return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst${out ? ' out' : ''}"${title}>${reset}</span></div>`;
+  const reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
+  const title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
+  return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst"${title}>${reset}</span></div>`;
 }
 const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : `${meterRowHTML(a, true)}${meterRowHTML(a, false)}`}</div>`;
 
@@ -1086,8 +1057,6 @@ function windowBlockHTML(a, w, title, size) {
   let note = 'Not reported yet';
   if (w && w.resets_at) note = `${q && (q.exhausted || spent) ? 'Back' : 'Resets'} ${esc(when(w.resets_at))} · in ${liveLeft(w.resets_at)}`;
   else if (q) note = 'No reset time reported';
-  const out = w && !spent && runsOutAt(w);
-  if (out) note += ` · <span class="warn">at this pace, used up ${esc(when(new Date(out).toISOString()))}</span>`;
   const big = size === 'xl';
   return `<div class="window"><div class="window-top"><span>${title}${big ? ' window' : ''}</span>${q ? `<span class="pct ${q.cls}${big ? ' big' : ''}" style="width:auto">${quotaPercent(q[S.quotaDisplay])}</span>` : '<span class="dim">–</span>'}</div>
     ${segsHTML(w, `${title} window`, size === 'xl' ? 'xl' : 'lg')}<span class="note">${note}</span>${usedByHTML(a, w)}</div>`;

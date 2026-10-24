@@ -392,7 +392,6 @@ h1, h2, h3, p { margin: 0; }
 .segs { position: relative; display: flex; gap: 2px; flex: 1; min-width: 60px; max-width: 180px; height: 9px; padding: 1px; border-radius: 2px; }
 /* Even pace: where usage would be now if spread evenly over the window. */
 .segs .pace { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--fg-3); pointer-events: none; }
-.rst.out { color: var(--warn); }
 .segs i { flex: 1; border-radius: 1px; background: var(--line); }
 .segs i.on { background: var(--meter); }
 .segs.warn i.on { background: var(--warn); }

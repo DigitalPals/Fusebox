@@ -39,8 +39,8 @@ test('exact strings, patterns and dates translate', () => {
   assert.equal(tr('Copy gpt-6-astra'), '复制 gpt-6-astra');
   assert.equal(tr('Remove API key 2'), '移除 API 密钥 2');
   assert.equal(tr('Resets Thu 12:39 · in'), '周四 12:39 重置 · 还有');
-  assert.equal(tr('5-hour window resets Wednesday, 14 October 2026 at 07:39:18 CEST · using 12% an hour'),
-    '5 小时窗口将于 2026年10月14日 星期三 07:39:18 CEST 重置 · 每小时用掉 12%');
+  assert.equal(tr('5-hour window resets Wednesday, 14 October 2026 at 07:39:18 CEST'),
+    '5 小时窗口将于 2026年10月14日 星期三 07:39:18 CEST 重置');
   assert.equal(tr('Thu Oct 8 – Wed Oct 14'), '10月8日 周四 – 10月14日 周三');
   assert.equal(tr('Fri Oct 9: Unpriced'), '10月9日 周五：未定价');
   assert.equal(tr('Restart Fusebox to apply changes to port, log format.'), '重启 Fusebox 后，对端口、日志格式的修改才会生效。');

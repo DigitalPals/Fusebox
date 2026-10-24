@@ -23,7 +23,7 @@ function load(extra = {}) {
   };
   vm.createContext(context);
   const helpers = [piece('const esc = (v) =>'), piece('function fmt(n) {'), piece('const plural = (n, word'), piece('function quotaOf(w, now'),
-    piece('function windowSeconds(w) {'), piece('function windowElapsed(w, now'), piece('function burnRate(w, now'), piece('function runsOutAt(w, now')].join('\n');
+    piece('function windowSeconds(w) {'), piece('function windowElapsed(w, now')].join('\n');
   vm.runInContext(`${helpers}\n${config}`, context);
   // Values cross back through JSON, so they compare like this realm's own.
   return (code) => {
@@ -71,21 +71,12 @@ test('client limits read as one line, with what was used when it is known', () =
   assert.equal(run(`namedLimitsText({ id: 'x' })`), '');
 });
 
-test('the pace says when a window runs out only when that is before it resets', () => {
+test('the pace mark follows elapsed time for known usage windows', () => {
   const run = load();
   const now = Date.parse('2026-10-13T12:00:00Z');
   const resetsIn = (h) => new Date(now + h * 3600e3).toISOString();
-  // Halfway through 5 hours with 80% used: out in about 37 minutes, before the reset.
   const fast = { name: '5h', used: 80, resets_at: resetsIn(2.5) };
   assert.equal(run(`windowElapsed(${JSON.stringify(fast)}, ${now})`), 0.5);
-  const out = run(`runsOutAt(${JSON.stringify(fast)}, ${now})`);
-  assert.equal(Math.round((out - now) / 60e3), 38);
-  // Slower than even pace: no warning. Too early, too little, or used up: nothing to say.
-  assert.equal(run(`runsOutAt(${JSON.stringify({ ...fast, used: 40 })}, ${now})`), null);
-  assert.equal(run(`runsOutAt(${JSON.stringify({ name: '5h', used: 30, resets_at: resetsIn(4.9) })}, ${now})`), null);
-  assert.equal(run(`runsOutAt(${JSON.stringify({ ...fast, used: 100 })}, ${now})`), null);
   assert.equal(run(`windowElapsed(${JSON.stringify({ name: 'week', used: 10, resets_at: resetsIn(84) })}, ${now})`), 0.5);
   assert.equal(run(`windowElapsed(${JSON.stringify({ name: 'month', used: 10, resets_at: resetsIn(1) })}, ${now})`), null);
-  // 80% in two and a half hours is 32% an hour.
-  assert.equal(run(`burnRate(${JSON.stringify(fast)}, ${now})`), 32);
 });

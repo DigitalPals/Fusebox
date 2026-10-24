@@ -4,10 +4,8 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-// An account's meter rows and window blocks, run from their own sources. A row normally
-// counts down to its reset and says when the window runs out instead if the pace so far
-// would use it up first; once a usage-limit cooldown lasts until the reset, the window is
-// used up and the reset is when the account is back.
+// An account's meter rows and window blocks, run from their own sources. Rows always
+// count down to the provider's reset, including when usage would run out sooner.
 const app = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
 function piece(start) {
   const at = app.indexOf(start);
@@ -27,7 +25,7 @@ function load() {
     piece('const hm ='), piece('const weekday ='), piece('const fullResetTime ='), piece('const when ='), piece('const liveLeft ='),
     piece('function quotaOf(w'), piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('function windowOf(a, short) {'), piece('const windowLabel ='), piece('const windowTitle ='), piece('function windowSeconds(w) {'),
-    piece('function windowElapsed(w'), piece('function burnRate(w'), piece('function runsOutAt(w'), piece('function windowSpent(a, w) {'),
+    piece('function windowElapsed(w'), piece('function windowSpent(a, w) {'),
     piece('const segsHTML ='), piece('function meterHTML(q'), piece('function pctHTML(w) {'), piece('function meterRowHTML(a, short) {'),
     piece('function windowBlockHTML(a, w, title, size) {'),
   ].join('\n'), context);
@@ -41,12 +39,26 @@ const account = (cooldowns = {}, kinds = {}) => ({
 const row = (run, a, short = true) => run(`meterRowHTML(${JSON.stringify(a)}, ${short})`);
 const block = (run, a) => run(`(() => { const a = ${JSON.stringify(a)}; return windowBlockHTML(a, windowOf(a, true), '5-hour', 'lg'); })()`);
 
-test('a window the pace would use up says when it runs out', () => {
+test('windows always show their reset countdown even when usage would run out sooner', () => {
   const run = load();
-  const html = row(run, account());
-  assert.match(html, /class="rst out"/);
-  assert.match(html, />out <span[^>]*>1m<\/span>/);
-  assert.match(block(run, account()), /^(?:(?!at this pace).)*Resets .*at this pace, used up/s);
+  for (const mode of ['remaining', 'used']) {
+    run(`S.quotaDisplay = '${mode}'`);
+    for (const used of [0, 50, 99, 100]) {
+      const a = account();
+      a.quota.windows[0].used = used;
+      a.quota.windows[1].used = used;
+      for (const short of [true, false]) {
+        const reset = a.quota.windows[short ? 0 : 1].resets_at;
+        const html = row(run, a, short);
+        assert.match(html, /class="rst" title="(?:5-hour|Weekly) window resets [^"]+">↺ /);
+        assert.ok(html.includes(`data-until="${reset}" data-countdown="compact"`));
+        assert.doesNotMatch(html, /out|using .*% an hour/);
+      }
+      const note = block(run, a);
+      assert.match(note, /(?:Resets|Back) .* · in <span[^>]*>2h 58m<\/span>/);
+      assert.doesNotMatch(note, /at this pace/);
+    }
+  }
 });
 
 test('a usage-limit cooldown until the reset shows the reset, not the projection', () => {
@@ -61,12 +73,12 @@ test('a usage-limit cooldown until the reset shows the reset, not the projection
   assert.match(row(run, cooling, false), /↺ <span[^>]*>5d 2h<\/span>/, 'the weekly row is unchanged');
 });
 
-test('a cooldown that ends before the reset, or is not about usage limits, keeps the projection', () => {
+test('cooldown scope does not change the reset countdown', () => {
   const run = load();
   const early = account({ 'claude-opus-5-5': '2026-10-23T14:00:00Z' }, { 'claude-opus-5-5': 'quota' });
-  assert.match(row(run, early), /class="rst out"/, 'a quota cooldown that lifts before the window renews');
+  assert.match(row(run, early), /class="rst"[^>]*>↺ <span[^>]*>2h 58m<\/span>/);
   const limited = account({ 'claude-opus-5-5': RESET }, { 'claude-opus-5-5': 'rate_limit' });
-  assert.match(row(run, limited), /class="rst out"/, 'a rate limit says nothing about the window');
+  assert.match(row(run, limited), /class="rst"[^>]*>↺ <span[^>]*>2h 58m<\/span>/);
   const weekly = account({ 'claude-opus-5-5': '2026-10-28T16:00:00Z' }, { 'claude-opus-5-5': 'quota' });
   assert.doesNotMatch(row(run, weekly), /out/, 'a weekly limit used up covers the 5-hour window too');
 });
