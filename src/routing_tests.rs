@@ -24,7 +24,7 @@ use crate::state::{App, RequestLog};
 struct Mock {
     mode: AtomicU8,
     /// Upcoming calls on account a that meet OpenAI's capacity shortage.
-    capacity: AtomicU64,
+    capacity: Mutex<u64>,
     sequence: AtomicU64,
     calls: Mutex<Vec<(String, Value, &'static str)>>,
     headers: Mutex<Vec<(String, HeaderMap, &'static str)>>,
@@ -132,8 +132,13 @@ async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
     mock.headers.lock().push((account.clone(), headers.clone(), "http"));
     mock.calls.lock().push((account.clone(), body.clone(), "http"));
     let mode = mock.mode.load(Ordering::Relaxed);
-    if account == "a" && mock.capacity.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()
-    {
+    let at_capacity = account == "a" && {
+        let mut left = mock.capacity.lock();
+        let met = *left > 0;
+        *left = left.saturating_sub(1);
+        met
+    };
+    if at_capacity {
         let error = json!({"error":{"type":"server_error", "message":"Codex is at capacity, please try again later"}});
         return (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response();
     }
@@ -803,12 +808,12 @@ async fn codex_capacity_errors_retry_the_subscription_without_pausing_its_sessio
     assert_eq!(answer(&fixture.request(Some("working"), prompt()).await.1), "a");
     let account = fixture.app.pool.all().into_iter().next().unwrap();
     // A brief shortage is absorbed by trying the same subscription again.
-    fixture.mock.capacity.store(1, Ordering::Relaxed);
+    *fixture.mock.capacity.lock() = 1;
     let (status, body) = fixture.request(Some("new-task"), prompt()).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(answer(&body), "a");
     // A lasting one fails only the request that met it, with OpenAI's own error...
-    fixture.mock.capacity.store(3, Ordering::Relaxed);
+    *fixture.mock.capacity.lock() = 3;
     let calls = fixture.mock.calls.lock().len();
     let (status, body) = fixture.request(Some("another-task"), prompt()).await;
     assert_eq!(status, 429, "{body}");
@@ -908,7 +913,10 @@ async fn connection_errors_expire_without_another_inference() {
             let attempts = if accepted { 1 } else { 2 };
             assert_eq!(log.attempts, attempts + u32::from(failover));
             if !failover {
-                assert_eq!(log.failure_kind, Some("upstream_connect"));
+                // A bound port that isn't listening refuses on Linux; macOS drops the SYN.
+                let refused =
+                    if !accepted && cfg!(target_os = "macos") { "upstream_timeout" } else { "upstream_connect" };
+                assert_eq!(log.failure_kind, Some(refused));
                 assert_eq!(log.error.as_deref(), Some(error));
             }
             assert_eq!(calls.load(Ordering::Relaxed), u64::from(accepted));
