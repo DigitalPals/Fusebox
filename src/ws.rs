@@ -855,6 +855,12 @@ async fn native_turn(
                 close_upstream(&mut up, &sess.connection_id, "auth_rejected").await;
                 tracker.cancel();
                 return Native::Fallback("upstream_closed");
+            } else if proxy::at_capacity(status, &text) {
+                // OpenAI is short of servers: shown, but other sessions keep the account.
+                acct.state
+                    .lock()
+                    .set_temporary_error(format!("429: {msg}"), chrono::Utc::now() + chrono::Duration::seconds(30));
+                app.broadcast("accounts", Value::Null);
             } else if status == 429 {
                 // A plain rate limit: step aside briefly. Sessions detour meanwhile.
                 acct.rate_limit(&model, chrono::Utc::now() + chrono::Duration::seconds(60), &format!("429: {msg}"));

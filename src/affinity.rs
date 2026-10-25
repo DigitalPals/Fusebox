@@ -477,6 +477,22 @@ fn selection(pick: Pick, model: &str) -> Selection {
     }
 }
 
+/// When a session's own account is back, if only a pause keeps the session away from it.
+/// Accounts the caller ruled out (already tried, wrong residency) don't count.
+fn paused_until(acct: &Account, model: &str, exclude: &[String]) -> Option<chrono::DateTime<Utc>> {
+    (!exclude.contains(&acct.id)).then(|| acct.cooling_until(model)).flatten()
+}
+
+/// A session leaving its paused account with no other account free waits for that
+/// account (a 429 with the wait), rather than hearing that nothing serves the model.
+fn or_paused(pick: Pick, paused: Option<chrono::DateTime<Utc>>) -> Pick {
+    match (pick, paused) {
+        (Pick::None, Some(until)) => Pick::Cooling(until),
+        (Pick::Cooling(other), Some(until)) => Pick::Cooling(other.min(until)),
+        (pick, _) => pick,
+    }
+}
+
 impl Sessions {
     pub fn hold(self: &Arc<Self>, session: &str, idle: u64) -> Lease {
         let session = digest(&["owner", session]);
@@ -610,6 +626,7 @@ impl Sessions {
         let mut excluded = exclude.to_vec();
         // Why an existing assignment has to move, if it does.
         let mut moving: Option<&'static str> = None;
+        let mut paused = None;
         if let Some(binding) = registry.bindings.get_mut(&key) {
             binding.last_seen = Utc::now().timestamp();
             let assigned = pool.get(&binding.account);
@@ -618,7 +635,10 @@ impl Sessions {
                 (None, _) => moving = Some("account_removed"),
                 (Some(acct), _) if acct.state.lock().disabled => moving = Some("account_disabled"),
                 (Some(_), None) => moving = Some("model_unavailable"),
-                (Some(acct), Some(_)) if acct.exhausted_until(model).is_some() => moving = Some("quota_exhausted"),
+                (Some(acct), Some(_)) if acct.exhausted_until(model).is_some() => {
+                    moving = Some("quota_exhausted");
+                    paused = paused_until(acct, model, exclude);
+                }
                 (Some(acct), Some(upstream)) => {
                     if acct.cooling_until(model).is_none() && !excluded.contains(&acct.id) {
                         registry.dirty = true;
@@ -634,11 +654,12 @@ impl Sessions {
                     // another account but keep the assignment, so the session comes back
                     // (and finds its prompt cache) once its subscription recovers.
                     let assigned_id = acct.id.clone();
+                    let paused = paused_until(acct, model, exclude);
                     if !excluded.contains(&assigned_id) {
                         excluded.push(assigned_id.clone());
                     }
-                    let (account, model) =
-                        selection(pool.pick(model, &excluded, cfg, None, only, &registry.account_load(cfg)), model)?;
+                    let pick = pool.pick(model, &excluded, cfg, None, only, &registry.account_load(cfg));
+                    let (account, model) = selection(or_paused(pick, paused), model)?;
                     return Ok(Selected {
                         account,
                         model,
@@ -681,18 +702,16 @@ impl Sessions {
                 }
             }
         }
-        let (acct, upstream) = selection(
-            pool.pick_with_context(
-                model,
-                &excluded,
-                cfg,
-                None,
-                only,
-                &registry.account_load(cfg),
-                context.filter(|_| moving.is_none() && exclude.is_empty()),
-            ),
+        let pick = pool.pick_with_context(
             model,
-        )?;
+            &excluded,
+            cfg,
+            None,
+            only,
+            &registry.account_load(cfg),
+            context.filter(|_| moving.is_none() && exclude.is_empty()),
+        );
+        let (acct, upstream) = selection(or_paused(pick, paused), model)?;
         let previous = registry.bindings.insert(
             key,
             Binding {
@@ -1311,6 +1330,59 @@ mod tests {
             assert!(second.previous_account.is_none());
             assert!(sessions.registry.lock().bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn a_session_whose_only_account_is_paused_waits_for_it() {
+        let cfg = Config {
+            codex_api_key: vec![KeyEntry { api_key: "only".into(), ..Default::default() }],
+            ..config(Routing::RoundRobin)
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let sessions = Sessions::memory();
+        let pick = |session: &str, exclude: &[String]| {
+            sessions.pick_with_reason(&pool, &cfg, "gpt-6.1-sol", Some(session), exclude, None)
+        };
+        let wait = |result: Result<Selected, (u16, String)>| match result {
+            Err((429, message)) => message.rsplit(' ').next().unwrap().trim_end_matches('s').parse::<i64>().unwrap(),
+            Err(other) => panic!("expected a wait, got {other:?}"),
+            Ok(selected) => panic!("expected a wait, got {}", selected.account.id),
+        };
+        let a = pick("task", &[]).unwrap().account;
+        // A rate limit: the session hears when its account is back, as a new session does,
+        // not that no account serves the model.
+        a.rate_limit("gpt-6.1-sol", Utc::now() + Duration::seconds(120), "429: slow down");
+        assert!((100..=120).contains(&wait(pick("task", &[]))));
+        assert!((100..=120).contains(&wait(pick("new-task", &[]))));
+        // An account this request already tried answers with its own upstream error instead.
+        assert!(matches!(pick("task", std::slice::from_ref(&a.id)), Err((404, _))));
+        a.state.lock().cooldowns.clear();
+        let back = pick("task", &[]).unwrap();
+        assert_eq!((back.account.id.as_str(), back.reason), (a.id.as_str(), "session_reused"));
+        // A spent quota waits for its reset and keeps the assignment too.
+        a.exhaust("gpt-6.1-sol", Utc::now() + Duration::hours(3), "spent");
+        assert!((10_700..=10_800).contains(&wait(pick("task", &[]))));
+        a.state.lock().quota_cooldowns.clear();
+        assert_eq!(pick("task", &[]).unwrap().reason, "session_reused");
+
+        // With other accounts paused too, the earliest return counts.
+        let cfg = config(Routing::RoundRobin);
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let sessions = Sessions::memory();
+        let assigned = sessions.pick_with_reason(&pool, &cfg, "gpt-6.1-sol", Some("task"), &[], None).unwrap().account;
+        let other = pool.all().into_iter().find(|a| a.id != assigned.id).unwrap();
+        assigned.rate_limit("gpt-6.1-sol", Utc::now() + Duration::seconds(60), "429: slow down");
+        other.rate_limit("gpt-6.1-sol", Utc::now() + Duration::seconds(300), "429: slow down");
+        assert!((40..=60).contains(&wait(sessions.pick_with_reason(
+            &pool,
+            &cfg,
+            "gpt-6.1-sol",
+            Some("task"),
+            &[],
+            None
+        ))));
     }
 
     #[test]

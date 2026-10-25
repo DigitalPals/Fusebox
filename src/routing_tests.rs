@@ -23,6 +23,8 @@ use crate::state::{App, RequestLog};
 #[derive(Default)]
 struct Mock {
     mode: AtomicU8,
+    /// Upcoming calls on account a that meet OpenAI's capacity shortage.
+    capacity: AtomicU64,
     sequence: AtomicU64,
     calls: Mutex<Vec<(String, Value, &'static str)>>,
     headers: Mutex<Vec<(String, HeaderMap, &'static str)>>,
@@ -130,6 +132,11 @@ async fn mock_http(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
     mock.headers.lock().push((account.clone(), headers.clone(), "http"));
     mock.calls.lock().push((account.clone(), body.clone(), "http"));
     let mode = mock.mode.load(Ordering::Relaxed);
+    if account == "a" && mock.capacity.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()
+    {
+        let error = json!({"error":{"type":"server_error", "message":"Codex is at capacity, please try again later"}});
+        return (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response();
+    }
     if mode == 7 && account != "a" && mock.calls.lock().iter().filter(|(a, _, _)| a == &account).count() == 1 {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"message":"temporary detour overload"}})))
             .into_response();
@@ -763,6 +770,58 @@ async fn temporary_failures_detour_and_the_session_returns_to_its_subscription()
         fixture.recover();
         assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
     }
+}
+
+#[tokio::test]
+async fn a_rate_limited_only_subscription_tells_its_sessions_when_to_return() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(1);
+    fixture.app.set_config(cfg);
+    assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
+    fixture.mock.mode.store(2, Ordering::Relaxed); // a rate limit for 120 seconds
+    assert_eq!(fixture.request(Some("new-task"), prompt()).await.0, 429);
+    let calls = fixture.mock.calls.lock().len();
+    // The session's own subscription is paused and there is no other: it is told to wait,
+    // which clients retry, instead of that no account serves the model.
+    let (status, body) = fixture.request(Some("task"), prompt()).await;
+    assert_eq!(status, 429, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("all accounts for gpt-6.1-sol are rate limited; next available in"), "{message}");
+    assert_eq!(fixture.mock.calls.lock().len(), calls, "a paused subscription is not called");
+    fixture.recover();
+    assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
+    assert_eq!(fixture.logs(4).await.pop().unwrap().routing_reason, Some("session_reused"));
+}
+
+#[tokio::test]
+async fn codex_capacity_errors_retry_the_subscription_without_pausing_its_sessions() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(1);
+    fixture.app.set_config(cfg);
+    assert_eq!(answer(&fixture.request(Some("working"), prompt()).await.1), "a");
+    let account = fixture.app.pool.all().into_iter().next().unwrap();
+    // A brief shortage is absorbed by trying the same subscription again.
+    fixture.mock.capacity.store(1, Ordering::Relaxed);
+    let (status, body) = fixture.request(Some("new-task"), prompt()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(answer(&body), "a");
+    // A lasting one fails only the request that met it, with OpenAI's own error...
+    fixture.mock.capacity.store(3, Ordering::Relaxed);
+    let calls = fixture.mock.calls.lock().len();
+    let (status, body) = fixture.request(Some("another-task"), prompt()).await;
+    assert_eq!(status, 429, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("at capacity"), "{body}");
+    assert_eq!(fixture.mock.calls.lock().len() - calls, 3, "one request and two retries");
+    // ...and pauses nothing, so the subscription's other sessions carry on.
+    let snapshot = account.snapshot();
+    assert_eq!(snapshot["cooldowns"], json!({}), "a capacity shortage does not pause routing");
+    assert!(snapshot["last_error"].as_str().unwrap().contains("at capacity"));
+    assert!(snapshot["last_error_until"].is_string());
+    let (status, body) = fixture.request(Some("working"), prompt()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(fixture.logs(4).await.pop().unwrap().routing_reason, Some("session_reused"));
 }
 
 #[tokio::test]

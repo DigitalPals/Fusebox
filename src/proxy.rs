@@ -576,8 +576,8 @@ fn reset_after(headers: &reqwest::header::HeaderMap, body: &str) -> Option<chron
 }
 
 /// A failure worth retrying on the same account, and how long to wait first:
-/// capacity errors (Google's "No capacity available") and rate limits that
-/// reset within seconds. Real quota exhaustion is not one of them.
+/// capacity errors (Google's "No capacity available", Codex "at capacity") and
+/// rate limits that reset within seconds. Real quota exhaustion is not one of them.
 fn soft_failure(
     provider: Provider,
     status: u16,
@@ -594,6 +594,9 @@ fn soft_failure(
         429 => {
             if body.contains("QUOTA_EXHAUSTED") {
                 return None;
+            }
+            if at_capacity(status, body) {
+                return Some(reset_after(headers, body).and_then(short).unwrap_or_default());
             }
             match reset_after(headers, body) {
                 Some(until) => short(until),
@@ -635,6 +638,14 @@ pub fn quota_exhausted(acct: &Account, model: &str, status: u16, body: &str) -> 
     ]
     .iter()
     .any(|s| b.contains(s))
+}
+
+/// Codex answers "Codex is at capacity, please try again later" with a 429 when OpenAI
+/// is short of servers. Like a 529 it says nothing about the subscription, so it is
+/// retried and shown but pauses no model: a pause would turn away working sessions.
+pub fn at_capacity(status: u16, body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    status == 429 && ["at capacity", "overloaded"].iter().any(|s| b.contains(s))
 }
 
 pub fn mark_quota_exhausted(acct: &Account, model: &str, headers: &reqwest::header::HeaderMap, body: &str) {
@@ -1563,8 +1574,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     retry_same = Some(acct.id.clone());
                     continue;
                 }
-                // Still busy: step aside briefly, without the escalating backoff.
-                if status == 429 {
+                // Still busy: step aside briefly, without the escalating backoff. A capacity
+                // shortage only fails this request; the account's other sessions carry on.
+                if status == 429 && !at_capacity(status, &text) {
                     acct.rate_limit(&model, Utc::now() + Duration::seconds(15), &format!("429: {msg}"));
                 } else {
                     acct.state
@@ -1641,9 +1653,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     }
                     if status == 429 && quota_exhausted(&acct, &model, status, &message) {
                         mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
-                    } else if status == 429 {
+                    } else if status == 429 && !at_capacity(status, &message) {
                         acct.rate_limit(&model, Utc::now() + Duration::seconds(30), &format!("429: {message}"));
-                    } else if matches!(status, 500 | 502 | 503 | 529) {
+                    } else if matches!(status, 429 | 500 | 502 | 503 | 529) {
                         acct.state
                             .lock()
                             .set_temporary_error(format!("{status}: {message}"), Utc::now() + Duration::seconds(30));
@@ -2391,6 +2403,14 @@ mod tests {
         soon.insert("retry-after", "2".parse().unwrap());
         assert!(soft_failure(Provider::Codex, 429, &soon, "{}").is_some());
         assert!(soft_failure(Provider::Codex, 400, &h, "{}").is_none());
+        // OpenAI's capacity shortage is retried even when it names a long wait.
+        let capacity = r#"{"error":{"message":"Codex is at capacity, please try again later"}}"#;
+        assert_eq!(soft_failure(Provider::Codex, 429, &h, capacity), Some(std::time::Duration::ZERO));
+        assert_eq!(soft_failure(Provider::Codex, 429, &later, capacity), Some(std::time::Duration::ZERO));
+        assert_eq!(soft_failure(Provider::Codex, 429, &soon, capacity).map(|d| d.as_secs() <= 2), Some(true));
+        assert!(at_capacity(429, r#"{"error":{"code":"server_is_overloaded"}}"#));
+        assert!(!at_capacity(503, capacity), "only 429s need telling apart from rate limits");
+        assert!(!at_capacity(429, r#"{"error":{"code":"rate_limit_exceeded"}}"#));
     }
 
     #[test]
