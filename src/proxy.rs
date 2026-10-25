@@ -1495,7 +1495,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 tracker.diagnostic_failure(failure.clone());
                 tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                     failure_kind = failure.kind, error_causes = ?failure.causes, "upstream connection failed");
-                acct.state.lock().set_error(msg.clone());
+                acct.state.lock().set_temporary_error(msg.clone(), Utc::now() + Duration::seconds(30));
+                app.broadcast("accounts", Value::Null);
                 // A connection that never opened is a blip worth one more try on the same
                 // account. Once the request went out, the provider may have run it, so it
                 // moves on rather than running it twice on one account.

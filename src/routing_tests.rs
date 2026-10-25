@@ -793,6 +793,75 @@ async fn overload_errors_expire_without_another_inference_over_http_and_streams(
 }
 
 #[tokio::test]
+async fn connection_errors_expire_without_another_inference() {
+    use tokio::io::AsyncReadExt;
+
+    for accepted in [false, true] {
+        for failover in [false, true] {
+            let fixture = Fixture::new(Routing::FillFirst, false).await;
+            // Keep the port reserved even when nothing is listening on it.
+            let mut socket = Some(tokio::net::TcpSocket::new_v4().unwrap());
+            socket.as_ref().unwrap().bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let address = socket.as_ref().unwrap().local_addr().unwrap();
+            let calls = Arc::new(AtomicU64::new(0));
+            let _peer = if accepted {
+                let listener = socket.take().unwrap().listen(4).unwrap();
+                let calls = calls.clone();
+                Some(Server {
+                    url: format!("http://{address}"),
+                    task: tokio::spawn(async move {
+                        loop {
+                            let (mut connection, _) = listener.accept().await.unwrap();
+                            let mut request = [0; 4096];
+                            assert!(connection.read(&mut request).await.unwrap() > 0);
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            // Close after receiving the request, before sending response headers.
+                        }
+                    }),
+                })
+            } else {
+                None
+            };
+            let mut cfg = fixture.cfg.clone();
+            cfg.proxy_url = "direct".into();
+            cfg.codex_api_key[0].base_url = Some(format!("http://{address}/v1"));
+            if !failover {
+                cfg.codex_api_key.truncate(1);
+            }
+            fixture.app.set_config(cfg);
+            let account = fixture.app.pool.all().into_iter().find(|a| a.label == "a").unwrap();
+            let before = chrono::Utc::now();
+            let (status, body) = fixture.request(Some("connection-error"), prompt()).await;
+            assert_eq!(status, if failover { 200 } else { 502 });
+            if failover {
+                assert_eq!(answer(&body), "b");
+            }
+            let snapshot = account.snapshot();
+            let error = snapshot["last_error"].as_str().unwrap();
+            assert!(error.starts_with("upstream connection failed:"), "{error}");
+            let until = chrono::DateTime::parse_from_rfc3339(snapshot["last_error_until"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            assert!(until >= before + chrono::Duration::seconds(30));
+            assert!(until <= chrono::Utc::now() + chrono::Duration::seconds(30));
+            assert_eq!(snapshot["cooldowns"], json!({}), "connection errors do not pause routing");
+            let log = fixture.logs(1).await.pop().unwrap();
+            let attempts = if accepted { 1 } else { 2 };
+            assert_eq!(log.attempts, attempts + u32::from(failover));
+            if !failover {
+                assert_eq!(log.failure_kind, Some("upstream_connect"));
+                assert_eq!(log.error.as_deref(), Some(error));
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), u64::from(accepted));
+            assert_eq!(account.state.lock().last_error(until - chrono::Duration::milliseconds(1)), Some(error));
+            assert_eq!(account.state.lock().last_error(until), None, "an idle account needs no recovery inference");
+            assert_eq!(fixture.mock.calls.lock().len(), usize::from(failover));
+            assert_eq!(fixture.app.stats.recent.lock().back().unwrap().error, log.error);
+        }
+    }
+}
+
+#[tokio::test]
 async fn quota_headers_and_stream_errors_trigger_migration() {
     // A used-up limit reported inside a 200 stream, before any content, moves this very
     // request to the next account; one reported in headers moves the next request.
