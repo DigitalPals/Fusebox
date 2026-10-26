@@ -22,6 +22,16 @@
   window.FUSEBOX_I18N = window.FUSEBOX_I18N || {};
   window.FUSEBOX_I18N.zh = {
     strings: {
+      "Refresh page": "刷新页面",
+      "Reload the dashboard and check for updates": "重新加载仪表板并检查更新",
+      "Pull to refresh": "下拉刷新",
+      "Release to refresh": "松开刷新",
+      "Refreshing…": "正在刷新…",
+      "Reload and discard changes?": "重新加载并放弃更改？",
+      "Refreshing the page will discard your unsaved Config changes.": "刷新页面将放弃尚未保存的配置更改。",
+      "Reload and discard": "重新加载并放弃更改",
+      "Wait for the current operation to finish before refreshing.": "请等待当前操作完成后再刷新。",
+      "Can’t reach Fusebox. Try refreshing again when you’re connected.": "无法连接到 Fusebox。请在恢复连接后重试刷新。",
       "Clear error": "清除错误",
       "Clearing…": "正在清除…",
       "Error cleared": "错误已清除",

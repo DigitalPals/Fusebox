@@ -29,6 +29,7 @@ const view = $('#view');
 const PHONE = matchMedia('(max-width: 759px)');
 const mob = () => PHONE.matches;
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const MOD = MAC ? '⌘' : 'Ctrl ';
 const ROUTES = ['overview', 'accounts', 'requests', 'usage', 'models', 'config'];
 
@@ -791,12 +792,13 @@ function renderChrome() {
   const ready = S.overview && !S.locked;
   const searchBtn = `<button class="icon-btn" type="button" data-act="palette" aria-label="Search or run a command" aria-haspopup="dialog">${ICON.search}</button>`;
   const privacyBtn = '<button class="icon-btn" type="button" data-act="privacy" data-privacy></button>';
+  const refreshBtn = `<button class="icon-btn" type="button" data-act="refresh-page" aria-label="Refresh page" title="Refresh page" ${pageRefreshBusy ? 'disabled' : ''}>${ICON.refresh}</button>`;
   const down = S.live === 'offline' ? '<span class="live down">Reconnecting</span>' : '';
   let lead;
   if (S.route === 'overview' || S.locked) lead = `${WORDMARK}<span class="dot s6 ${S.live === 'offline' ? 'err' : 'ok'}" data-live-dot aria-hidden="true"></span>`;
   else if (S.route === 'accounts' && S.sub) lead = `<button class="back" type="button" data-act="to-list">${ICON.back}Accounts</button>`;
   else lead = `${MARK}<span class="title">${TITLES[S.route]}</span>`;
-  $('#mbar').innerHTML = `${lead}${S.route !== 'overview' ? down : ''}<span class="grow"></span>${ready ? '<span class="faults-slot" data-faults-slot></span>' : ''}${ready ? searchBtn : ''}${privacyBtn}`;
+  $('#mbar').innerHTML = `${lead}${S.route !== 'overview' ? down : ''}<span class="grow"></span>${ready ? '<span class="faults-slot" data-faults-slot></span>' : ''}${ready ? searchBtn : ''}${refreshBtn}${privacyBtn}`;
   $('.bar .search').hidden = !ready;
   renderPrivacy();
   renderLive();
@@ -1929,6 +1931,7 @@ function paletteItems(q) {
   const accounts = S.accounts || [];
   const act = (ref, label, hint, kbd = '') => items.push({ group: 'Actions', kind: 'act', ref, label, hint, kbd });
   act('connect', 'Connect account', 'Sign in with a subscription', 'C');
+  act('refresh-page', 'Refresh page', 'Reload the dashboard and check for updates');
   act('apikey', 'Add API key', 'Anthropic, OpenAI, Gemini, OpenRouter…');
   act('quota', S.quotaDisplay === 'remaining' ? 'Show quota used' : 'Show quota remaining', 'Flip every meter', 'U');
   act('privacy', S.private ? 'Show emails and keys' : 'Hide emails and keys', 'For screenshots and screen sharing', '.');
@@ -2013,6 +2016,7 @@ function runPalette(i) {
   if (it.kind === 'acc') return openAccount(it.ref);
   if (it.kind === 'model') return copyText(it.ref).then(() => toast(`Copied ${it.ref}`));
   switch (it.ref) {
+    case 'refresh-page': return refreshPage();
     case 'connect': return openPanel('connect');
     case 'apikey': return openPanel('key');
     case 'quota': return setQuotaDisplay(S.quotaDisplay === 'used' ? 'remaining' : 'used');
@@ -3382,7 +3386,6 @@ function patchModelFailures() {
 // Push notifications for this device (Config, Notifications). The server decides what
 // to send; the dashboard only subscribes the browser and lists the devices.
 const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const pushReady = () => window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
 // "Chrome on Android", "Fusebox app on iPhone": how the device is listed.
@@ -3731,6 +3734,9 @@ document.addEventListener('click', (e) => {
   if (!el) return;
   const { act, id } = el.dataset;
   switch (act) {
+    case 'refresh-page': return refreshPage();
+    case 'confirm-page-refresh': $('#page-refresh-modal').close(); return refreshPage(true);
+    case 'cancel-page-refresh': return $('#page-refresh-modal').close();
     case 'copy': return copy(el);
     case 'copy-model': return copyText(id).then(() => toast(`Copied ${id}`));
     case 'add-model': return openAddModel(el.dataset.provider);
@@ -4001,6 +4007,134 @@ document.addEventListener('submit', async (e) => {
   }
 });
 
+// ---------------------------------------------------------------- page refresh
+
+let pageRefreshBusy = false;
+let pageRefreshDiscard = false;
+const refreshIndicator = $('#pull-refresh');
+let refreshFrame = 0;
+let refreshFeedback = null;
+let refreshLabel = '';
+
+// Keep gesture painting outside the live dashboard's render cycle.
+function showRefreshFeedback(text = '', pull = 0) {
+  refreshFeedback = { text, pull };
+  if (refreshFrame) return;
+  refreshFrame = requestAnimationFrame(() => {
+    refreshFrame = 0;
+    const { text, pull } = refreshFeedback;
+    refreshIndicator.hidden = !text;
+    refreshIndicator.classList.toggle('busy', pageRefreshBusy);
+    refreshIndicator.style.setProperty('--refresh-pull', `${pull}px`);
+    const label = $('[data-refresh-label]', refreshIndicator);
+    if (refreshLabel !== text) { refreshLabel = text; label.textContent = text; }
+  });
+}
+
+function positionRefreshFeedback() {
+  const header = mob() ? $('#mbar') : $('#bar');
+  refreshIndicator.style.setProperty('--refresh-top', `${header.getBoundingClientRect().bottom}px`);
+}
+
+function confirmPageRefresh() {
+  showRefreshFeedback();
+  $('#page-refresh-modal').showModal();
+  $('[data-act="cancel-page-refresh"]', $('#page-refresh-modal')).focus();
+}
+
+async function refreshPage(discard = false) {
+  if (pageRefreshBusy || $('#page-refresh-modal').open) return;
+  if (S.config.busy || S.play?.busy) {
+    showRefreshFeedback();
+    toast('Wait for the current operation to finish before refreshing.');
+    return;
+  }
+  if (!discard && (configDirty() || rawDirty())) return confirmPageRefresh();
+  pageRefreshBusy = true;
+  for (const button of $$('[data-act="refresh-page"]')) button.disabled = true;
+  positionRefreshFeedback();
+  showRefreshFeedback('Refreshing…', 48);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    // Keep the current dashboard if the server is offline, rather than losing it
+    // to a failed navigation. This does not fetch or change any provider data.
+    const response = await fetch('/healthz', { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) throw new Error('unavailable');
+    // Edits or a save may have started while the health check was in flight.
+    if (S.config.busy || S.play?.busy) {
+      toast('Wait for the current operation to finish before refreshing.');
+    } else if (!discard && (configDirty() || rawDirty())) {
+      confirmPageRefresh();
+    } else {
+      pageRefreshDiscard = discard;
+      location.reload();
+      return;
+    }
+  } catch {
+    pageRefreshDiscard = false;
+    toast('Can’t reach Fusebox. Try refreshing again when you’re connected.');
+  } finally {
+    clearTimeout(timeout);
+    pageRefreshBusy = false;
+    for (const button of $$('[data-act="refresh-page"]')) button.disabled = false;
+    showRefreshFeedback();
+  }
+}
+
+function installPullToRefresh() {
+  // iPadOS may identify itself as a Mac. Standalone alone would also match Android.
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!STANDALONE || !ios) return;
+  document.documentElement.classList.add('ios-pull-refresh');
+  const threshold = 80;
+  let gesture = null;
+  const blocked = () => pageRefreshBusy || S.drawer || S.palette || S.faults || S.panel || S.addModel || S.config.review || document.querySelector('dialog[open]');
+  const reset = () => { gesture = null; if (!pageRefreshBusy) showRefreshFeedback(); };
+  const ignored = 'a, button, input, select, textarea, label, summary, [contenteditable]:not([contenteditable="false"]), [role="slider"], [data-no-pull-refresh], .mtabs, #layer, dialog, pre, code';
+  document.addEventListener('touchstart', (event) => {
+    reset();
+    if (event.touches.length !== 1 || window.scrollY > 1 || blocked() || event.target.closest(ignored)) return;
+    if (document.activeElement?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    // Nested scrolling belongs to that control, even when it is at its own top.
+    for (let el = event.target; el && el !== document.body; el = el.parentElement) {
+      const style = getComputedStyle(el);
+      if ((/(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 1) ||
+          (/(auto|scroll)/.test(style.overflowX) && el.scrollWidth > el.clientWidth + 1)) return;
+    }
+    const touch = event.touches[0];
+    gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY, distance: 0, captured: false };
+    positionRefreshFeedback();
+  }, { passive: true });
+  document.addEventListener('touchmove', (event) => {
+    if (!gesture) return;
+    if (event.touches.length !== 1 || event.touches[0].identifier !== gesture.id || blocked() || window.scrollY > 1) return reset();
+    const touch = event.touches[0];
+    const dx = Math.abs(touch.clientX - gesture.x);
+    const dy = touch.clientY - gesture.y;
+    if (!gesture.captured) {
+      if (Math.max(dx, Math.abs(dy)) < 6) return;
+      if (dy <= 0 || dy < dx * 1.25) return reset();
+      gesture.captured = true;
+    }
+    if (!event.cancelable) return reset();
+    event.preventDefault();
+    gesture.distance = Math.max(0, dy);
+    showRefreshFeedback(dy >= threshold ? 'Release to refresh' : 'Pull to refresh', Math.min(64, gesture.distance * 0.55));
+  }, { passive: false });
+  document.addEventListener('touchend', (event) => {
+    if (!gesture) return;
+    const ready = !event.touches.length && Array.from(event.changedTouches).some((touch) => touch.identifier === gesture.id) && gesture.captured && gesture.distance >= threshold && !blocked();
+    reset();
+    if (ready) refreshPage();
+  }, { passive: true });
+  document.addEventListener('touchcancel', reset, { passive: true });
+  document.addEventListener('visibilitychange', reset);
+  window.addEventListener('hashchange', reset);
+  window.addEventListener('pagehide', reset);
+  window.addEventListener('resize', reset);
+}
+
 // ---------------------------------------------------------------- routing + timers
 
 // #/overview, #/accounts, #/accounts/{id}, #/requests?acc=…&sess=…, #/models, #/config/{section}
@@ -4083,7 +4217,7 @@ async function pollOverview() {
 setInterval(() => { if (!document.hidden && Date.now() - overviewAt >= 30000) pollOverview(); }, 60000);
 
 window.addEventListener('beforeunload', (e) => {
-  if (configDirty() || rawDirty()) e.preventDefault();
+  if (!pageRefreshDiscard && (configDirty() || rawDirty())) e.preventDefault();
 });
 
 window.addEventListener('storage', (e) => {
@@ -4130,4 +4264,5 @@ if (window.isSecureContext && 'serviceWorker' in navigator) {
   if (route === 'requests') { S.reqAcc = query.get('acc'); S.reqSess = query.get('sess'); }
   if (route === 'config' && sub && CONFIG_SECTIONS.some(([id]) => id === sub)) S.config.section = sub;
 }
+installPullToRefresh();
 boot();

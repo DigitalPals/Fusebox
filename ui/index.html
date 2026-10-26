@@ -56,10 +56,12 @@ may keep them until they change.
       <span class="search-text">Search or run a command</span><kbd class="kbd" data-mod-key="K">⌘K</kbd>
     </button>
     <span class="faults-slot" data-faults-slot></span>
+    <button class="icon-btn" type="button" data-act="refresh-page" aria-label="Refresh page" title="Refresh page"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7a4.5 4.5 0 1 1-1.3-3.2"/><path d="M11.2 1.8v2.4H8.8"/></svg></button>
     <button class="icon-btn" type="button" data-act="privacy" data-privacy></button>
     <div class="live" data-live aria-live="polite"></div>
   </header>
   <header class="mbar" id="mbar"></header>
+  <div id="pull-refresh" class="pull-refresh" role="status" aria-live="polite" aria-atomic="true" hidden><span class="pull-refresh-icon" aria-hidden="true">↻</span><span data-refresh-label></span></div>
   <main id="view" class="view" tabindex="-1"></main>
   <nav class="mtabs" aria-label="Sections">
     <a href="#/overview" data-tab="overview"><i aria-hidden="true"></i>Overview</a>
@@ -72,5 +74,10 @@ may keep them until they change.
   <div id="layer"></div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <dialog id="banked-reset-modal" class="reset-modal" aria-labelledby="reset-modal-title" aria-describedby="reset-modal-account"></dialog>
+  <dialog id="page-refresh-modal" class="reset-modal" aria-labelledby="page-refresh-title" aria-describedby="page-refresh-description">
+    <div class="reset-modal-head"><h2 id="page-refresh-title">Reload and discard changes?</h2></div>
+    <div class="reset-modal-body"><p id="page-refresh-description">Refreshing the page will discard your unsaved Config changes.</p></div>
+    <footer class="reset-modal-footer"><div class="actions"><button class="btn" type="button" data-act="cancel-page-refresh" autofocus>Keep editing</button><button class="btn primary" type="button" data-act="confirm-page-refresh">Reload and discard</button></div></footer>
+  </dialog>
 </body>
 </html>

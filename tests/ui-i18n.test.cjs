@@ -79,6 +79,16 @@ test('the dictionary is fetched from a URL the server can version', () => {
   assert.match(source, /'\/ui\/i18n-zh\.js'/);
 });
 
+test('page refresh gestures and the discard confirmation read in Chinese', () => {
+  const { tr } = load().FUSEBOX_I18N;
+  assert.equal(tr('Refresh page'), '刷新页面');
+  assert.equal(tr('Pull to refresh'), '下拉刷新');
+  assert.equal(tr('Release to refresh'), '松开刷新');
+  assert.equal(tr('Refreshing…'), '正在刷新…');
+  assert.equal(tr('Reload and discard changes?'), '重新加载并放弃更改？');
+  assert.equal(tr('Refreshing the page will discard your unsaved Config changes.'), '刷新页面将放弃尚未保存的配置更改。');
+});
+
 test('quota attribution and the usage database read in Chinese', () => {
   const { tr } = load().FUSEBOX_I18N;
   assert.equal(tr('Used by'), '使用方');
