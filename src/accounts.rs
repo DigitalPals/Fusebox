@@ -417,6 +417,10 @@ impl AccountState {
 
     /// A quota reading: the windows, and the attribution of whatever rose since the last one.
     pub fn set_quota(&mut self, windows: Vec<crate::quota::Window>, plan: Option<String>) {
+        if plan.as_ref().zip(self.quota.plan.as_ref()).is_some_and(|(new, old)| new != old) {
+            self.attribution.history.clear();
+            self.attribution.dirty = true;
+        }
         self.attribution.reading(&windows, Utc::now());
         self.quota.set(windows, plan);
     }

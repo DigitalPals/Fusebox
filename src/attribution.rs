@@ -139,6 +139,8 @@ impl Share {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Attribution {
     #[serde(default)]
+    pub history: Vec<crate::outlook::History>,
+    #[serde(default)]
     uses: VecDeque<Use>,
     #[serde(default)]
     pub current: Vec<Share>,
@@ -180,6 +182,7 @@ impl Attribution {
 
     /// A quota reading. Windows the reading leaves out keep their state.
     pub fn reading(&mut self, windows: &[Window], now: DateTime<Utc>) {
+        crate::outlook::History::observe(&mut self.history, windows, now);
         for w in windows {
             let Some(i) = self.current.iter().position(|s| s.same_window(w)) else {
                 // First sight: what is used already happened before Fusebox looked.
@@ -279,6 +282,7 @@ impl Attribution {
         let skip = pending.clone().count().saturating_sub(SAVE_USES);
         Self {
             uses: pending.skip(skip).cloned().collect(),
+            history: self.history.clone(),
             current: self.current.clone(),
             previous: self.previous.clone(),
             dirty: false,
@@ -455,12 +459,18 @@ mod tests {
         let saved = a.for_disk();
         assert_eq!(saved.uses.len(), 1, "only the attempt after the last rise");
         assert_eq!(saved.current, a.current);
+        assert_eq!(saved.history, a.history);
         let saved = SavedAccount { identity: Some("identity".into()), attribution: saved };
         let text = serde_json::to_string(&Saved(BTreeMap::from([("acct".to_string(), saved)]))).unwrap();
         let back: Saved = serde_json::from_str(&text).unwrap();
         assert_eq!(back.0["acct"].identity.as_deref(), Some("identity"));
         let mut restored = back.0["acct"].attribution.clone();
+        assert_eq!(restored.history, a.history);
         restored.reading(&[window("week", 7.0, 5000)], at(4));
         assert_eq!(restored.current[0].clients.get("agent"), Some(&1.0));
+        let mut legacy: serde_json::Value = serde_json::from_str(&text).unwrap();
+        legacy["acct"].as_object_mut().unwrap().remove("history");
+        let legacy: Saved = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.0["acct"].attribution.history.is_empty());
     }
 }

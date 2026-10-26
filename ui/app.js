@@ -1213,7 +1213,7 @@ function overviewHTML() {
       <div class="bars" id="bars">${barsHTML()}</div>
       <div class="axis" aria-hidden="true"><span>60 min ago</span><span>now</span></div></section>`;
   const subs = `<section class="sec" id="ov-subs" aria-label="Subscriptions">${ovSubsHTML()}</section>`;
-  const pool = `<section class="sec" id="ov-pool" aria-label="Combined weekly limits">${ovPoolHTML()}</section>`;
+  const pool = `<section class="sec" id="ov-pool" aria-label="Weekly quota outlook">${ovPoolHTML()}</section>`;
   const other = `<section class="sec" id="ov-other" aria-label="Other circuits">${ovOtherHTML()}</section>`;
   const latest = `<section class="sec" aria-labelledby="latest-title"><div class="sec-head"><h2 class="h-sec" id="latest-title">Latest requests</h2><span class="grow"></span><a class="link" href="#/requests">All requests →</a></div>
       <div id="recent">${recentHTML()}</div></section>`;
@@ -1376,12 +1376,8 @@ function planCounts(list) {
   return [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
 }
 
-// The weekly windows of each provider with two or more subscriptions, taken together, as the
-// server works them out (src/pools.rs) for this meter and for the pace warning alike: the
-// accounts' weighted use and the weighted average of where each would be at even pace, each
-// counting by its plan's price when every reporting account's has one (`priced`), equally
-// otherwise. `runs_out_early` says that at the pace so far they all run out before renewals
-// bring capacity back, which is at `until`.
+// Server forecasts for each provider with several subscriptions; quota and resets
+// are weighted consistently in src/pools.rs and src/outlook.rs.
 function weeklyPools() {
   return ((S.overview && S.overview.pools) || []).filter((p) => p.window === 'week' && !p.model).map((p) => {
     const list = (p.account_ids || []).map(accountById).filter(Boolean);
@@ -1389,20 +1385,57 @@ function weeklyPools() {
   }).filter(Boolean);
 }
 
-// How far the combined use is from even pace, in percentage points of the week.
-function poolGap(p) {
-  if (p.pace == null) return null;
-  const d = Math.round(p.used - p.pace * 100);
-  if (!d) return { text: 'On pace', cls: '' };
-  return { text: `${plural(Math.abs(d), 'point')} ${d < 0 ? 'under' : 'over'} pace`, cls: d > 0 ? 'warn' : '' };
+// Forecast reserves always mean remaining quota, independently of the subscription toggle.
+const POOL_OUTLOOK_NOTE = 'Lowest combined weekly quota expected over the next 7 days, using recent consumption and each account’s scheduled resets. Assumes usage can move between accounts. Five-hour and model limits are separate; banked resets are not predicted.';
+const POOL_CURRENT_NOTE = 'Current combined weekly quota while the forecast learns from recent usage. The forecast appears automatically when enough readings are available.';
+
+function poolLearningQuota(p) {
+  return p.outlook?.state === 'learning' && p.accounts > 0 && p.reported === p.accounts ? quotaOf({ used: p.used }) : null;
 }
 
-const POOL_PACE = 'Even pace: where these accounts would be by now if each spread its use evenly over its own week';
+function poolStatus(p) {
+  const o = p.outlook || {};
+  if (o.state === 'run_out') return { text: 'Quota gap expected', cls: 'err' };
+  if (o.state === 'tight') return { text: 'Low reserve', cls: 'warn' };
+  if (o.state === 'on_track') return { text: 'Expected to last', cls: 'good' };
+  if (o.state === 'learning') return { text: 'Learning usage', cls: '' };
+  return { text: 'Forecast unavailable', cls: '' };
+}
 
 function poolMeterHTML(p) {
-  const q = quotaOf({ used: p.used });
-  const pace = p.pace == null ? '' : quotaPercent(S.quotaDisplay === 'used' ? p.pace * 100 : 100 - p.pace * 100);
-  return `<div class="meters"><div class="mrow"><span class="capsm">WK</span>${meterHTML(q, p.pace, `${provName(p.account)} combined weekly`)}<span class="pct ${q.cls}">${quotaPercent(q[S.quotaDisplay])}</span><span class="rst"${pace ? ` title="${esc(POOL_PACE)}"` : ''}>${pace ? `pace ${pace}` : ''}</span></div></div>`;
+  const o = p.outlook || {};
+  const reset = o.next_reset_at ? `<span title="${esc(fullResetTime(o.next_reset_at))}">Next reset in ${liveLeft(o.next_reset_at, true)}</span>` : '<span>No reset time reported</span>';
+  const current = poolLearningQuota(p);
+  if (current) {
+    const label = S.quotaDisplay === 'used' ? 'used now' : 'remaining now';
+    return `<div class="meters"><div class="mrow" title="${esc(POOL_CURRENT_NOTE)}"><span class="capsm">NOW</span>${meterHTML(current, null, `${provName(p.account)} current combined weekly`)}<span class="pct ${current.cls}">${esc(quotaPercent(current[S.quotaDisplay]))}</span><span class="rst">${label}</span></div><div class="pool-note">${reset}</div></div>`;
+  }
+  const status = poolStatus(p);
+  const known = ['on_track', 'tight', 'run_out'].includes(o.state) && Number.isFinite(o.min_remaining);
+  const reserve = known ? Math.max(0, Math.min(100, o.min_remaining)) : null;
+  const label = `${provName(p.account)} lowest projected weekly reserve`;
+  const meter = reserve == null
+    ? `<span class="segs" role="img" aria-label="${esc(label)}: forecast unavailable">${'<i></i>'.repeat(20)}</span>`
+    : `<span class="segs ${status.cls}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${reserve}" aria-valuetext="${esc(`${quotaPercent(reserve)} lowest projected reserve over the next 7 days`)}">${Array.from({ length: 20 }, (_, i) => i < Math.round(reserve / 5) ? '<i class="on"></i>' : '<i></i>').join('')}</span>`;
+  const low = known && o.min_at ? ` · <span title="${esc(fullResetTime(o.min_at))}">Lowest ${esc(when(o.min_at))}</span>` : '';
+  const basis = known && Number.isFinite(o.observed_hours) ? ` · Based on ${Math.floor(o.observed_hours)}h of recent quota readings.` : '';
+  return `<div class="meters"><div class="mrow" title="${esc(POOL_OUTLOOK_NOTE + basis)}"><span class="capsm">MIN</span>${meter}<span class="pct ${status.cls}">${reserve == null ? '–' : esc(quotaPercent(reserve))}</span><span class="rst">lowest reserve</span></div><div class="pool-note">${reset}${low}</div></div>`;
+}
+
+function poolStatusHTML(p) {
+  const o = p.outlook || {};
+  const status = poolStatus(p);
+  let detail = 'Next 7 days at recent usage';
+  if (o.state === 'run_out') {
+    detail = o.exhausts_at && o.recovers_at ? `Runs out ${when(o.exhausts_at)} · Back ${when(o.recovers_at)}` : 'Expected to exhaust weekly quota';
+  } else if (o.state === 'learning') {
+    detail = o.learning_until ? `Estimate after ${when(o.learning_until)}` : 'Needs 6h of recent quota readings';
+  } else if (!['on_track', 'tight'].includes(o.state)) {
+    detail = ({ stale_readings: 'Quota readings are stale', missing_quota: 'Waiting for every account’s weekly quota',
+      missing_reset: 'Waiting for every account’s reset time', awaiting_reset: 'Waiting for reset confirmation',
+      unavailable_account: 'An account needs to sign in again' })[o.reason] || 'Waiting for quota history';
+  }
+  return `<span class="pool-gap ${status.cls}">${status.text}</span><span class="pool-note">${esc(detail)}</span>`;
 }
 
 // "3 accounts · Max 20x" when they share a plan, "2 Max 20x, 1 Pro" when every plan is known
@@ -1425,39 +1458,27 @@ function poolBasis(pools) {
   if (!priced) return 'Each provider’s subscriptions together, weighted equally';
   return `${priced} weighted by plan price, ${equal} equally`;
 }
-function poolGapHTML(p) {
-  const gap = poolGap(p);
-  return gap ? `<span class="pool-gap ${gap.cls}">${gap.text}</span>` : '';
-}
-
-// The pace warning's verdict, on the row it is about.
-function poolEarlyHTML(p) {
-  if (!p.runs_out_early) return '';
-  const back = p.until ? ` Capacity comes back ${fullResetTime(p.until)}.` : '';
-  return `<span class="pool-gap warn" title="${esc(`At this pace these accounts run out before renewals bring capacity back.${back}`)}">Runs out early</span>`;
-}
-
-// One bar per provider with several subscriptions, under the Subscriptions table, in its
-// columns: all of a provider's weekly quota together, with the pace mark where it should be.
+// A forecast per provider, with the lowest reserve before any of the coming resets.
 function ovPoolHTML() {
   const pools = weeklyPools();
   if (!pools.length) return '';
+  const note = `${POOL_OUTLOOK_NOTE} · ${poolBasis(pools)}${pools.some((p) => p.priced) ? ` · ${PLAN_PRICE_NOTE}` : ''}`;
+  const learning = pools.every((p) => poolLearningQuota(p));
+  const heading = `<div class="sec-head"><h2 class="h-sec">Weekly quota outlook</h2><span class="meta" title="${esc(learning ? POOL_CURRENT_NOTE : note)}">${learning ? 'Current quota while learning' : 'Next 7 days · lowest projected reserve'}</span></div>`;
   if (mob()) {
     const items = pools.map((p) => `<div class="item">
-        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div>${poolEarlyHTML(p) || poolGapHTML(p)}</div>
-        <div class="indent">${poolMeterHTML(p)}</div>
+        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div></div>
+        <div class="indent">${poolMeterHTML(p)}<div class="c-status">${poolStatusHTML(p)}</div></div>
       </div>`).join('');
-    return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2></div><div class="card stack-list pool">${items}</div>`;
+    return `${heading}<div class="card stack-list pool">${items}</div>`;
   }
   const rows = pools.map((p) => `<div class="tr">
       <span class="c-idx"></span>
       <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${esc(poolCount(p))}</span></div></div>
       ${poolMeterHTML(p)}
-      <div class="c-status">${poolGapHTML(p)}${poolEarlyHTML(p)}</div>
+      <div class="c-status">${poolStatusHTML(p)}</div>
     </div>`).join('');
-  const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_PRICE_NOTE)}"` : '';
-  return `<div class="sec-head"><h2 class="h-sec">Combined weekly limits</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>
-    <div class="card table subs pool">${rows}</div>`;
+  return `${heading}<div class="card table subs pool">${rows}</div>`;
 }
 
 function ovOtherHTML() {

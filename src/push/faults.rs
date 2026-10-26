@@ -144,6 +144,7 @@ pub struct AccountView {
     pub pauses: BTreeMap<String, (DateTime<Utc>, &'static str)>,
     pub last_error: Option<String>,
     pub windows: Vec<Window>,
+    pub history: Vec<crate::outlook::History>,
     /// Failed requests (not cancellations) in the last hour.
     pub failures: u64,
     /// Per current window (name, model scope): the points of it each client used, by the
@@ -160,6 +161,8 @@ impl AccountView {
             subscription: self.subscription,
             disabled: self.disabled,
             windows: &self.windows,
+            history: &self.history,
+            forecast_available: !self.signin_error(),
         }
     }
 
@@ -725,6 +728,8 @@ mod tests {
         a.clients = vec![clients("week", None, &[("The laptop", 50.0), ("CI", 40.0)])];
         let mut b = sub("b", vec![week(60.0, 4.2)]);
         b.clients = vec![clients("week", None, &[("The laptop", 20.0), ("CI", 40.0)])];
+        a.history = vec![crate::outlook::test_history(&a.windows[0], now, 20.0)];
+        b.history = vec![crate::outlook::test_history(&b.windows[0], now, 20.0)];
         let busy = [a.clone(), b];
         let f = faults(&busy, now);
         assert_eq!(keys(&f), ["pace:pool:claude:week"], "no warning for either account");
@@ -781,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_with_one_account_reporting_a_window_has_that_accounts_rule() {
+    fn an_incomplete_weekly_pool_does_not_predict_from_one_accounts_pace() {
         let now = Utc::now();
         for used in [15.0, 25.0, 40.0, 55.0, 70.0, 85.0, 99.0] {
             for hours in [12, 36, 60, 84, 108, 132, 156] {
@@ -789,8 +794,7 @@ mod tests {
                 let alone = faults(&[sub("a", vec![w.clone()])], now);
                 let pooled = faults(&[sub("a", vec![w.clone()]), sub("b", vec![])], now);
                 assert_eq!(early_run_out(&w, now).is_some(), !alone.is_empty(), "{used}% with {hours}h left");
-                assert_eq!(alone.len(), pooled.len(), "{used}% with {hours}h left");
-                assert_eq!(alone.first().map(|f| f.until), pooled.first().map(|f| f.until));
+                assert!(pooled.is_empty(), "the other account has no forecast data");
             }
         }
     }

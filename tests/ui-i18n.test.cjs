@@ -129,3 +129,16 @@ test('model setup and scoped quota explanations translate without changing model
   assert.equal(tr('Model metadata overrides'),'模型元数据覆盖');
   assert.equal(tr('Download file'),'下载文件');
 });
+
+test('weekly forecasts translate reserve, learning and gap messages', () => {
+  const { tr } = load().FUSEBOX_I18N;
+  assert.equal(tr('Weekly quota outlook'), '每周额度预测');
+  assert.equal(tr('Expected to last'), '预计额度充足');
+  assert.equal(tr('Learning usage'), '正在学习用量');
+  assert.equal(tr('Current quota while learning'), '学习期间显示当前额度');
+  assert.equal(tr('remaining now'), '当前剩余');
+  assert.equal(tr('Claude current combined weekly quota used'), 'Claude 当前每周合计额度已用');
+  assert.equal(tr('Quota readings are stale'), '额度记录已过期');
+  assert.equal(tr('Claude lowest projected weekly reserve'), 'Claude 预计最低每周剩余额度');
+  assert.equal(tr('29% lowest projected reserve over the next 7 days'), '未来 7 天预计最低剩余额度 29%');
+});

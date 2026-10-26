@@ -22,6 +22,8 @@ pub struct Member<'a> {
     pub subscription: bool,
     pub disabled: bool,
     pub windows: &'a [Window],
+    pub history: &'a [crate::outlook::History],
+    pub forecast_available: bool,
 }
 
 impl Member<'_> {
@@ -75,6 +77,7 @@ pub struct Pool {
     pub priced: bool,
     /// The renewal that brings capacity back, when the pool runs out before it at this pace.
     pub runs_out: Option<DateTime<Utc>>,
+    pub outlook: Option<crate::outlook::Outlook>,
 }
 
 impl Pool {
@@ -92,6 +95,7 @@ impl Pool {
             "priced": self.priced,
             "runs_out_early": self.runs_out.is_some(),
             "until": self.runs_out.map(|t| t.to_rfc3339()),
+            "outlook": self.outlook,
         })
     }
 }
@@ -157,11 +161,16 @@ fn pool(provider: &str, name: &str, model: Option<&str>, members: &[Member], now
     let pace = paced.then(|| elapsed / total);
     // As one account's pace warning: at least a quarter of the window gone and 20% used.
     // With one member reporting, this is that rule.
-    let runs_out = match (pace, length) {
-        (Some(p), Some(l)) if p >= 0.25 && (20.0..100.0).contains(&used) => {
-            run_out(stock, total * used / (p * l.num_milliseconds() as f64), now)
+    let outlook = (name == "week" && model.is_none()).then(|| crate::outlook::Outlook::calculate(members, priced, now));
+    let runs_out = if let Some(outlook) = &outlook {
+        outlook.exhausts_at.and(outlook.recovers_at)
+    } else {
+        match (pace, length) {
+            (Some(p), Some(l)) if p >= 0.25 && (20.0..100.0).contains(&used) => {
+                run_out(stock, total * used / (p * l.num_milliseconds() as f64), now)
+            }
+            _ => None,
         }
-        _ => None,
     };
     Some(Pool {
         provider: provider.to_string(),
@@ -173,6 +182,7 @@ fn pool(provider: &str, name: &str, model: Option<&str>, members: &[Member], now
         pace,
         priced,
         runs_out,
+        outlook,
     })
 }
 
@@ -254,6 +264,8 @@ mod tests {
                 subscription: a.subscription,
                 disabled: a.disabled,
                 windows: &a.windows,
+                history: &[],
+                forecast_available: true,
             })
             .collect()
     }
@@ -358,47 +370,26 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_runs_out_early_only_when_renewals_come_too_late() {
-        // The account renewing first is run down on purpose. Over its pace on its own, but
-        // the other has room until it renews: no warning.
-        let drained = [sub("a", vec![week(90.0, Some(2.8))]), sub("b", vec![week(0.0, Some(4.9))])];
-        assert_eq!(weekly(&drained)[0].runs_out, None);
-
-        // Both heavily used: they run out before the first renewal brings capacity back.
-        let a = week(90.0, Some(3.5));
-        let busy = [sub("a", vec![a.clone()]), sub("b", vec![week(60.0, Some(4.2))])];
-        let p = &weekly(&busy)[0];
-        assert_eq!(p.runs_out, a.resets_at, "until a real renewal, not when it runs out");
-        assert_eq!(p.json()["until"], a.resets_at.unwrap().to_rfc3339());
-        assert_eq!(p.json()["runs_out_early"], true);
-
-        // Under even pace, but one account was used up early and the other renews tomorrow
-        // with most of its week unused, which is lost: together they run dry before the
-        // used-up one renews.
-        let later = week(100.0, Some(6.3));
-        let wasted = [sub("a", vec![later.clone()]), sub("b", vec![week(0.0, Some(0.35))])];
-        let p = &weekly(&wasted)[0];
-        assert!(p.used < 100.0 * p.pace.unwrap(), "the meter reads under pace");
-        assert_eq!(p.runs_out, later.resets_at);
-
-        // Too early in the windows, or too little used, to say.
-        let early = [sub("a", vec![week(60.0, Some(6.0))]), sub("b", vec![week(50.0, Some(6.5))])];
-        assert_eq!(weekly(&early)[0].runs_out, None);
-        let little = [sub("a", vec![week(19.0, Some(5.0))]), sub("b", vec![week(19.0, Some(1.0))])];
-        assert_eq!(weekly(&little)[0].runs_out, None);
-    }
-
-    #[test]
-    fn with_one_member_reporting_it_is_the_single_account_rule() {
-        // Over even pace runs out early, under it doesn't, as `used / elapsed` projected.
-        for (used, left, early) in [(60.0, 3.5, true), (40.0, 3.5, false), (30.0, 5.0, true), (95.0, 0.2, false)] {
-            let list = [sub("a", vec![week(used, Some(left))]), sub("b", vec![])];
-            let p = &weekly(&list)[0];
-            assert_eq!(p.runs_out.is_some(), early, "{used}% with {left} days left");
-            if early {
-                assert_eq!(p.runs_out, list[0].windows[0].resets_at);
-            }
+    fn weekly_forecast_and_warning_share_recent_consumption_and_missing_data_is_unknown() {
+        let list = [sub("a", vec![week(90.0, Some(3.5))]), sub("b", vec![week(60.0, Some(4.2))])];
+        let mut members = members(&list);
+        assert_eq!(pools(&members, now())[0].outlook.as_ref().unwrap().state, "learning");
+        assert!(pools(&members, now())[0].runs_out.is_none());
+        let histories: Vec<_> =
+            list.iter().map(|a| vec![crate::outlook::test_history(&a.windows[0], now(), 20.0)]).collect();
+        for (member, history) in members.iter_mut().zip(&histories) {
+            member.history = history;
         }
+        let p = &pools(&members, now())[0];
+        let outlook = p.outlook.as_ref().unwrap();
+        assert_eq!(outlook.state, "run_out");
+        assert_eq!(outlook.exhausts_at, Some(now() + Duration::hours(30)));
+        assert_eq!(p.runs_out, outlook.recovers_at);
+        assert_eq!(p.json()["outlook"]["state"], "run_out");
+        members[1].windows = &[];
+        let p = &pools(&members, now())[0];
+        assert_eq!(p.outlook.as_ref().unwrap().reason, Some("missing_quota"));
+        assert!(p.runs_out.is_none());
     }
 
     #[test]

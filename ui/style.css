@@ -482,13 +482,22 @@ h1, h2, h3, p { margin: 0; }
   .subs .th, .subs .tr { grid-template-columns: 28px minmax(0, 1.2fr) minmax(250px, 2.2fr) 196px 72px 84px; }
   .subs .c-idx, .subs .c-req { display: block; }
 }
-/* combined weekly limits: one row per provider, in the subscriptions table's columns */
+/* Weekly outlook: projected reserves, independent of the subscription display mode. */
 #ov-pool:empty { display: none; }
 .pool .tr { min-height: 52px; }
 .pool .tr:first-child { border-top: 0; }
 .pool-name { color: var(--fg); }
 .pool-gap { font-size: 12px; color: var(--fg-3); white-space: nowrap; }
 .pool-gap.warn { color: var(--warn); }
+.pool-gap.err { color: var(--err); }
+.pool-gap.good { color: var(--ok); }
+.pool .rst { width: auto; }
+.pool-note { font-size: 11px; line-height: 1.5; color: var(--fg-3); overflow-wrap: anywhere; }
+.pool .meters { min-width: 0; }
+.pool .meters > .pool-note { margin-top: 5px; }
+.pool .c-status { grid-column: 3 / -1; }
+.pool.stack-list .c-status { margin-top: 9px; }
+@media (min-width: 1180px) { .pool .c-status { grid-column: 4 / -1; } }
 .stack-list .pool-gap { flex: none; }
 .c-status { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .c-status .subs-line .linkbtn { font-size: 12px; }

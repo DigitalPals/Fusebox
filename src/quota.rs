@@ -519,7 +519,14 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let mut st = acct.state.lock();
     // A different account signed in to this file while the plan was read.
     if st.quota_epoch == epoch {
+        let before = (st.quota.plan.clone(), st.quota.subscription_plan.clone());
         st.quota.plan_read(Utc::now(), details.as_ref().ok().cloned());
+        if before.0.as_ref().zip(st.quota.plan.as_ref()).is_some_and(|(old, new)| old != new)
+            || before.1.as_ref().zip(st.quota.subscription_plan.as_ref()).is_some_and(|(old, new)| old != new)
+        {
+            st.attribution.history.clear();
+            st.attribution.dirty = true;
+        }
     }
     details.map(drop)
 }
