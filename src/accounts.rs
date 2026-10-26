@@ -337,6 +337,7 @@ impl Counters {
 /// An account's latest problem, as the dashboard and notifications show it.
 #[derive(Debug, Clone)]
 struct AccountError {
+    id: String,
     message: String,
     /// Temporary upstream failures and pauses stop being current at this deadline.
     until: Option<DateTime<Utc>>,
@@ -426,23 +427,53 @@ impl AccountState {
         error.until.is_none_or(|until| until > now).then_some(error.message.as_str())
     }
 
+    pub fn last_error_id(&self, now: DateTime<Utc>) -> Option<&str> {
+        self.last_error(now)?;
+        self.last_error.as_ref().map(|error| error.id.as_str())
+    }
+
     /// Records a problem that stays until a request succeeds or the account is reset.
     pub fn set_error(&mut self, message: impl Into<String>) {
-        self.last_error = Some(AccountError { message: message.into(), until: None, pause: None });
+        self.last_error = Some(AccountError {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.into(),
+            until: None,
+            pause: None,
+        });
     }
 
     /// A recent upstream failure, without requiring another inference to clear it.
     pub fn set_temporary_error(&mut self, message: impl Into<String>, until: DateTime<Utc>) {
-        self.last_error = Some(AccountError { message: message.into(), until: Some(until), pause: None });
+        self.last_error = Some(AccountError {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.into(),
+            until: Some(until),
+            pause: None,
+        });
     }
 
     pub fn clear_error(&mut self) {
         self.last_error = None;
     }
 
+    /// Dismiss the displayed occurrence without losing a newer failure, including
+    /// a repeated failure with the same message. An already-cleared error is OK.
+    pub fn clear_error_if(&mut self, id: &str) -> bool {
+        if self.last_error.as_ref().is_some_and(|error| error.id != id) {
+            return false;
+        }
+        self.clear_error();
+        true
+    }
+
     fn pause_error(&mut self, message: &str, quota: bool, model: &str, until: DateTime<Utc>) {
         let pause = Some(ErrorPause { quota, model: model.to_string() });
-        self.last_error = Some(AccountError { message: message.to_string(), until: Some(until), pause });
+        self.last_error = Some(AccountError {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.to_string(),
+            until: Some(until),
+            pause,
+        });
     }
 
     /// Ends a spent-quota error early once nothing keeps that model paused for quota,
@@ -787,6 +818,7 @@ impl Account {
             "cooldown_kinds": kinds,
             "quota_reset_unknown": st.quota.reset_unknown(""),
             "last_error": st.last_error(now),
+            "last_error_id": st.last_error_id(now),
             "last_error_until": st.last_error.as_ref().and_then(|e| e.until).filter(|t| *t > now),
             "last_used": st.last_used.map(|t| t.to_rfc3339()),
             "expires_at": expires,

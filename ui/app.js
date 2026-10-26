@@ -72,6 +72,7 @@ const S = {
   quotaDisplay: store.get('quota-display') === 'remaining' ? 'remaining' : 'used',
   confirm: null,
   resets: {}, // account-specific confirmations and errors
+  errorClears: {}, // pending error dismissals and action failures, separate from provider errors
   resetModal: null,
   push: { loaded: false, loading: false, status: null, endpoint: null, busy: false, msg: null }, // Config, Notifications
   config: { values: null, saved: null, defaults: {}, revision: '', path: '', ignored: [], restart_fields: [],
@@ -1829,6 +1830,19 @@ function renderDrawer() {
   if (sel) slot.querySelector(sel)?.focus({ preventScroll: true });
 }
 
+function accountErrorHTML(a) {
+  const local = S.errorClears[a.id];
+  if (!a.last_error && !local?.error) return '';
+  const billing = a.provider === 'claude' && /third-party apps now draw from your extra usage/i.test(a.last_error || '');
+  return `<section class="account-error block" aria-label="Last error" aria-busy="${!!local?.busy}">
+    ${a.last_error ? `<div class="account-error-head"><span class="label">Last error</span><button class="btn sm" type="button" data-act="clear-error" data-id="${esc(a.id)}" aria-label="Clear error for ${esc(acctLabel(a))}" ${local?.busy || !a.last_error_id ? 'disabled' : ''}>${local?.busy ? 'Clearing…' : 'Clear error'}</button></div>
+    <div class="errbox">${esc(hideEmails(a.last_error))}</div>
+    <p class="meta">Clears the saved message. A new failure will appear again.</p>
+    ${billing ? '<a class="link" href="https://claude.ai/settings/usage" target="_blank" rel="noopener noreferrer">Manage extra usage</a>' : ''}` : ''}
+    ${local?.error ? `<p class="msg err" role="alert">${esc(local.error)}</p>` : ''}
+  </section>`;
+}
+
 function drawerHTML(a) {
   const st = acctState(a);
   const hasQuota = metered(a) && ((a.quota?.windows || []).some((w) => quotaOf(w)) || a.quota?.limits?.length > 0);
@@ -1844,7 +1858,7 @@ function drawerHTML(a) {
       ${hasQuota ? `<div class="block" style="gap:14px"><span class="label">Limits · ${quotaWord()}</span>${quotaWindowsHTML(a, 'lg')}${quotaLimitsHTML(a)}</div>` : ''}
       ${windowStarterHTML(a)}
       ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">${esc(bankedPolicyText(a))}</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Reset details</button></div>` : ''}
-      ${a.last_error ? `<div class="block" style="gap:8px"><span class="label">Last error</span><div class="errbox">${esc(hideEmails(a.last_error))}</div></div>` : ''}
+      ${accountErrorHTML(a)}
       <div class="block"><span class="label">Since start</span><div class="figs" id="drawer-since">${drawerSinceHTML()}</div></div>
       <div class="block" style="gap:6px"><span class="label">Sign-in</span><span class="fg2" style="font-size:13px">${esc(signinLine(a))}</span></div>
       <div class="block" style="gap:0" id="drawer-reqs">${drawerRequestsHTML()}</div>
@@ -2208,11 +2222,11 @@ function detailBodyHTML() {
   const head = mob()
     ? `<div class="det-head">${acctLogo(a, 28)}<div class="cell2"><h1>${esc(acctLabel(a))}</h1><span class="sub">${esc([provName(a), planName(a)].filter(Boolean).join(' '))} · ${esc(authName(a))}</span></div></div>
        <div class="statline" style="font-size:13px">${statusHTML(a)}<span class="dim">· last used ${liveAgo(a.last_used)}</span></div>
-       ${a.last_error ? `<div class="errbox" style="border-color:var(--err-line);background:transparent">${esc(hideEmails(a.last_error))}</div>` : ''}`
+       ${accountErrorHTML(a)}`
     : `<nav class="crumbs" aria-label="Breadcrumb"><a href="#/accounts">Accounts</a><span aria-hidden="true">/</span><span>${esc(provName(a))}</span><span aria-hidden="true">/</span><span aria-current="page">${esc(acctLabel(a))}</span></nav>
        <div class="det-head">${acctLogo(a, 34)}<div class="cell2"><h1>${esc(acctLabel(a))}</h1><span class="sub"><span class="mono">${idx}</span><span>${esc(acctSub(a))}</span></span></div>
          <div class="det-actions"><span class="status-pill">${statusHTML(a)}</span>${a.kind === 'oauth' ? `<button class="btn" type="button" data-act="refresh" data-id="${esc(a.id)}">Refresh</button>` : ''}${toggle}${remove}</div></div>
-       ${a.last_error ? `<div class="banner err"><span class="dot err"></span><span class="errtext">${esc(hideEmails(a.last_error))}</span><span class="meta" style="font-size:12px">${liveAgo(a.last_used)}</span></div>` : ''}`;
+       ${accountErrorHTML(a)}`;
   const limits = metered(a) ? `<section class="card pad block" style="gap:20px" aria-label="Limits">
       <div class="card-head"><span class="label">Limits · ${quotaWord()}</span>${quotaControlsHTML(mob(), false)}</div>
       <div class="windows">${quotaWindowsHTML(a)}</div>
@@ -3597,6 +3611,29 @@ async function submitKey(form) {
   }
 }
 
+async function clearAccountError(id) {
+  const a = accountById(id);
+  if (!a?.last_error_id || S.errorClears[id]?.busy) return;
+  const errorId = a.last_error_id;
+  const local = S.errorClears[id] = { busy: true, error: null };
+  refreshViews();
+  try {
+    const updated = await api(`/accounts/${encodeURIComponent(id)}/error/clear`, { method: 'POST', body: JSON.stringify({ error_id: errorId }) });
+    const current = accountById(id);
+    if (current?.last_error_id === errorId) {
+      for (const field of ['last_error', 'last_error_id', 'last_error_until']) current[field] = updated[field];
+    }
+    delete S.errorClears[id];
+    toast('Error cleared');
+  } catch (e) {
+    local.error = e.status === 409 ? e.message : `Could not clear error: ${e.message}`;
+  } finally {
+    local.busy = false;
+    refreshViews();
+    refreshAccounts();
+  }
+}
+
 async function accountAction(act, id) {
   const a = accountById(id);
   try {
@@ -3812,6 +3849,9 @@ document.addEventListener('click', (e) => {
       e.stopPropagation();
       if (act === 'reset') toast('Cooldowns cleared');
       return accountAction(act, id);
+    case 'clear-error':
+      e.stopPropagation();
+      return clearAccountError(id);
     case 'pause':
       S.paused = !S.paused;
       S.pending = 0;

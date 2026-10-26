@@ -591,6 +591,8 @@ h1, h2, h3, p { margin: 0; }
 .notice .small { font-size: 12px; }
 .errbox { font: 400 12px/1.55 var(--mono); color: var(--err); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow-wrap: anywhere; }
 .block { display: flex; flex-direction: column; gap: 10px; }
+.account-error { min-width: 0; gap: 8px; }
+.account-error-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .figs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 12px; }
 .figs > div { display: flex; flex-direction: column; }
 .figs b { font-size: 18px; font-weight: 500; }

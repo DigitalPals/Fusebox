@@ -22,6 +22,12 @@
   window.FUSEBOX_I18N = window.FUSEBOX_I18N || {};
   window.FUSEBOX_I18N.zh = {
     strings: {
+      "Clear error": "清除错误",
+      "Clearing…": "正在清除…",
+      "Error cleared": "错误已清除",
+      "Clears the saved message. A new failure will appear again.": "清除已保存的消息。发生新的失败时会再次显示。",
+      "Manage extra usage": "管理额外用量",
+      "A newer error arrived. Review it before clearing.": "出现了新的错误。请查看后再清除。",
       "Quota used up": "额度已用尽",
       "Reset time unknown": "重置时间未知",
       "Provider did not report a reset time. Refresh quota to check availability.": "提供商未报告重置时间。请刷新额度以检查可用状态。",
@@ -1057,6 +1063,8 @@
       "Compressing older records…": "正在压缩较早的记录…",
     },
     patterns: [
+      [/^Clear error for (.+)$/, '清除 $1 的错误'],
+      [/^Could not clear error: (.+)$/, '无法清除错误：$1'],
       [/^([\d,.]+) context tokens$/, (m, n) => `${n} 个上下文 token`],
       [/^([\d,.]+) output tokens$/, (m, n) => `${n} 个输出 token`],
       [/^Model: (.+)$/, (m, id) => `模型：${id}`],

@@ -298,6 +298,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/toggle", post(toggle_account))
         .route("/accounts/{id}/refresh", post(refresh_account))
         .route("/accounts/{id}/reset", post(reset_account))
+        .route("/accounts/{id}/error/clear", post(clear_account_error))
         .route("/accounts/{id}/banked-resets", get(banked_resets).post(apply_banked_reset))
         .route("/accounts/{id}/quota/refresh", post(refresh_quota))
         .route("/accounts/{id}/window-starter", post(start_window))
@@ -900,6 +901,28 @@ async fn reset_account(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
 }
 
 const RESETS_OFF: &str = "Banked resets are turned off. Turn them on under Config, Connections.";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearErrorBody {
+    error_id: String,
+}
+
+async fn clear_account_error(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<ClearErrorBody>,
+) -> Response {
+    let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
+    let Ok(error_id) = uuid::Uuid::parse_str(&b.error_id) else {
+        return err(StatusCode::BAD_REQUEST, "A valid error ID is required");
+    };
+    if !acct.state.lock().clear_error_if(&error_id.to_string()) {
+        return err(StatusCode::CONFLICT, "A newer error arrived. Review it before clearing.");
+    }
+    app.broadcast("accounts", Value::Null);
+    Json(acct.snapshot()).into_response()
+}
 
 async fn start_window(
     State(app): State<Arc<App>>,
@@ -1505,6 +1528,117 @@ async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clearing_an_account_error_is_authenticated_scoped_and_race_safe() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = App::new(
+            Config {
+                auth_dir: "/nonexistent".into(),
+                management_key: "management-only".into(),
+                api_keys: vec!["inference-only".into()],
+                claude_api_key: vec![crate::config::KeyEntry { api_key: "mock-only".into(), ..Default::default() }],
+                ..Default::default()
+            },
+            "/nonexistent/config.yaml".into(),
+        );
+        let account = app.pool.all()[0].clone();
+        let now = chrono::Utc::now();
+        {
+            let mut state = account.state.lock();
+            state.cooldowns.insert("claude-opus-5-5".into(), now + chrono::Duration::minutes(1));
+            state.quota_cooldowns.insert("*".into(), now + chrono::Duration::hours(1));
+            state.quota.set(
+                vec![crate::quota::Window {
+                    name: "week".into(),
+                    used: 100.0,
+                    resets_at: Some(now + chrono::Duration::hours(1)),
+                    model: None,
+                }],
+                None,
+            );
+            state.counters.requests = 19;
+            state.strikes = 3;
+            state.disabled = true;
+            state.set_error("400: billing restriction");
+        }
+        let before = account.snapshot();
+        let old_id = before["last_error_id"].as_str().unwrap().to_string();
+        let service = router(app.clone()).with_state(app.clone());
+        let post = |key: Option<&str>, body: Value, id: &str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/accounts/{id}/error/clear"))
+                .header("content-type", "application/json");
+            if let Some(key) = key {
+                request = request.header("authorization", format!("Bearer {key}"));
+            }
+            let mut request = request.body(Body::from(body.to_string())).unwrap();
+            request.extensions_mut().insert(ConnectInfo("192.0.2.1:1234".parse::<SocketAddr>().unwrap()));
+            service.clone().oneshot(request)
+        };
+        let body = json!({"error_id":old_id});
+        assert_eq!(post(None, body.clone(), &account.id).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            post(Some("inference-only"), body.clone(), &account.id).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(account.snapshot()["last_error_id"], before["last_error_id"]);
+        assert_eq!(
+            post(Some("management-only"), json!({}), &account.id).await.unwrap().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post(Some("management-only"), json!({"error_id":"invalid"}), &account.id).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(Some("management-only"), body.clone(), "missing").await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Repeated identical messages are distinct occurrences.
+        account.state.lock().set_error("400: billing restriction");
+        let newer_id = account.snapshot()["last_error_id"].as_str().unwrap().to_string();
+        assert_ne!(old_id, newer_id);
+        assert_eq!(post(Some("management-only"), body, &account.id).await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(account.snapshot()["last_error_id"], newer_id);
+        let mut events = app.live.subscribe();
+        let body = json!({"error_id":newer_id});
+        let response = post(Some("management-only"), body.clone(), &account.id).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let after: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(after["last_error"].is_null());
+        assert!(after["last_error_id"].is_null());
+        for field in ["cooldowns", "cooldown_kinds", "quota", "counters", "disabled"] {
+            assert_eq!(after[field], before[field], "clearing an error preserves {field}");
+        }
+        assert_eq!(account.state.lock().strikes, 3);
+        assert_eq!(app.stats.recent.lock().len(), 0, "no inference or request-history entry is generated");
+        let event: Value = serde_json::from_str(&events.try_recv().unwrap()).unwrap();
+        assert_eq!(event["type"], "accounts");
+        assert_eq!(
+            post(Some("management-only"), body, &account.id).await.unwrap().status(),
+            StatusCode::OK,
+            "duplicate clears are harmless"
+        );
+
+        // An ordinary error with no cooldown must be dismissible too.
+        {
+            let mut state = account.state.lock();
+            state.cooldowns.clear();
+            state.quota_cooldowns.clear();
+            state.quota = Default::default();
+            state.set_error("400: third-party billing");
+        }
+        let body = json!({"error_id":account.snapshot()["last_error_id"]});
+        assert_eq!(post(Some("management-only"), body, &account.id).await.unwrap().status(), StatusCode::OK);
+        assert!(account.snapshot()["last_error"].is_null());
+    }
 
     #[tokio::test]
     async fn requests_through_a_local_proxy_need_the_management_key() {
