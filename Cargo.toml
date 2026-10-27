@@ -1,6 +1,6 @@
 [package]
 name = "fusebox"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.88"
 description = "One fast binary that turns your Claude, ChatGPT, Gemini, Antigravity, Grok, Kimi, Meta, Devin and Vertex accounts into OpenAI, Anthropic and Gemini compatible APIs."
@@ -51,7 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
-zstd = "0.14"
+zstd = "0.14.3"
 yaml-edit = { version = "0.3.2", default-features = false }
 
 [build-dependencies]
