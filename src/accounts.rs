@@ -44,8 +44,19 @@ pub const PROVIDERS: [Provider; 10] = [
 ];
 
 const ANTIGRAVITY_MODELS: &[&str] = &[
+    "claude-opus-5-5-max",
+    "claude-opus-5-5-high",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-low",
+    "claude-sonnet-5-5-max",
+    "claude-sonnet-5-5-high",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-low",
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-low",
     "gemini-3.8-flash-high",
     "gemini-3.7-flash-high",
     "gemini-3.6-flash-high",
@@ -61,12 +72,15 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
 const DEVIN_MODELS: &[&str] = &[
     "claude-opus-5-5",
     "claude-fable-5-1",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
     "claude-sonnet-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-sonnet-4-6",
     "gpt-6-astra",
+    "gpt-6-1-sol",
     "gpt-6-sol",
     "gpt-6-luna",
     "gpt-5-6-sol",
@@ -182,6 +196,7 @@ impl Provider {
                 "claude-fable-5-1",
                 "claude-opus-5-5",
                 "claude-sonnet-5-5",
+                "claude-haiku-5-5",
                 "claude-opus-5",
                 "claude-sonnet-5",
                 "claude-opus-4-8",
@@ -193,6 +208,7 @@ impl Provider {
             Provider::Codex => &[
                 "gpt-6-astra",
                 "gpt-6.1-sol",
+                "gpt-6.1-terra",
                 "gpt-6-sol",
                 "gpt-6-luna",
                 "gpt-5.6-sol",
@@ -200,18 +216,25 @@ impl Provider {
                 "gpt-5.6-luna",
                 "gpt-5.5",
                 "gpt-image-2",
+                "gpt-image-2.5-flare",
+                "gpt-image-2.5-sunburst",
             ],
             Provider::Gemini => &[
+                "gemini-4-argon",
                 "gemini-3.8-flash",
                 "gemini-3.7-flash",
                 "gemini-3.6-flash",
                 "gemini-3.1-pro-preview",
                 "gemini-3.5-flash-lite",
                 "gemini-3.1-flash-image-preview",
+                "gemini-3.1-flash-image",
+                "gemini-3.1-flash-lite-image",
+                "gemini-nano-banana-2.1",
                 "gemini-2.5-pro",
                 "gemini-2.5-flash",
             ],
             Provider::Vertex => &[
+                "gemini-4-argon",
                 "gemini-3.8-flash",
                 "gemini-3.7-flash",
                 "gemini-3.1-pro",
@@ -225,6 +248,8 @@ impl Provider {
             ],
             Provider::Antigravity => ANTIGRAVITY_MODELS,
             Provider::Kimi => &[
+                "kimi-k3.1-pro",
+                "kimi-k3.1-pro-highspeed",
                 "kimi-k3",
                 "kimi-k3-256k",
                 "kimi-k2.8",
@@ -246,7 +271,9 @@ impl Provider {
                 "grok-4.20-0309-non-reasoning",
                 "grok-3-mini",
                 "grok-imagine-image-2.0",
+                "grok-imagine-image-quality",
                 "grok-imagine-video-1.5",
+                "grok-imagine-video-1.5-lite",
             ],
             Provider::Meta => &["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"],
             Provider::Devin => DEVIN_MODELS,
@@ -2419,8 +2446,37 @@ oauth-model-alias:
         let pool = Pool::default();
         pool.reload(&cfg);
         assert_eq!(pool.canonical("gpt-6-1-sol", None), "gpt-6.1-sol");
+        assert_eq!(pool.canonical("gpt-6-1-terra", None), "gpt-6.1-terra");
         assert_eq!(pool.canonical("openai/gpt-6-astra", None), "gpt-6-astra");
         assert_eq!(pool.canonical("nothing-like-it", None), "nothing-like-it");
+    }
+
+    #[test]
+    fn new_provider_models_keep_aggregator_variants_on_their_provider() {
+        for (provider, model) in [
+            (Provider::Codex, "gpt-6.1-terra"),
+            (Provider::Codex, "gpt-image-2.5-sunburst"),
+            (Provider::Codex, "gpt-image-2.5-flare"),
+            (Provider::Claude, "claude-haiku-5-5"),
+            (Provider::Gemini, "gemini-4-argon"),
+            (Provider::Vertex, "gemini-4-argon"),
+            (Provider::Kimi, "kimi-k3.1-pro"),
+            (Provider::Kimi, "kimi-k3.1-pro-highspeed"),
+            (Provider::Xai, "grok-imagine-video-1.5-lite"),
+            (Provider::Devin, "gpt-6-1-sol"),
+            (Provider::Devin, "claude-haiku-5-5"),
+            (Provider::Antigravity, "gemini-4-argon-high"),
+            (Provider::Antigravity, "claude-sonnet-5-5-max"),
+        ] {
+            assert!(provider.serves(model), "{} serves {model}", provider.as_str());
+        }
+        assert!(!Provider::Codex.serves("gpt-6-1-sol"));
+        assert!(!Provider::Codex.serves("gemini-4-argon-high"));
+        assert!(!Provider::Gemini.serves("gemini-4-argon-high"));
+        assert!(!Provider::Claude.serves("claude-sonnet-5-5-max"));
+        assert!(!Provider::Antigravity.family("gpt-6.1-terra"));
+        assert!(!Provider::Devin.family("gpt-6.1-terra"));
+        assert!(!Provider::Devin.first_party("claude-haiku-5-5"));
     }
 
     #[test]

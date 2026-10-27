@@ -376,7 +376,7 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
             assert!(rate["tier_multipliers"].get("fast").is_none());
         }
     }
-    assert_eq!(result["omitted_unsupported_rates"], 8);
+    assert_eq!(result["omitted_unsupported_rates"], 9);
     let original: String =
         c.query_row("SELECT value FROM usage_meta WHERE key='catalogue_before_downgrade'", [], |r| r.get(0)).unwrap();
     assert!(original.contains("above_threshold_write_5m_nanos_per_token"));

@@ -989,6 +989,9 @@ fn kimi(t: &Target, mut body: Value) -> Prepared {
                 body["stream_options"] = json!({ "include_usage": true });
             }
             normalize_chat_tools(&mut body);
+            if matches!(t.model, "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed") {
+                normalize_kimi_k31(&mut body);
+            }
             // Kimi only accepts its fixed temperatures; let it choose.
             let thinking_off = body["thinking"]["type"] == "disabled";
             let temp = body["temperature"].as_f64();
@@ -1001,6 +1004,24 @@ fn kimi(t: &Target, mut body: Value) -> Prepared {
         }
     };
     Prepared { url, headers, body, raw: None }
+}
+
+/// K3.1 always thinks and accepts only fixed sampling values. The Chat API
+/// names its output limit `max_completion_tokens`, including translated limits.
+fn normalize_kimi_k31(body: &mut Value) {
+    let Some(o) = body.as_object_mut() else { return };
+    for key in ["temperature", "top_p", "n", "presence_penalty", "frequency_penalty"] {
+        o.remove(key);
+    }
+    if let Some(limit) = o.remove("max_tokens") {
+        o.entry("max_completion_tokens").or_insert(limit);
+    }
+    if o.get("thinking").is_some_and(|v| v["type"] == "disabled") {
+        o.remove("thinking");
+        o.insert("reasoning_effort".into(), "low".into());
+    } else if o.get("reasoning_effort").is_some_and(|v| v == "none") {
+        o.insert("reasoning_effort".into(), "low".into());
+    }
 }
 
 // ------------------------------------------------------------------ xai / meta
@@ -1098,6 +1119,40 @@ fn compat(t: &Target, mut body: Value) -> Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_k31_chat_omits_fixed_sampling_and_preserves_explicit_completion_limit() {
+        let cfg = Config::parse("auth-dir: /nonexistent\nkimi-api-key:\n  - api-key: synthetic-kimi\n").unwrap();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        let headers = HeaderMap::new();
+        for model in ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+            let mut target = test_target(&acct, &cfg, &headers);
+            target.model = model;
+            target.wire = Format::Chat;
+            let prepared = prepare(
+                &target,
+                json!({"messages":[{"role":"user","content":"hello"}],
+                "temperature":0.2,"top_p":0.8,"n":2,"presence_penalty":1,"frequency_penalty":1,
+                "max_tokens":2048,"reasoning_effort":"none"}),
+            );
+            assert!(prepared.url.ends_with("/v1/chat/completions"));
+            assert_eq!(prepared.body["model"], model);
+            assert_eq!(prepared.body["max_completion_tokens"], 2048);
+            assert_eq!(prepared.body["reasoning_effort"], "low");
+            for key in ["temperature", "top_p", "n", "presence_penalty", "frequency_penalty", "max_tokens"] {
+                assert!(prepared.body.get(key).is_none(), "{key}");
+            }
+            let prepared = prepare(
+                &target,
+                json!({"max_tokens":100,"max_completion_tokens":200,
+                "reasoning_effort":"max"}),
+            );
+            assert_eq!(prepared.body["max_completion_tokens"], 200);
+            assert_eq!(prepared.body["reasoning_effort"], "max");
+        }
+    }
 
     fn request_headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();

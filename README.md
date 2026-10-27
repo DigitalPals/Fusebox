@@ -203,6 +203,8 @@ When more than one provider has a model, the vendor's own accounts answer first 
 
 ### New models
 
+A [model support review dated 2026-10-27](docs/model-support-2026-10-27.md) adds GPT-6.1 Terra and verified releases from the other providers, with their request compatibility rules and source evidence.
+
 A model a provider releases after your Fusebox version usually works straight away: requests go by name family, so `claude-*` reaches Claude, `gpt-*` reaches Codex, `gemini-*` Gemini, and so on.
 
 Fusebox also asks the providers what they serve, so new models show up in `/v1/models` and on the dashboard by themselves. Signed-in Claude and Codex accounts each fetch their model list once every 6 to 7 hours, retrying after 15 minutes (then 30, 60, …) when that fails. The lists are kept in `<auth-dir>/.model-lists.state`, so a restart fetches nothing. Codex marks a changed list on its ordinary responses, which brings that account's next check forward, but never to within 10 minutes of the last one. Claude's list also says whether a model can turn thinking off and which effort levels it takes, and requests follow it. Antigravity has always fetched its own list.

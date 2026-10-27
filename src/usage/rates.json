@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-21.1",
+  "version": "2026-10-27.1",
   "verified_at": "2026-10-18",
   "rates": [
     {
@@ -93,6 +93,48 @@
       "cache_write_12h_nanos_per_token": 5000,
       "above_threshold_write_30m_nanos_per_token": 5000,
       "above_threshold_write_12h_nanos_per_token": 10000
+    },
+    {
+      "provider": "openai",
+      "models": [
+        "gpt-6.1-terra"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 1000,
+      "cache_read_nanos_per_token": 50,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 5000,
+      "cache_write_nanos_per_token": null,
+      "threshold_input_tokens": 272000,
+      "above_threshold_input_nanos_per_token": 2000,
+      "above_threshold_read_nanos_per_token": 100,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_output_nanos_per_token": 7500,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "flex": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ]
+      },
+      "cache_write_30m_nanos_per_token": 1250,
+      "cache_write_12h_nanos_per_token": 2500,
+      "above_threshold_write_30m_nanos_per_token": 2500,
+      "above_threshold_write_12h_nanos_per_token": 5000
     },
     {
       "provider": "openai",

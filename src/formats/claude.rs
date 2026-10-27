@@ -183,11 +183,11 @@ pub fn uses_budget_thinking(model: &str) -> bool {
         || m == "claude-sonnet-4"
 }
 
-/// Opus 4.7 and later, Sonnet 5 and later, Fable and Mythos reject `temperature`
+/// Opus 4.7 and later, Sonnet/Haiku 5.5, Fable and Mythos reject `temperature`
 /// and `top_p` (Sonnet 5.5 any non-default value), so they are left out.
 fn rejects_sampling(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    ["opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "fable", "mythos"].iter().any(|k| m.contains(k))
+    ["opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "haiku-5-5", "fable", "mythos"].iter().any(|k| m.contains(k))
 }
 
 /// Models that reject forced tool use (`tool_choice` `any` or `tool`) even with thinking off.
@@ -431,9 +431,9 @@ pub fn build_request(req: &Request, model: &str) -> Value {
             ToolChoice::Tool(n) => json!({ "type": "tool", "name": n }),
             _ => json!({ "type": "auto" }),
         };
-        // Forced tool use is incompatible with thinking, and the newest models refuse it
-        // outright. Let the model choose instead, keeping any limit on parallel calls.
-        if tc["type"] != "auto" && (thinking_on || rejects_forced_tool_use(model)) {
+        // Haiku 5.5 supports forced tools with adaptive thinking (the response
+        // starts with the tool call). Other thinking models still require auto.
+        if tc["type"] != "auto" && ((thinking_on && !model.contains("haiku-5-5")) || rejects_forced_tool_use(model)) {
             tc = json!({ "type": "auto" });
         }
         if req.parallel_tool_calls == Some(false) {

@@ -130,6 +130,65 @@ fn gemini_native_and_translated_efforts_agree_and_preserve_summary_choice() {
 }
 
 #[test]
+fn responses_preserves_max_on_documented_gpt_families() {
+    let req = Request {
+        reasoning: Some(Reasoning { effort: Some("max".into()), ..Default::default() }),
+        ..Default::default()
+    };
+    let opts = responses::BuildOpts { chatgpt_backend: false, custom_tools: true, default_reasoning: false };
+    for model in ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra"] {
+        assert_eq!(responses::build_request(&req, model, &opts)["reasoning"]["effort"], "max");
+    }
+    assert_eq!(responses::build_request(&req, "gpt-5.5", &opts)["reasoning"]["effort"], "xhigh");
+    assert_eq!(responses::build_request(&req, "grok-4.7", &opts)["reasoning"]["effort"], "xhigh");
+}
+
+#[test]
+fn gemini4_effort_and_nano_banana_image_translation() {
+    for (effort, expected) in [("none", "low"), ("minimal", "low"), ("medium", "medium"), ("max", "high")] {
+        let r = Reasoning { effort: Some(effort.into()), disabled: effort == "none", ..Default::default() };
+        let mut native = json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":1000}}});
+        gemini::apply_native_reasoning(&mut native, &r, "gemini-4-argon");
+        let translated = gemini::build_request(&Request { reasoning: Some(r), ..Default::default() }, "gemini-4-argon");
+        for body in [native, translated] {
+            let tc = &body["generationConfig"]["thinkingConfig"];
+            assert_eq!(tc["thinkingLevel"], expected);
+            assert!(tc.get("thinkingBudget").is_none());
+        }
+    }
+    let model = "gemini-nano-banana-2.1";
+    let body = gemini::build_request(&Request::default(), model);
+    assert_eq!(body["generationConfig"]["responseModalities"], json!(["TEXT", "IMAGE"]));
+    assert!(body["generationConfig"].get("thinkingConfig").is_none());
+    let mut body = json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}});
+    gemini::apply_native_reasoning(&mut body, &Reasoning::default(), model);
+    assert!(body["generationConfig"].get("thinkingConfig").is_none());
+}
+
+#[test]
+fn haiku55_uses_adaptive_thinking_without_sampling_and_keeps_forced_tools() {
+    for disabled in [false, true] {
+        let req = Request {
+            reasoning: Some(Reasoning { disabled, effort: Some("medium".into()), ..Default::default() }),
+            temperature: Some(0.5),
+            top_p: Some(0.8),
+            tool_choice: crate::ir::ToolChoice::Required,
+            tools: vec![crate::ir::Tool { name: "lookup".into(), description: "".into(), parameters: json!({}) }],
+            ..Default::default()
+        };
+        let body = claude::build_request(&req, "claude-haiku-5-5");
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert_eq!(body["tool_choice"]["type"], "any");
+        if !disabled {
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["output_config"]["effort"], "medium");
+            assert!(body["thinking"].get("budget_tokens").is_none());
+        }
+    }
+}
+
+#[test]
 fn chat_done_requires_finish_reason_but_allows_usage_after_finish() {
     let mut parser = chat::Parser::default();
     let mut events = Vec::new();

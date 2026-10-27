@@ -32,12 +32,15 @@ const TOKEN_PREFIX: &str = "devin-session-token$";
 const LEVELS: &[(&str, &[&str])] = &[
     ("claude-opus-5-5", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-fable-5-1", &["low", "medium", "high", "xhigh", "max"]),
+    ("claude-sonnet-5-5", &["low", "medium", "high", "xhigh", "max"]),
+    ("claude-haiku-5-5", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-sonnet-5", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-opus-5", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-5-fable", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-opus-4-8", &["low", "medium", "high", "xhigh", "max"]),
     ("claude-opus-4-7", &["low", "medium", "high", "xhigh", "max"]),
     ("gpt-6-astra", &["low", "medium", "high", "xhigh", "max"]),
+    ("gpt-6-1-sol", &["low", "medium", "high", "xhigh", "max"]),
     ("gpt-6-sol", &["none", "low", "medium", "high", "xhigh", "max"]),
     ("gpt-6-luna", &["none", "low", "medium", "high", "xhigh", "max"]),
     ("gpt-5-6-sol", &["none", "low", "medium", "high", "xhigh", "max"]),
@@ -843,6 +846,10 @@ mod tests {
         assert_eq!(model_uid("claude-sonnet-4-6", Some("high")), "claude-sonnet-4-6-thinking");
         assert_eq!(model_uid("swe-2", None), "swe-2-high");
         assert_eq!(model_uid("swe-2-max", None), "swe-2-max");
+        assert_eq!(model_uid("gpt-6.1-sol", None), "gpt-6-1-sol-medium");
+        assert_eq!(model_uid("gpt-6-1-sol", Some("none")), "gpt-6-1-sol-medium");
+        assert_eq!(model_uid("claude-haiku-5-5", Some("max")), "claude-haiku-5-5-max");
+        assert_eq!(model_uid("claude-sonnet-5-5", Some("xhigh")), "claude-sonnet-5-5-xhigh");
     }
 
     #[test]

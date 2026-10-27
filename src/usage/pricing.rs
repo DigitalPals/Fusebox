@@ -423,6 +423,45 @@ mod tier_tests {
         o
     }
     #[test]
+    fn terra_prices_cache_lifetimes_tiers_and_context_boundaries() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("openai", "gpt-6.1-terra");
+        o.service_tier = Some("standard".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(1_635_000));
+        for (tier, expected) in [("batch", 817_500), ("flex", 817_500), ("fast", 3_270_000), ("priority", 3_270_000)] {
+            o.service_tier = Some(tier.into());
+            assert_eq!(c.price(&o).cost_nanos, Some(expected), "{tier}");
+        }
+        o.service_tier = Some("ultrafast".into());
+        assert_eq!(c.price(&o).basis, "unsupported_service_tier");
+        o.service_tier = Some("standard".into());
+        o.tokens.input = Some(271700); // Inclusive prompt = exactly 272K.
+        assert_eq!(c.price(&o).cost_nanos, Some(272_335_000));
+        o.tokens.input = Some(271701);
+        assert_eq!(c.price(&o).cost_nanos, Some(544_422_000));
+        o.tokens.write_30m = Some(0);
+        o.tokens.write_12h = Some(100);
+        assert_eq!(c.price(&o).cost_nanos, Some(544_672_000));
+        o.inference_geo = Some("us".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(599_139_200));
+    }
+
+    #[test]
+    fn haiku55_threshold_includes_cache_reads_and_both_write_lifetimes() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("anthropic", "claude-haiku-5-5");
+        o.service_tier = Some("standard".into());
+        o.tokens.input = Some(99700); // Cache reads/writes bring the prompt to 100K.
+        assert_eq!(c.price(&o).cost_nanos, Some(10_038_250));
+        o.tokens.input = Some(99701);
+        assert_eq!(c.price(&o).cost_nanos, Some(50_191_750));
+        o.service_tier = Some("batch".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(25_095_875));
+        o.inference_geo = Some("us".into());
+        assert_eq!(c.price(&o).cost_nanos, Some(27_605_463));
+    }
+
+    #[test]
     fn tier_context_and_region_are_exact() {
         let c = Catalogue::load(None).unwrap();
         let mut o = event("openai", "gpt-6.1-sol");

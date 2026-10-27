@@ -481,6 +481,59 @@ fn answer(response: &Value) -> &str {
     response["output"].as_array().unwrap().iter().find_map(|item| item["content"][0]["text"].as_str()).unwrap()
 }
 
+#[tokio::test]
+async fn terra_lists_and_routes_native_translated_and_websocket_tools() {
+    for native in [false, true] {
+        let f = Fixture::new(Routing::default(), native).await;
+        let models: Value = reqwest::Client::new()
+            .get(format!("{}/v1/models", f.proxy.url))
+            .bearer_auth("client-one")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(models["data"].as_array().unwrap().iter().any(|m| m["id"] == "gpt-6.1-terra"));
+        for effort in ["none", "max"] {
+            let body = json!({"model":"gpt-6.1-terra","input":"hello","reasoning":{"effort":effort},
+                "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
+            let (status, _) = f.request(None, body).await;
+            assert_eq!(status, 200);
+            let chat = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", f.proxy.url))
+                .bearer_auth("client-one")
+                .json(&json!({"model":"gpt-6-1-terra","messages":[{"role":"user","content":"hello"}],
+                    "reasoning_effort":effort,"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}))
+                .send().await.unwrap();
+            assert_eq!(chat.status(), StatusCode::OK);
+            let _: Value = chat.json().await.unwrap();
+            let calls = f.mock.calls.lock();
+            for (_, body, _) in calls.iter().rev().take(2) {
+                assert_eq!(body["model"], "gpt-6.1-terra");
+                assert_eq!(body["reasoning"]["effort"], effort);
+                assert_eq!(body["tools"][0]["name"], "lookup");
+            }
+        }
+        if native {
+            let mut socket = f.socket("terra-websocket").await;
+            let response = turn(
+                &mut socket,
+                json!({"model":"gpt-6.1-terra","input":"hello", "reasoning":{"effort":"max"},
+                "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}),
+            )
+            .await;
+            assert_eq!(response["status"], "completed");
+            let calls = f.mock.calls.lock();
+            let (_, body, transport) = calls.last().unwrap();
+            assert_eq!(*transport, "ws");
+            assert_eq!(body["model"], "gpt-6.1-terra");
+            assert_eq!(body["reasoning"]["effort"], "max");
+            assert_eq!(body["tools"][0]["name"], "lookup");
+        }
+    }
+}
+
 async fn turn(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     mut body: Value,

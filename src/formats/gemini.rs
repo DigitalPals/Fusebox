@@ -181,16 +181,16 @@ fn strip_schema(v: &Value) -> Value {
 /// Share effort and budget normalization between translated requests and native
 /// model suffixes, so `none` and `medium` cannot turn into high effort in one path.
 pub fn thinking_config(reasoning: Option<&Reasoning>, model: &str) -> Value {
-    let gemini3 = model.starts_with("gemini-3");
+    let uses_levels = model.starts_with("gemini-3") || model.starts_with("gemini-4");
     match reasoning {
         Some(r) if r.disabled => {
-            if gemini3 {
+            if uses_levels {
                 json!({ "thinkingLevel": "low" })
             } else {
                 json!({ "thinkingBudget": 0 })
             }
         }
-        Some(r) if gemini3 => {
+        Some(r) if uses_levels => {
             let level = match r.effort_level().as_deref() {
                 Some("minimal") | Some("low") => "low",
                 Some("medium") => "medium",
@@ -204,6 +204,10 @@ pub fn thinking_config(reasoning: Option<&Reasoning>, model: &str) -> Value {
         },
         None => json!({ "includeThoughts": true }),
     }
+}
+
+fn image_model(model: &str) -> bool {
+    model.contains("-image") || model.starts_with("gemini-nano-banana-")
 }
 
 pub fn apply_native_reasoning(body: &mut Value, reasoning: &Reasoning, model: &str) {
@@ -224,7 +228,7 @@ pub fn apply_native_reasoning(body: &mut Value, reasoning: &Reasoning, model: &s
     }
     let config = config.as_object_mut().unwrap();
     config.remove("thinking_config");
-    if model.contains("-image") {
+    if image_model(model) {
         config.remove("thinkingConfig");
     } else {
         config.insert("thinkingConfig".into(), thinking);
@@ -308,7 +312,7 @@ pub fn build_request(req: &Request, model: &str) -> Value {
     if !req.stop.is_empty() {
         gc.insert("stopSequences".into(), req.stop.clone().into());
     }
-    if model.contains("-image") {
+    if image_model(model) {
         // Image models answer with pictures and don't take thinking settings.
         gc.insert("responseModalities".into(), json!(["TEXT", "IMAGE"]));
     } else {

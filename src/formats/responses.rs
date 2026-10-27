@@ -328,7 +328,10 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
         .and_then(|r| r.effort_level())
         .or_else(|| opts.default_reasoning.then(|| "medium".to_string()));
     if let Some(effort) = effort {
-        let effort = if effort == "max" { "xhigh".to_string() } else { effort };
+        // GPT-5.6 and GPT-6 accept max directly. Older models and other
+        // Responses providers retain the legacy xhigh mapping.
+        let supports_max = model.starts_with("gpt-5.6") || model.starts_with("gpt-6");
+        let effort = if effort == "max" && !supports_max { "xhigh".to_string() } else { effort };
         o.insert("reasoning".into(), json!({ "effort": effort, "summary": "auto" }));
     }
     if !req.tools.is_empty() {
