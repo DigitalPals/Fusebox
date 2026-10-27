@@ -658,7 +658,9 @@ impl Account {
     /// Wonder Full is a Muse Code subscription offering, not a pay-as-you-go
     /// Model API model. Explicit model mappings can describe other entitlements.
     fn default_model_allowed(&self, model: &str) -> bool {
-        self.provider != Provider::Meta || !model.eq_ignore_ascii_case("muse-wonder-full-1.0") || self.is_oauth()
+        self.provider != Provider::Meta
+            || !model.to_ascii_lowercase().starts_with("muse-wonder-full")
+            || self.is_oauth()
     }
 
     /// Upstream model name if this account can serve `model`.
@@ -2480,6 +2482,10 @@ oauth-model-alias:
         assert!(!acct.lists("muse-wonder-full-1.0"));
         assert!(!acct.public_models().iter().any(|m| m == "muse-wonder-full-1.0"));
         assert!(acct.resolve_with("muse-wonder-full-1.0", true).is_none());
+        // Canonicalization probes effort suffixes for aggregator models. Those
+        // probes must not turn a denied Full request into a synthetic model ID.
+        assert_eq!(pool.canonical("muse-wonder-full-1.0", None), "muse-wonder-full-1.0");
+        assert!(acct.resolve("muse-wonder-full-1.0-high").is_none());
         assert!(matches!(pool.pick("muse-wonder-full-1.0", &[], &cfg, None, None, &HashMap::new()), Pick::None));
 
         *acct.cred.write() =
