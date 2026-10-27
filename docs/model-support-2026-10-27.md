@@ -25,7 +25,8 @@ model pages for [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-
 [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
 [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra),
 and [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
-Older models and other Responses providers retain their existing mapping.
+Older GPT models and other Responses providers retain their existing mapping,
+apart from the documented Meta reasoning support described below.
 
 Bundled rate catalog `2026-10-27.1` adds Terra's
 [published prices](https://developers.openai.com/api/docs/pricing):
@@ -57,7 +58,7 @@ sparse Codex template is not fabricated for the new model.
 | Antigravity | Added the verified Gemini 4 Argon `high`, `medium`, `low` IDs and Claude Opus/Sonnet 5.5 `max`, `high`, `medium`, `low` IDs. They remain aggregator-specific IDs; first-party providers do not receive these suffixed names. Existing account discovery still determines additional availability and renamed models. |
 | Kimi | Added `kimi-k3.1-pro` and `kimi-k3.1-pro-highspeed`. The Chat adapter omits fixed sampling parameters, forwards output limits as `max_completion_tokens`, preserves an explicit completion limit, and maps disabled reasoning to the documented `low` effort because K3.1 always thinks. Valid requested efforts and omitted defaults are retained. |
 | xAI | Grok 4.7 is already present. Added the missing `grok-imagine-image-quality` and `grok-imagine-video-1.5-lite` entries; the existing image/video adapters forward their selected IDs. |
-| Meta | The current Muse client still contains Muse Spark 1.3 and 1.2. No newer public inference model was verified; the existing Spark catalog is retained. Internal/contributor model strings are not treated as public releases. |
+| Meta | Added `muse-wonder-1.0` and `muse-wonder-full-1.0`, released October 12. Full is a separate Muse Code subscription offering on Power Usage and Maximum Usage plans; default pay-as-you-go accounts neither list nor route it. Explicit model mappings can describe other account entitlements. Wonder, Full and Spark 1.3 Standard preserve `max` reasoning. Disabled reasoning maps to `minimal` because Meta rejects `none`. Full and Contributor modes remain separate IDs, never inferred from reasoning effort. See the correction below. |
 | Devin | Added `gpt-6-1-sol`, `claude-sonnet-5-5`, and `claude-haiku-5-5` with their verified effort-to-UID mappings. The published artifact did not contain Terra or Gemini 4 IDs, so neither is advertised on Devin. |
 | OpenAI-compatible | Model lists remain operator-configured, since OpenRouter, Ollama, vLLM and other compatible endpoints have independent catalogs and availability. Their existing arbitrary-ID routing needs no new vendor-name rule. |
 
@@ -90,9 +91,45 @@ Sources actually fetched:
   and its linked manifest for 1.4.13-R6996.1. Inspected the published Linux ARM
   binary after verifying SHA-256
   `c7f278b5f12862f5721c73433976256aa2a8abd433a12da0e484d30b08c024ff`.
-  Public documentation URLs tried for Meta's inference catalog were unavailable;
-  artifact inspection does not establish account entitlements or an exhaustive
-  server model list.
+  This compiled fallback does not contain the Wonder IDs and is not an
+  exhaustive catalog. The initial review wrongly relied on that absence;
+  the official developer sources below correct that conclusion.
+
+## Meta correction
+
+The initial review missed Muse Wonder and Muse Wonder Full. Meta's
+[October 12 announcement](https://research.meta.ai/blog/muse-wonder),
+[model page](https://dev.meta.ai/models/muse-wonder),
+[API catalog](https://dev.meta.ai/docs/models#muse-wonder-availability), and
+[subscription plans](https://dev.meta.ai/docs/muse-code/subscriptions)
+confirm both releases and the separate `muse-wonder-1.0` and
+`muse-wonder-full-1.0` identifiers. Wonder has a 1,048,576-token API context
+window; account-specific effective limits are not fabricated from this value.
+The official model page lists Full's context as 1M, while its exact effective
+subscription limit remains account-specific. Wonder accepts the same requests
+and endpoints as Spark. Full is not available on the pay-as-you-go Model API,
+and upstream subscription eligibility still determines whether it can run.
+
+The [reasoning guide](https://dev.meta.ai/docs/reasoning) documents `minimal`,
+`low`, `medium`, `high`, `xhigh`, and `max` for Wonder; `none` returns HTTP 400.
+It also confirms `max` for Spark 1.3 Standard and Full in Muse Code.
+Native and translated requests now agree on these settings. Selecting `max`
+on Wonder keeps the Wonder ID; it does not select Full. No Contributor variant
+is selected implicitly.
+
+Catalog `2026-10-27.2` retains Terra's rates and adds Wonder Standard's official
+[pricing](https://dev.meta.ai/docs/pricing-rate-limits): $4/M input,
+$0.20/M cached input, and $20/M output, with no long-context premium.
+Full has no published pay-as-you-go price and remains unpriced. Native web
+search is billed separately; tool charges are not represented by these text
+token rates. The dedicated image, transcription and segmentation APIs remain
+outside this text-model correction.
+
+The correction passed 735 Rust tests (one existing ignored test), formatting,
+Clippy with warnings denied, and diff checks. Regression coverage checks
+subscription versus pay-as-you-go listing/routing, native versus translated
+reasoning without switching models, cached-input pricing, the absence of a
+long-context premium, and unpriced Full/Contributor variants.
 
 Voice, live sessions, Google video/music generation and other dedicated APIs
 are not advertised as ordinary chat models. The existing supported wire
@@ -102,7 +139,7 @@ as part of this model catalog refresh.
 
 ## Verification and development restart
 
-All checks passed with Rust 1.96.1: `cargo test --locked` (732 passed,
+The initial refresh passed with Rust 1.96.1: `cargo test --locked` (732 passed,
 one existing ignored test), `cargo fmt --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and
 `cargo build --release --locked`. The Node suite passed all 133 tests and
@@ -120,4 +157,5 @@ inference was performed; account-specific availability remains unverified.
 
 Both smoke-test leases were closed and checked: no temporary resources,
 preserved volumes, or cleanup errors remained. Downloaded client binaries
-and archives were removed. No persistent service was installed or deployed.
+and archives were removed. No persistent service was installed or deployed
+during that initial local validation.

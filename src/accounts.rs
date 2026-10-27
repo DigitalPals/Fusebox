@@ -275,7 +275,9 @@ impl Provider {
                 "grok-imagine-video-1.5",
                 "grok-imagine-video-1.5-lite",
             ],
-            Provider::Meta => &["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"],
+            Provider::Meta => {
+                &["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"]
+            }
             Provider::Devin => DEVIN_MODELS,
             Provider::Compat => &[],
         }
@@ -653,6 +655,12 @@ impl Account {
         matches!(*self.cred.read(), Credential::OAuth(_))
     }
 
+    /// Wonder Full is a Muse Code subscription offering, not a pay-as-you-go
+    /// Model API model. Explicit model mappings can describe other entitlements.
+    fn default_model_allowed(&self, model: &str) -> bool {
+        self.provider != Provider::Meta || !model.eq_ignore_ascii_case("muse-wonder-full-1.0") || self.is_oauth()
+    }
+
     /// Upstream model name if this account can serve `model`.
     pub fn resolve(&self, model: &str) -> Option<String> {
         self.resolve_with(model, false)
@@ -676,6 +684,9 @@ impl Account {
         }
         // Renamed without `fork`: the original name is gone.
         if self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(model) && !a.fork) {
+            return None;
+        }
+        if !self.default_model_allowed(model) {
             return None;
         }
         let aggregator = matches!(self.provider, Provider::Antigravity | Provider::Devin);
@@ -714,8 +725,11 @@ impl Account {
         if !self.models.is_empty() {
             return self.models.iter().any(|m| same(m.public()) && !self.excludes(&m.name));
         }
-        let shown =
-            |m: &str| !self.excludes(m) && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork);
+        let shown = |m: &str| {
+            self.default_model_allowed(m)
+                && !self.excludes(m)
+                && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork)
+        };
         let first = match self.provider.builtin_models().iter().find(|m| same(m)) {
             Some(m) => Some(shown(m)),
             None => match self.discovered.read().iter().find(|m| same(m)) {
@@ -736,7 +750,11 @@ impl Account {
                 out.push(m.clone());
             }
         }
-        out.retain(|m| !self.excludes(m) && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork));
+        out.retain(|m| {
+            self.default_model_allowed(m)
+                && !self.excludes(m)
+                && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork)
+        });
         for a in &self.aliases {
             if !self.excludes(&a.name) && !out.iter().any(|o| o.eq_ignore_ascii_case(&a.alias)) {
                 out.push(a.alias.clone());
@@ -2449,6 +2467,33 @@ oauth-model-alias:
         assert_eq!(pool.canonical("gpt-6-1-terra", None), "gpt-6.1-terra");
         assert_eq!(pool.canonical("openai/gpt-6-astra", None), "gpt-6-astra");
         assert_eq!(pool.canonical("nothing-like-it", None), "nothing-like-it");
+    }
+
+    #[test]
+    fn wonder_full_defaults_to_subscription_accounts_and_respects_explicit_models() {
+        let mut cfg = Config::parse("auth-dir: /nonexistent\nmeta-api-key:\n  - api-key: synthetic-meta\n").unwrap();
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        assert!(acct.lists("muse-wonder-1.0"));
+        assert!(acct.resolve("muse-wonder-1.0").is_some());
+        assert!(!acct.lists("muse-wonder-full-1.0"));
+        assert!(!acct.public_models().iter().any(|m| m == "muse-wonder-full-1.0"));
+        assert!(acct.resolve_with("muse-wonder-full-1.0", true).is_none());
+        assert!(matches!(pool.pick("muse-wonder-full-1.0", &[], &cfg, None, None, &HashMap::new()), Pick::None));
+
+        *acct.cred.write() =
+            Credential::OAuth(OAuth { access_token: "synthetic-subscription".into(), ..Default::default() });
+        assert!(acct.lists("MUSE-WONDER-FULL-1.0"));
+        assert!(acct.public_models().iter().any(|m| m == "muse-wonder-full-1.0"));
+        assert!(matches!(pool.pick("muse-wonder-full-1.0", &[], &cfg, None, None, &HashMap::new()), Pick::Ok(..)));
+
+        cfg.meta_api_key[0].models.push(ModelAlias { name: "muse-wonder-full-1.0".into(), alias: None });
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        assert!(!acct.is_oauth());
+        assert!(acct.lists("muse-wonder-full-1.0"));
+        assert!(acct.resolve("muse-wonder-full-1.0").is_some());
     }
 
     #[test]

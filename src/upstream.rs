@@ -1051,6 +1051,9 @@ fn responses_api(t: &Target, mut body: Value) -> Prepared {
         ("accept".into(), if t.stream { "text/event-stream" } else { "application/json" }.into()),
     ];
     let base = if t.acct.provider == Provider::Meta {
+        if let Some(effort) = body["reasoning"]["effort"].as_str() {
+            body["reasoning"]["effort"] = crate::formats::responses::normalize_reasoning_effort(effort, t.model).into();
+        }
         headers.push(("user-agent".into(), device::meta::API_UA.into()));
         headers.push(("x-client-id".into(), "tbh:tui".into()));
         headers.push(("x-tbh-agent-role".into(), "main".into()));
@@ -1826,6 +1829,48 @@ mod tests {
             assert!(!forwardable(name), "{name}");
         }
         assert!(forwardable("anthropic-version"));
+    }
+
+    #[test]
+    fn muse_wonder_native_and_translated_reasoning_agree_without_selecting_full() {
+        let cfg = Config::parse("auth-dir: /nonexistent\nmeta-api-key:\n  - api-key: synthetic-meta\n").unwrap();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        let headers = HeaderMap::new();
+        let opts = crate::formats::responses::BuildOpts {
+            chatgpt_backend: false,
+            custom_tools: false,
+            default_reasoning: false,
+        };
+        for (model, effort, expected) in [
+            ("muse-wonder-1.0", "max", "max"),
+            ("muse-wonder-full-1.0", "max", "max"),
+            ("muse-wonder-1.0", "none", "minimal"),
+            ("muse-wonder-full-1.0", "none", "minimal"),
+            ("muse-wonder-1.0", "high", "high"),
+            ("muse-spark-1.3", "max", "max"),
+            ("muse-spark-1.3-contributor", "max", "xhigh"),
+            ("muse-spark-1.2", "max", "xhigh"),
+        ] {
+            let mut target = test_target(&acct, &cfg, &headers);
+            target.model = model;
+            let req = crate::ir::Request {
+                reasoning: Some(crate::ir::Reasoning {
+                    effort: Some(effort.into()),
+                    disabled: effort == "none",
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let translated = crate::formats::responses::build_request(&req, model, &opts);
+            for body in [json!({"input":"hello","reasoning":{"effort":effort}}), translated] {
+                let prepared = prepare(&target, body);
+                assert_eq!(prepared.url, "https://api.meta.ai/v1/responses");
+                assert_eq!(prepared.body["model"], model);
+                assert_eq!(prepared.body["reasoning"]["effort"], expected);
+            }
+        }
     }
 
     #[test]

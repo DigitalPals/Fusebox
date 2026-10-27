@@ -328,10 +328,7 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
         .and_then(|r| r.effort_level())
         .or_else(|| opts.default_reasoning.then(|| "medium".to_string()));
     if let Some(effort) = effort {
-        // GPT-5.6 and GPT-6 accept max directly. Older models and other
-        // Responses providers retain the legacy xhigh mapping.
-        let supports_max = model.starts_with("gpt-5.6") || model.starts_with("gpt-6");
-        let effort = if effort == "max" && !supports_max { "xhigh".to_string() } else { effort };
+        let effort = normalize_reasoning_effort(&effort, model);
         o.insert("reasoning".into(), json!({ "effort": effort, "summary": "auto" }));
     }
     if !req.tools.is_empty() {
@@ -387,6 +384,20 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
         out["service_tier"] = tier.clone().into();
     }
     out
+}
+
+/// Keep supported max reasoning intact and map disabled reasoning to Meta's
+/// shortest supported pass. Shared with native Meta Responses requests.
+pub fn normalize_reasoning_effort<'a>(effort: &'a str, model: &str) -> &'a str {
+    let supports_max = model.starts_with("gpt-5.6")
+        || model.starts_with("gpt-6")
+        || model.starts_with("muse-wonder-")
+        || model == "muse-spark-1.3";
+    match effort {
+        "none" if model.starts_with("muse-wonder-") || model.starts_with("muse-spark-") => "minimal",
+        "max" if !supports_max => "xhigh",
+        _ => effort,
+    }
 }
 
 // --------------------------------------------------------------- stream parser

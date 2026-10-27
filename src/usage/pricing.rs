@@ -423,6 +423,24 @@ mod tier_tests {
         o
     }
     #[test]
+    fn wonder_standard_prices_cache_reads_without_a_context_premium_or_full_price() {
+        let c = Catalogue::load(None).unwrap();
+        let mut o = event("meta", "muse-wonder-1.0");
+        o.service_tier = Some("standard".into());
+        o.tokens.cache_write = Some(0);
+        o.tokens.write_5m = None;
+        o.tokens.write_1h = None;
+        assert_eq!(c.price(&o).cost_nanos, Some(6_040_000));
+        o.tokens.input = Some(1_000_000);
+        assert_eq!(c.price(&o).cost_nanos, Some(4_002_040_000));
+        for model in ["muse-wonder-full-1.0", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"] {
+            o.actual_model = Some(model.into());
+            assert_eq!(c.price(&o).basis, "unknown_model");
+            assert!(c.price(&o).cost_nanos.is_none());
+        }
+    }
+
+    #[test]
     fn terra_prices_cache_lifetimes_tiers_and_context_boundaries() {
         let c = Catalogue::load(None).unwrap();
         let mut o = event("openai", "gpt-6.1-terra");

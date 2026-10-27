@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-27.1",
+  "version": "2026-10-27.2",
   "verified_at": "2026-10-18",
   "rates": [
     {
@@ -912,6 +912,20 @@
       "above_threshold_write_5m_nanos_per_token": 625,
       "above_threshold_write_1h_nanos_per_token": 1000,
       "above_threshold_output_nanos_per_token": 2500
+    },
+    {
+      "provider": "meta",
+      "models": [
+        "muse-wonder-1.0"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "input_nanos_per_token": 4000,
+      "cache_read_nanos_per_token": 200,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 20000
     }
   ],
   "currency": "USD"
