@@ -167,9 +167,7 @@ fn hash_content(content: &Value, hasher: &mut Sha256) -> bool {
                 match &part["text"] {
                     Value::String(text) => feed(text.as_bytes()),
                     _ if part.is_object() => {
-                        let mut part = part.clone();
-                        strip_cache_markers(&mut part);
-                        feed(&serde_json::to_vec(&part).unwrap_or_default());
+                        feed(&serde_json::to_vec(&WithoutCacheMarkers(part)).unwrap_or_default());
                     }
                     _ => continue,
                 }
@@ -182,15 +180,31 @@ fn hash_content(content: &Value, hasher: &mut Sha256) -> bool {
     true
 }
 
-fn strip_cache_markers(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.remove("cache_control");
-            object.remove("prompt_cache_breakpoint");
-            object.values_mut().for_each(strip_cache_markers);
+/// Serialize the same marker-free JSON as before without cloning potentially
+/// large image/tool blocks. Reproduce Map::remove's swap removal order so
+/// existing inferred session keys remain stable.
+struct WithoutCacheMarkers<'a>(&'a Value);
+
+impl Serialize for WithoutCacheMarkers<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self.0 {
+            Value::Object(object) => {
+                let mut fields: Vec<_> = object.iter().collect();
+                for marker in ["cache_control", "prompt_cache_breakpoint"] {
+                    if let Some(index) = fields.iter().position(|(key, _)| key.as_str() == marker) {
+                        fields.swap_remove(index);
+                    }
+                }
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, value) in fields {
+                    map.serialize_entry(key, &WithoutCacheMarkers(value))?;
+                }
+                map.end()
+            }
+            Value::Array(items) => serializer.collect_seq(items.iter().map(WithoutCacheMarkers)),
+            value => value.serialize(serializer),
         }
-        Value::Array(items) => items.iter_mut().for_each(strip_cache_markers),
-        _ => {}
     }
 }
 
@@ -1596,6 +1610,44 @@ mod tests {
         let registry = sessions.registry.lock();
         assert_eq!(registry.bindings.len(), MAX_SESSIONS);
         assert!(!registry.bindings.contains_key("old-0"));
+    }
+
+    #[test]
+    fn borrowed_cache_marker_filter_preserves_existing_serialization_and_session_hashes() {
+        fn strip(value: &mut Value) {
+            match value {
+                Value::Object(object) => {
+                    object.remove("cache_control");
+                    object.remove("prompt_cache_breakpoint");
+                    object.values_mut().for_each(strip);
+                }
+                Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        for value in [
+            json!({"type":"image", "source":{"type":"base64","data":"aBc".repeat(100_000)},
+                "cache_control":{"type":"ephemeral"}}),
+            json!({"before":1,"cache_control":{},"middle":[{"prompt_cache_breakpoint":true,"text":"é\\\n🦀"},
+                null,false,1.25,{"nested":{"cache_control":null,"value":-1}}],"after":2}),
+            json!({"prompt_cache_breakpoint":{},"type":"future","value":u64::MAX,"array":[[],{},"*"]}),
+        ] {
+            let original = value.clone();
+            let mut stripped = value.clone();
+            strip(&mut stripped);
+            assert_eq!(
+                serde_json::to_vec(&WithoutCacheMarkers(&value)).unwrap(),
+                serde_json::to_vec(&stripped).unwrap()
+            );
+            let mut expected = Sha256::new();
+            let bytes = serde_json::to_vec(&stripped).unwrap();
+            expected.update((bytes.len() as u64).to_le_bytes());
+            expected.update(bytes);
+            let mut actual = Sha256::new();
+            assert!(hash_content(&json!([value]), &mut actual));
+            assert_eq!(actual.finalize(), expected.finalize());
+            assert_eq!(original, value);
+        }
     }
 
     #[test]

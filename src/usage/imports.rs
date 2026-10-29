@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -800,13 +800,35 @@ fn files(root: &Path) -> Result<Vec<PathBuf>> {
     found.sort();
     Ok(found)
 }
-fn reader(path: &Path) -> Result<Box<dyn Read + Send>> {
+enum HistoryReader {
+    Plain(fs::File),
+    Compressed(Box<dyn Read + Send>),
+}
+impl Read for HistoryReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(file) => file.read(bytes),
+            Self::Compressed(reader) => reader.read(bytes),
+        }
+    }
+}
+fn reader(path: &Path) -> Result<HistoryReader> {
     let file = fs::File::open(path)?;
     if path.extension().and_then(|v| v.to_str()) == Some("zst") {
-        Ok(Box::new(zstd::stream::read::Decoder::new(file)?))
+        Ok(HistoryReader::Compressed(Box::new(zstd::stream::read::Decoder::new(file)?)))
     } else {
-        Ok(Box::new(file))
+        Ok(HistoryReader::Plain(file))
     }
+}
+
+/// Seeking past EOF succeeds on ordinary files, so check length first: a
+/// truncated history must reset its checkpoint just as a short sequential skip did.
+fn seek_checkpoint(input: &mut impl Seek, offset: u64) -> Result<bool> {
+    if offset > MAX_FILE + 1 || input.seek(SeekFrom::End(0))? < offset {
+        return Ok(false);
+    }
+    input.seek(SeekFrom::Start(offset))?;
+    Ok(true)
 }
 fn file_signature(metadata: &fs::Metadata) -> String {
     #[cfg(unix)]
@@ -855,8 +877,20 @@ fn read_file(path: &Path, root: &Root, checkpoint: Option<&Checkpoint>, remainin
         prefix.clear();
     } else {
         let skip = cp.offset.saturating_sub(n as u64);
-        let skipped = std::io::copy(&mut input.by_ref().take(skip), &mut std::io::sink())?;
-        if skipped != skip {
+        let resumed = if matches!(input.get_ref().get_ref(), HistoryReader::Plain(_)) {
+            // Discard BufReader's lookahead before the absolute seek, then reset
+            // Take's budget to preserve the bound on the entire logical file.
+            let mut source = input.into_inner().into_inner();
+            let HistoryReader::Plain(file) = &mut source else { unreachable!() };
+            let offset = n as u64 + skip;
+            let resumed = seek_checkpoint(file, offset)?;
+            input = BufReader::new(source.take((MAX_FILE + 1).saturating_sub(offset)));
+            resumed
+        } else {
+            // Compressed streams keep their existing bounded sequential resume.
+            std::io::copy(&mut input.by_ref().take(skip), &mut std::io::sink())? == skip
+        };
+        if !resumed {
             cp = Checkpoint::default();
             input = BufReader::new(reader(path)?.take(MAX_FILE + 1));
             prefix.clear();

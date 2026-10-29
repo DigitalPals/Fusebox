@@ -1,0 +1,37 @@
+{
+  "baseline_ref": "f49466b",
+  "methodology": "Same UI fixture and optimized build-script compiler; nine warm no-change reruns per implementation. Includes process startup, hashing and file I/O; no full Cargo compilation.",
+  "compiler": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "before_ms": [
+    64.210605,
+    64.122882,
+    64.322985,
+    63.602702,
+    62.930592,
+    73.833159,
+    80.516599,
+    69.70489,
+    65.642024
+  ],
+  "after_ms": [
+    14.667263,
+    16.035649,
+    13.621251,
+    14.074212,
+    13.902604,
+    16.663572,
+    13.086548,
+    13.249422,
+    14.265479
+  ],
+  "before_median_ms": 64.322985,
+  "after_median_ms": 14.074212,
+  "identical_initial_outputs": true,
+  "unchanged_output_mtimes_on_rerun": true,
+  "transitive_invalidation_verified": [
+    "i18n-zh.js.gz",
+    "i18n.js.gz",
+    "index.html.gz"
+  ],
+  "missing_and_incomplete_outputs_recovered": true
+}

@@ -86,6 +86,24 @@ test('unknown pricing remains unpriced and small backend estimates retain precis
   assert.equal(helpers.dollars(12345000), '$0.0123');
 });
 
+test('usage formatting reuses formatters while retaining unknown, zero and currency precision', () => {
+  let constructed = 0;
+  const d = dashboard({ Intl: { DateTimeFormat: Intl.DateTimeFormat, NumberFormat: class extends Intl.NumberFormat {
+    constructor(...args) { super(...args); constructed++; }
+  } } });
+  const initial = constructed;
+  for (let i = 0; i < 100; i++) {
+    assert.equal(d.run('usageCount(1234.5)'), '1,234.5');
+    assert.equal(d.run('UsageTools.dollars(12345000)'), '$0.0123');
+    assert.equal(d.run('UsageTools.dollars(1200000000)'), '$1.20');
+  }
+  assert.equal(constructed, initial, 'live renders do not allocate more number formatters');
+  assert.equal(d.run('usageCount(null)'), 'Unknown');
+  assert.equal(d.run('usageCount(0)'), '0');
+  assert.equal(d.run('UsageTools.dollars(null)'), 'Unpriced');
+  assert.equal(d.run('UsageTools.dollars(0)'), '$0.00');
+});
+
 test('privacy hides all labels, IDs, paths, credentials and draft values in rendered markup', () => {
   const d = dashboard();
   d.context.S.private = true;
@@ -191,6 +209,76 @@ test('readout shows the hovered day with each group, and history-only days befor
   assert.match(html, /Before the proxy was set up · history only/);
   assert.equal(helpers.beforeProxy('2026-10-06', Date.UTC(2026, 9, 5, 23, 30), 'Europe/Amsterdam'), false);
   assert.equal(helpers.beforeProxy('2026-10-05', null, 'UTC'), false);
+});
+
+test('chart aggregation is reused on hover and invalidates for data, range, metric, stack and theme', () => {
+  const d = dashboard();
+  const trend = [{ date: '2026-10-05', group: 'anthropic', observations: 4, estimated_cost_nanos: 3e9 }];
+  d.seed({ range: { start: '2026-10-05', end: '2026-10-07', through: '2026-10-06' }, summary: { combined: { trend } } });
+  d.run('let aggregations = 0; const originalChart = UsageTools.chart; UsageTools.chart = (...args) => { aggregations++; return originalChart(...args); }; usageChartHTML()');
+  d.run('Usage.hoverDay = "2026-10-05"; usageChartHTML(); usageChartHTML()');
+  assert.equal(d.run('aggregations'), 1);
+  d.run('Usage.metric = "calls"');
+  assert.match(d.run('usageChartHTML()'), /4 calls/);
+  assert.equal(d.run('usageChartData().max'), 4);
+  d.run('Usage.range.end = "2026-10-06"; usageChartHTML()');
+  assert.equal(d.run('usageChartData().series.length'), 1);
+  d.run('Usage.summary.combined.trend = [{date: "2026-10-05", group: "anthropic", observations: 9}]; usageChartHTML()');
+  assert.equal(d.run('usageChartData().max'), 9);
+  d.run('Usage.summary.combined.trends = {model: [{date: "2026-10-05", group: "model-a", observations: 2}]}; Usage.stack = "model"; usageSelectStack(Usage.summary); usageChartHTML()');
+  assert.equal(d.run('usageChartData().keys[0]'), 'model-a');
+  // Introduce only the document properties chart generation needs, after setup.
+  d.context.document = { documentElement: { dataset: { shade: 'light' } } };
+  d.run('usageChartHTML()');
+  assert.equal(d.run('usageChartData().colors[0]'), 'oklch(0.6 0.09 30)');
+  assert.equal(d.run('aggregations'), 6);
+});
+
+test('empty charts reuse their aggregate and labels remain fresh without re-aggregation', () => {
+  const d = dashboard();
+  d.seed({ range: { start: '2026-10-05', end: '2026-10-07', through: '2026-10-06' }, summary: { combined: {} } });
+  d.run('let aggregations = 0; const originalChart = UsageTools.chart; UsageTools.chart = (...args) => { aggregations++; return originalChart(...args); }; usageChartHTML(); usageChartHTML()');
+  assert.equal(d.run('aggregations'), 1);
+  assert.equal(d.run('usageChartData().max'), 0);
+  assert.equal(d.run('usageChartData().series.length'), 2);
+  d.run('Usage.summary.combined.trend = [{date: "2026-10-05", group: "anthropic", observations: 1}]');
+  assert.match(d.run('usageChartHTML()'), /Claude/);
+  d.context.provName = () => 'Updated provider';
+  assert.match(d.run('usageChartHTML()'), /Updated provider/);
+  assert.equal(d.run('aggregations'), 2, 'labels are generated afresh without changing cached numeric data');
+});
+
+test('hover retains chart controls and focused bars, changing only selected classes and readout', () => {
+  const writes = [], classWrites = [];
+  const bars = ['2026-10-05', '2026-10-06', '2026-10-07'].map((date) => {
+    let cls = 'u-bar';
+    return { dataset: { usageDay: date }, get className() { return cls; }, set className(value) { cls = value; classWrites.push(date); } };
+  });
+  let readoutHTML = '';
+  const readout = { get innerHTML() { return readoutHTML; }, set innerHTML(value) { readoutHTML = value; writes.push('readout'); } };
+  const chart = { querySelector: () => readout, querySelectorAll: () => bars, set innerHTML(_) { assert.fail('hover must preserve the chart DOM'); } };
+  const cost = {};
+  const document = { documentElement: { dataset: {} }, activeElement: bars[1], addEventListener() {}, getElementById: (id) => ({ 'usage-chart': chart, 'usage-part-cost': cost })[id] || null };
+  const d = dashboard({ document, addEventListener() {}, setInterval() {} });
+  d.seed({ range: { start: '2026-10-05', end: '2026-10-08', through: '2026-10-07' }, summary: { combined: { trend: [{ date: '2026-10-05', group: 'anthropic', observations: 4, estimated_cost_nanos: 3e9 }] } } });
+  d.context.cost = cost;
+  d.run('S.route = "usage"; usagePainted.set(cost, "initial"); usageHover("2026-10-05")');
+  assert.deepEqual(bars.map((b) => b.className), ['u-bar on', 'u-bar dim', 'u-bar dim']);
+  assert.match(readout.innerHTML, /Day · Mon Oct 5/);
+  assert.match(readout.innerHTML, /4 calls/);
+  assert.equal(d.run('usagePainted.has(cost)'), false);
+  d.run('usageHover("2026-10-06")');
+  assert.deepEqual(bars.map((b) => b.className), ['u-bar dim', 'u-bar on', 'u-bar dim']);
+  assert.match(readout.innerHTML, /Day · Tue Oct 6/);
+  assert.equal(classWrites.length, 5, 'moving between bars changes only the previous and next selection');
+  d.run('usageHover("2026-10-06")');
+  assert.equal(writes.length, 2, 'repeated events on one day do no work');
+  d.run('usageHover(null)');
+  assert.deepEqual(bars.map((b) => b.className), ['u-bar', 'u-bar', 'u-bar']);
+  assert.match(readout.innerHTML, /Peak day · Mon Oct 5/);
+  assert.equal(document.activeElement, bars[1], 'the focused bar is the same element throughout');
+  d.run('S.route = "overview"; usageHover("2026-10-05")');
+  assert.equal(writes.length, 3, 'events outside the Usage page are ignored');
 });
 
 test('daily priced subset is distinct from the range breakdown and Fable is visible initially', () => {

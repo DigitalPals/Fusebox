@@ -1,0 +1,31 @@
+{
+  "existing_dev_service_found": false,
+  "rebuilt_release": "/home/john/Code/Fusebox/target/release/fusebox",
+  "binary_sha256": "8d89d44805a2470746d1b01b71d1cb3c69854ed76c9720b5001ee1f609fb53ce",
+  "managed_lease": "94710878f0e64378910796562d9eb264",
+  "restart_verified": true,
+  "checks": [
+    "rebuilt dashboard, content versions, gzip/identity, immutable caching and conditional 304",
+    "native and translated proxy requests plus compressed input through loopback mock provider",
+    "graceful stop and restart on same config and port, retaining all usage records with no drops"
+  ],
+  "usage_acceptance": {
+    "passed": 12,
+    "checks": [
+      "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+      "collector identity filtering, breakdown and friendly label",
+      "replay does not inflate combined imported totals",
+      "offline outbox survives separate process restart and reconnect",
+      "copied histories across collectors deduplicate using message evidence",
+      "retired summary returns 410 without query work and remains management authenticated",
+      "management/inference separation, wrong credential and oversized batch rejection",
+      "revocation rejects upload and retains offline data",
+      "credential rotation and local re-enrollment preserve idempotency",
+      "imported history from 10 days ago is priced on its local date in the combined trend",
+      "usage reprice CLI is idempotent on an already priced database",
+      "marker transcript/tool/project content absent from databases, exports and logs"
+    ]
+  },
+  "external_inference": false,
+  "temporary_processes_stopped": true
+}

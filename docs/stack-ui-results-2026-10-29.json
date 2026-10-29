@@ -1,0 +1,101 @@
+{
+  "measuredAt": "2026-10-29T06:08:39.405Z",
+  "node": "v22.22.3",
+  "baselineCommit": "f49466be5bbc15372d595ca497f7d893d6807773",
+  "command": "node scripts/ui-benchmark.cjs --baseline-ref f49466be5bbc15372d595ca497f7d893d6807773",
+  "method": "Median of five batches of 60 desktop chart hovers after warmup; real dashboard source in a Node VM with minimal DOM stand-ins. Timing covers JavaScript/HTML generation only, excluding browser DOM parsing, layout and painting. Synthetic snapshots contain 7, 30 or 366 days and 3, 20 or 40 groups.",
+  "eventsPerBatch": 60,
+  "batches": 5,
+  "results": [
+    {
+      "days": 7,
+      "groups": 3,
+      "trendRows": 21,
+      "baseline": {
+        "medianMilliseconds": 33.931,
+        "microsecondsPerHover": 565.52,
+        "operationsPerBatch": {
+          "aggregations": 60,
+          "numberFormatters": 1800,
+          "chartReplacements": 60,
+          "readoutReplacements": 0,
+          "assignedHTMLBytes": 283684,
+          "classChanges": 0
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 0.73,
+        "microsecondsPerHover": 12.16,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 38344,
+          "classChanges": 125
+        }
+      },
+      "speedup": 46.48
+    },
+    {
+      "days": 30,
+      "groups": 20,
+      "trendRows": 600,
+      "baseline": {
+        "medianMilliseconds": 137.655,
+        "microsecondsPerHover": 2294.25,
+        "operationsPerBatch": {
+          "aggregations": 60,
+          "numberFormatters": 6360,
+          "chartReplacements": 60,
+          "readoutReplacements": 0,
+          "assignedHTMLBytes": 1158298,
+          "classChanges": 0
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.023,
+        "microsecondsPerHover": 17.05,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 69658,
+          "classChanges": 148
+        }
+      },
+      "speedup": 134.56
+    },
+    {
+      "days": 366,
+      "groups": 40,
+      "trendRows": 14640,
+      "baseline": {
+        "medianMilliseconds": 1908.938,
+        "microsecondsPerHover": 31815.64,
+        "operationsPerBatch": {
+          "aggregations": 60,
+          "numberFormatters": 66840,
+          "chartReplacements": 60,
+          "readoutReplacements": 0,
+          "assignedHTMLBytes": 12498762,
+          "classChanges": 0
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 2.045,
+        "microsecondsPerHover": 34.08,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 69762,
+          "classChanges": 484
+        }
+      },
+      "speedup": 933.47
+    }
+  ]
+}

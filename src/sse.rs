@@ -45,11 +45,19 @@ impl SseDecoder {
                 self.fail();
                 break;
             }
-            self.buf.extend_from_slice(piece);
             if piece.last() != Some(&b'\n') {
+                self.buf.extend_from_slice(piece);
                 continue;
             }
-            let line = String::from_utf8_lossy(&self.buf[..self.buf.len() - 1]);
+            // Most lines arrive complete. Borrow them directly from the network
+            // chunk; only fragmented lines need copying into the carry buffer.
+            let bytes = if self.buf.is_empty() {
+                &piece[..piece.len() - 1]
+            } else {
+                self.buf.extend_from_slice(piece);
+                &self.buf[..self.buf.len() - 1]
+            };
+            let line = String::from_utf8_lossy(bytes);
             if self.data.len().saturating_add(line.len()) > self.limit {
                 self.fail();
                 break;
@@ -157,6 +165,26 @@ mod tests {
             assert_eq!(events[2].data, "tail");
             assert!(decoder.finish().is_empty());
             assert_eq!(decoder.push(b"data: reused\n\n")[0].data, "reused");
+        }
+    }
+
+    #[test]
+    fn limits_are_identical_for_complete_and_fragmented_lines() {
+        for wire in [
+            &b"data: kept\n\ndata: 12345678901234567890123456789012\n\n"[..],
+            &b"data: kept\n\ndata: 1234567890\ndata: 12345678901234567\n\n"[..],
+        ] {
+            for chunk_size in 1..=wire.len() {
+                let mut decoder = SseDecoder::with_limit(32);
+                let mut events = Vec::new();
+                for chunk in wire.chunks(chunk_size) {
+                    events.extend(decoder.push(chunk));
+                }
+                events.extend(decoder.finish());
+                assert!(decoder.failed(), "chunk size {chunk_size}");
+                assert_eq!(events.len(), 1, "chunk size {chunk_size}");
+                assert_eq!(events[0].data, "kept");
+            }
         }
     }
 

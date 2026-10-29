@@ -1,0 +1,30 @@
+[
+  {
+    "lease": "2d474e7cc97b42d4a9b5f4baf7db1a72",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  {
+    "lease": "94710878f0e64378910796562d9eb264",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  {
+    "lease": "fe316c4592734d0180c94c6050da6d66",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  {
+    "lease": "5f2ff423f1464866a6399970b7e93399",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  }
+]

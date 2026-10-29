@@ -1,0 +1,134 @@
+{
+  "synthetic_only": true,
+  "network_or_provider_latency_measured": false,
+  "baseline_commit": "f49466be5bbc15372d595ca497f7d893d6807773",
+  "compiler": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "system": "Linux-6.12.113+deb13-amd64-x86_64-with-glibc2.41",
+  "methodology": [
+    "Optimized standalone Rust binaries, medians of 9 samples per case.",
+    "Routing: 600,000 comparisons per sample over exact/prefix/suffix/infix/multi-wildcard/Unicode cases.",
+    "Routing allocations counted by a System global allocator wrapper; harness bookkeeping excluded.",
+    "SSE: existing scripts/sse-benchmark.rs, complete production decoder from each revision.",
+    "Microbenchmarks measure primitives only; compiler/host noise and production workload differences apply."
+  ],
+  "working_sources_sha256": {
+    "src/accounts.rs": "e45e27a5488e1ffd87b1fb6633c54e76c8c58cbb8eea69efe442c03fc90b9060",
+    "src/sse.rs": "52c34ee3546a003e90d639c6bdc18d6acb0a286457bd50f23b99b912d3c71047"
+  },
+  "routing": [
+    {
+      "algorithm": "before",
+      "comparisons": 600000,
+      "median_ms": 39.130499,
+      "allocations": 1800000,
+      "allocated_bytes": 52700000
+    },
+    {
+      "algorithm": "after",
+      "comparisons": 600000,
+      "median_ms": 12.030315,
+      "allocations": 0,
+      "allocated_bytes": 0
+    }
+  ],
+  "sse": [
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 1024,
+      "median_ms": 0.757038
+    },
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 16384,
+      "median_ms": 0.66577
+    },
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 65536,
+      "median_ms": 0.766542
+    },
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 1024,
+      "median_ms": 2.948063
+    },
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 16384,
+      "median_ms": 2.63448
+    },
+    {
+      "algorithm": "before",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 65536,
+      "median_ms": 2.641962
+    },
+    {
+      "algorithm": "before",
+      "case": "small_events",
+      "bytes": 275780,
+      "chunk_bytes": 16384,
+      "median_ms": 0.337477
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 1024,
+      "median_ms": 0.610347
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 16384,
+      "median_ms": 0.503878
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 1048584,
+      "chunk_bytes": 65536,
+      "median_ms": 0.470848
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 1024,
+      "median_ms": 1.981269
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 16384,
+      "median_ms": 1.839275
+    },
+    {
+      "algorithm": "after",
+      "case": "long_line",
+      "bytes": 4194312,
+      "chunk_bytes": 65536,
+      "median_ms": 1.896081
+    },
+    {
+      "algorithm": "after",
+      "case": "small_events",
+      "bytes": 275780,
+      "chunk_bytes": 16384,
+      "median_ms": 0.231929
+    }
+  ]
+}

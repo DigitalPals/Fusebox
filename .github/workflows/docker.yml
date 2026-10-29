@@ -13,6 +13,11 @@ permissions:
 env:
   IMAGE: ghcr.io/digitalpals/fusebox
 
+# Replace superseded main builds; every tag or other dispatch has its own group.
+concurrency:
+  group: fusebox-docker-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && 'latest' || github.run_id }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
 jobs:
   build:
     name: ${{ matrix.platform }}

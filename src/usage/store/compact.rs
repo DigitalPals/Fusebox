@@ -185,12 +185,14 @@ pub(super) fn compress_step(conn: &mut Connection, cursor: &mut i64, limit: i64)
         "UPDATE usage_observations SET payload=?2,snapshot_json=?3,
            pricing_partial=COALESCE(pricing_partial,json_extract(?4,'$.partial')) WHERE id=?1",
     )?;
+    let mut decoder = codec::Decoder::new(&tx);
     for (id, payload, snapshot) in &rows {
-        let payload = codec::decode(&tx, payload.into())?;
-        let snapshot = codec::decode(&tx, snapshot.into())?;
+        let payload = decoder.decode(payload.into())?;
+        let snapshot = decoder.decode(snapshot.into())?;
         update.execute(params![id, documents.store(&payload)?, documents.store(&snapshot)?, snapshot])?;
         *cursor = *id;
     }
+    drop(decoder);
     drop(update);
     if rows.is_empty() {
         // Caught up: everything up to the newest row is compressed.
@@ -362,15 +364,17 @@ pub fn downgrade(path: &Path) -> Result<Value> {
         if rows.is_empty() {
             break;
         }
+        let mut decoder = codec::Decoder::new(&tx);
         for (id, payload, snapshot) in &rows {
-            let payload = codec::decode(&tx, payload.into())?;
-            let snapshot = codec::decode(&tx, snapshot.into())?;
+            let payload = decoder.decode(payload.into())?;
+            let snapshot = decoder.decode(snapshot.into())?;
             tx.execute(
                 "UPDATE usage_observations SET payload=?2,snapshot_json=?3 WHERE id=?1",
                 params![id, payload, snapshot],
             )?;
         }
         decompressed += rows.len();
+        drop(decoder);
         tx.commit()?;
     }
     let tx = conn.transaction()?;

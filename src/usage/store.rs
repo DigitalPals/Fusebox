@@ -136,9 +136,37 @@ fn register_aggregates(conn: &Connection) -> Result<()> {
 }
 const WRITER_SESSIONS_SCHEMA: &str = "CREATE TABLE usage_writer_sessions(id TEXT PRIMARY KEY,started_at_ms INTEGER NOT NULL,ended_at_ms INTEGER,clean INTEGER NOT NULL DEFAULT 0,dropped INTEGER NOT NULL DEFAULT 0,rejected INTEGER NOT NULL DEFAULT 0,writer_errors INTEGER NOT NULL DEFAULT 0,written INTEGER NOT NULL DEFAULT 0,last_commit_at_ms INTEGER NOT NULL DEFAULT 0);";
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-fn persist_health(conn: &Connection, id: &str, health: &Health) -> Result<()> {
-    conn.execute("UPDATE usage_writer_sessions SET dropped=?2,rejected=?3,writer_errors=?4,written=?5,last_commit_at_ms=?6 WHERE id=?1",params![id,health.dropped.load(Ordering::Relaxed),health.rejected.load(Ordering::Relaxed),health.errors.load(Ordering::Relaxed),health.written.load(Ordering::Relaxed),health.last_commit.load(Ordering::Relaxed)])?;
-    Ok(())
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HealthCounters {
+    dropped: u64,
+    rejected: u64,
+    errors: u64,
+    written: u64,
+    last_commit: i64,
+}
+
+/// Idle writers still check for losses reported by producers, but an unchanged
+/// checkpoint needs neither a SQL statement nor a WAL write/sync every second.
+#[derive(Default)]
+struct HealthCheckpoint(Option<HealthCounters>);
+impl HealthCheckpoint {
+    fn persist(&mut self, conn: &Connection, id: &str, health: &Health) -> Result<()> {
+        let counters = HealthCounters {
+            dropped: health.dropped.load(Ordering::Relaxed),
+            rejected: health.rejected.load(Ordering::Relaxed),
+            errors: health.errors.load(Ordering::Relaxed),
+            written: health.written.load(Ordering::Relaxed),
+            last_commit: health.last_commit.load(Ordering::Relaxed),
+        };
+        if self.0 == Some(counters) {
+            return Ok(());
+        }
+        conn.prepare_cached("UPDATE usage_writer_sessions SET dropped=?2,rejected=?3,writer_errors=?4,written=?5,last_commit_at_ms=?6 WHERE id=?1")?.execute(params![id,counters.dropped,counters.rejected,counters.errors,counters.written,counters.last_commit])?;
+        // A failed write must remain dirty so the next timer/barrier retries it.
+        self.0 = Some(counters);
+        Ok(())
+    }
 }
 fn database_failure(error: &anyhow::Error) -> bool {
     error
@@ -301,6 +329,7 @@ impl Store {
                     }
                 };
                 let mut last_health = std::time::Instant::now();
+                let mut health_checkpoint = HealthCheckpoint::default();
                 let stop = loop {
                     // Wake sooner while the compactor has work, so it keeps its pace.
                     let wait =
@@ -309,7 +338,7 @@ impl Store {
                     let command = match received {
                         Ok(Some(command)) => Some(command),
                         Ok(None) => {
-                            let _ = persist_health(&conn, &worker_session, &worker_health);
+                            let _ = health_checkpoint.persist(&conn, &worker_session, &worker_health);
                             break None;
                         }
                         Err(_) => None,
@@ -336,7 +365,7 @@ impl Store {
                     }
                     if last_health.elapsed() >= std::time::Duration::from_secs(1) {
                         last_health = std::time::Instant::now();
-                        if let Err(e) = persist_health(&conn, &worker_session, &worker_health) {
+                        if let Err(e) = health_checkpoint.persist(&conn, &worker_session, &worker_health) {
                             worker_health.fail(&e);
                         }
                     }
@@ -375,7 +404,7 @@ impl Store {
                                     worker_health.fail(&e);
                                 }
                             }
-                            if let Err(e) = persist_health(&conn, &worker_session, &worker_health) {
+                            if let Err(e) = health_checkpoint.persist(&conn, &worker_session, &worker_health) {
                                 worker_health.fail(&e);
                             }
                             match pending {
@@ -518,7 +547,7 @@ impl Store {
                 let health = self.health.clone();
                 let clean = self
                     .call_internal(move |conn| {
-                        persist_health(conn, &id, &health)?;
+                        HealthCheckpoint::default().persist(conn, &id, &health)?;
                         conn.execute(
                             "UPDATE usage_writer_sessions SET clean=1,ended_at_ms=?2 WHERE id=?1",
                             params![id.as_str(), Utc::now().timestamp_millis()],
@@ -745,6 +774,9 @@ mod compact_tests;
 #[cfg(test)]
 #[path = "store/index_tests.rs"]
 mod index_tests;
+#[cfg(test)]
+#[path = "store/optimization_tests.rs"]
+mod optimization_tests;
 
 fn association_key(o: &Observation) -> String {
     if let Some(id) = o.response_id.as_ref().filter(|s| !s.is_empty()) {
@@ -843,12 +875,13 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
         let Some(last) = rows.last() else { break };
         cursor = last.0;
         let mut documents = Documents::new(&tx)?;
+        let mut decoder = codec::Decoder::new(&tx);
         let mut groups = BTreeSet::new();
         for (id, payload, key, basis, old_cost, old_snapshot, old_catalogue) in rows {
             // Payloads written by an incompatible build stay as stored rather than guessed.
-            let Ok(payload) = codec::decode(&tx, (&payload).into()) else { continue };
+            let Ok(payload) = decoder.decode((&payload).into()) else { continue };
             let Ok(o) = serde_json::from_str::<Observation>(&payload) else { continue };
-            let old_snapshot = codec::decode(&tx, (&old_snapshot).into())?;
+            let old_snapshot = decoder.decode((&old_snapshot).into())?;
             let mut correction = "recoverable_unpriced_estimate";
             if old_cost.is_some() {
                 let old: super::pricing::Snapshot = serde_json::from_str(&old_snapshot)?;
@@ -889,6 +922,7 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
             groups.insert(key);
             repriced += 1;
         }
+        drop(decoder);
         for key in groups {
             rebuild_entries(&tx, &key)?;
         }
@@ -1165,15 +1199,16 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
         [],
         |r| r.get(0),
     )?;
+    let mut decoder = codec::Decoder::new(conn);
     for row in rows {
         read::check()?;
         let (id, payload, cost, basis, snapshot, key, ingested, suppressed, association) = row?;
-        let mut value: Value = serde_json::from_str(&codec::decode(conn, (&payload).into())?)?;
+        let mut value: Value = serde_json::from_str(&decoder.decode((&payload).into())?)?;
         value["id"] = json!(id);
         value["ingested_at_ms"] = json!(ingested);
         value["estimated_cost_nanos"] = json!(cost);
         value["pricing_basis"] = json!(basis);
-        value["pricing_snapshot"] = serde_json::from_str(&codec::decode(conn, (&snapshot).into())?)?;
+        value["pricing_snapshot"] = serde_json::from_str(&decoder.decode((&snapshot).into())?)?;
         if has_revisions {
             let mut revisions = conn.prepare_cached("SELECT changed_at_ms,reason,previous_cost_nanos,previous_catalogue_version,previous_snapshot,catalogue_version,cost_nanos FROM usage_price_revisions WHERE observation_id=?1 ORDER BY id")?;
             let records = revisions

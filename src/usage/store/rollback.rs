@@ -41,6 +41,7 @@ pub fn rollback_copy(database: &Path, to: &Path) -> Result<Value> {
             |r| r.get(0),
         )?;
         let tx = conn.transaction()?;
+        let mut decoder = codec::Decoder::new(&tx);
         let mut cursor = 0_i64;
         loop {
             let rows = tx
@@ -50,10 +51,10 @@ pub fn rollback_copy(database: &Path, to: &Path) -> Result<Value> {
             let Some(last) = rows.last() else { break };
             cursor = last.0;
             for (id, payload, snapshot) in rows {
-                let mut observation: Observation = serde_json::from_str(&codec::decode(&tx, (&payload).into())?)?;
+                let mut observation: Observation = serde_json::from_str(&decoder.decode((&payload).into())?)?;
                 observation.tokens.write_30m = None;
                 observation.tokens.write_12h = None;
-                let snapshot = compatible_snapshot(&codec::decode(&tx, (&snapshot).into())?)?;
+                let snapshot = compatible_snapshot(&decoder.decode((&snapshot).into())?)?;
                 // Preserve identities and historical costs. Canonical/source keys
                 // continue to deduplicate replays under an older importer.
                 tx.execute("UPDATE usage_observations SET payload=?2,snapshot_json=?3,write_30m=NULL,write_12h=NULL WHERE id=?1",
@@ -79,7 +80,7 @@ pub fn rollback_copy(database: &Path, to: &Path) -> Result<Value> {
                 let Some(last) = rows.last() else { break };
                 cursor = last.0;
                 for (id, snapshot) in rows {
-                    let snapshot = compatible_snapshot(&codec::decode(&tx, (&snapshot).into())?)?;
+                    let snapshot = compatible_snapshot(&decoder.decode((&snapshot).into())?)?;
                     tx.execute(
                         "UPDATE usage_price_revisions SET previous_snapshot=?2 WHERE id=?1",
                         params![id, snapshot],
@@ -92,6 +93,7 @@ pub fn rollback_copy(database: &Path, to: &Path) -> Result<Value> {
             "INSERT OR REPLACE INTO usage_meta(key,value) VALUES('rollback_omitted_lifetime_rows',?1)",
             [lifetime_rows.to_string()],
         )?;
+        drop(decoder);
         tx.commit()?;
         drop(conn);
         // Schema 4 releases already know how to migrate schema 3. Reuse the

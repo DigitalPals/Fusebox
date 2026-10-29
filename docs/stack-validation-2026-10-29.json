@@ -1,0 +1,38 @@
+{
+  "source_sha256": {
+    ".github/workflows/ci.yml": "e9dea303954c226cea8090e43c362c609882ec853e8eac4afadc3b685d391dd9",
+    ".github/workflows/docker.yml": "59273a257eda2fea377fff7cb72cbf5e41624d86c2d356d31304623fb65ed20f",
+    "build.rs": "38d3a46f0895d37bfa2a9ee5caa9ff6e83c903280d8d90bdb2d04dbeddc4d59f",
+    "src/accounts.rs": "e45e27a5488e1ffd87b1fb6633c54e76c8c58cbb8eea69efe442c03fc90b9060",
+    "src/affinity.rs": "f63900698262d2e2a01b76bec49c67acb0d2e01ab56123de754cff9de7f2e2cb",
+    "src/sse.rs": "52c34ee3546a003e90d639c6bdc18d6acb0a286457bd50f23b99b912d3c71047",
+    "src/usage/imports.rs": "72a112cb9b8c77e3a82a862b31bc839b6afaec0a0a7a7bc8a1bbc883caae1888",
+    "src/usage/import_tests.rs": "959ec0621d08a940c1ac51b0130ae89b5722a99eb9654fce59163459de496099",
+    "src/usage/store.rs": "5a4bfe0b71f70bebb42fde14bb924218b31bcc322435bab3fc6fcbcc510809c9",
+    "src/usage/store/codec.rs": "a740ff87693590b211a11ff685c0960cb2b7258abe64e20f64caff44fc4c9420",
+    "src/usage/store/compact.rs": "efaae5f8121c076c21503b502f3afbe8ffe98bbc41b79e9070e6c06669a59c32",
+    "src/usage/store/rollback.rs": "610f3398a8c2008533c314c4f4263fde46fffeb320df8451fda92a1620d7bffa",
+    "src/usage/store/optimization_tests.rs": "9012b5c7fdc5e5cd2e04696901b87e92a0e7393d9fe6fb874926d45cb063ec1c",
+    "ui/usage.js": "169bcb1a799a6f19df576c7f13983e3ea2d7d439089a69c81d60e5c0642383ca",
+    "tests/ui-usage.test.cjs": "b02c845f2a3b8c04eec295859566df7cae7bb61fd49ce8597382ea7f75f69727"
+  },
+  "rust": {
+    "passed": 743,
+    "ignored": 2,
+    "failed": 0
+  },
+  "ui": {
+    "passed": 137,
+    "failed": 0
+  },
+  "python": {
+    "passed": 46,
+    "failed": 0
+  },
+  "format": true,
+  "clippy_all_targets_warnings_denied": true,
+  "release_build": true,
+  "workflows_yaml_parse": true,
+  "ci_platform_project_available": false,
+  "local_ci_host_reservation_released": true
+}

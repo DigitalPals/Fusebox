@@ -45,6 +45,106 @@ fn write_rows(path: &Path, rows: &[Value]) {
         writeln!(f, "{}", r).unwrap();
     }
 }
+
+#[test]
+fn plain_checkpoint_seek_reads_only_prefix_and_new_suffix() {
+    struct Counted {
+        input: std::io::Cursor<Vec<u8>>,
+        read: usize,
+    }
+    impl Read for Counted {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.input.read(bytes)?;
+            self.read += n;
+            Ok(n)
+        }
+    }
+    impl Seek for Counted {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.input.seek(position)
+        }
+    }
+    let offset = 1 << 20;
+    let mut input = Counted { input: std::io::Cursor::new(vec![0; offset + 7]), read: 0 };
+    input.read_exact(&mut [0; 4096]).unwrap();
+    assert!(seek_checkpoint(&mut input, offset as u64).unwrap());
+    let mut tail = Vec::new();
+    input.read_to_end(&mut tail).unwrap();
+    assert_eq!(tail.len(), 7);
+    assert_eq!(input.read, 4096 + 7, "checkpoint history must be sought over without reads");
+    assert!(!seek_checkpoint(&mut input, offset as u64 + 8).unwrap(), "past EOF must trigger a reset");
+    assert!(!seek_checkpoint(&mut input, MAX_FILE + 2).unwrap(), "the file bound still applies");
+}
+
+#[test]
+fn seek_and_compressed_resume_preserve_fragments_truncation_rewrites_and_line_bounds() {
+    for compressed in [false, true] {
+        let dir = TestDir::new();
+        let root = Root { id: "test".into(), source: "claude_code".into(), path: dir.0.clone() };
+        let path = dir.0.join(if compressed { "history.jsonl.zst" } else { "history.jsonl" });
+        let save = |bytes: &[u8]| {
+            let bytes = if compressed { zstd::stream::encode_all(bytes, 1).unwrap() } else { bytes.to_vec() };
+            fs::write(&path, bytes).unwrap();
+        };
+        let scan = |checkpoint: Option<&Checkpoint>| {
+            let mut remaining = MAX_BYTES;
+            read_file(&path, &root, checkpoint, &mut remaining).unwrap()
+        };
+        let line = format!("{}\n", claude("base", 10));
+        let mut bytes = line.repeat(40).into_bytes();
+        assert!(bytes.len() > 8192, "exercise BufReader lookahead and a full fingerprint");
+        save(&bytes);
+        let initial = scan(None);
+        assert_eq!(initial.checkpoint.offset, bytes.len() as u64);
+        let idle = scan(Some(&initial.checkpoint));
+        assert!(idle.observations.is_empty());
+        assert_eq!(idle.checkpoint.offset, initial.checkpoint.offset);
+        assert_eq!(idle.counts.skipped, 0);
+
+        // Resume at a complete-line checkpoint even when a UTF-8 codepoint in
+        // the new record is only partly written.
+        let mut appended = claude("appended", 20);
+        appended["message"]["content"][0]["text"] = json!("é");
+        let raw = format!("{appended}\n");
+        let split = raw.find('é').unwrap() + 1;
+        bytes.extend_from_slice(&raw.as_bytes()[..split]);
+        save(&bytes);
+        let partial = scan(Some(&idle.checkpoint));
+        assert!(partial.observations.is_empty());
+        assert_eq!(partial.checkpoint.offset, idle.checkpoint.offset);
+        assert_eq!(partial.counts.deferred, 1);
+        bytes.extend_from_slice(&raw.as_bytes()[split..]);
+        save(&bytes);
+        let complete = scan(Some(&partial.checkpoint));
+        assert_eq!(complete.observations.len(), 1);
+        assert_eq!(complete.observations[0].response_id.as_deref(), Some("appended"));
+        assert_eq!(complete.checkpoint.offset, bytes.len() as u64);
+
+        // The prefix remains identical, so only the length/short-skip check
+        // detects this truncation and restarts from the beginning.
+        bytes = line.repeat(20).into_bytes();
+        save(&bytes);
+        let truncated = scan(Some(&complete.checkpoint));
+        assert_eq!(truncated.checkpoint.offset, bytes.len() as u64);
+        assert_eq!(truncated.observations.len(), 1);
+        assert_eq!(truncated.counts.duplicate, 19);
+
+        bytes = format!("{}\n", claude("rewritten", 30)).repeat(40).into_bytes();
+        save(&bytes);
+        let rewritten = scan(Some(&truncated.checkpoint));
+        assert_eq!(rewritten.observations[0].response_id.as_deref(), Some("rewritten"));
+        bytes.extend(std::iter::repeat_n(b'x', MAX_LINE + 1));
+        bytes.push(b'\n');
+        bytes.extend_from_slice(format!("{}\n", claude("after-limit", 40)).as_bytes());
+        save(&bytes);
+        let bounded = scan(Some(&rewritten.checkpoint));
+        assert_eq!(bounded.counts.unsupported, 1);
+        assert_eq!(bounded.observations.len(), 1);
+        assert_eq!(bounded.observations[0].response_id.as_deref(), Some("after-limit"));
+        assert_eq!(bounded.checkpoint.offset, bytes.len() as u64);
+    }
+}
+
 async fn count(store: &Store) -> i64 {
     store.call(|c| Ok(c.query_row("SELECT COUNT(*) FROM usage_entries", [], |r| r.get(0))?)).await.unwrap()
 }

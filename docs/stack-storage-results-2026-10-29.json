@@ -1,0 +1,37 @@
+{
+  "methodology": "Debug test executable, five batches of 10000 compressed metadata documents; compares fresh per-document contexts with one reused batch context. Same database and document, synthetic local CPU work; not full HTTP query latency.",
+  "runs": [
+    {
+      "documents": 10000,
+      "document_bytes": 1614,
+      "separate_context_ms": 82.779262,
+      "reused_context_ms": 45.344946
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1614,
+      "separate_context_ms": 86.651068,
+      "reused_context_ms": 44.714679
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1614,
+      "separate_context_ms": 93.144872,
+      "reused_context_ms": 42.824929999999995
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1614,
+      "separate_context_ms": 77.98676999999999,
+      "reused_context_ms": 45.369132
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1614,
+      "separate_context_ms": 90.09482100000001,
+      "reused_context_ms": 46.856285
+    }
+  ],
+  "separate_context_median_ms": 86.651068,
+  "reused_context_median_ms": 45.344946
+}

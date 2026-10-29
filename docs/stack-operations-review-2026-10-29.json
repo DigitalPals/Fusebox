@@ -1,0 +1,57 @@
+{
+  "reviewed_on": "2026-10-29",
+  "scope": [
+    "Cargo.toml dependency features and release/compact profiles",
+    ".cargo/config.toml bundled SQLite compile options",
+    "Dockerfile dependency cache, final images and .dockerignore",
+    ".github/workflows/ci.yml, docker.yml, release.yml, audit.yml and client-versions.yml",
+    "build.rs incremental compressed asset generation and reference versioning",
+    "src/server/assets.rs representation negotiation, validators and identity decoding",
+    "src/server.rs HTTP middleware order, request extraction and static delivery",
+    "src/server/request_body.rs and request_body/tests.rs",
+    "src/admission.rs request/byte accounting and permit lifetime",
+    "scripts runtime/usage/identity/SSE/context benchmarks and collector acceptance tooling"
+  ],
+  "implemented": [
+    {
+      "file": ".github/workflows/ci.yml",
+      "change": "Cancel superseded CI runs within each pull request or branch ref.",
+      "benefit": "Avoid continuing obsolete three-platform Rust checks and dashboard/operational tests."
+    },
+    {
+      "file": ".github/workflows/docker.yml",
+      "change": "Cancel superseded main-branch image builds; give every tag and non-main dispatch its own run-specific concurrency group.",
+      "benefit": "Avoid obsolete two-platform image builds while retaining every tag release run, including repeated runs for the same tag."
+    }
+  ],
+  "validation": {
+    "yaml": "Both edited workflows parsed successfully with Python PyYAML safe_load.",
+    "expressions": "Manually inspected: main Docker ref selects stable latest group with cancellation; every other ref selects github.run_id with cancellation false. Unique tag groups prevent GitHub's pending-run replacement behavior.",
+    "whitespace": "git diff --check passed.",
+    "not_measured": "No GitHub workflow was dispatched; elapsed CI savings depend on overlapping pushes."
+  },
+  "preserved_safeguards": [
+    "Full LTO and opt-level 3 prioritize release runtime speed; existing documented compact-profile slowdowns argue against changing the default solely for binary size.",
+    "Docker already separates manifest/toolchain/SQLite dependency compilation from source/UI changes, reuses the build stage for both image flavors, and uses native architecture runners.",
+    "Asset fingerprints use post-reference-rewrite source content. Changed scripts/dictionaries therefore invalidate their referencing index/i18n assets. Deterministic gzip and unchanged generated declarations remain stable.",
+    "Compressed asset cache invalidates its prior fingerprint before replacing the gzip file, preserving recovery after interruption and source reversion.",
+    "Asset serving reuses static gzip bytes and one lazy shared identity copy. Conditional 304 responses occur before decompression and use representation-specific validators.",
+    "Client authentication precedes request-body decoding. Encoded and decoded sizes remain independently bounded; multi-member/frame decoding preserves trailing-corruption checks.",
+    "Admission permits retain request and decoded-byte accounting through response-stream completion or cancellation; defaults bypass accounting overhead when limits are disabled."
+  ],
+  "remaining_opportunities": [
+    {
+      "location": "src/server/request_body.rs:142",
+      "finding": "Compressed request decoding uses ReaderStream's default chunk capacity; enabled byte admission takes a mutex once per decoded chunk.",
+      "recommendation": "If large compressed inputs are a measured bottleneck, compare larger decoder output chunks using 1/4/16 MiB gzip and zstd fixtures under concurrency. Retain both size limits, corruption tests and admission cancellation behavior.",
+      "status": "Unmeasured tuning candidate; no code change."
+    },
+    {
+      "location": "src/server.rs:810",
+      "finding": "Fonts have one-year immutable caching under semantic filenames rather than content-versioned URLs. Their existing contract requires filenames to change when bytes change.",
+      "recommendation": "Preserve filename changes on future font replacement, or extend content versioning to fonts before replacing their contents in place.",
+      "status": "Existing future asset-update constraint; current fonts unchanged."
+    }
+  ],
+  "regression_blockers_found": []
+}

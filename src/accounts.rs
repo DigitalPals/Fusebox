@@ -623,23 +623,30 @@ fn dot_versions(m: &str) -> String {
 
 /// `*` wildcard match, case-insensitive (`gemini-2.5-*`, `*-preview`, `*flash*`).
 pub fn wildcard(pattern: &str, s: &str) -> bool {
-    let (p, s) = (pattern.trim().to_ascii_lowercase(), s.to_ascii_lowercase());
-    let parts: Vec<&str> = p.split('*').collect();
-    if parts.len() == 1 {
-        return p == s;
+    let pattern = pattern.trim();
+    if !pattern.contains('*') {
+        return pattern.eq_ignore_ascii_case(s);
     }
-    let mut rest = s.as_str();
-    for (i, part) in parts.iter().enumerate() {
+    let mut rest = s.as_bytes();
+    let mut parts = pattern.split('*').enumerate().peekable();
+    while let Some((i, part)) = parts.next() {
+        let part = part.as_bytes();
         if part.is_empty() {
             continue;
         }
         if i == 0 {
-            let Some(r) = rest.strip_prefix(part) else { return false };
-            rest = r;
-        } else if i == parts.len() - 1 {
-            return rest.ends_with(part);
+            if !rest.get(..part.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(part)) {
+                return false;
+            }
+            rest = &rest[part.len()..];
+        } else if parts.peek().is_none() {
+            return rest
+                .get(rest.len().saturating_sub(part.len())..)
+                .is_some_and(|suffix| suffix.len() == part.len() && suffix.eq_ignore_ascii_case(part));
         } else {
-            let Some(at) = rest.find(part) else { return false };
+            let Some(at) = rest.windows(part.len()).position(|window| window.eq_ignore_ascii_case(part)) else {
+                return false;
+            };
             rest = &rest[at + part.len()..];
         }
     }
@@ -2528,6 +2535,73 @@ oauth-model-alias:
         assert!(!Provider::Antigravity.family("gpt-6.1-terra"));
         assert!(!Provider::Devin.family("gpt-6.1-terra"));
         assert!(!Provider::Devin.first_party("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn wildcard_boundaries_preserve_ascii_case_and_unicode() {
+        for (pattern, value, expected) in [
+            ("", "", true),
+            ("  ", "", true),
+            ("*", "", true),
+            ("***", "anything", true),
+            ("abc*", "ab", false),
+            ("*abc", "bc", false),
+            ("a*b", "ab", true),
+            ("a*a", "a", false),
+            ("a**B*", "aB", true),
+            ("*ab*ab", "ab", false),
+            ("*ab*ab", "abab", true),
+            ("  GPT-*SOL  ", "gpt-6.1-sol", true),
+            ("gpt-*", " gpt-sol", false),
+            ("*é*B", "AéB", true),
+            ("*É*", "aéb", false),
+            ("*🦀b", "a🦀B", true),
+        ] {
+            assert_eq!(wildcard(pattern, value), expected, "{pattern:?} vs {value:?}");
+        }
+    }
+
+    #[test]
+    fn wildcard_matches_reference_for_small_patterns() {
+        fn reference(pattern: &str, value: &str) -> bool {
+            let (pattern, value) = (pattern.trim().to_ascii_lowercase(), value.to_ascii_lowercase());
+            let parts: Vec<_> = pattern.split('*').collect();
+            if parts.len() == 1 {
+                return pattern == value;
+            }
+            let mut rest = value.as_str();
+            for (i, part) in parts.iter().enumerate() {
+                if part.is_empty() {
+                    continue;
+                }
+                if i == 0 {
+                    let Some(next) = rest.strip_prefix(part) else { return false };
+                    rest = next;
+                } else if i + 1 == parts.len() {
+                    return rest.ends_with(part);
+                } else {
+                    let Some(at) = rest.find(part) else { return false };
+                    rest = &rest[at + part.len()..];
+                }
+            }
+            true
+        }
+        fn words(depth: usize) -> Vec<String> {
+            let mut result = vec![String::new()];
+            let mut level = vec![String::new()];
+            for _ in 0..depth {
+                level =
+                    level.iter().flat_map(|prefix| ["a", "B", "é", "*", " "].map(|c| format!("{prefix}{c}"))).collect();
+                result.extend(level.iter().cloned());
+            }
+            result
+        }
+        let values = words(3);
+        for pattern in words(4) {
+            for value in &values {
+                assert_eq!(wildcard(&pattern, value), reference(&pattern, value), "{pattern:?} vs {value:?}");
+            }
+        }
     }
 
     #[test]

@@ -57,7 +57,12 @@ pub(super) fn ensure_database_id(conn: &Connection) -> Result<()> {
 
 pub(crate) fn dictionary(conn: &Connection, id: i64) -> Result<Arc<Dictionary>> {
     let database = database_id(conn)?;
-    if let Some(d) = CACHE.lock().unwrap().get(&(database.clone(), id)) {
+    dictionary_for(conn, &database, id)
+}
+
+fn dictionary_for(conn: &Connection, database: &str, id: i64) -> Result<Arc<Dictionary>> {
+    let key = (database.to_owned(), id);
+    if let Some(d) = CACHE.lock().unwrap().get(&key) {
         return Ok(d.clone());
     }
     let bytes: Vec<u8> = conn
@@ -73,7 +78,7 @@ pub(crate) fn dictionary(conn: &Connection, id: i64) -> Result<Arc<Dictionary>> 
     if cache.len() >= CACHE_LIMIT {
         cache.clear();
     }
-    cache.insert((database, id), d.clone());
+    cache.insert(key, d.clone());
     Ok(d)
 }
 
@@ -120,25 +125,54 @@ impl Documents {
 
 /// A stored payload or snapshot as JSON text, whichever way it was stored.
 pub(crate) fn decode(conn: &Connection, value: ValueRef<'_>) -> Result<String> {
-    match value {
-        ValueRef::Text(t) => Ok(std::str::from_utf8(t).context("stored usage document is not UTF-8")?.to_owned()),
-        ValueRef::Blob(b) => {
-            ensure!(b.len() > HEADER && b[0] == MAGIC && b[1] == WITH_DICTIONARY, "unrecognized usage document");
-            let id = i64::from(u32::from_le_bytes(b[2..HEADER].try_into().unwrap()));
-            let dictionary = dictionary(conn, id)?;
-            let frame = &b[HEADER..];
-            let size = zstd::zstd_safe::get_frame_content_size(frame)
-                .map_err(|_| anyhow!("corrupt usage document"))?
-                .context("usage document has no recorded size")?;
-            let size = usize::try_from(size).ok().filter(|n| *n <= MAX_DOCUMENT).context("usage document too large")?;
-            let mut bytes = Vec::with_capacity(size);
-            zstd::zstd_safe::DCtx::create()
-                .decompress_using_ddict(&mut bytes, frame, dictionary.decoder.as_ddict())
-                .map_err(|code| anyhow!("corrupt usage document: {}", zstd::zstd_safe::get_error_name(code)))?;
-            ensure!(bytes.len() == size, "corrupt usage document");
-            String::from_utf8(bytes).context("stored usage document is not UTF-8")
+    Decoder::new(conn).decode(value)
+}
+
+/// Reuse the decompression context and last dictionary within a read/batch. A
+/// 500-row details page otherwise creates 1,000 contexts and repeats the database
+/// identity query for every document. The connection binds the cached identity
+/// to one database, and all size/format validation is still per document.
+pub(crate) struct Decoder<'a> {
+    conn: &'a Connection,
+    database: Option<String>,
+    dictionary: Option<Arc<Dictionary>>,
+    dctx: Option<zstd::zstd_safe::DCtx<'static>>,
+}
+
+impl<'a> Decoder<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn, database: None, dictionary: None, dctx: None }
+    }
+
+    pub fn decode(&mut self, value: ValueRef<'_>) -> Result<String> {
+        match value {
+            ValueRef::Text(t) => Ok(std::str::from_utf8(t).context("stored usage document is not UTF-8")?.to_owned()),
+            ValueRef::Blob(b) => {
+                ensure!(b.len() > HEADER && b[0] == MAGIC && b[1] == WITH_DICTIONARY, "unrecognized usage document");
+                let id = i64::from(u32::from_le_bytes(b[2..HEADER].try_into().unwrap()));
+                if self.dictionary.as_ref().is_none_or(|d| d.id != id) {
+                    if self.database.is_none() {
+                        self.database = Some(database_id(self.conn)?);
+                    }
+                    self.dictionary = Some(dictionary_for(self.conn, self.database.as_deref().unwrap(), id)?);
+                }
+                let dictionary = self.dictionary.as_ref().unwrap();
+                let frame = &b[HEADER..];
+                let size = zstd::zstd_safe::get_frame_content_size(frame)
+                    .map_err(|_| anyhow!("corrupt usage document"))?
+                    .context("usage document has no recorded size")?;
+                let size =
+                    usize::try_from(size).ok().filter(|n| *n <= MAX_DOCUMENT).context("usage document too large")?;
+                let mut bytes = Vec::with_capacity(size);
+                self.dctx
+                    .get_or_insert_with(zstd::zstd_safe::DCtx::create)
+                    .decompress_using_ddict(&mut bytes, frame, dictionary.decoder.as_ddict())
+                    .map_err(|code| anyhow!("corrupt usage document: {}", zstd::zstd_safe::get_error_name(code)))?;
+                ensure!(bytes.len() == size, "corrupt usage document");
+                String::from_utf8(bytes).context("stored usage document is not UTF-8")
+            }
+            _ => bail!("stored usage document has an unexpected type"),
         }
-        _ => bail!("stored usage document has an unexpected type"),
     }
 }
 
@@ -171,14 +205,15 @@ pub(super) fn train(conn: &Connection) -> Result<Option<i64>> {
     let low = (max_id - 50 * TRAINING_SAMPLE).max(0);
     let step = ((max_id - low) / TRAINING_SAMPLE).max(1);
     let mut samples = Vec::new();
+    let mut decoder = Decoder::new(conn);
     {
         let mut statement = conn.prepare(
             "SELECT payload,snapshot_json FROM usage_observations WHERE id>?1 AND (id-?1)%?2=0 ORDER BY id LIMIT ?3",
         )?;
         let mut rows = statement.query(params![low, step, TRAINING_SAMPLE])?;
         while let Some(row) = rows.next()? {
-            samples.push(decode(conn, row.get_ref(0)?)?.into_bytes());
-            samples.push(decode(conn, row.get_ref(1)?)?.into_bytes());
+            samples.push(decoder.decode(row.get_ref(0)?)?.into_bytes());
+            samples.push(decoder.decode(row.get_ref(1)?)?.into_bytes());
         }
     }
     // Two documents per sampled row; fewer than 500 rows is too little to learn from.

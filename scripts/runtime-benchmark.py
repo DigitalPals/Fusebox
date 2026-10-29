@@ -117,7 +117,7 @@ def main():
                 "TCP_NODELAY on client and mock; mock backlog 128.",
                 "RSS includes retained store:false continuation histories; memory is cumulative within each worker run.",
                 "Proxy CPU uses Linux scheduler tick resolution; small cases may round to zero.",
-                "This compares worker counts on the current implementation, not old and new revisions."],
+                "Each report measures one executable; compare revisions using separate reports with matching settings."],
             "allocator":"application default: 4 glibc arenas, 256 KiB mmap threshold", "runs":[]}
     try:
         for workers in args.workers:

@@ -31,10 +31,13 @@ const UsageTools = (() => {
   };
   const privateLabel = (value, hidden) => hidden && value != null && value !== '' ? '••••••' : String(value ?? 'Unknown');
   // Totals: cents above a dollar, four places below so small estimates stay visible.
+  const currency = [2, 4].map((digits) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }));
+  const numbers = new Intl.NumberFormat('en-US');
+  const count = (value) => value == null ? 'Unknown' : numbers.format(value);
   const dollars = (nanos) => {
     if (nanos == null || !Number.isFinite(Number(nanos))) return 'Unpriced';
     const v = Number(nanos) / 1e9, small = v !== 0 && Math.abs(v) < 1;
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: small ? 4 : 2, maximumFractionDigits: small ? 4 : 2 }).format(v);
+    return currency[small ? 1 : 0].format(v);
   };
   const compact = (v) => v == null || !Number.isFinite(Number(v)) ? 'Unknown' : v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(Math.round(v));
 
@@ -91,7 +94,7 @@ const UsageTools = (() => {
   const parts = (iso) => { const at = new Date(`${iso}T00:00:00Z`); return { w: W[at.getUTCDay()], m: M[at.getUTCMonth()], d: at.getUTCDate(), y: at.getUTCFullYear(), monday: at.getUTCDay() === 1 }; };
   const dayLabel = (iso) => { const p = parts(iso); return `${p.w} ${p.m} ${p.d}`; };
   const shortDate = (iso) => { const p = parts(iso); return `${p.m} ${p.d}`; };
-  return { OTHER, escape, date, shift, range, dates, query, privateLabel, dollars, compact, chart, localDate, beforeProxy, parts, dayLabel, shortDate, bytes };
+  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, parts, dayLabel, shortDate, bytes };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools;
 
@@ -105,7 +108,7 @@ const Usage = {
   sequence: 0, credential: null, confirm: null, roots: {}, collectorDraft: '', rows: [],
 };
 const ux = UsageTools.escape;
-const usageCount = (value) => value == null ? 'Unknown' : new Intl.NumberFormat('en-US').format(value);
+const usageCount = UsageTools.count;
 const usageSensitive = (value) => ux(UsageTools.privateLabel(value, S.private));
 const usageSource = (source) => ({ proxy: 'Proxy', claude_code: 'Claude Code history', codex: 'Codex history' }[source] || source || 'Unknown source');
 const usageTime = (value) => value == null || value === 0 ? 'Not reported' : Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined, { timeZone: Usage.timezone }) : 'Not reported';
@@ -250,8 +253,22 @@ function usageCostHTML() {
   </section>`;
 }
 
+// A snapshot's trend is immutable; hover, focus and section repaints reuse its
+// aggregation. Keep only the current chart so old snapshots can be reclaimed.
+let usageChartCache = null;
+const usageEmptyTrend = [];
+function usageChartData() {
+  const trend = usageCombined().trend || usageEmptyTrend;
+  const { start, end } = Usage.range, metric = Usage.metric;
+  const shade = typeof document !== 'undefined' && document.documentElement.dataset.shade;
+  const prev = usageChartCache;
+  if (prev && prev.trend === trend && prev.start === start && prev.end === end && prev.metric === metric && prev.shade === shade) return prev.chart;
+  const chart = UsageTools.chart(trend, UsageTools.dates(Usage.range), metric);
+  usageChartCache = { trend, start, end, metric, shade, chart };
+  return chart;
+}
 function usageChartHTML() {
-  const u = Usage, phone = usagePhone(), days = UsageTools.dates(u.range), c = UsageTools.chart(usageCombined().trend || [], days, u.metric);
+  const u = Usage, phone = usagePhone(), c = usageChartData(), days = c.series.map((d) => d.date);
   const calls = u.metric === 'calls', showVals = days.length <= 10 && !phone, today = usageToday();
   const hover = days.indexOf(u.hoverDay);
   const seg = (name, opts, act, label) => `<div class="seg u-seg" role="group" aria-label="${label}">${opts.map(([v, l]) => `<button type="button" data-usage-act="${act}" data-value="${v}" aria-pressed="${u[name] === v}">${l}</button>`).join('')}</div>`;
@@ -488,6 +505,24 @@ function usageRenderChart() {
   if (cost) usagePainted.delete(cost);
   if (focus) el.querySelector(focus)?.focus({ preventScroll: true });
 }
+// A pointer/focus move changes only selection and its readout. Retaining the bar
+// elements also keeps the browser's hovered/focused target stable.
+function usageHover(day) {
+  if (S.route !== 'usage' || Usage.hoverDay === day) return;
+  Usage.hoverDay = day;
+  const el = document.getElementById('usage-chart');
+  const readout = el?.querySelector('.u-readout');
+  if (!readout) return usageRenderChart();
+  const chart = usageChartData(), hover = chart.series.findIndex((d) => d.date === day);
+  for (const bar of el.querySelectorAll('[data-usage-day]')) {
+    const selected = hover >= 0 && bar.dataset.usageDay === day;
+    const cls = `u-bar${hover >= 0 && !selected ? ' dim' : ''}${selected ? ' on' : ''}`;
+    if (bar.className !== cls) bar.className = cls;
+  }
+  readout.innerHTML = usageReadoutHTML(chart, hover);
+  const cost = document.getElementById('usage-part-cost');
+  if (cost) usagePainted.delete(cost);
+}
 // Account changes reach account names in the filter and the breakdown.
 function usageAccountsChanged() {
   usageRender(undefined, ['head', 'breakdown']);
@@ -628,26 +663,22 @@ if (typeof document !== 'undefined') {
       usageMutate('/usage/imports', { source, root, enabled: true }, () => { delete Usage.roots[source]; });
     }
   });
-  const hoverDay = (day) => {
-    if (S.route !== 'usage' || Usage.hoverDay === day) return;
-    Usage.hoverDay = day; usageRenderChart();
-  };
   document.addEventListener('mouseover', (event) => {
     if (usagePhone()) return;
     const bar = event.target.closest?.('[data-usage-day]');
-    if (bar) hoverDay(bar.dataset.usageDay);
+    if (bar) usageHover(bar.dataset.usageDay);
   });
   document.addEventListener('mouseout', (event) => {
     const bars = event.target.closest?.('[data-usage-bars]');
-    if (bars && !bars.contains(event.relatedTarget) && !usagePhone()) hoverDay(null);
+    if (bars && !bars.contains(event.relatedTarget) && !usagePhone()) usageHover(null);
   });
   document.addEventListener('focusin', (event) => {
     const bar = event.target.closest?.('[data-usage-day]');
-    if (bar && !usagePhone()) hoverDay(bar.dataset.usageDay);
+    if (bar && !usagePhone()) usageHover(bar.dataset.usageDay);
   });
   document.addEventListener('click', (event) => {
     const bar = event.target.closest('[data-usage-day]');
-    if (bar) return hoverDay(Usage.hoverDay === bar.dataset.usageDay && usagePhone() ? null : bar.dataset.usageDay);
+    if (bar) return usageHover(Usage.hoverDay === bar.dataset.usageDay && usagePhone() ? null : bar.dataset.usageDay);
     const el = event.target.closest('[data-usage-act]');
     if (!el || el.disabled) return;
     const act = el.dataset.usageAct, index = Number(el.dataset.index);
@@ -657,7 +688,7 @@ if (typeof document !== 'undefined') {
       if (Usage.preset === 'custom') return usageRender('#usage-range [name="start"]');
       Usage.range = UsageTools.range(Number(Usage.preset)); return usageReload();
     }
-    if (act === 'stack') { if (Usage.stack !== el.dataset.value) { Usage.stack = el.dataset.value; usageRenderChart(); usageLoadStack(); } return; }
+    if (act === 'stack') { if (Usage.stack !== el.dataset.value) { Usage.stack = el.dataset.value; usageLoadStack(); } return; }
     if (act === 'metric') { Usage.metric = el.dataset.value; return usageRenderChart(); }
     if (act === 'dim') { Usage.dim = el.dataset.value; Usage.showAll = false; return usageRender(); }
     if (act === 'show-all') { Usage.showAll = !Usage.showAll; return usageRender(); }
