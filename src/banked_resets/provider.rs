@@ -103,7 +103,13 @@ pub fn codex(usage: &Value, details: &Value, now: DateTime<Utc>) -> Result<Inven
     } else {
         None
     };
-    Ok(Inventory { available, applicable, eligible, grants, reason, selected_grant: None })
+    // Name the credit that expires first. Without an ID, Codex picks one itself.
+    let selected_grant = grants
+        .iter()
+        .filter(|g| g.usable && !g.id.is_empty())
+        .min_by_key(|g| (g.expires_at.is_none(), g.expires_at, &g.id))
+        .map(|g| g.id.clone());
+    Ok(Inventory { available, applicable, eligible, grants, reason, selected_grant })
 }
 
 pub fn claude(v: &Value, now: DateTime<Utc>) -> Result<Inventory> {
@@ -330,7 +336,11 @@ impl Api for HttpProvider {
     }
     async fn redeem(&self, organization: &str, grant: &str, request: &str) -> Result<Outcome> {
         let (path, body) = if self.provider == Provider::Codex {
-            ("/backend-api/wham/rate-limit-reset-credits/consume".to_string(), json!({"redeem_request_id":request}))
+            let mut body = json!({"redeem_request_id":request});
+            if !grant.is_empty() {
+                body["credit_id"] = json!(grant);
+            }
+            ("/backend-api/wham/rate-limit-reset-credits/consume".to_string(), body)
         } else {
             ensure!(uuid::Uuid::parse_str(organization).is_ok(), "Invalid provider identity");
             (
@@ -352,13 +362,20 @@ impl Api for HttpProvider {
         if !(200..300).contains(&status) {
             return Ok(Outcome::Unknown);
         }
-        if self.provider == Provider::Codex {
-            return Ok(Outcome::Applied);
-        }
         let v = match json_body(response).await {
             Ok(v) => v,
             Err(_) => return Ok(Outcome::Unknown),
         };
+        if self.provider == Provider::Codex {
+            // Codex answers 200 even when nothing was spent (openai/codex backend-client).
+            return Ok(match v["code"].as_str() {
+                Some("reset") => Outcome::Applied,
+                Some("already_redeemed") => Outcome::AlreadyUsed,
+                Some("nothing_to_reset") => Outcome::Refused("Codex reports nothing to reset right now"),
+                Some("no_credit") => Outcome::Refused("Codex reports this reset is no longer available"),
+                _ => Outcome::Unknown,
+            });
+        }
         Ok(match v["result"].as_str() {
             Some("reset") => Outcome::Applied,
             Some("already_used") => Outcome::AlreadyUsed,

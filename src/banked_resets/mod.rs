@@ -311,7 +311,7 @@ async fn execute<P: Api + Sync>(
             let decision = automation::decision(&cfg, &fresh.quota, &inventory, Utc::now())
                 .ok_or_else(|| anyhow!("No automatic reset is due"))?;
             automation::check_journal(&ledger.journal, &decision, Utc::now())?;
-            action.grant_id = if acct.provider == Provider::Claude { decision.grant_id.clone() } else { String::new() };
+            action.grant_id = decision.grant_id.clone();
             Some(decision.credit_key)
         } else {
             let quotes = app.reset_quotes.lock();
@@ -337,7 +337,14 @@ async fn execute<P: Api + Sync>(
                 .ok_or_else(|| anyhow!("Selected grant is no longer usable"))?;
             grant.clears.clone()
         } else {
-            ensure!(action.grant_id.is_empty(), "Codex selects the reset grant automatically");
+            // Older dashboards send no credit; use the one expiring first.
+            if action.grant_id.is_empty() {
+                action.grant_id = inventory.selected_grant.clone().unwrap_or_default();
+            }
+            ensure!(
+                action.grant_id.is_empty() || inventory.grants.iter().any(|g| g.id == action.grant_id && g.usable),
+                "Selected reset is no longer usable"
+            );
             // Codex resets its subscription windows; preserve model-scoped quotas.
             vec!["*".into()]
         };

@@ -111,7 +111,7 @@ const ux = UsageTools.escape;
 const usageCount = UsageTools.count;
 const usageSensitive = (value) => ux(UsageTools.privateLabel(value, S.private));
 const usageSource = (source) => ({ proxy: 'Proxy', claude_code: 'Claude Code history', codex: 'Codex history' }[source] || source || 'Unknown source');
-const usageTime = (value) => value == null || value === 0 ? 'Not reported' : Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined, { timeZone: Usage.timezone }) : 'Not reported';
+const usageTime = (value) => value == null || value === 0 ? 'Not reported' : Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined, { timeZone: Usage.timezone, hourCycle: 'h23' }) : 'Not reported';
 const usageClock = (value) => value == null || value === 0 ? 'Not reported' : new Date(value).toLocaleTimeString('en-GB', { timeZone: Usage.timezone, hour12: false });
 const usageButton = (act, label, extra = '', disabled = false, cls = 'btn') => `<button class="${cls}" type="button" data-usage-act="${act}" ${extra}${disabled || Usage.busy ? ' disabled' : ''}>${label}</button>`;
 const usagePhone = () => typeof mob === 'function' && mob();

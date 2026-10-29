@@ -2604,8 +2604,9 @@ function bankedLineHTML(a) {
 function resetButton(a, act, label, disabled = false, extra = '') {
   return `<button type="button" class="btn sm ${['banked-open', 'banked-confirm'].includes(act) ? 'primary' : ''}" data-act="${act}" data-id="${esc(a.id)}" ${disabled ? 'disabled' : ''} ${extra}>${label}</button>`;
 }
+// The browser's locale orders the date; the clock is always 24-hour, as elsewhere.
 function resetDate(value) {
-  return value ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'No expiry reported';
+  return value ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' }) : 'No expiry reported';
 }
 function grantDetail(g) {
   return `${g.expires_at ? `Expires ${resetDate(g.expires_at)}` : 'No expiry reported'} · Clears ${g.clears.join(', ') || 'provider limits'}`;
@@ -2626,7 +2627,8 @@ function bankedResetsHTML(a) {
       const selection = a.provider === 'claude' && choices.length > 1
         ? `<label class="reset-selection">Grant<select data-reset-grant="${esc(a.id)}" ${local.busy ? 'disabled' : ''}>${choices.map((g) => `<option value="${esc(g.id)}" ${g.id === d.grant ? 'selected' : ''}>${esc(g.label)} · ${g.remaining} left</option>`).join('')}</select></label>`
         : grant ? `<p class="reset-grant-name">${esc(grant.label)}</p>` : '';
-      content = `<p>This uses one saved reset.</p>${a.provider === 'codex' ? '<p class="sub">Codex chooses the reset and restores its subscription limits.</p>' : `${selection}${grant ? `<p class="sub">${esc(grantDetail(grant))}</p>` : ''}`}`;
+      const codexNote = a.provider !== 'codex' ? '' : grant ? '<p class="sub">Uses the reset that expires first.</p>' : '<p class="sub">Codex chooses the reset and restores its subscription limits.</p>';
+      content = `<p>This uses one saved reset.</p>${selection}${grant ? `<p class="sub">${esc(grantDetail(grant))}</p>` : ''}${codexNote}`;
       controls = `${resetButton(a, 'banked-cancel', 'Back', local.busy)}${resetButton(a, 'banked-confirm', local.busy ? 'Applying…' : 'Apply reset', local.busy || a.disabled)}`;
     } else if (d.action === 'retry') {
       title = 'Retry reset request?';

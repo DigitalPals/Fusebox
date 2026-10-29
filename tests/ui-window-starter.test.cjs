@@ -42,7 +42,9 @@ test('working hours expose timezone, weekdays, times and explicit safe account s
   assert.doesNotMatch(html, /data-id="b"/);
   assert.match(html, /Unavailable account · gone/);
   assert.match(html, /Working hours timezone/);
-  assert.match(html, /type="time"/);
+  assert.doesNotMatch(html, /type="time"/, "browser time pickers can show AM/PM");
+  assert.match(html, /placeholder="09:00"/);
+  assert.match(html, /24-hour clock/);
   assert.equal((html.match(/data-config-act="window-day"/g) || []).length, 7);
   assert.match(html, /data-day="6" aria-pressed="false"/);
   assert.match(html, /No selection means no automatic requests/);

@@ -37,6 +37,7 @@ struct Mock {
     usage: Value,
     outcomes: Mutex<VecDeque<Outcome>>,
     calls: Mutex<Vec<String>>,
+    grants: Mutex<Vec<String>>,
     reads: AtomicUsize,
     fail_after: usize,
 }
@@ -47,6 +48,7 @@ impl Mock {
             usage: json!({"five_hour":{"utilization":0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}}),
             outcomes: Mutex::new(outcomes.iter().copied().collect()),
             calls: Mutex::new(vec![]),
+            grants: Mutex::new(vec![]),
             reads: AtomicUsize::new(0),
             fail_after: usize::MAX,
         }
@@ -61,8 +63,9 @@ impl Api for Mock {
     async fn identity(&self) -> Result<String> {
         Ok("organization-1".into())
     }
-    async fn redeem(&self, _: &str, _: &str, request: &str) -> Result<Outcome> {
+    async fn redeem(&self, _: &str, grant: &str, request: &str) -> Result<Outcome> {
         self.calls.lock().push(request.into());
+        self.grants.lock().push(grant.into());
         Ok(self.outcomes.lock().pop_front().unwrap())
     }
 }
@@ -341,7 +344,8 @@ async fn automatic_codex_reset_requires_shared_quota_and_keeps_model_limits() {
     assert_eq!(result.operation.unwrap().status, "applied");
     assert_eq!(mock.calls.lock().len(), 1);
     assert!(acct.state.lock().quota.windows.contains(&model_limit));
-    assert!(ledger.journal.latest().unwrap().grant_id.is_empty(), "Codex chooses the credit on the provider side");
+    assert_eq!(ledger.journal.latest().unwrap().grant_id, "codex-credit");
+    assert_eq!(*mock.grants.lock(), ["codex-credit"], "the expiring credit is named, not left to Codex");
 }
 
 #[test]
@@ -535,6 +539,53 @@ fn codex_manual_reset_uses_available_credits_and_checks_expiry() {
     assert_eq!(expired.reason.as_deref(), Some("Available resets have expired"));
     details["available_count"] = json!(0);
     assert!(!provider::codex(&usage, &details, Utc::now()).unwrap().eligible);
+}
+#[tokio::test]
+async fn codex_spends_the_credit_that_expires_first_and_records_refusals() {
+    let credit = |id: &str, expires: &str| json!({"id":id,"reset_type":"codex_rate_limits","status":"available","expires_at":expires});
+    let details = json!({"available_count":3,"credits":[
+        credit("later", "2099-02-01T00:00:00Z"), credit("sooner", "2099-01-01T00:00:00Z"),
+        credit("", "2098-01-01T00:00:00Z"), credit("expired", "2000-01-01T00:00:00Z")
+    ]});
+    let inventory = provider::codex(&json!({}), &details, Utc::now()).unwrap();
+    assert_eq!(inventory.selected_grant.as_deref(), Some("sooner"), "an unnamed credit cannot be requested");
+    let unnamed = json!({"available_count":1,"credits":[credit("", "2099-01-01T00:00:00Z")]});
+    assert!(provider::codex(&json!({}), &unnamed, Utc::now()).unwrap().selected_grant.is_none());
+
+    let (_temp, app, acct) = fixture(Provider::Codex, 1);
+    let mut mock = Mock::new(&[Outcome::Refused("Codex reports nothing to reset right now"), Outcome::Applied]);
+    mock.inventory = inventory;
+    let mut ledger = Ledger::open(&app.startup_config.auth_dir(), "codex:organization-1").unwrap();
+    let quote = |ledger: &Ledger| {
+        let id = uuid::Uuid::new_v4().to_string();
+        app.reset_quotes.lock().insert(
+            id.clone(),
+            Quote {
+                account: "account-1".into(),
+                identity: "codex:organization-1".into(),
+                version: ledger.journal.operations.len(),
+                fingerprint: fingerprint(&mock.inventory),
+                expires: Utc::now() + chrono::Duration::minutes(2),
+            },
+        );
+        id
+    };
+    let mut a = action(&quote(&ledger), "redeem");
+    a.grant_id.clear();
+    let v = run(&app, &acct, &mock, &mut ledger, a).await.unwrap();
+    let op = v.operation.unwrap();
+    assert_eq!((op.status.as_str(), op.grant_id.as_str()), ("refused", "sooner"));
+    assert_eq!(op.message, "Codex reports nothing to reset right now");
+    assert!(ledger.journal.unresolved().is_none(), "a refusal does not block the next reset");
+    for unusable in ["expired", "missing"] {
+        let mut a = action(&quote(&ledger), "redeem");
+        a.grant_id = unusable.into();
+        assert!(run(&app, &acct, &mock, &mut ledger, a).await.is_err());
+    }
+    let mut a = action(&quote(&ledger), "redeem");
+    a.grant_id = "later".into();
+    assert_eq!(run(&app, &acct, &mock, &mut ledger, a).await.unwrap().operation.unwrap().status, "applied");
+    assert_eq!(*mock.grants.lock(), ["sooner", "later"]);
 }
 #[tokio::test]
 async fn turned_off_resets_never_reach_the_provider() {
@@ -918,17 +969,38 @@ async fn provider_http_payloads_headers_and_refusals() {
     *captured.result.lock() = (200, json!({"account":{"uuid":"account-1"},"organization":{"uuid":org}}));
     assert_eq!(provider.identity().await.unwrap(), org);
     provider.provider = Provider::Codex;
-    *captured.result.lock() = (204, Value::Null);
-    assert_eq!(provider.redeem("", "", &request).await.unwrap(), Outcome::Applied);
+    *captured.result.lock() = (200, json!({"code":"reset","windows_reset":2}));
+    assert_eq!(provider.redeem("", "credit-1", &request).await.unwrap(), Outcome::Applied);
     let (path, body, headers) = captured.received.lock().last().unwrap().clone();
     assert_eq!(path, "/backend-api/wham/rate-limit-reset-credits/consume");
-    assert_eq!(body, json!({"redeem_request_id":request}));
+    assert_eq!(body, json!({"redeem_request_id":request,"credit_id":"credit-1"}));
     assert_eq!(headers["chatgpt-account-id"], "account-1");
     assert_eq!(headers["openai-beta"], "codex-1");
-    *captured.result.lock() = (307, json!({}));
-    assert_eq!(provider.redeem("", "", &request).await.unwrap(), Outcome::Unknown);
+    provider.redeem("", "", &request).await.unwrap();
+    assert_eq!(captured.received.lock().last().unwrap().1, json!({"redeem_request_id":request}));
+    // Codex reports refusals with HTTP 200, so only its code proves a spend.
+    for (status, body, outcome) in [
+        (200, json!({"code":"already_redeemed"}), Outcome::AlreadyUsed),
+        (
+            200,
+            json!({"code":"nothing_to_reset","windows_reset":0}),
+            Outcome::Refused("Codex reports nothing to reset right now"),
+        ),
+        (
+            200,
+            json!({"code":"no_credit","credit":null}),
+            Outcome::Refused("Codex reports this reset is no longer available"),
+        ),
+        (200, json!({"code":"new_code"}), Outcome::Unknown),
+        (200, json!({}), Outcome::Unknown),
+        (204, Value::Null, Outcome::Unknown),
+        (307, json!({}), Outcome::Unknown),
+    ] {
+        *captured.result.lock() = (status, body);
+        assert_eq!(provider.redeem("", "credit-1", &request).await.unwrap(), outcome);
+    }
     // Redirects and retries must not generate additional spending requests.
-    assert_eq!(captured.received.lock().len(), 10);
+    assert_eq!(captured.received.lock().len(), 17);
     server.abort();
 }
 #[tokio::test]

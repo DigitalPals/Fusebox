@@ -200,6 +200,7 @@ The same panel in daylight, chosen by the system or from the palette (`html[data
 
 - Do keep amber for the fuse only.
 - Do show the time until an account comes back.
+- Do show clock times in the browser's time zone on a 24-hour clock, whatever the locale (`hourCycle: 'h23'`, or `en-GB`); take time input as HH:MM text, since native time pickers can show AM/PM.
 - Do keep one primary (off-white) button per view at most.
 - Do give every control a visible 2px focus ring (`line-hover`) and 44px touch targets on phones.
 - Do set text fields to 16px on touch screens (`pointer: coarse`); iOS zooms into smaller ones, and in an installed app the zoom can stick.

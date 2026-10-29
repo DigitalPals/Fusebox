@@ -59,3 +59,30 @@ test('missing plans describe manual behavior, and unresolved resets remain revie
   assert.match(run('bankedLineHTML(a)'), /Review reset/);
   assert.match(run('bankedResetsHTML(a)'), /New resets are blocked until resolved/);
 });
+
+test('reset expiry dates use a 24-hour clock in every locale', () => {
+  const run = load();
+  for (const locale of ['en-US', 'en-GB', 'nl-NL']) {
+    const text = run(`(() => { const f = Date.prototype.toLocaleString; Date.prototype.toLocaleString = function (_, o) { return f.call(this, ${JSON.stringify(locale)}, { ...o, timeZone: 'UTC' }); }; try { return resetDate('2026-10-29T19:03:30Z'); } finally { Date.prototype.toLocaleString = f; } })()`);
+    assert.match(text, /19:03/, locale);
+    assert.doesNotMatch(text, /PM|AM/, locale);
+  }
+});
+
+test('Codex confirmation names the reset that expires first', () => {
+  const run = load();
+  const codex = { ...account, provider: 'codex', banked_resets: { ...account.banked_resets, inventory: {
+    available: 2, applicable: 0, eligible: true, selected_grant: 'soon',
+    grants: [
+      { id: 'soon', label: 'Codex reset', remaining: 1, usable: true, expires_at: '2026-10-29T19:03:30Z', clears: ['subscription limits'] },
+      { id: 'later', label: 'Codex reset', remaining: 1, usable: true, expires_at: '2026-11-06T23:31:00Z', clears: ['subscription limits'] },
+    ] } } };
+  run(`var a=${JSON.stringify(codex)}; S.resets.demo={dialog:{action:'redeem',grant:'soon',inventory:a.banked_resets.inventory}}`);
+  const html = run('bankedResetsHTML(a)');
+  assert.match(html, /Uses the reset that expires first/);
+  assert.match(html, /Expires 29 Oct 2026|Expires Oct 29, 2026/);
+  assert.doesNotMatch(html, /Codex chooses the reset/);
+  assert.doesNotMatch(html, /<select/);
+  run('S.resets.demo.dialog.grant=""');
+  assert.match(run('bankedResetsHTML(a)'), /Codex chooses the reset/);
+});

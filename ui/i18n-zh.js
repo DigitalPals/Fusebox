@@ -401,6 +401,7 @@
       "Close the playground": "关闭试用面板",
       "Code copied": "代码已复制",
       "Codex chooses the reset and restores its subscription limits.": "由 Codex 选择重置，并恢复订阅限额。",
+      "Uses the reset that expires first.": "使用最先到期的重置。",
       "Codex history": "Codex 历史",
       "Coding sessions active in the last 5 minutes": "最近 5 分钟内活跃的编码会话",
       "Coding sessions stay on this account so their prompt cache keeps working.": "编码会话留在这个账号上，以便提示词缓存持续生效。",
