@@ -1310,3 +1310,138 @@ async fn same_organization_cannot_retry_another_account_operation() {
     assert_eq!(mock.calls.lock().len(), 1);
     assert!(ledger.journal.unresolved().is_some());
 }
+
+fn codex_inventory(credits: &[(&str, DateTime<Utc>)]) -> Inventory {
+    let credits: Vec<Value> = credits
+        .iter()
+        .map(
+            |(id, expires)| json!({"id":id,"reset_type":"codex_rate_limits","status":"available","expires_at":expires}),
+        )
+        .collect();
+    provider::codex(&json!({}), &json!({"available_count":credits.len(),"credits":credits}), Utc::now()).unwrap()
+}
+
+#[test]
+fn an_expired_unused_reset_is_noticed_once_and_a_spent_one_never() {
+    let now = Utc::now();
+    let soon = now + chrono::Duration::minutes(1);
+    let week = now + chrono::Duration::days(7);
+    let before = codex_inventory(&[("soon", soon), ("week", week)]);
+    let watch = notices::watch_list(&before, now);
+    assert_eq!(watch, [("soon".to_string(), soon, 1), ("week".to_string(), week, 1)]);
+    let later = now + chrono::Duration::minutes(2);
+    let after = codex_inventory(&[("week", week)]);
+    assert_eq!(notices::expired_unused(&watch, &after, later), [("soon".to_string(), soon, 1)]);
+    assert!(notices::expired_unused(&notices::watch_list(&after, later), &after, later).is_empty(), "noticed once");
+    assert!(notices::expired_unused(&watch, &after, now).is_empty(), "gone before expiry is not an expiry");
+
+    // Claude lists an expired grant with what was left; one used up first isn't news.
+    let mut claude = claude_usage();
+    claude["cedar_ember"]["grants"][0]["ends_at"] = json!(soon);
+    let watch = notices::watch_list(&provider::claude(&claude, now).unwrap(), now);
+    assert_eq!(watch[0].2, 2);
+    claude["cedar_ember"]["grants"][0]["resets_left"] = json!(1);
+    let expired = provider::claude(&claude, later).unwrap();
+    assert_eq!(notices::expired_unused(&watch, &expired, later)[0].2, 1);
+    claude["cedar_ember"]["grants"][0]["resets_left"] = json!(0);
+    assert!(notices::expired_unused(&watch, &provider::claude(&claude, later).unwrap(), later).is_empty());
+
+    // The poller reads again once a reset in the stored view has expired, and only once.
+    let mut view = reset_view(before);
+    view.checked_at = now;
+    assert!(!expiry_passed(&view, now) && expiry_passed(&view, later));
+    view.checked_at = later;
+    assert!(!expiry_passed(&view, later));
+}
+
+#[tokio::test]
+async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
+    use axum::{Json, Router, extract::State, routing::post};
+    type Hooks = Arc<Mutex<Vec<Value>>>;
+    async fn hook(State(hooks): State<Hooks>, Json(body): Json<Value>) {
+        hooks.lock().push(body);
+    }
+    let hooks: Hooks = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    let server = tokio::spawn(
+        axum::serve(listener, Router::new().route("/hook", post(hook)).with_state(hooks.clone())).into_future(),
+    );
+    let wait = |text: &'static str| {
+        let hooks = hooks.clone();
+        async move {
+            for _ in 0..100 {
+                if let Some(h) = hooks.lock().iter().find(|h| h["text"].as_str().is_some_and(|t| t.contains(text))) {
+                    return Some(h.clone());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            None
+        }
+    };
+
+    let (temp, app, acct) = fixture(Provider::Codex, 1);
+    let mut cfg = (*app.cfg()).clone();
+    cfg.routing = crate::config::Routing::SmartQuota;
+    cfg.banked_reset_policy.auto_redeem = true;
+    cfg.notifications.webhooks = vec![url];
+    app.set_config(cfg.clone());
+    let now = Utc::now();
+    let mut mock = Mock::new(&[Outcome::Applied, Outcome::Unknown]);
+    mock.usage = json!({});
+    mock.inventory = codex_inventory(&[("expiring", now + chrono::Duration::minutes(30))]);
+    let mut ledger = Ledger::open(&temp.0, "codex:account-1").unwrap();
+
+    // The first good read watches the credit; spending it here forgets it.
+    store(&app, &acct, "account-1", &reset_view(mock.inventory.clone()));
+    assert_eq!(acct.state.lock().reset_watch.len(), 1);
+    execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    let used = wait("Codex reset used").await.expect("a used-reset notification");
+    assert_eq!((used["event"].as_str(), used["level"].as_str()), (Some("banked_reset"), Some("ok")));
+    assert!(used["text"].as_str().unwrap().contains("was about to expire, so Fusebox used it"), "{used}");
+    mock.inventory = codex_inventory(&[]);
+    store(&app, &acct, "account-1", &reset_view(mock.inventory.clone()));
+    assert!(acct.state.lock().reset_watch.is_empty());
+
+    // An unclear answer asks for review.
+    mock.inventory = codex_inventory(&[("next", now + chrono::Duration::minutes(20))]);
+    execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert!(wait("Codex reset needs review").await.is_some());
+
+    // A watched credit gone after its expiry is reported once, with the last refusal.
+    let expired_at = now - chrono::Duration::minutes(1);
+    acct.state.lock().reset_watch = vec![("gone".into(), expired_at, 1)];
+    let mut view = reset_view(codex_inventory(&[]));
+    view.operation = Some(OperationView {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        grant_id: "gone".into(),
+        created_at: now - chrono::Duration::minutes(4),
+        status: "refused".into(),
+        message: "Codex reports nothing to reset right now".into(),
+        retry_until: now,
+        automatic: true,
+    });
+    store(&app, &acct, "account-1", &view);
+    let expired = wait("Codex reset expired unused").await.expect("an expiry notification");
+    assert!(
+        expired["text"]
+            .as_str()
+            .unwrap()
+            .contains("The last automatic try was refused: Codex reports nothing to reset right now."),
+        "{expired}"
+    );
+    store(&app, &acct, "account-1", &view);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let count = |text: &str| hooks.lock().iter().filter(|h| h["text"].as_str().unwrap().contains(text)).count();
+    assert_eq!(count("expired unused"), 1, "noticed once");
+
+    // Turned off, nothing is sent.
+    cfg.notifications.banked_resets = false;
+    app.set_config(cfg);
+    acct.state.lock().reset_watch = vec![("off".into(), expired_at, 1)];
+    store(&app, &acct, "account-1", &view);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(count("expired unused"), 1);
+    assert_eq!(hooks.lock().len(), 3);
+    server.abort();
+}

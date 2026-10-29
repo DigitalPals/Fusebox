@@ -800,7 +800,8 @@ function configNotificationsHTML() {
     ${configSwitch(['notifications', 'provider-exhausted'], 'Provider out of capacity', 'Every account of a provider is used up or unavailable, and again when one is back.')}
     ${configSwitch(['notifications', 'account-used-up'], 'Account limit used up', 'One account used up its 5-hour or weekly limit while others carry on.')}
     ${configSwitch(['notifications', 'account-errors'], 'Account errors', 'An account reports an error, or three or more of its requests fail within an hour.')}
-    ${configSwitch(['notifications', 'client-new-address'], 'New client address', 'A client’s key is used from an address it wasn’t used from before, or refused at one its address list doesn’t allow.')}</div>`;
+    ${configSwitch(['notifications', 'client-new-address'], 'New client address', 'A client’s key is used from an address it wasn’t used from before, or refused at one its address list doesn’t allow.')}
+    ${configSwitch(['notifications', 'banked-resets'], 'Banked resets', 'A reset is used automatically, its outcome needs review, or one expires unused.')}</div>`;
 }
 
 // Where a webhook URL delivers, as the server decides it (src/push/webhooks.rs).

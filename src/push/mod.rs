@@ -250,6 +250,7 @@ fn enabled(settings: &Notifications, event: Event) -> bool {
         Event::AccountUsedUp => settings.account_used_up,
         Event::AccountErrors => settings.account_errors,
         Event::ClientAddress => settings.client_new_address,
+        Event::BankedReset => settings.banked_resets,
         Event::Quiet => false,
     }
 }
@@ -330,6 +331,47 @@ pub fn client_address(
         path: "#/config/clients".into(),
         kind: "client_address",
         level: if refused { "err" } else { "warn" },
+        ..Default::default()
+    };
+    let app = app.clone();
+    tokio::spawn(async move {
+        let badge = faults::badge(&all_faults(&app, &views(&app)));
+        notify(&app, &fault, badge).await;
+        let hooks = app.cfg().notifications.webhooks.clone();
+        webhooks::deliver_all(&app, &hooks, &fault).await;
+    });
+}
+
+/// Tells devices and webhooks what happened to one of `acct`'s banked resets, in the
+/// background. `key` names the event, and the caller sends each one once.
+pub fn banked_reset(
+    app: &Arc<App>,
+    acct: &crate::accounts::Account,
+    key: String,
+    level: &'static str,
+    title: String,
+    body: String,
+) {
+    let cfg = app.cfg();
+    if !enabled(&cfg.notifications, Event::BankedReset)
+        || (app.push.subscriptions().is_empty() && cfg.notifications.webhooks.is_empty())
+    {
+        return;
+    }
+    let fault = Fault {
+        key,
+        event: Event::BankedReset,
+        provider: acct.provider.as_str().into(),
+        provider_name: crate::banked_resets::provider_name(acct.provider).into(),
+        summary: title.clone(),
+        title,
+        detail: Some(body.clone()),
+        body,
+        path: format!("#/accounts/{}", url::form_urlencoded::byte_serialize(acct.id.as_bytes()).collect::<String>()),
+        kind: "banked_reset",
+        level,
+        account: Some(acct.id.clone()),
+        label: Some(acct.label.clone()),
         ..Default::default()
     };
     let app = app.clone();

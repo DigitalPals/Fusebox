@@ -78,7 +78,7 @@ impl Message<'_> {
     fn colour(&self) -> u32 {
         if self.test {
             0xf2efe8
-        } else if self.recovered {
+        } else if self.recovered || self.fault.level == "ok" {
             0x4ade80
         } else if self.fault.level == "err" {
             0xfb7185
@@ -114,6 +114,7 @@ fn event_name(e: Event) -> &'static str {
         Event::AccountUsedUp => "account_used_up",
         Event::AccountErrors => "account_errors",
         Event::ClientAddress => "client_new_address",
+        Event::BankedReset => "banked_reset",
         Event::Quiet => "quiet",
     }
 }
@@ -155,7 +156,7 @@ pub async fn send(app: &App, url: &str, msg: &Message<'_>) -> Result<(), String>
             client.post(u).json(&json!({ "chat_id": chat, "text": format!("{}\n{}", f.title, f.body) }))
         }
         Kind::Ntfy => {
-            let (tags, priority) = if msg.recovered || msg.test {
+            let (tags, priority) = if msg.recovered || msg.test || f.level == "ok" {
                 ("white_check_mark", "3")
             } else if f.level == "err" {
                 ("rotating_light", "4")

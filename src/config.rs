@@ -282,6 +282,8 @@ pub struct Notifications {
     /// A named client's key used from an address it wasn't used from before, or refused
     /// at one its address list doesn't allow.
     pub client_new_address: bool,
+    /// A banked reset used automatically, one that needs review, or one that expired unused.
+    pub banked_resets: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -296,6 +298,7 @@ impl Default for Notifications {
             account_used_up: false,
             account_errors: false,
             client_new_address: true,
+            banked_resets: true,
             webhooks: vec![],
         }
     }
@@ -536,6 +539,7 @@ usage:
 #   account-used-up: false     # one account used up its 5-hour or weekly limit
 #   account-errors: false      # account errors and runs of failed requests
 #   client-new-address: true   # a named client's key used from a new address, or refused at one
+#   banked-resets: true        # a banked reset used automatically, needing review, or expired unused
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 
@@ -1011,6 +1015,10 @@ mod tests {
         let defaults = Config::parse("").unwrap();
         assert_eq!((defaults.trusted_proxies.clone(), defaults.proxy_protocol_port), (None, 0));
         assert!(defaults.notifications.client_new_address, "new-address notifications are on unless turned off");
+        // Settings saved before this event existed turn it on; it can be turned off.
+        let saved = Config::parse(r#"notifications: {"sign-in-expired":true,"account-errors":true}"#).unwrap();
+        assert!(defaults.notifications.banked_resets && saved.notifications.banked_resets);
+        assert!(!Config::parse("notifications:\n  banked-resets: false\n").unwrap().notifications.banked_resets);
         for (text, problem) in [
             ("trusted-proxies: [example.com]\n", "trusted-proxies"),
             ("trusted-proxies: [10.0.0.0/40]\n", "trusted-proxies"),

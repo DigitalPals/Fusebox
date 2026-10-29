@@ -373,6 +373,7 @@ notifications:                # push notifications, for devices that turn them o
   provider-exhausted: true    # every account of a provider is out, and when one is back
   account-used-up: false
   account-errors: false
+  banked-resets: true         # a banked reset used automatically, needing review, or expired unused
   webhooks:                   # the same messages in Discord, Slack, Teams, Telegram, ntfy or any URL
     - https://discord.com/api/webhooks/...
 log-format: text              # or json, one object per line (needs a restart)

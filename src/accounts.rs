@@ -403,6 +403,9 @@ pub struct AccountState {
     pub identity_epoch: u64,
     pub quota_refreshing: bool,
     pub banked_resets: Option<crate::banked_resets::View>,
+    /// Unexpired banked resets at the last good inventory read (ID, expiry, count), so
+    /// one that expires unused is noticed once.
+    pub reset_watch: Vec<(String, DateTime<Utc>, u64)>,
     pub window_starter: Option<crate::window_starter::View>,
     /// Foreground attempts cancel an idle-window preflight or pending send.
     pub window_starter_cancel: Option<Arc<tokio_util::sync::CancellationToken>>,
@@ -433,6 +436,7 @@ impl AccountState {
         self.quota_cooldowns.clear();
         self.models_etag = None;
         self.banked_resets = None;
+        self.reset_watch.clear();
         self.window_starter = None;
         if let Some(cancel) = self.window_starter_cancel.take() {
             cancel.cancel();
@@ -1353,6 +1357,7 @@ impl Pool {
                         models_etag: st.models_etag.clone(),
                         quota_refreshing: st.quota_refreshing,
                         banked_resets: st.banked_resets.clone(),
+                        reset_watch: st.reset_watch.clone(),
                         strikes: st.strikes,
                         last_error: st.last_error.clone(),
                         last_used: st.last_used,

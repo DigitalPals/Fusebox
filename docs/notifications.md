@@ -21,6 +21,7 @@ notifications:
   provider-exhausted: true   # every account of a provider is out, and when one is back
   account-used-up: false     # one account used up its 5-hour or weekly limit
   account-errors: false      # account errors, and three or more failed requests in an hour
+  banked-resets: true        # a banked reset used automatically, needing review, or expired unused
 ```
 
 ## What is sent, and when
@@ -31,6 +32,7 @@ Fusebox checks every 30 seconds, using the rules behind the dashboard's faults b
 - **Provider out of capacity:** "Every Claude account is used up" with when the first one is back, or "No Claude account can take requests" when sign-ins have expired too. When a provider has run out, its accounts' own limit notifications are left out. "Claude is back" follows when an account can take requests again.
 - **Account limit used up:** "work@example.com: weekly limit used up · back in 3d 7h".
 - **Account errors:** the account's error, or "3 failed requests" in the last hour.
+- **Banked resets:** sent once, as it happens, not by the 30-second check. "Codex reset used" when automatic use spends one; "Codex reset needs review" when an automatic spend got no clear answer; "Codex reset expired unused" within about a minute of a reset expiring, with the provider's last refusal if there was one. A refusal alone isn't sent: during a reset's final hour automatic use retries every five minutes. Resets you use yourself aren't sent either. Opens the account's page.
 
 Rate limits are never sent; they come and go too quickly. The app's icon shows the number of faults the dashboard shows.
 
@@ -56,7 +58,7 @@ The URL says how a message is sent:
 | a host named `ntfy` (`ntfy.sh/<topic>`, `ntfy.example.com/<topic>`) | An ntfy notification with title, tags and priority |
 | anything else | JSON with `text` (which Mattermost, Google Chat and Rocket.Chat show as it is) plus `title`, `body`, `event`, `kind`, `level`, `provider`, `account`, `label` and `until` |
 
-`event` is `sign_in_expired`, `provider_exhausted`, `account_used_up`, `account_errors`, `recovered` or `test`. A destination is named by its kind and host only, in the dashboard and in logs; the rest of the URL is usually its secret, so keep `config.yaml` private. Webhooks are sent once per fault, like push notifications, and a failed delivery is logged, not retried.
+`event` is `sign_in_expired`, `provider_exhausted`, `account_used_up`, `account_errors`, `client_new_address`, `banked_reset`, `recovered` or `test`; a used reset has `level` `ok`. A destination is named by its kind and host only, in the dashboard and in logs; the rest of the URL is usually its secret, so keep `config.yaml` private. Webhooks are sent once per fault, like push notifications, and a failed delivery is logged, not retried.
 
 ## Reading faults from other tools
 

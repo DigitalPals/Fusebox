@@ -628,7 +628,10 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     let reset_stale = acct.provider != Provider::Antigravity && app.cfg().banked_resets && {
         let st = acct.state.lock();
         !st.disabled
-            && st.banked_resets.as_ref().is_none_or(|v| (Utc::now() - v.checked_at).num_seconds() >= RESET_POLL_EVERY)
+            && st.banked_resets.as_ref().is_none_or(|v| {
+                (Utc::now() - v.checked_at).num_seconds() >= RESET_POLL_EVERY
+                    || crate::banked_resets::expiry_passed(v, Utc::now())
+            })
     };
     if reset_stale {
         let _ = crate::banked_resets::refresh(app, &acct).await;

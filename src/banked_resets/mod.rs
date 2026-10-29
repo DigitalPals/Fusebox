@@ -1,6 +1,7 @@
 //! Banked reset redemption. Tokens and upstream identities never leave the server.
 mod automation;
 pub(crate) mod ledger;
+mod notices;
 mod provider;
 #[cfg(test)]
 mod tests;
@@ -16,6 +17,7 @@ use crate::accounts::{Account, Credential, Provider};
 use crate::state::App;
 pub use automation::{Policy, automatic_check, plan, priority_expiry};
 use ledger::{Ledger, Operation};
+pub use notices::{expiry_passed, provider_name};
 use provider::{Api, HttpProvider, Inventory, Outcome};
 
 #[derive(Clone, Debug, Serialize)]
@@ -123,10 +125,20 @@ fn check_current(app: &App, acct: &Arc<Account>, id: &str, spending: bool) -> Re
 fn scope(provider: Provider, organization: &str) -> String {
     format!("{}:{organization}", provider.as_str())
 }
-fn store(app: &App, acct: &Account, account: &str, view: &View) {
+fn store(app: &Arc<App>, acct: &Account, account: &str, view: &View) {
+    // Only a good read can tell that a reset expired unused.
+    let watch = view.inventory.as_ref().filter(|_| view.error.is_none()).map(|inv| {
+        let gone = notices::expired_unused(&acct.state.lock().reset_watch, inv, view.checked_at);
+        notices::expired(app, acct, view, &gone);
+        notices::watch_list(inv, view.checked_at)
+    });
     for other in app.pool.all() {
         if other.provider == acct.provider && account_id(&other).ok().as_deref() == Some(account) {
-            other.state.lock().banked_resets = Some(view.clone());
+            let mut st = other.state.lock();
+            st.banked_resets = Some(view.clone());
+            if let Some(watch) = &watch {
+                st.reset_watch = watch.clone();
+            }
         }
     }
     app.broadcast("accounts", Value::Null);
@@ -247,7 +259,7 @@ enum Request {
 }
 
 async fn execute<P: Api + Sync>(
-    app: &App,
+    app: &Arc<App>,
     acct: &Arc<Account>,
     api: &P,
     organization: &str,
@@ -256,6 +268,7 @@ async fn execute<P: Api + Sync>(
     request: Request,
 ) -> Result<View> {
     let automatic = matches!(request, Request::Automatic);
+    let mut expiry_due = false;
     let mut action = match request {
         Request::Manual(action) => {
             ensure!(action.confirmed, "Explicit confirmation is required");
@@ -312,6 +325,7 @@ async fn execute<P: Api + Sync>(
                 .ok_or_else(|| anyhow!("No automatic reset is due"))?;
             automation::check_journal(&ledger.journal, &decision, Utc::now())?;
             action.grant_id = decision.grant_id.clone();
+            expiry_due = decision.expiry_due;
             Some(decision.credit_key)
         } else {
             let quotes = app.reset_quotes.lock();
@@ -409,6 +423,12 @@ async fn execute<P: Api + Sync>(
         ledger.journal.operations.insert(operation.request_id.clone(), operation.clone());
         // If the terminal save fails, the on-disk pending entry still blocks a new spend.
         ledger.save()?;
+        if matches!(operation.status.as_str(), "applied" | "already_used") {
+            notices::forget_spent(app, acct, account, &operation.grant_id);
+        }
+        if automatic {
+            notices::outcome(app, acct, &operation, expiry_due);
+        }
         let read = api.read().await;
         drop(guard);
         let (inventory, error) = match read {

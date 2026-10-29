@@ -239,6 +239,7 @@
       "Account errors": "账号错误",
       "New client address": "客户端新地址",
       "A client’s key is used from an address it wasn’t used from before, or refused at one its address list doesn’t allow.": "客户端的密钥从以前没用过的地址使用，或从地址列表不允许的地址被拒绝。",
+      "A reset is used automatically, its outcome needs review, or one expires unused.": "自动使用了重置、重置结果需要核对，或有重置未使用就到期。",
       "Connected now": "当前连接",
       "Which machine is using Fusebox: requests in flight, open sockets, and what was seen in the last five minutes.": "哪台机器正在使用 Fusebox：进行中的请求、打开的套接字，以及最近五分钟内出现过的连接。",
       "Nothing in the last five minutes.": "最近五分钟内没有连接。",
