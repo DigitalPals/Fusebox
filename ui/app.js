@@ -2994,14 +2994,19 @@ function famRoute(f) {
   const rep = f.ids.reduce((best, id) => (routeSteps(id).length > routeSteps(best).length ? id : best), f.ids[0]);
   const rows = routeSteps(rep).map((s) => ({ ...s }));
   const seen = new Set(rows.map((r) => r.account));
+  const models = new Set(), coverage = new Map();
   for (const id of f.ids) {
+    const model = unprefixed(id);
+    models.add(model);
     for (const s of routeSteps(id)) {
       if (!seen.has(s.account)) { seen.add(s.account); rows.push({ ...s, next: false }); }
+      if (!coverage.has(s.account)) coverage.set(s.account, new Set());
+      coverage.get(s.account).add(model);
     }
   }
   // Coverage counts models, so an account's prefixed copies don't make the others look partial.
-  const models = new Set(f.ids.map(unprefixed));
-  for (const r of rows) r.serves = new Set(f.ids.filter((id) => routeSteps(id).some((s) => s.account === r.account)).map(unprefixed)).size;
+  // Accumulate it while visiting routes, instead of rescanning all routes for every account.
+  for (const r of rows) r.serves = coverage.get(r.account).size;
   return { rep, models: models.size, rows: rows.filter((r) => accountById(r.account)) };
 }
 
@@ -3229,8 +3234,12 @@ async function checkModels(btn) {
   const m = S.addModel;
   try {
     const r = await api('/models/check', { method: 'POST' });
-    const msg = !r.asked ? 'Every account was checked in the last 10 minutes.'
-      : r.new.length ? `New: ${r.new.join(', ')}.` : `Asked ${plural(r.asked, 'account')}; nothing new.`;
+    let msg = r.new.length ? `New: ${r.new.join(', ')}.`
+      : r.asked ? `Asked ${plural(r.asked, 'account')}; nothing new.` : 'Every account was checked in the last 10 minutes.';
+    if (r.in_progress) {
+      const pending = 'Some accounts are still being checked; results will appear automatically.';
+      msg = r.asked || r.new.length ? `${msg} ${pending}` : pending;
+    }
     if (m) Object.assign(m, { msg, err: false, model: $('#models-panel input[name="model"]')?.value || m.model });
     refreshAccounts();
   } catch (e) {

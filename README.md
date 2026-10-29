@@ -216,7 +216,7 @@ extra-models:
   claude: [claude-opus-6]
 ```
 
-Every account of that provider then serves and lists it, apart from API keys with their own `models` list. Once a Fusebox release or the provider's model list includes it, Fusebox removes the entry from `config.yaml` and says so on the Models page. **Check Claude and Codex for new models** in the Add model form asks every signed-in Claude and Codex account now, skipping any checked in the last 10 minutes.
+Every account of that provider then serves and lists it, apart from API keys with their own `models` list. Once a Fusebox release or the provider's model list includes it, Fusebox removes the entry from `config.yaml` and says so on the Models page. **Check Claude and Codex for new models** in the Add model form schedules eligible signed-in Claude and Codex accounts, skipping any checked in the last 10 minutes. Manual and automatic checks share four slots. If another check is already running, the form says so and its results appear automatically when it completes.
 
 ### Model capabilities
 

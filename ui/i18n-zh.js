@@ -522,6 +522,7 @@
       "Every account of a provider is used up or unavailable, and again when one is back.": "某个提供商的所有账号都已用完或不可用时通知，有账号恢复时再通知一次。",
       "Every account that serves these models is turned off.": "提供这些模型的账号都已停用。",
       "Every account was checked in the last 10 minutes.": "所有账号在最近 10 分钟内都已检查过。",
+      "Some accounts are still being checked; results will appear automatically.": "部分账号仍在检查中；结果将自动显示。",
       "Every model": "所有模型",
       "Exactly as the provider writes it; clients ask for this name.": "与提供商的写法完全一致；客户端用这个名字请求。",
       "Excluded models": "排除的模型",

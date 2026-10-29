@@ -35,6 +35,7 @@ test('the browser language picks Chinese, and a saved choice wins', () => {
 test('exact strings, patterns and dates translate', () => {
   const { tr } = load().FUSEBOX_I18N;
   assert.equal(tr('Overview'), '概览');
+  assert.equal(tr('Some accounts are still being checked; results will appear automatically.'), '部分账号仍在检查中；结果将自动显示。');
   assert.equal(tr('  Accounts '), '  账号 ', 'surrounding space is kept');
   assert.equal(tr('Copy gpt-6-astra'), '复制 gpt-6-astra');
   assert.equal(tr('Remove API key 2'), '移除 API 密钥 2');

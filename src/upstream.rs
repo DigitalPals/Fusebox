@@ -499,26 +499,27 @@ fn strip_foreign_thinking(body: &mut Value) {
 
 /// JavaScript-compatible 3-char build fingerprint Claude Code puts in its billing header.
 fn cc_fingerprint(message: &str) -> String {
-    let units: Vec<u16> = message.encode_utf16().collect();
-    let sampled: Vec<u16> = [4usize, 7, 20].iter().map(|&i| units.get(i).copied().unwrap_or(b'0' as u16)).collect();
+    // JavaScript indexes UTF-16 code units, including individual surrogates.
+    // Only these three positions matter, regardless of the prompt's length.
+    let mut units = message.encode_utf16();
+    let sampled = [units.nth(4), units.nth(2), units.nth(12)].map(|unit| unit.unwrap_or(b'0' as u16));
     let version = crate::clients::version(crate::clients::CLAUDE_CODE);
     let input = format!("{CC_FINGERPRINT_SALT}{}{version}", String::from_utf16_lossy(&sampled));
     hex::encode(Sha256::digest(input.as_bytes()))[..3].to_string()
 }
 
-fn first_user_text(body: &Value) -> (Option<usize>, String) {
-    let Some(msgs) = body["messages"].as_array() else { return (None, String::new()) };
-    let Some(idx) = msgs.iter().position(|m| m["role"] == "user") else { return (None, String::new()) };
+fn first_user_text(body: &Value) -> (Option<usize>, &str) {
+    let Some(msgs) = body["messages"].as_array() else { return (None, "") };
+    let Some(idx) = msgs.iter().position(|m| m["role"] == "user") else { return (None, "") };
     let text = match &msgs[idx]["content"] {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.as_str(),
         Value::Array(blocks) => blocks
             .iter()
             .filter(|b| b["type"] == "text")
             .filter_map(|b| b["text"].as_str())
             .find(|t| !t.starts_with("<system-reminder>"))
-            .unwrap_or_default()
-            .to_string(),
-        _ => String::new(),
+            .unwrap_or_default(),
+        _ => "",
     };
     (Some(idx), text)
 }
@@ -528,9 +529,9 @@ fn first_user_text(body: &Value) -> (Option<usize>, String) {
 /// Account/session identity is bound separately for native and cloaked requests alike.
 fn cloak_body(body: &mut Value, count_tokens: bool, cache_defaults: bool) {
     let configured_cache = !cache_defaults || crate::cache::has_claude_controls(body);
-    let original: Vec<Value> = match &body["system"] {
+    let original: Vec<Value> = match body["system"].take() {
         Value::String(s) => vec![json!({"type": "text", "text": s})],
-        Value::Array(blocks) => blocks.clone(),
+        Value::Array(blocks) => blocks,
         _ => vec![],
     };
     let caller: Vec<Value> = original
@@ -553,7 +554,7 @@ fn cloak_body(body: &mut Value, count_tokens: bool, cache_defaults: bool) {
     let billing = format!(
         "x-anthropic-billing-header: cc_version={}.{}; cc_entrypoint=cli;",
         crate::clients::version(crate::clients::CLAUDE_CODE),
-        cc_fingerprint(&text)
+        cc_fingerprint(text)
     );
     body["system"] = json!([
         { "type": "text", "text": billing },
@@ -2370,5 +2371,31 @@ mod tests {
         assert!(f.chars().all(|c| c.is_ascii_hexdigit()));
         // Short messages fall back to '0' for missing positions.
         assert_eq!(cc_fingerprint(""), cc_fingerprint("abc"));
+    }
+
+    #[test]
+    fn bounded_fingerprint_matches_full_utf16_for_unicode_and_short_messages() {
+        fn reference(message: &str) -> String {
+            let units: Vec<u16> = message.encode_utf16().collect();
+            let sampled: Vec<u16> =
+                [4usize, 7, 20].iter().map(|&i| units.get(i).copied().unwrap_or(b'0' as u16)).collect();
+            let version = crate::clients::version(crate::clients::CLAUDE_CODE);
+            let input = format!("{CC_FINGERPRINT_SALT}{}{version}", String::from_utf16_lossy(&sampled));
+            hex::encode(Sha256::digest(input.as_bytes()))[..3].to_string()
+        }
+        // Exercise both halves of astral characters at every sampled position,
+        // including a UTF-16 surrogate pair formed by two separated samples.
+        for text in ["hello world with enough text", "é中文🦀𐐷x".repeat(30).as_str(), "🦀".repeat(30).as_str()]
+        {
+            for (end, _) in text.char_indices().chain(std::iter::once((text.len(), '\0'))) {
+                assert_eq!(cc_fingerprint(&text[..end]), reference(&text[..end]));
+            }
+        }
+        for padding in 0..24 {
+            let text = format!("{}🦀abc𐐷xyz🦀", "a".repeat(padding));
+            assert_eq!(cc_fingerprint(&text), reference(&text));
+        }
+        let long = "prefix with enough text".to_string() + &"é🦀".repeat(200_000);
+        assert_eq!(cc_fingerprint(&long), reference(&long));
     }
 }

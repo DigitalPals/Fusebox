@@ -28,6 +28,9 @@ struct Metrics {
     pricing_partial: i64,
 }
 impl Metrics {
+    fn cost(&self) -> Option<i64> {
+        self.sums[0].and_then(|n| i64::try_from(n).ok())
+    }
     fn add(&mut self, amounts: &[Option<i64>; 10], completeness: &str, pricing_partial: bool) {
         self.observations += 1;
         self.partial += i64::from(completeness == "partial");
@@ -297,30 +300,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     let trends = trend_values;
     let mut out = serde_json::Map::new();
     for (name, groups) in DIMS.into_iter().zip(breakdowns) {
-        let mut group_values = Vec::with_capacity(groups.len());
-        for (id, group) in groups {
-            read::check()?;
-            let mut value = group.metrics.value();
-            if name == "client" {
-                value["models"] = client_model_values(client_models.remove(&id).unwrap_or_default());
-            }
-            value["id"] = json!(id);
-            value["accounts"] = json!(group.accounts.len());
-            value["provider"] = json!(group.provider);
-            group_values.push(value);
-        }
-        let mut groups = group_values;
-        read::check()?;
-        groups.sort_by(|a, b| {
-            b["estimated_cost_nanos"]
-                .as_i64()
-                .cmp(&a["estimated_cost_nanos"].as_i64())
-                .then(b["observations"].as_i64().cmp(&a["observations"].as_i64()))
-                .then(a["id"].as_str().cmp(&b["id"].as_str()))
-        });
-        read::check()?;
-        groups.truncate(500);
-        out.insert(name.into(), json!(groups));
+        out.insert(name.into(), json!(breakdown_values(name, groups, &mut client_models)?));
     }
     let proxy_first: Option<i64> = conn
         .query_row("SELECT event_at_ms FROM usage_observations INDEXED BY usage_event_time WHERE source='proxy' ORDER BY event_at_ms LIMIT 1",[],|r|r.get(0))
@@ -339,14 +319,53 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
             "basis":"API list-price equivalent estimate; usage older than the catalogue is priced at today's rates as a backdated current-rate equivalent, not what was paid at the time"}}))
 }
 
+/// Select bounded output before expanding aggregates into nested JSON. Large
+/// journals can contain far more model/account/client groups than the UI shows.
+fn top<T>(mut values: Vec<T>, limit: usize, compare: impl Fn(&T, &T) -> std::cmp::Ordering) -> Vec<T> {
+    if values.len() > limit {
+        values.select_nth_unstable_by(limit, &compare);
+        values.truncate(limit);
+    }
+    values.sort_unstable_by(compare);
+    values
+}
+
+fn breakdown_values(
+    name: &str,
+    groups: BTreeMap<Option<String>, Group>,
+    client_models: &mut BTreeMap<Option<String>, BTreeMap<Option<String>, Metrics>>,
+) -> Result<Vec<Value>> {
+    read::check()?;
+    let groups = top(groups.into_iter().collect::<Vec<_>>(), 500, |a, b| {
+        b.1.metrics
+            .cost()
+            .cmp(&a.1.metrics.cost())
+            .then(b.1.metrics.observations.cmp(&a.1.metrics.observations))
+            .then(a.0.cmp(&b.0))
+    });
+    let mut values = Vec::with_capacity(groups.len());
+    for (id, group) in groups {
+        read::check()?;
+        let mut value = group.metrics.value();
+        if name == "client" {
+            value["models"] = client_model_values(client_models.remove(&id).unwrap_or_default());
+        }
+        value["id"] = json!(id);
+        value["accounts"] = json!(group.accounts.len());
+        value["provider"] = json!(group.provider);
+        values.push(value);
+    }
+    read::check()?;
+    Ok(values)
+}
+
 /// A client's models, largest list price first: the model, its calls and its cost.
 fn client_model_values(models: BTreeMap<Option<String>, Metrics>) -> Value {
     // None when nothing was priced or the sum left the supported range.
     let cost = |m: &Metrics| m.sums[0];
-    let mut models: Vec<(Option<String>, Metrics)> = models.into_iter().collect();
-    models
-        .sort_by(|a, b| cost(&b.1).cmp(&cost(&a.1)).then(b.1.observations.cmp(&a.1.observations)).then(a.0.cmp(&b.0)));
-    models.truncate(50);
+    let models = top(models.into_iter().collect::<Vec<_>>(), 50, |a, b| {
+        cost(&b.1).cmp(&cost(&a.1)).then(b.1.observations.cmp(&a.1.observations)).then(a.0.cmp(&b.0))
+    });
     models
         .into_iter()
         .map(|(id, m)| {
@@ -428,3 +447,7 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
     read::check()?;
     Ok(json!(out))
 }
+
+#[cfg(test)]
+#[path = "dashboard_tests.rs"]
+mod tests;

@@ -537,6 +537,45 @@ async fn record_failure(store: &Store, code: &str) -> Result<()> {
     let code = code.to_string();
     store.call(move|conn|{conn.execute("INSERT INTO usage_collector_local_meta(key,value) VALUES('last_error',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[code])?;Ok(())}).await
 }
+
+fn serialized_size(value: &impl Serialize) -> serde_json::Result<usize> {
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+/// JSON array elements contribute their own encoded bytes and a separating
+/// comma. Count the envelope once and each observation once, without cloning or
+/// serializing every earlier observation again for each candidate.
+fn fill_batch(batch: &mut Batch, records: Vec<(u64, String)>, limit: usize) -> Result<Vec<(u64, String)>> {
+    let mut bytes = serialized_size(batch)?;
+    let mut sequences = Vec::new();
+    for (sequence, payload) in records {
+        let observation: Observation =
+            serde_json::from_str(&payload).map_err(|_| anyhow!("invalid outbox metadata"))?;
+        let candidate = bytes
+            .saturating_add(serialized_size(&observation)?)
+            .saturating_add(usize::from(!batch.observations.is_empty()));
+        if candidate > limit {
+            break;
+        }
+        bytes = candidate;
+        batch.observations.push(observation);
+        sequences.push((sequence, payload));
+    }
+    Ok(sequences)
+}
+
 async fn synchronize(store: &Store, state: &LocalState) -> Result<Value> {
     let url = validate_destination(&state.destination)?;
     let client = reqwest::Client::builder()
@@ -564,24 +603,9 @@ async fn synchronize(store: &Store, state: &LocalState) -> Result<Value> {
                 Ok((rows, pending + tombstones, superseded))
             })
             .await?;
-        let mut observations = Vec::new();
-        let mut sequences = Vec::new();
-        for (sequence, payload) in records {
-            let o: Observation = serde_json::from_str(&payload).map_err(|_| anyhow!("invalid outbox metadata"))?;
-            let tentative = Batch {
-                version: 1,
-                observations: observations.iter().cloned().chain(std::iter::once(o.clone())).collect(),
-                pending,
-                superseded: superseded.clone(),
-                progress: progress.clone(),
-            };
-            if serde_json::to_vec(&tentative)?.len() > MAX_BODY {
-                break;
-            }
-            observations.push(o);
-            sequences.push((sequence, payload));
-        }
-        let batch = Batch { version: 1, observations, pending, superseded: superseded.clone(), progress };
+        let mut batch =
+            Batch { version: 1, observations: Vec::new(), pending, superseded: superseded.clone(), progress };
+        let sequences = fill_batch(&mut batch, records, MAX_BODY)?;
         let count = batch.observations.len();
         let superseded_count = superseded.len();
         let reply = match client.post(url.clone()).bearer_auth(&state.credential).json(&batch).send().await {

@@ -1,0 +1,19 @@
+{
+  "checks": [
+    {
+      "lease": "d5ebee4f11e947c185ff0f804b3a4e2d",
+      "status": "closed",
+      "remaining": [],
+      "preserved_volumes": [],
+      "errors": []
+    },
+    {
+      "lease": "1696391d50cd42d4976d20d8ce6bfac8",
+      "status": "closed",
+      "remaining": [],
+      "preserved_volumes": [],
+      "errors": []
+    }
+  ],
+  "retained_temporary_resources": []
+}

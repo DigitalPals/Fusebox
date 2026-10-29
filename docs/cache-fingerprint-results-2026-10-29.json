@@ -1,0 +1,107 @@
+{
+  "synthetic_only": true,
+  "network_or_provider_latency_measured": false,
+  "baseline_commit": "8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "compiler": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "system": "Linux-6.12.113+deb13-amd64-x86_64-with-glibc2.41",
+  "methodology": [
+    "Optimized standalone Rust, medians of 9 samples per case.",
+    "Cache: exact production cache methods, keys prebuilt, Arc<usize> payload instead of JSON.",
+    "Cache: only hits measured, no serialization, key hashing, misses, expiry or mutex contention.",
+    "Fingerprint: production function with the client version fixed to omit global lookup.",
+    "Fingerprint allocations counted with a System allocator wrapper; cumulative allocated bytes, not peak memory; harness excluded.",
+    "Neither measurement estimates end-to-end request latency or provider speed."
+  ],
+  "working_sources_sha256": {
+    "src/embeddings.rs": "cc74a85e4cedd6995dc1d3d5ab48baf1603d07ff7c25454affe2665afd3b9ed6",
+    "src/upstream.rs": "9823b4012b8b5716b1f8e0c2544bf6d29d457d20251bbfb0e138d6b8f2b00ee8"
+  },
+  "cache": [
+    {
+      "algorithm": "before",
+      "entries": 1,
+      "hits_per_sample": 100000,
+      "median_ms": 5.958235999999999
+    },
+    {
+      "algorithm": "before",
+      "entries": 100,
+      "hits_per_sample": 100000,
+      "median_ms": 35.739021
+    },
+    {
+      "algorithm": "before",
+      "entries": 1000,
+      "hits_per_sample": 100000,
+      "median_ms": 377.60635199999996
+    },
+    {
+      "algorithm": "after",
+      "entries": 1,
+      "hits_per_sample": 100000,
+      "median_ms": 4.009687
+    },
+    {
+      "algorithm": "after",
+      "entries": 100,
+      "hits_per_sample": 100000,
+      "median_ms": 3.946552
+    },
+    {
+      "algorithm": "after",
+      "entries": 1000,
+      "hits_per_sample": 100000,
+      "median_ms": 4.14471
+    }
+  ],
+  "fingerprint": [
+    {
+      "algorithm": "before",
+      "prompt_bytes": 0,
+      "calls_per_sample": 200,
+      "median_ms": 0.21668600000000002,
+      "allocations": 1400,
+      "allocated_bytes": 24800
+    },
+    {
+      "algorithm": "after",
+      "prompt_bytes": 0,
+      "calls_per_sample": 200,
+      "median_ms": 0.220141,
+      "allocations": 1200,
+      "allocated_bytes": 23600
+    },
+    {
+      "algorithm": "before",
+      "prompt_bytes": 10240,
+      "calls_per_sample": 200,
+      "median_ms": 0.893393,
+      "allocations": 2000,
+      "allocated_bytes": 9584000
+    },
+    {
+      "algorithm": "after",
+      "prompt_bytes": 10240,
+      "calls_per_sample": 200,
+      "median_ms": 0.220761,
+      "allocations": 1200,
+      "allocated_bytes": 23600
+    },
+    {
+      "algorithm": "before",
+      "prompt_bytes": 1048576,
+      "calls_per_sample": 200,
+      "median_ms": 70.380163,
+      "allocations": 2000,
+      "allocated_bytes": 978697600
+    },
+    {
+      "algorithm": "after",
+      "prompt_bytes": 1048576,
+      "calls_per_sample": 200,
+      "median_ms": 0.22190400000000002,
+      "allocations": 1200,
+      "allocated_bytes": 23600
+    }
+  ]
+}

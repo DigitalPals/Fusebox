@@ -11,13 +11,14 @@
 //! Models added from the dashboard (`extra-models`) are removed from config.yaml
 //! once this release or a provider list has them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use futures::{StreamExt, stream};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,6 +37,8 @@ const FIRST_RETRY: i64 = 15 * 60;
 const MIN_GAP: i64 = 10 * 60;
 /// Dashboard notes about removed `extra-models` entries are kept this long.
 const REMOVED_KEEP_DAYS: i64 = 30;
+/// Shared by automatic checks and overlapping dashboard checks.
+const REFRESH_CONCURRENCY: usize = 4;
 
 /// One model as a provider lists it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -95,6 +98,21 @@ pub struct Store {
     stored: Mutex<Stored>,
     /// The removals that last failed to save, so a read-only config.yaml warns once.
     unsaved: Mutex<Vec<(String, String)>>,
+    refreshing: Mutex<HashSet<String>>,
+    refresh_slots: tokio::sync::Semaphore,
+}
+
+/// Cancellation releases both the account claim and the shared concurrency slot.
+struct RefreshPermit<'a> {
+    store: &'a Store,
+    account: &'a str,
+    _slot: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl Drop for RefreshPermit<'_> {
+    fn drop(&mut self) {
+        self.store.refreshing.lock().remove(self.account);
+    }
 }
 
 /// What the provider lists say about Claude models, for request building.
@@ -157,7 +175,13 @@ impl Store {
             Err(_) => Stored::default(),
         };
         crate::clients::restore(&stored.clients);
-        let store = Self { path, stored: Mutex::new(stored), unsaved: Mutex::default() };
+        let store = Self {
+            path,
+            stored: Mutex::new(stored),
+            unsaved: Mutex::default(),
+            refreshing: Mutex::default(),
+            refresh_slots: tokio::sync::Semaphore::new(REFRESH_CONCURRENCY),
+        };
         store.publish_caps();
         store
     }
@@ -202,6 +226,11 @@ impl Store {
     /// The account's list is due: never fetched, its time has come, or Codex reported
     /// a different list version. Never within `MIN_GAP` of the last attempt.
     pub fn due(&self, acct: &Account, now: DateTime<Utc>) -> bool {
+        self.checkable(acct, now, false)
+    }
+
+    /// Read-only admission check; manual checks may advance the normal schedule.
+    fn checkable(&self, acct: &Account, now: DateTime<Utc>, manual: bool) -> bool {
         if !eligible(acct) {
             return false;
         }
@@ -213,7 +242,7 @@ impl Store {
         let hinted = acct.provider == Provider::Codex
             && e.etag.is_some()
             && acct.state.lock().models_etag.as_ref().is_some_and(|seen| Some(seen) != e.etag.as_ref());
-        hinted || e.next_at.is_none_or(|t| now >= t)
+        manual || hinted || e.next_at.is_none_or(|t| now >= t)
     }
 
     /// Lets "Check for new models" ask now, still at most once per `MIN_GAP` per account.
@@ -230,6 +259,26 @@ impl Store {
             }
             None => true,
         }
+    }
+
+    async fn begin_refresh<'a>(&'a self, acct: &'a Account, manual: bool) -> Option<RefreshPermit<'a>> {
+        {
+            let refreshing = self.refreshing.lock();
+            // Completed/redundant checks must not wait behind unrelated network I/O.
+            if refreshing.contains(&acct.id) || !self.checkable(acct, Utc::now(), manual) {
+                return None;
+            }
+        }
+        let slot = self.refresh_slots.acquire().await.ok()?;
+        let mut refreshing = self.refreshing.lock();
+        // Recheck after waiting: another caller may have refreshed or disabled it.
+        if refreshing.contains(&acct.id)
+            || !(if manual { self.bring_forward(acct, Utc::now()) } else { self.due(acct, Utc::now()) })
+        {
+            return None;
+        }
+        refreshing.insert(acct.id.clone());
+        Some(RefreshPermit { store: self, account: &acct.id, _slot: slot })
     }
 
     pub(crate) fn record(
@@ -288,8 +337,10 @@ impl Store {
     }
 }
 
-/// Fetches one account's model list and stores it. True when the list changed.
-pub async fn refresh(app: &App, acct: &Arc<Account>) -> bool {
+/// Fetches an admitted account's model list. None if ineligible, too recent,
+/// not due, or already being checked by another caller.
+async fn refresh(app: &App, acct: &Arc<Account>, manual: bool) -> Option<bool> {
+    let _permit = app.models.begin_refresh(acct, manual).await?;
     let now = Utc::now();
     let result = async {
         crate::oauth::ensure_fresh(app, acct, chrono::Duration::minutes(5), false).await?;
@@ -312,37 +363,58 @@ pub async fn refresh(app: &App, acct: &Arc<Account>) -> bool {
             if changed {
                 tracing::info!(account = %acct.label, "model list updated");
             }
-            changed
+            Some(changed)
         }
         Err(e) => {
             tracing::debug!(account = %acct.label, "model list check failed: {e:#}");
-            false
+            Some(false)
         }
     }
 }
 
 /// Checks every account whose list is due. True when a list changed.
 pub async fn refresh_due(app: &Arc<App>) -> bool {
-    let now = Utc::now();
-    let due: Vec<_> = app.pool.all().into_iter().filter(|a| app.models.due(a, now)).collect();
-    let mut changed = false;
-    for acct in due {
-        changed |= refresh(app, &acct).await;
-    }
-    changed
+    refresh_accounts(app, false).await.1
 }
 
-/// "Check for new models": asks every signed-in Claude and Codex account now, except
-/// those checked in the last 10 minutes. Returns how many were asked and what is new.
-pub async fn check_now(app: &Arc<App>) -> (usize, Vec<String>) {
+async fn refresh_accounts(app: &App, manual: bool) -> (usize, bool) {
     let now = Utc::now();
-    let before: Vec<String> = app.pool.models().into_iter().map(|(m, _)| m).collect();
-    let accounts: Vec<_> = app.pool.all().into_iter().filter(|a| app.models.bring_forward(a, now)).collect();
-    let checks = accounts.iter().map(|a| refresh(app, a));
-    futures::future::join_all(checks).await;
+    // Mark the whole manual batch due before waiting for slots, so cancellation
+    // leaves its queued accounts available to the next automatic poll.
+    let accounts: Vec<_> = app
+        .pool
+        .all()
+        .into_iter()
+        .filter(|a| if manual { app.models.bring_forward(a, now) } else { app.models.due(a, now) })
+        .collect();
+    stream::iter(accounts)
+        .map(|acct| async move { refresh(app, &acct, manual).await })
+        .buffer_unordered(REFRESH_CONCURRENCY)
+        .fold((0, false), |(asked, changed), result| async move {
+            (asked + usize::from(result.is_some()), changed | result.unwrap_or(false))
+        })
+        .await
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckResult {
+    pub asked: usize,
+    /// Checks still running for eligible accounts when this response was built.
+    pub in_progress: usize,
+    pub new: Vec<String>,
+}
+
+/// Schedule eligible Claude/Codex checks, sharing four slots with the poller.
+/// Recently checked accounts are skipped; overlapping checks are reported separately.
+pub async fn check_now(app: &Arc<App>) -> CheckResult {
+    let before: HashSet<String> = app.pool.models().into_iter().map(|(m, _)| m).collect();
+    let (asked, _) = refresh_accounts(app, true).await;
     prune(app);
     let new = app.pool.models().into_iter().map(|(m, _)| m).filter(|m| !before.contains(m)).collect();
-    (accounts.len(), new)
+    let accounts = app.pool.all();
+    let refreshing = app.models.refreshing.lock();
+    let in_progress = accounts.iter().filter(|a| eligible(a) && refreshing.contains(&a.id)).count();
+    CheckResult { asked, in_progress, new }
 }
 
 async fn fetch_claude(http: &reqwest::Client, token: &str) -> Result<Vec<Listed>> {
@@ -569,6 +641,172 @@ fn with_extra_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RefreshFixture {
+        dir: PathBuf,
+        cfg: crate::config::Config,
+        store: Store,
+        accounts: Vec<Arc<Account>>,
+    }
+
+    impl RefreshFixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("fusebox-model-scheduler-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let cfg = crate::config::Config {
+                auth_dir: dir.display().to_string(),
+                management_key: "synthetic-model-check".into(),
+                claude_api_key: (0..REFRESH_CONCURRENCY + 1)
+                    .map(|i| crate::config::KeyEntry { api_key: format!("synthetic-{i}"), ..Default::default() })
+                    .collect(),
+                ..Default::default()
+            };
+            let pool = crate::accounts::Pool::default();
+            pool.reload(&cfg);
+            let accounts = pool.all();
+            for acct in &accounts {
+                *acct.cred.write() = Credential::OAuth(crate::accounts::OAuth::default());
+            }
+            Self { store: Store::load(&dir), dir, cfg, accounts }
+        }
+
+        fn app(&self) -> Arc<App> {
+            let app = App::new(self.cfg.clone(), self.dir.join("config.yaml"));
+            for acct in app.pool.all() {
+                *acct.cred.write() = Credential::OAuth(crate::accounts::OAuth::default());
+            }
+            app
+        }
+    }
+
+    impl Drop for RefreshFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn model_refreshes_share_a_bound_and_recheck_queued_accounts() {
+        let f = RefreshFixture::new();
+        let mut active = Vec::new();
+        for (i, acct) in f.accounts[..REFRESH_CONCURRENCY].iter().enumerate() {
+            active.push(f.store.begin_refresh(acct, i % 2 == 0).await.unwrap());
+        }
+        assert_eq!(f.store.refresh_slots.available_permits(), 0);
+        let acct = &f.accounts[REFRESH_CONCURRENCY];
+        let pending = f.store.begin_refresh(acct, true);
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        acct.state.lock().disabled = true;
+        active.pop();
+        assert!(pending.await.is_none(), "disabled while queued must not fetch");
+        acct.state.lock().disabled = false;
+        let permit = f.store.begin_refresh(acct, false).await.unwrap();
+        assert_eq!(f.store.refreshing.lock().len(), REFRESH_CONCURRENCY);
+        drop(permit);
+        drop(active);
+        assert!(f.store.refreshing.lock().is_empty());
+        assert_eq!(f.store.refresh_slots.available_permits(), REFRESH_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn overlapping_model_checks_deduplicate_and_cancelled_checks_can_retry() {
+        let f = RefreshFixture::new();
+        let acct = &f.accounts[0];
+        let permit = f.store.begin_refresh(acct, false).await.unwrap();
+        assert!(f.store.begin_refresh(acct, true).await.is_none());
+        assert!(f.store.begin_refresh(acct, false).await.is_none());
+        // A dropped fetch future releases its claim even without a completed record.
+        drop(permit);
+        let permit = f.store.begin_refresh(acct, true).await.unwrap();
+        assert!(f.store.record(acct, Utc::now(), Err(anyhow::anyhow!("synthetic failure"))).is_err());
+        drop(permit);
+        assert!(f.store.begin_refresh(acct, true).await.is_none(), "manual checks retain the minimum gap");
+        assert!(f.store.begin_refresh(acct, false).await.is_none(), "automatic checks retain backoff");
+
+        // A freshly queued manual call must also respect a completion that raced it.
+        let mut active = Vec::new();
+        for other in &f.accounts[1..] {
+            active.push(f.store.begin_refresh(other, true).await.unwrap());
+        }
+        let recent = f.store.begin_refresh(acct, true);
+        tokio::pin!(recent);
+        assert!(matches!(futures::poll!(&mut recent), std::task::Poll::Ready(None)), "recent checks must not queue");
+        let duplicate = f.store.begin_refresh(&f.accounts[1], true);
+        tokio::pin!(duplicate);
+        assert!(matches!(futures::poll!(&mut duplicate), std::task::Poll::Ready(None)), "active checks must not queue");
+        f.store.stored.lock().accounts.get_mut(&acct.id).unwrap().checked_at =
+            Some(Utc::now() - chrono::Duration::minutes(11));
+        let queued = f.store.begin_refresh(acct, true);
+        tokio::pin!(queued);
+        assert!(futures::poll!(&mut queued).is_pending());
+        assert!(f.store.record(acct, Utc::now(), Err(anyhow::anyhow!("concurrent completion"))).is_err());
+        active.pop();
+        assert!(queued.await.is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_model_endpoint_distinguishes_in_progress_from_recent_checks_without_waiting() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+
+        let f = RefreshFixture::new();
+        let app = f.app();
+        let accounts = app.pool.all();
+        let mut active = Vec::new();
+        for acct in &accounts[..REFRESH_CONCURRENCY] {
+            active.push(app.models.begin_refresh(acct, false).await.unwrap());
+        }
+        assert!(app.models.record(&accounts[REFRESH_CONCURRENCY], Utc::now(), Err(anyhow::anyhow!("recent"))).is_err());
+        let request = || {
+            let mut request = Request::post("/api/models/check")
+                .header("authorization", "Bearer synthetic-model-check")
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo("127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap()));
+            request
+        };
+        let router = crate::server::router(app.clone());
+        let response =
+            tokio::time::timeout(Duration::from_secs(2), router.clone().oneshot(request())).await.unwrap().unwrap();
+        assert_eq!(response.status(), 200);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"asked":0,"in_progress":REFRESH_CONCURRENCY,"new":[]}));
+
+        for acct in &accounts[..REFRESH_CONCURRENCY] {
+            assert!(app.models.record(acct, Utc::now(), Err(anyhow::anyhow!("finished"))).is_err());
+        }
+        drop(active);
+        let _slots = app.models.refresh_slots.acquire_many(REFRESH_CONCURRENCY as u32).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), router.oneshot(request())).await.unwrap().unwrap();
+        assert_eq!(response.status(), 200);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"asked":0,"in_progress":0,"new":[]}));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_queued_manual_check_keeps_all_accounts_due_for_the_poller() {
+        let f = RefreshFixture::new();
+        let app = f.app();
+        let accounts = app.pool.all();
+        for acct in &accounts {
+            app.models.record(acct, Utc::now() - chrono::Duration::minutes(11), Ok((Vec::new(), None))).unwrap();
+            assert!(!app.models.due(acct, Utc::now()));
+        }
+        let _slots = app.models.refresh_slots.acquire_many(REFRESH_CONCURRENCY as u32).await.unwrap();
+        {
+            let check = check_now(&app);
+            tokio::pin!(check);
+            assert!(futures::poll!(&mut check).is_pending());
+        }
+        assert!(accounts.iter().all(|acct| app.models.due(acct, Utc::now())));
+        assert!(app.models.refreshing.lock().is_empty());
+    }
 
     #[test]
     fn claude_lists_skip_retired_models_and_keep_thinking_rules() {

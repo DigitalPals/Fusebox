@@ -1,0 +1,35 @@
+{
+  "binary_sha256": "482263a4f61ca3f14a8bd32b5a3fc083500613b9cb914710f3f41cadcbc65ed0",
+  "binary_version": "fusebox 0.11.0 (8acb559)",
+  "managed_lease": "1696391d50cd42d4976d20d8ce6bfac8",
+  "existing_dev_service_found": false,
+  "checks": [
+    "health and readiness",
+    "rebuilt versioned assets match source in gzip and identity; conditional 304",
+    "native and translated requests plus compressed request input",
+    "embedding cache hit bypasses provider and records zero provider tokens",
+    "graceful restart on same config/port retains all observations; ephemeral cache resets"
+  ],
+  "restart_verified": true,
+  "external_inference": false,
+  "temporary_processes_stopped": true,
+  "usage_acceptance": {
+    "passed": 12,
+    "checks": [
+      "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+      "collector identity filtering, breakdown and friendly label",
+      "replay does not inflate combined imported totals",
+      "offline outbox survives separate process restart and reconnect",
+      "copied histories across collectors deduplicate using message evidence",
+      "retired summary returns 410 without query work and remains management authenticated",
+      "management/inference separation, wrong credential and oversized batch rejection",
+      "revocation rejects upload and retains offline data",
+      "credential rotation and local re-enrollment preserve idempotency",
+      "imported history from 10 days ago is priced on its local date in the combined trend",
+      "usage reprice CLI is idempotent on an already priced database",
+      "marker transcript/tool/project content absent from databases, exports and logs"
+    ]
+  },
+  "smoke_harness_sha256": "97259199f20b7c1acfd31e9a4e075a9acec313962dc2f15e508de116a1cebd0e",
+  "harness_correction": "Initial smoke expected a durable observation for an embedding cache hit; corrected to match existing attempt-only accounting. Product code required no change."
+}

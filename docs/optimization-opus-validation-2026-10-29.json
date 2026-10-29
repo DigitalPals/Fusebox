@@ -1,0 +1,63 @@
+{
+  "review": {
+    "provider": "Claude",
+    "model": "claude-opus-5-5",
+    "effort": "max",
+    "blocking_findings": 0,
+    "follow_up_fixes_reviewed_by_claude": false
+  },
+  "baseline_commit": "8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "rust": {
+    "passed": 759,
+    "failed": 0,
+    "ignored": 5
+  },
+  "ui": {
+    "passed": 144,
+    "failed": 0
+  },
+  "python": {
+    "passed": 46,
+    "failed": 0
+  },
+  "format": true,
+  "clippy_all_targets_warnings_denied": true,
+  "source_sha256": {
+    "README.md": "695d74b3ff4319887438ead2595f5ba3484de77816fc89fe94fb6a91c67885c2",
+    "scripts/ui-benchmark.cjs": "5fce7dba5760bbe21924fe3eac3dadf269530b57862ffa125c42b4e4f86dd50b",
+    "src/discovery.rs": "6d614919aa150733bea8e706336e0bf7cfd512462293244b4607a376b9d52632",
+    "src/embeddings.rs": "a8c99e40e77c786c7c375e170013e398319759afeba0786708c1574b85a5fe64",
+    "src/mgmt.rs": "313df796fd8de9f744387dfb8b0a8b12c9cb145f6441f6d810f127ed573d16fb",
+    "src/upstream.rs": "9823b4012b8b5716b1f8e0c2544bf6d29d457d20251bbfb0e138d6b8f2b00ee8",
+    "src/usage/collector.rs": "0a26acd40f252fc5054978fdce73a65af14a79ca97f51175a21083f4946252c7",
+    "src/usage/collector_tests.rs": "5dcf185774206e9569553748bc79860cd1bb168c6d493bd7a7d454fe336b2070",
+    "src/usage/store/codec.rs": "52cc8fd2adbfbc8ca557e6c3a778108f2051be30f4770c5eff6a767a7deba8e8",
+    "src/usage/store/dashboard.rs": "73444cbcd1659de465ce5ea7c49a2261e6f086523249c64f3314c14f5c4e84bd",
+    "tests/ui-i18n.test.cjs": "0c592f90b6b5dd3be1c7a3673f8b97e9c997e16edccc2115a18c6fcb528d100b",
+    "tests/ui-usage.test.cjs": "43ebb5dff167dd42cc11925d760e92f7bef65ca6bb2052ccbf3aaa1dfaab28ea",
+    "ui/app.js": "1620b7221add91c6f9297f8861272e5b9a7f01c0f4bfe43c5547f67ffc98a294",
+    "ui/i18n-zh.js": "0b1db826ad87e890bb640b8e85281b6817fbdce8afcb9df32c1663e50da3ae93",
+    "ui/usage.js": "433fb4de55fac32e627faec10b570c17b0f525d6991f55858101d664443aa86c",
+    "scripts/cache-fingerprint-benchmark.py": "96b1bb87e32e7ece8e261565e3b1f11b0eb98d8c7a89eba77e4064057e8838d8",
+    "src/usage/store/codec_tests.rs": "e5886a79dc3e7acdf47ba7468f9ce0b7b2cdc2fac1b01e67c1f01685fb844271",
+    "src/usage/store/dashboard_tests.rs": "8198ad4846bfa99bcbc6b800a8456eee317b124b03f6e464ea229c3342f8d8bb",
+    "tests/ui-model-routes.test.cjs": "9b876b9e2e6807fb4ea47afebea701310b1a1cbccfd0988fdb5558aff33e0520"
+  },
+  "ci_platform_project_available": false,
+  "reservation": {
+    "cpus": 4,
+    "memory_gib": 8
+  },
+  "release_build": true,
+  "release_binary_sha256": "a99c4d8acb87711d9b6a64c56fd793f9cc263363f1b0d5e980a1e99621b58e2c",
+  "restart_smoke": true,
+  "collector_acceptance_passed": 12,
+  "cleanup": {
+    "lease": "e8f4441d6a654ee684f1bc385d08b940",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  "local_ci_host_reservation_released": true
+}

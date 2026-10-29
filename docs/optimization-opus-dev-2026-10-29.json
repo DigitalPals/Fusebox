@@ -1,0 +1,42 @@
+{
+  "binary_sha256": "a99c4d8acb87711d9b6a64c56fd793f9cc263363f1b0d5e980a1e99621b58e2c",
+  "binary_version": "fusebox 0.11.0 (8acb559)",
+  "managed_lease": "e8f4441d6a654ee684f1bc385d08b940",
+  "existing_dev_service_found": false,
+  "checks": [
+    "health and readiness",
+    "rebuilt versioned assets match source in gzip and identity; conditional 304",
+    "manual model-check response includes in-progress count",
+    "native and translated requests plus compressed request input",
+    "embedding cache hit bypasses provider and records zero provider tokens",
+    "graceful restart on same config/port retains all observations; ephemeral cache resets"
+  ],
+  "restart_verified": true,
+  "external_inference": false,
+  "temporary_processes_stopped": true,
+  "usage_acceptance": {
+    "passed": 12,
+    "checks": [
+      "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+      "collector identity filtering, breakdown and friendly label",
+      "replay does not inflate combined imported totals",
+      "offline outbox survives separate process restart and reconnect",
+      "copied histories across collectors deduplicate using message evidence",
+      "retired summary returns 410 without query work and remains management authenticated",
+      "management/inference separation, wrong credential and oversized batch rejection",
+      "revocation rejects upload and retains offline data",
+      "credential rotation and local re-enrollment preserve idempotency",
+      "imported history from 10 days ago is priced on its local date in the combined trend",
+      "usage reprice CLI is idempotent on an already priced database",
+      "marker transcript/tool/project content absent from databases, exports and logs"
+    ]
+  },
+  "cleanup": {
+    "lease": "e8f4441d6a654ee684f1bc385d08b940",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  "smoke_harness_sha256": "0aba8742514e1b731e28c8d9d9fd3d2504940b725fbe1b35eb31cd24e301015a"
+}

@@ -104,6 +104,65 @@ test('usage formatting reuses formatters while retaining unknown, zero and curre
   assert.equal(d.run('UsageTools.dollars(0)'), '$0.00');
 });
 
+test('usage dates retain native locale, timezone, DST and invalid-date behavior', () => {
+  const script = `
+    const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+    const context = { Intl, Date, URLSearchParams, S: {} };
+    vm.createContext(context);
+    vm.runInContext(fs.readFileSync(${JSON.stringify(path.join(__dirname, '../ui/usage.js'))}, 'utf8'), context);
+    const run = (source) => vm.runInContext(source, context);
+    for (const zone of ['UTC', 'Europe/Amsterdam', 'America/Los_Angeles', 'Asia/Kathmandu']) {
+      run('Usage.timezone = ' + JSON.stringify(zone));
+      for (const value of ['2026-03-29T00:30:00Z', '2026-03-29T01:30:00Z', '2026-10-25T00:30:00Z', '2026-10-25T01:30:00Z', '2026-10-29T23:59:59Z', -1, 1]) {
+        const at = new Date(value), literal = JSON.stringify(value);
+        assert.equal(run('usageTime(' + literal + ')'), at.toLocaleString(undefined, { timeZone: zone, hourCycle: 'h23' }));
+        assert.equal(run('usageClock(' + literal + ')'), at.toLocaleTimeString('en-GB', { timeZone: zone, hour12: false }));
+        assert.equal(run('UsageTools.localDate(' + literal + ', Usage.timezone)'), new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at));
+        assert.equal(run('UsageTools.timeText(' + literal + ', Usage.timezone, "weekday")'), at.toLocaleString('en-GB', { timeZone: zone, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }));
+      }
+    }
+    for (const literal of ['null', 'undefined', '0']) {
+      assert.equal(run('usageTime(' + literal + ')'), 'Not reported');
+      assert.equal(run('usageClock(' + literal + ')'), 'Not reported');
+    }
+    for (const literal of ['"bad date"', 'NaN', 'Infinity', '8640000000000001']) {
+      assert.equal(run('usageTime(' + literal + ')'), 'Not reported');
+      assert.equal(run('usageClock(' + literal + ')'), 'Invalid Date');
+    }
+    run('Usage.timezone = "not/a-timezone"');
+    assert.equal(run('usageTime("bad date")'), 'Not reported');
+    assert.throws(() => run('usageTime(1)'), /time zone/i);
+  `;
+  for (const locale of ['en_US.UTF-8', 'en_GB.UTF-8', 'nl_NL.UTF-8', 'zh_CN.UTF-8']) {
+    execFileSync(process.execPath, ['-e', script], { env: { ...process.env, LANG: locale, LC_ALL: locale, TZ: 'UTC' }, encoding: 'utf8' });
+  }
+});
+
+test('usage timestamps and chart history labels reuse formatters and update after a timezone change', () => {
+  let constructed = 0;
+  const d = dashboard({ Intl: { NumberFormat: Intl.NumberFormat, DateTimeFormat: function (...args) {
+    constructed++;
+    return new Intl.DateTimeFormat(...args);
+  } } });
+  const exercise = () => d.run(`[
+    usageTime(1793314800000), usageClock(1793314800000),
+    UsageTools.localDate(1793314800000, Usage.timezone),
+    UsageTools.beforeProxy('2026-10-28', 1793314800000, Usage.timezone),
+    UsageTools.timeText(1793314800000, Usage.timezone, 'weekday')
+  ]`);
+  d.seed({ timezone: 'UTC' });
+  const utc = exercise(), warm = constructed;
+  for (let i = 0; i < 100; i++) exercise();
+  assert.equal(constructed, warm, 'no new formatters during warm renders');
+  d.seed({ timezone: 'Asia/Tokyo' });
+  const tokyo = exercise();
+  assert.notEqual(tokyo[2], utc[2], 'the calendar date moves with the timezone');
+  assert.equal(constructed, warm + 4, 'each style replaces its cached timezone');
+  d.seed({ timezone: 'UTC' });
+  assert.deepEqual(exercise(), utc);
+  assert.equal(constructed, warm + 8, 'the cache retains only one timezone per style');
+});
+
 test('privacy hides all labels, IDs, paths, credentials and draft values in rendered markup', () => {
   const d = dashboard();
   d.context.S.private = true;

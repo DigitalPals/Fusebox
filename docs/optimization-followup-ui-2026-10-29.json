@@ -1,0 +1,160 @@
+{
+  "measuredAt": "2026-10-29T11:41:23.633Z",
+  "node": "v22.22.3",
+  "baselineCommit": "8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "command": "node scripts/ui-benchmark.cjs --baseline-ref 8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "method": "Median of five batches after warmup; real dashboard source in a Node VM with minimal DOM stand-ins. Each chart batch has 60 hovers with a known first proxy timestamp. Model-family batches have 10 coverage calculations over ragged routes and prefixed model aliases; before/after outputs must match. Route reads are counted separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.",
+  "eventsPerBatch": 60,
+  "batches": 5,
+  "results": [
+    {
+      "days": 7,
+      "groups": 3,
+      "trendRows": 21,
+      "baseline": {
+        "medianMilliseconds": 2.348,
+        "microsecondsPerHover": 39.13,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 60,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 38344,
+          "classChanges": 125
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 0.773,
+        "microsecondsPerHover": 12.88,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 38344,
+          "classChanges": 125
+        }
+      },
+      "speedup": 3.04
+    },
+    {
+      "days": 30,
+      "groups": 20,
+      "trendRows": 600,
+      "baseline": {
+        "medianMilliseconds": 2.69,
+        "microsecondsPerHover": 44.83,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 60,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 71698,
+          "classChanges": 148
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.162,
+        "microsecondsPerHover": 19.37,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 71698,
+          "classChanges": 148
+        }
+      },
+      "speedup": 2.31
+    },
+    {
+      "days": 366,
+      "groups": 40,
+      "trendRows": 14640,
+      "baseline": {
+        "medianMilliseconds": 3.899,
+        "microsecondsPerHover": 64.99,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 60,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 73842,
+          "classChanges": 484
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.983,
+        "microsecondsPerHover": 33.06,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 73842,
+          "classChanges": 484
+        }
+      },
+      "speedup": 1.97
+    }
+  ],
+  "modelFamilies": [
+    {
+      "models": 20,
+      "accounts": 5,
+      "baseline": {
+        "medianMilliseconds": 0.443,
+        "microsecondsPerRender": 44.26,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 161
+      },
+      "optimized": {
+        "medianMilliseconds": 0.185,
+        "microsecondsPerRender": 18.53,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 61
+      },
+      "speedup": 2.39
+    },
+    {
+      "models": 120,
+      "accounts": 40,
+      "baseline": {
+        "medianMilliseconds": 22.471,
+        "microsecondsPerRender": 2247.08,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 5161
+      },
+      "optimized": {
+        "medianMilliseconds": 2.24,
+        "microsecondsPerRender": 224.01,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 361
+      },
+      "speedup": 10.03
+    },
+    {
+      "models": 300,
+      "accounts": 80,
+      "baseline": {
+        "medianMilliseconds": 205.256,
+        "microsecondsPerRender": 20525.64,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 24901
+      },
+      "optimized": {
+        "medianMilliseconds": 9.636,
+        "microsecondsPerRender": 963.57,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 901
+      },
+      "speedup": 21.3
+    }
+  ]
+}

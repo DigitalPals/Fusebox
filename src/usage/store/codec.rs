@@ -95,11 +95,12 @@ pub(crate) fn active(conn: &Connection) -> Result<Option<Arc<Dictionary>>> {
 pub(crate) struct Documents {
     dictionary: Option<Arc<Dictionary>>,
     cctx: zstd::zstd_safe::CCtx<'static>,
+    frame: Vec<u8>,
 }
 
 impl Documents {
     pub fn new(conn: &Connection) -> Result<Self> {
-        Ok(Self { dictionary: active(conn)?, cctx: zstd::zstd_safe::CCtx::create() })
+        Ok(Self { dictionary: active(conn)?, cctx: zstd::zstd_safe::CCtx::create(), frame: Vec::new() })
     }
 
     pub fn store(&mut self, text: &str) -> Result<rusqlite::types::Value> {
@@ -107,14 +108,17 @@ impl Documents {
             return Ok(rusqlite::types::Value::Text(text.to_owned()));
         };
         let id = u32::try_from(dictionary.id).context("usage dictionary id out of range")?;
-        let mut out = Vec::with_capacity(HEADER + zstd::zstd_safe::compress_bound(text.len()));
+        // Reuse the worst-case scratch allocation for the batch. Stored blobs
+        // only need the actual compressed length, which is usually much smaller.
+        self.frame.clear();
+        self.frame.reserve(zstd::zstd_safe::compress_bound(text.len()));
+        self.cctx
+            .compress_using_cdict(&mut self.frame, text.as_bytes(), dictionary.encoder.as_cdict())
+            .map_err(|code| anyhow!("compress usage document: {}", zstd::zstd_safe::get_error_name(code)))?;
+        let mut out = Vec::with_capacity(HEADER + self.frame.len());
         out.extend_from_slice(&[MAGIC, WITH_DICTIONARY]);
         out.extend_from_slice(&id.to_le_bytes());
-        let mut frame = Vec::with_capacity(zstd::zstd_safe::compress_bound(text.len()));
-        self.cctx
-            .compress_using_cdict(&mut frame, text.as_bytes(), dictionary.encoder.as_cdict())
-            .map_err(|code| anyhow!("compress usage document: {}", zstd::zstd_safe::get_error_name(code)))?;
-        out.extend_from_slice(&frame);
+        out.extend_from_slice(&self.frame);
         Ok(rusqlite::types::Value::Blob(out))
     }
 
@@ -252,3 +256,7 @@ pub(super) fn needs_training(conn: &Connection) -> Result<bool> {
         Some(through) => max_id - through >= RETRAIN_AFTER_ROWS,
     })
 }
+
+#[cfg(test)]
+#[path = "codec_tests.rs"]
+mod tests;

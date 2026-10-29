@@ -53,6 +53,8 @@ pub struct Cache {
     bytes: usize,
     hits: u64,
     misses: u64,
+    next_expiry: Option<std::time::Instant>,
+    limits: Option<(u64, usize)>,
 }
 impl Cache {
     fn key(headers: &HeaderMap, acct: &Account, model: &str, body: &Value) -> String {
@@ -70,26 +72,49 @@ impl Cache {
         hex::encode(hash.finalize())
     }
     fn get(&mut self, key: &str, cfg: &Config) -> Option<Arc<Value>> {
-        self.trim(cfg);
+        let now = std::time::Instant::now();
+        self.trim(cfg, now);
         let Some(cached) = self.entries.get_mut(key) else {
             self.misses = self.misses.saturating_add(1);
             return None;
         };
         self.hits = self.hits.saturating_add(1);
-        cached.used = std::time::Instant::now();
+        cached.used = now;
         Some(cached.value.clone())
     }
-    fn trim(&mut self, cfg: &Config) {
-        let now = std::time::Instant::now();
-        self.entries.retain(|_, e| {
-            cfg.cache_seconds > 0 && e.expires > now && now.duration_since(e.created).as_secs() < cfg.cache_seconds
-        });
-        self.bytes = self.entries.values().map(|e| e.bytes).sum();
+    fn trim(&mut self, cfg: &Config, now: std::time::Instant) {
+        let limits = (cfg.cache_seconds, cfg.cache_bytes);
+        if cfg.cache_seconds == 0 {
+            self.clear();
+        } else if self.limits != Some(limits) || self.next_expiry.is_some_and(|expires| expires <= now) {
+            // Hits only need a sweep once the earliest deadline arrives or the
+            // operator changes a limit. Keep each original deadline when the
+            // TTL grows; a shorter TTL still applies to already cached results.
+            self.next_expiry = None;
+            self.entries.retain(|_, e| {
+                let expires = e.expires.min(e.created + std::time::Duration::from_secs(cfg.cache_seconds));
+                if expires <= now {
+                    debug_assert!(self.bytes >= e.bytes);
+                    self.bytes -= e.bytes;
+                    false
+                } else {
+                    self.next_expiry = Some(self.next_expiry.map_or(expires, |next| next.min(expires)));
+                    true
+                }
+            });
+        }
+        self.limits = Some(limits);
         while self.bytes > cfg.cache_bytes || self.entries.len() > 1000 {
             let Some(old) = self.entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else {
                 break;
             };
-            self.bytes -= self.entries.remove(&old).unwrap().bytes;
+            let removed = self.entries.remove(&old).unwrap();
+            debug_assert!(self.bytes >= removed.bytes);
+            self.bytes -= removed.bytes;
+        }
+        if self.entries.is_empty() {
+            self.bytes = 0;
+            self.next_expiry = None;
         }
     }
     fn insert(&mut self, key: String, value: Arc<Value>, bytes: usize, cfg: &Config) {
@@ -97,27 +122,22 @@ impl Cache {
             return;
         }
         let now = std::time::Instant::now();
-        if let Some(old) = self.entries.insert(
-            key,
-            Cached {
-                value,
-                bytes,
-                created: now,
-                expires: now + std::time::Duration::from_secs(cfg.cache_seconds),
-                used: now,
-            },
-        ) {
+        let expires = now + std::time::Duration::from_secs(cfg.cache_seconds);
+        if let Some(old) = self.entries.insert(key, Cached { value, bytes, created: now, expires, used: now }) {
+            debug_assert!(self.bytes >= old.bytes);
             self.bytes -= old.bytes;
         }
         self.bytes += bytes;
-        self.trim(cfg);
+        self.next_expiry = Some(self.next_expiry.map_or(expires, |next| next.min(expires)));
+        self.trim(cfg, now);
     }
     pub fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.next_expiry = None;
     }
     pub fn stats(&mut self, cfg: &Config) -> (u64, u64, usize, usize) {
-        self.trim(cfg);
+        self.trim(cfg, std::time::Instant::now());
         (self.hits, self.misses, self.entries.len(), self.bytes)
     }
 }
@@ -139,6 +159,92 @@ mod cache_tests {
         cfg.cache_bytes = 0;
         assert!(cache.get("new", &cfg).is_none());
         assert_eq!(cache.stats(&cfg), (1, 2, 0, 0));
+    }
+
+    #[test]
+    fn expiry_boundary_and_longer_ttl_preserve_original_deadline() {
+        let mut cache = Cache::default();
+        let mut cfg = Config { cache_seconds: 2, cache_bytes: 1024, ..Default::default() };
+        cache.insert("short".into(), Arc::new(json!([])), 2, &cfg);
+        let deadline = cache.entries["short"].expires;
+        cfg.cache_seconds = 60;
+        cache.insert("long".into(), Arc::new(json!([1])), 3, &cfg);
+        assert_eq!(cache.next_expiry, Some(deadline));
+        cache.trim(&cfg, deadline - std::time::Duration::from_nanos(1));
+        assert_eq!(cache.bytes, 5);
+        cache.trim(&cfg, deadline);
+        assert!(!cache.entries.contains_key("short"));
+        assert_eq!(cache.bytes, 3);
+        assert_eq!(cache.next_expiry, Some(cache.entries["long"].expires));
+    }
+
+    #[test]
+    fn replacement_eviction_disable_and_clear_keep_byte_accounting_exact() {
+        let mut cache = Cache::default();
+        let mut cfg = Config { cache_seconds: 60, cache_bytes: 10, ..Default::default() };
+        cache.insert("a".into(), Arc::new(json!([1])), 3, &cfg);
+        cache.insert("b".into(), Arc::new(json!([2])), 3, &cfg);
+        cache.entries.get_mut("a").unwrap().used -= std::time::Duration::from_secs(1);
+        cache.insert("b".into(), Arc::new(json!([2, 3, 4])), 7, &cfg);
+        assert_eq!(cache.bytes, 10);
+        cache.insert("c".into(), Arc::new(json!([5])), 3, &cfg);
+        assert!(!cache.entries.contains_key("a"));
+        assert_eq!(cache.bytes, 10);
+        cfg.cache_seconds = 0;
+        assert_eq!(cache.stats(&cfg), (0, 0, 0, 0));
+        assert!(cache.next_expiry.is_none());
+        cfg.cache_seconds = 60;
+        cache.insert("fresh".into(), Arc::new(json!([])), 2, &cfg);
+        assert!(cache.get("fresh", &cfg).is_some());
+        cache.clear();
+        assert_eq!(cache.stats(&cfg), (1, 0, 0, 0));
+        assert!(cache.next_expiry.is_none());
+    }
+
+    #[test]
+    fn deferred_maintenance_matches_eager_reference_across_limits_and_deadlines() {
+        fn eager_trim(cache: &mut Cache, cfg: &Config, now: std::time::Instant) {
+            cache.entries.retain(|_, e| {
+                cfg.cache_seconds > 0 && e.expires > now && now.duration_since(e.created).as_secs() < cfg.cache_seconds
+            });
+            cache.bytes = cache.entries.values().map(|e| e.bytes).sum();
+            while cache.bytes > cfg.cache_bytes || cache.entries.len() > 1000 {
+                let oldest = cache.entries.iter().min_by_key(|(_, e)| e.used).unwrap().0.clone();
+                cache.bytes -= cache.entries.remove(&oldest).unwrap().bytes;
+            }
+        }
+        let start = std::time::Instant::now();
+        let fixture = || {
+            let mut cache = Cache::default();
+            for index in 0..1003 {
+                let created = start - std::time::Duration::from_millis(index as u64);
+                let expires = start + std::time::Duration::from_millis(50 + index as u64 * 3);
+                let bytes = index % 11;
+                cache.entries.insert(
+                    index.to_string(),
+                    Cached { value: Arc::new(Value::Null), bytes, created, expires, used: created },
+                );
+                cache.bytes += bytes;
+                cache.next_expiry = Some(cache.next_expiry.map_or(expires, |next| next.min(expires)));
+            }
+            cache
+        };
+        for scenario in 0..8 {
+            let (mut actual, mut expected) = (fixture(), fixture());
+            for step in 0..40 {
+                let cfg = Config {
+                    cache_seconds: [60, 1, 60, 2, 0][(scenario + step / 9) % 5],
+                    cache_bytes: [20_000, 2_000, 0, 20_000][(scenario + step / 7) % 4],
+                    ..Default::default()
+                };
+                let now = start + std::time::Duration::from_millis(step as u64 * 100);
+                actual.trim(&cfg, now);
+                eager_trim(&mut expected, &cfg, now);
+                assert_eq!(actual.bytes, expected.bytes, "scenario={scenario} step={step}");
+                assert_eq!(actual.entries.len(), expected.entries.len(), "scenario={scenario} step={step}");
+                assert!(actual.entries.keys().all(|key| expected.entries.contains_key(key)));
+            }
+        }
     }
 }
 

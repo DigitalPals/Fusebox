@@ -848,11 +848,11 @@ async fn remove_model(State(app): State<Arc<App>>, Json(b): Json<AddedModel>) ->
     }
 }
 
-/// Asks Claude and Codex for their model lists now (at most once per 10 minutes per account).
-async fn check_models(State(app): State<Arc<App>>) -> Json<Value> {
-    let (asked, new) = crate::discovery::check_now(&app).await;
+/// Schedule bounded model checks and report any overlapping checks still in progress.
+async fn check_models(State(app): State<Arc<App>>) -> Json<crate::discovery::CheckResult> {
+    let result = crate::discovery::check_now(&app).await;
     app.broadcast("accounts", Value::Null);
-    Json(json!({ "asked": asked, "new": new }))
+    Json(result)
 }
 
 #[derive(Deserialize)]

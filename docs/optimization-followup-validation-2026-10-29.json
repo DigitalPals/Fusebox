@@ -1,0 +1,50 @@
+{
+  "baseline_commit": "8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "source_sha256": {
+    "scripts/ui-benchmark.cjs": "5fce7dba5760bbe21924fe3eac3dadf269530b57862ffa125c42b4e4f86dd50b",
+    "src/discovery.rs": "eebffc3a5fd034860d1767ed14e2e83d4e0e6aeea4a2d21859f4f0d75dd84704",
+    "src/embeddings.rs": "cc74a85e4cedd6995dc1d3d5ab48baf1603d07ff7c25454affe2665afd3b9ed6",
+    "src/upstream.rs": "9823b4012b8b5716b1f8e0c2544bf6d29d457d20251bbfb0e138d6b8f2b00ee8",
+    "src/usage/collector.rs": "0a26acd40f252fc5054978fdce73a65af14a79ca97f51175a21083f4946252c7",
+    "src/usage/collector_tests.rs": "5dcf185774206e9569553748bc79860cd1bb168c6d493bd7a7d454fe336b2070",
+    "src/usage/store/codec.rs": "52cc8fd2adbfbc8ca557e6c3a778108f2051be30f4770c5eff6a767a7deba8e8",
+    "src/usage/store/dashboard.rs": "73444cbcd1659de465ce5ea7c49a2261e6f086523249c64f3314c14f5c4e84bd",
+    "tests/ui-usage.test.cjs": "43ebb5dff167dd42cc11925d760e92f7bef65ca6bb2052ccbf3aaa1dfaab28ea",
+    "ui/app.js": "ec8db5ce009c478689159a509c43cfe01d27870dc30e12c6a857013a4bfcec08",
+    "ui/usage.js": "433fb4de55fac32e627faec10b570c17b0f525d6991f55858101d664443aa86c",
+    "scripts/cache-fingerprint-benchmark.py": "96b1bb87e32e7ece8e261565e3b1f11b0eb98d8c7a89eba77e4064057e8838d8",
+    "src/usage/store/codec_tests.rs": "e5886a79dc3e7acdf47ba7468f9ce0b7b2cdc2fac1b01e67c1f01685fb844271",
+    "src/usage/store/dashboard_tests.rs": "8198ad4846bfa99bcbc6b800a8456eee317b124b03f6e464ea229c3342f8d8bb",
+    "tests/ui-model-routes.test.cjs": "ad406bf0976cfb15b500b007351c2e67392497104b6fb6bc6578294a5f8d39ea"
+  },
+  "rust": {
+    "passed": 757,
+    "failed": 0,
+    "ignored": 5
+  },
+  "ui": {
+    "passed": 143,
+    "failed": 0
+  },
+  "python": {
+    "passed": 46,
+    "failed": 0
+  },
+  "format": true,
+  "clippy_all_targets_warnings_denied": true,
+  "ci_platform_project_available": false,
+  "reservation": {
+    "cpus": 4,
+    "memory_gib": 8
+  },
+  "independent_reviews": [
+    "runtime cache and UTF-16 behavior",
+    "discovery scheduling and cancellation",
+    "storage selection, compression, collector sizing"
+  ],
+  "release_build": true,
+  "release_binary_sha256": "482263a4f61ca3f14a8bd32b5a3fc083500613b9cb914710f3f41cadcbc65ed0",
+  "restart_smoke": true,
+  "collector_acceptance_passed": 12,
+  "local_ci_host_reservation_released": true
+}

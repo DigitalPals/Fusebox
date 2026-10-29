@@ -1,0 +1,132 @@
+{
+  "profile": "debug test binary; component measurements only",
+  "samples": 5,
+  "encoder": [
+    {
+      "documents": 10000,
+      "document_bytes": 1572,
+      "separate_scratch_ms": 40.115262,
+      "reused_scratch_ms": 37.668741999999995,
+      "stored_blob_capacity_before": 16470000,
+      "stored_blob_capacity_after": 940000,
+      "reused_scratch_capacity": 1641
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1572,
+      "separate_scratch_ms": 37.681563000000004,
+      "reused_scratch_ms": 36.678523999999996,
+      "stored_blob_capacity_before": 16470000,
+      "stored_blob_capacity_after": 940000,
+      "reused_scratch_capacity": 1641
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1572,
+      "separate_scratch_ms": 37.530104,
+      "reused_scratch_ms": 37.321332,
+      "stored_blob_capacity_before": 16470000,
+      "stored_blob_capacity_after": 940000,
+      "reused_scratch_capacity": 1641
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1572,
+      "separate_scratch_ms": 37.688422,
+      "reused_scratch_ms": 36.844264,
+      "stored_blob_capacity_before": 16470000,
+      "stored_blob_capacity_after": 940000,
+      "reused_scratch_capacity": 1641
+    },
+    {
+      "documents": 10000,
+      "document_bytes": 1572,
+      "separate_scratch_ms": 40.299256,
+      "reused_scratch_ms": 36.958526,
+      "stored_blob_capacity_before": 16470000,
+      "stored_blob_capacity_after": 940000,
+      "reused_scratch_capacity": 1641
+    }
+  ],
+  "dashboard": [
+    {
+      "groups": 10000,
+      "serialized_groups_before": 10000,
+      "serialized_groups_after": 500,
+      "serialize_then_sort_ms": 414.510152,
+      "select_then_serialize_ms": 21.821872
+    },
+    {
+      "groups": 10000,
+      "serialized_groups_before": 10000,
+      "serialized_groups_after": 500,
+      "serialize_then_sort_ms": 409.520955,
+      "select_then_serialize_ms": 21.953159
+    },
+    {
+      "groups": 10000,
+      "serialized_groups_before": 10000,
+      "serialized_groups_after": 500,
+      "serialize_then_sort_ms": 416.050297,
+      "select_then_serialize_ms": 22.247603
+    },
+    {
+      "groups": 10000,
+      "serialized_groups_before": 10000,
+      "serialized_groups_after": 500,
+      "serialize_then_sort_ms": 413.63506700000005,
+      "select_then_serialize_ms": 22.488795
+    },
+    {
+      "groups": 10000,
+      "serialized_groups_before": 10000,
+      "serialized_groups_after": 500,
+      "serialize_then_sort_ms": 409.432631,
+      "select_then_serialize_ms": 23.311351000000002
+    }
+  ],
+  "collector": [
+    {
+      "records": 200,
+      "wire_bytes": 135327,
+      "observation_serializations_before": 20100,
+      "observation_serializations_after": 200,
+      "repeated_batch_ms": 248.52367,
+      "incremental_size_ms": 4.050148
+    },
+    {
+      "records": 200,
+      "wire_bytes": 135327,
+      "observation_serializations_before": 20100,
+      "observation_serializations_after": 200,
+      "repeated_batch_ms": 247.803408,
+      "incremental_size_ms": 4.0693969999999995
+    },
+    {
+      "records": 200,
+      "wire_bytes": 135327,
+      "observation_serializations_before": 20100,
+      "observation_serializations_after": 200,
+      "repeated_batch_ms": 254.106522,
+      "incremental_size_ms": 4.015897
+    },
+    {
+      "records": 200,
+      "wire_bytes": 135327,
+      "observation_serializations_before": 20100,
+      "observation_serializations_after": 200,
+      "repeated_batch_ms": 250.28436599999998,
+      "incremental_size_ms": 3.981254
+    },
+    {
+      "records": 200,
+      "wire_bytes": 135327,
+      "observation_serializations_before": 20100,
+      "observation_serializations_after": 200,
+      "repeated_batch_ms": 250.085347,
+      "incremental_size_ms": 4.002426
+    }
+  ],
+  "baseline_commit": "8acb559ab2540ad2f6b59fbabf719dd7329a13f1",
+  "methodology": "Prior functions retained as reference oracles; medians of 5 debug-binary samples. Encoder measures per-document retained blob capacity, not process peak RSS. Dashboard timing includes dropping all remaining client-model aggregates. Collector timing includes decoding stored records and sizing; excludes HTTP and SQLite."
+}

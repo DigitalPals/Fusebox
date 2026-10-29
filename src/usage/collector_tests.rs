@@ -592,3 +592,107 @@ async fn full_outbox_preserves_checkpoint_and_restart_retries() {
         .unwrap();
     assert!(!payload.contains("PRIVATE-PROMPT-MARKER"));
 }
+
+fn sizing_fixture(count: usize) -> (Batch, Vec<(u64, String)>) {
+    let records = (0..count)
+        .map(|i| {
+            let mut o = observation(&format!("id-{i}"));
+            o.requested_model = Some(format!("model-{i}-日本語-\"\\\n"));
+            o.tokens.write_12h = (i % 2 == 0).then_some(0);
+            // Whitespace in stored JSON must not be counted as wire bytes.
+            (i as u64, serde_json::to_string_pretty(&o).unwrap())
+        })
+        .collect();
+    let batch = Batch {
+        version: 1,
+        observations: Vec::new(),
+        pending: count as u64,
+        superseded: vec![CounterSupersession { source_event_id: "counter:escaped-\"\\日本語".into() }],
+        progress: vec![SourceProgress {
+            source: ProgressSource::Codex,
+            state: ProgressState::Ready,
+            imported: 1,
+            duplicate: 2,
+            skipped: 3,
+            unsupported: 4,
+            failed: 5,
+            last_scan_at_ms: Some(1_800_000_000_000),
+        }],
+    };
+    (batch, records)
+}
+
+fn fill_reference(batch: &mut Batch, records: Vec<(u64, String)>, limit: usize) -> Result<Vec<(u64, String)>> {
+    let mut sequences = Vec::new();
+    for (sequence, payload) in records {
+        let o: Observation = serde_json::from_str(&payload)?;
+        let tentative = Batch {
+            version: batch.version,
+            observations: batch.observations.iter().cloned().chain(std::iter::once(o.clone())).collect(),
+            pending: batch.pending,
+            superseded: batch.superseded.clone(),
+            progress: batch.progress.clone(),
+        };
+        if serde_json::to_vec(&tentative)?.len() > limit {
+            break;
+        }
+        batch.observations.push(o);
+        sequences.push((sequence, payload));
+    }
+    Ok(sequences)
+}
+
+#[test]
+fn collector_batch_sizing_preserves_exact_json_boundaries_and_acknowledgements() {
+    let (mut full, records) = sizing_fixture(8);
+    let mut boundaries = vec![0, serialized_size(&full).unwrap(), MAX_BODY];
+    for (_, payload) in &records {
+        full.observations.push(serde_json::from_str(payload).unwrap());
+        let bytes = serde_json::to_vec(&full).unwrap().len();
+        assert_eq!(serialized_size(&full).unwrap(), bytes);
+        boundaries.extend([bytes - 1, bytes, bytes + 1]);
+    }
+    for limit in boundaries {
+        let (mut expected, _) = sizing_fixture(0);
+        expected.pending = 8;
+        let mut actual: Batch = serde_json::from_value(serde_json::to_value(&expected).unwrap()).unwrap();
+        let expected_sequences = fill_reference(&mut expected, records.clone(), limit).unwrap();
+        let actual_sequences = fill_batch(&mut actual, records.clone(), limit).unwrap();
+        assert_eq!(actual_sequences, expected_sequences, "limit={limit}");
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap(), "limit={limit}");
+    }
+    let (mut batch, records) = sizing_fixture(MAX_BATCH);
+    let original = records.clone();
+    assert_eq!(fill_batch(&mut batch, records, MAX_BODY).unwrap(), original);
+    assert_eq!(batch.observations.len(), MAX_BATCH);
+    assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_BODY);
+}
+
+#[test]
+fn collector_batch_sizing_rejects_invalid_metadata_without_returning_acknowledgements() {
+    let (mut batch, mut records) = sizing_fixture(2);
+    records.push((2, "invalid metadata".into()));
+    assert_eq!(fill_batch(&mut batch, records, MAX_BODY).unwrap_err().to_string(), "invalid outbox metadata");
+}
+
+#[test]
+#[ignore = "manual CPU benchmark; run with --ignored --nocapture"]
+fn usage_collector_batch_sizing_benchmark() {
+    let (mut before_batch, records) = sizing_fixture(MAX_BATCH);
+    let mut after_batch: Batch = serde_json::from_value(serde_json::to_value(&before_batch).unwrap()).unwrap();
+    let after_records = records.clone();
+    let started = std::time::Instant::now();
+    let before_sequences = fill_reference(&mut before_batch, records, MAX_BODY).unwrap();
+    let before = started.elapsed();
+    let started = std::time::Instant::now();
+    let after_sequences = fill_batch(&mut after_batch, after_records, MAX_BODY).unwrap();
+    let after = started.elapsed();
+    assert_eq!(before_sequences, after_sequences);
+    assert_eq!(serde_json::to_vec(&before_batch).unwrap(), serde_json::to_vec(&after_batch).unwrap());
+    println!(
+        "{}",
+        json!({"records":MAX_BATCH,"wire_bytes":serialized_size(&after_batch).unwrap(),
+            "observation_serializations_before":MAX_BATCH*(MAX_BATCH+1)/2,"observation_serializations_after":MAX_BATCH,
+            "repeated_batch_ms":before.as_secs_f64()*1000.0,"incremental_size_ms":after.as_secs_f64()*1000.0})
+    );
+}

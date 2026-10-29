@@ -80,8 +80,30 @@ const UsageTools = (() => {
     series.forEach((d, i) => { if (d.total > series[peak].total || d.total === series[peak].total && d.calls > series[peak].calls) peak = i; });
     return { keys, colors, series, peak, max: Math.max(0, ...series.map((d) => d.total)), OTHER };
   };
+  // Reuse each format in the page's current timezone. Keeping only the latest
+  // timezone per style bounds the cache even when a caller changes timezones.
+  const timeStyles = {
+    date: ['en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }],
+    timestamp: [undefined, { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23' }],
+    clock: ['en-GB', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }],
+    weekday: ['en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }],
+  };
+  const timeFormats = new Map();
+  const timeFormat = (style, timezone) => {
+    let cached = timeFormats.get(style);
+    if (!cached || cached.timezone !== timezone) {
+      const [locale, options] = timeStyles[style];
+      cached = { timezone, formatter: new Intl.DateTimeFormat(locale, { ...options, timeZone: timezone }) };
+      timeFormats.set(style, cached);
+    }
+    return cached.formatter;
+  };
+  const timeText = (value, timezone, style, invalid = 'Invalid Date') => {
+    const at = new Date(value);
+    return Number.isFinite(at.getTime()) ? timeFormat(style, timezone).format(at) : invalid;
+  };
   // Local calendar date of an instant in the page's timezone.
-  const localDate = (ms, timezone) => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
+  const localDate = (ms, timezone) => timeFormat('date', timezone).format(new Date(ms));
   const beforeProxy = (day, firstProxyMs, timezone) => firstProxyMs != null && Number.isFinite(Number(firstProxyMs)) && day < localDate(Number(firstProxyMs), timezone);
   // Sizes in decimal units, as the server's messages: "512 B", "3.4 MB", "128 MB", "1.2 GB".
   const bytes = (v) => {
@@ -94,7 +116,7 @@ const UsageTools = (() => {
   const parts = (iso) => { const at = new Date(`${iso}T00:00:00Z`); return { w: W[at.getUTCDay()], m: M[at.getUTCMonth()], d: at.getUTCDate(), y: at.getUTCFullYear(), monday: at.getUTCDay() === 1 }; };
   const dayLabel = (iso) => { const p = parts(iso); return `${p.w} ${p.m} ${p.d}`; };
   const shortDate = (iso) => { const p = parts(iso); return `${p.m} ${p.d}`; };
-  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, parts, dayLabel, shortDate, bytes };
+  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, timeText, parts, dayLabel, shortDate, bytes };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools;
 
@@ -111,8 +133,8 @@ const ux = UsageTools.escape;
 const usageCount = UsageTools.count;
 const usageSensitive = (value) => ux(UsageTools.privateLabel(value, S.private));
 const usageSource = (source) => ({ proxy: 'Proxy', claude_code: 'Claude Code history', codex: 'Codex history' }[source] || source || 'Unknown source');
-const usageTime = (value) => value == null || value === 0 ? 'Not reported' : Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined, { timeZone: Usage.timezone, hourCycle: 'h23' }) : 'Not reported';
-const usageClock = (value) => value == null || value === 0 ? 'Not reported' : new Date(value).toLocaleTimeString('en-GB', { timeZone: Usage.timezone, hour12: false });
+const usageTime = (value) => value == null || value === 0 ? 'Not reported' : UsageTools.timeText(value, Usage.timezone, 'timestamp', 'Not reported');
+const usageClock = (value) => value == null || value === 0 ? 'Not reported' : UsageTools.timeText(value, Usage.timezone, 'clock');
 const usageButton = (act, label, extra = '', disabled = false, cls = 'btn') => `<button class="${cls}" type="button" data-usage-act="${act}" ${extra}${disabled || Usage.busy ? ' disabled' : ''}>${label}</button>`;
 const usagePhone = () => typeof mob === 'function' && mob();
 const usageCombined = () => Usage.summary?.combined || {};
@@ -221,7 +243,7 @@ function usageStaleLine() {
   const stale = (Usage.status?.collectors || []).filter((c) => !c.revoked && c.state === 'offline');
   return stale.map((c) => {
     const sources = (c.covered_sources || []).map((s) => usageSource(s).replace(' history', '')).join(' and ') || 'imported';
-    const since = c.last_sync_at_ms ? new Date(c.last_sync_at_ms).toLocaleString('en-GB', { timeZone: Usage.timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).replace(',', '') : null;
+    const since = c.last_sync_at_ms ? UsageTools.timeText(c.last_sync_at_ms, Usage.timezone, 'weekday').replace(',', '') : null;
     return `${usageSensitive(c.label || c.id)} has not synced ${since ? `since ${ux(since)}` : 'yet'}, so its recent ${ux(sources)} history may be missing`;
   }).join('. ');
 }
