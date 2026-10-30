@@ -1,0 +1,748 @@
+{
+  "researched_on": "2026-10-30",
+  "read_only_investigation": true,
+  "window": {
+    "start_inclusive": "2026-10-01T00:00:00+02:00",
+    "end_exclusive": "2026-10-30T08:46:00+01:00",
+    "timezone": "Europe/Amsterdam"
+  },
+  "production": {
+    "read_at": "2026-10-30T07:57:14.590258+00:00",
+    "start_inclusive": "2026-10-01T00:00:00+02:00",
+    "end_exclusive": "2026-10-30T08:46:00+01:00",
+    "timezone": "Europe/Amsterdam",
+    "totals": [
+      {
+        "provider": "anthropic",
+        "observations": 203103,
+        "cost_nanos": 21739294303460,
+        "unpriced": 280,
+        "pricing_partial": 19797,
+        "missing": 207,
+        "partial": 6463,
+        "input": 41961452,
+        "cache_read": 56944535203,
+        "cache_write": 1292259694,
+        "output": 167158127,
+        "reasoning": 64331072,
+        "first_at_ms": 1790820047884,
+        "last_at_ms": 1793346359189
+      },
+      {
+        "provider": "openai",
+        "observations": 110538,
+        "cost_nanos": 6374011819320,
+        "unpriced": 5979,
+        "pricing_partial": 110538,
+        "missing": 5979,
+        "partial": 18540,
+        "input": 406989902,
+        "cache_read": 12257130368,
+        "cache_write": 0,
+        "output": 53788563,
+        "reasoning": 20870023,
+        "first_at_ms": 1790805600824,
+        "last_at_ms": 1793346320046
+      }
+    ],
+    "origins": [
+      {
+        "source": "proxy",
+        "origin": "keeper",
+        "observations": 24782,
+        "cost_nanos": 2847794003680,
+        "unpriced": 14,
+        "pricing_partial": 24782,
+        "missing": 10,
+        "partial": 24772,
+        "input": 82744780,
+        "cache_read": 3622185310,
+        "cache_write": 38844670,
+        "output": 16037071,
+        "reasoning": 5270955,
+        "first_at_ms": 1790805600824,
+        "last_at_ms": 1790949136709
+      },
+      {
+        "source": "proxy",
+        "origin": "local",
+        "observations": 288859,
+        "cost_nanos": 25265512119100,
+        "unpriced": 6245,
+        "pricing_partial": 105553,
+        "missing": 6176,
+        "partial": 231,
+        "input": 366206574,
+        "cache_read": 65579480261,
+        "cache_write": 1253415024,
+        "output": 204909619,
+        "reasoning": 79930140,
+        "first_at_ms": 1791354734557,
+        "last_at_ms": 1793346359189
+      }
+    ],
+    "unpriced": [
+      {
+        "provider": "anthropic",
+        "model": "claude-fable-5-1",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 5
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "pricing_basis": "unknown_model",
+        "completeness": "complete",
+        "records": 69
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "pricing_basis": "unknown_model",
+        "completeness": "partial",
+        "records": 4
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-5-5",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 7
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-nonexistent-9",
+        "pricing_basis": "unknown_model",
+        "completeness": "missing",
+        "records": 2
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 193
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 5
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-6-astra",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 1766
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 5
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-6-sol",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 129
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-6.1-sol",
+        "pricing_basis": "missing_tokens",
+        "completeness": "missing",
+        "records": 4070
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-nonexistent-9",
+        "pricing_basis": "unknown_model",
+        "completeness": "missing",
+        "records": 4
+      }
+    ],
+    "import_roots": 0,
+    "collectors": 0,
+    "catalogue_version": "2026-10-27.2",
+    "rollup_matches_entries": true
+  },
+  "screenshot": {
+    "total_usd": 35530.73,
+    "claude_usd": 22694.84,
+    "codex_usd": 12835.89,
+    "processed_tokens_display": "80.7B",
+    "cache_savings_display_usd": 325365.18,
+    "cached_input_tokens_display": "78.4B",
+    "query_and_environment_selection_verified": false,
+    "selected_environments_user_confirmed": [
+      "thebeast",
+      "The Dragon",
+      "XPS laptop"
+    ],
+    "all_selected_environments_use_production_fusebox_user_confirmed": true,
+    "actual_query_verified": false
+  },
+  "production_cost_usd": 28113.30612278,
+  "screenshot_minus_production_usd": 7417.423877220004,
+  "t3_local_replay": {
+    "cacheVersion": 9,
+    "cacheSha256": "b7ea3a5ecae82f93393e37fd317aec328ee38c02abd2581a6c8ac2ea7546e787",
+    "cutoffExclusive": "2026-10-30T07:46:00.000Z",
+    "rateFetchedAt": "2026-10-29T10:39:09.529Z",
+    "sinceDay": "2026-10-01",
+    "untilDay": "2026-10-30",
+    "timeZone": "Europe/Amsterdam",
+    "missingFiles": {
+      "claude": 750,
+      "codex": 0
+    },
+    "unresolved": 0,
+    "duplicatesDropped": 7696,
+    "totals": {
+      "claude": {
+        "records": 207913,
+        "costUsd": 20934.914688315643,
+        "tokens": 60552547769,
+        "uncached": 497395,
+        "cached": 59177555744,
+        "writes": 1245800654,
+        "output": 128693976,
+        "unpriced": 0,
+        "speedPremiumUsd": 0,
+        "cacheSavingsUsd": 226771.89211006011
+      },
+      "codex": {
+        "records": 130953,
+        "costUsd": 12567.226676500124,
+        "tokens": 16153490375,
+        "uncached": 562404434,
+        "cached": 15520881408,
+        "writes": 0,
+        "output": 70204533,
+        "unpriced": 0,
+        "speedPremiumUsd": 5069.153697080027,
+        "cacheSavingsUsd": 84372.87975680166
+      }
+    },
+    "gap": {
+      "claude": {
+        "records": 23380,
+        "costUsd": 2264.1906681000164,
+        "tokens": 6001657336,
+        "uncached": 47704,
+        "cached": 5821132552,
+        "writes": 169465035,
+        "output": 11012045,
+        "unpriced": 0,
+        "speedPremiumUsd": 0,
+        "cacheSavingsUsd": 22229.287549649893
+      },
+      "codex": {
+        "records": 36771,
+        "costUsd": 2136.1591695200013,
+        "tokens": 4521888658,
+        "uncached": 196387578,
+        "cached": 4304014464,
+        "writes": 0,
+        "output": 21486616,
+        "unpriced": 0,
+        "speedPremiumUsd": 775.3199546599989,
+        "cacheSavingsUsd": 14701.669537280222
+      }
+    },
+    "oct3Through6": {
+      "claude": {
+        "records": 21062,
+        "costUsd": 2042.715272900014,
+        "tokens": 5586232793,
+        "uncached": 42994,
+        "cached": 5431957876,
+        "writes": 144046267,
+        "output": 10185656,
+        "unpriced": 0,
+        "speedPremiumUsd": 0,
+        "cacheSavingsUsd": 20750.423780849906
+      },
+      "codex": {
+        "records": 35152,
+        "costUsd": 1890.3777163999987,
+        "tokens": 4329719074,
+        "uncached": 186822506,
+        "cached": 4122451328,
+        "writes": 0,
+        "output": 20445240,
+        "unpriced": 0,
+        "speedPremiumUsd": 688.5517363999977,
+        "cacheSavingsUsd": 13305.921305600255
+      }
+    },
+    "deletedFileRecords": {},
+    "codex_sessions_shared_across_cached_files": 0
+  },
+  "screenshot_minus_t3_local_replay_usd": 2028.5886351842346,
+  "screenshot_fully_reconciled": false,
+  "claude_response_match": {
+    "records": 178337,
+    "sameTokens": 160260,
+    "sameInput": 178337,
+    "sameOutput": 160260,
+    "t3OutputLower": 18077,
+    "t3OutputHigher": 0,
+    "t3CostUsd": 18143.907032314866,
+    "productionCostUsd": 18765.472987365294,
+    "t3Output": 115164169,
+    "productionOutput": 144460144,
+    "outputDifferenceAtT3RatesUsd": 620.8346700000027
+  },
+  "codex_matched_examples": [
+    {
+      "response_id_sha256": "bb766fc978b5d79c93e0c89af0c56ca9cb1a4302ae374aa1da53026716a8b77c",
+      "model": "gpt-6.1-sol",
+      "timestamp": "2026-10-27T07:52:46.238Z",
+      "tokens": {
+        "input_tokens": 200518,
+        "cached_input_tokens": 200320,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 735,
+        "reasoning_output_tokens": 364,
+        "total_tokens": 201253
+      },
+      "t3_speed": "fast",
+      "t3_history_setting": "priority",
+      "returned_tier": "default",
+      "fusebox_tier_multiplier": [
+        1,
+        1
+      ],
+      "fusebox_cost_nanos": 27778000,
+      "t3_fast_equivalent_cost_nanos": 55556000,
+      "unique_matching_t3_cache_record": true
+    },
+    {
+      "response_id_sha256": "a12b3c580b24c2067fc822ae80c1258da928cfe248518025d1bf3155c5c556bf",
+      "model": "gpt-6.1-sol",
+      "timestamp": "2026-10-27T07:52:51.679Z",
+      "tokens": {
+        "input_tokens": 201431,
+        "cached_input_tokens": 201088,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 46,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 201477
+      },
+      "t3_speed": "fast",
+      "t3_history_setting": "priority",
+      "returned_tier": "default",
+      "fusebox_tier_multiplier": [
+        1,
+        1
+      ],
+      "fusebox_cost_nanos": 21254800,
+      "t3_fast_equivalent_cost_nanos": 42509600,
+      "unique_matching_t3_cache_record": true
+    },
+    {
+      "response_id_sha256": "8d5ba7dc17cdf39ddd6797575dd15fe1552b0ca09eb5224182051644b1d9b0ac",
+      "model": "gpt-6.1-sol",
+      "timestamp": "2026-10-27T11:55:00.984Z",
+      "tokens": {
+        "input_tokens": 123019,
+        "cached_input_tokens": 122752,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 105,
+        "reasoning_output_tokens": 12,
+        "total_tokens": 123124
+      },
+      "t3_speed": "fast",
+      "t3_history_setting": "priority",
+      "returned_tier": "default",
+      "fusebox_tier_multiplier": [
+        1,
+        1
+      ],
+      "fusebox_cost_nanos": 13859200,
+      "t3_fast_equivalent_cost_nanos": 27718400,
+      "unique_matching_t3_cache_record": true
+    },
+    {
+      "response_id_sha256": "3745586e1d015a1e7996f97e5ce0f8fc49163def5ad469d0c932d712caf69d65",
+      "model": "gpt-6.1-sol",
+      "timestamp": "2026-10-27T11:55:06.559Z",
+      "tokens": {
+        "input_tokens": 123319,
+        "cached_input_tokens": 122880,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 76,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 123395
+      },
+      "t3_speed": "fast",
+      "t3_history_setting": "priority",
+      "returned_tier": "default",
+      "fusebox_tier_multiplier": [
+        1,
+        1
+      ],
+      "fusebox_cost_nanos": 13926000,
+      "t3_fast_equivalent_cost_nanos": 27852000,
+      "unique_matching_t3_cache_record": true
+    }
+  ],
+  "coverage_gap": {
+    "last_keeper_event_at_ms": 1790949136709,
+    "first_native_event_at_ms": 1791354734557,
+    "empty_local_days": [
+      "2026-10-03",
+      "2026-10-04",
+      "2026-10-05",
+      "2026-10-06"
+    ],
+    "t3_history_counts_and_costs": {
+      "claude": {
+        "records": 23380,
+        "costUsd": 2264.1906681000164,
+        "tokens": 6001657336,
+        "uncached": 47704,
+        "cached": 5821132552,
+        "writes": 169465035,
+        "output": 11012045,
+        "unpriced": 0,
+        "speedPremiumUsd": 0,
+        "cacheSavingsUsd": 22229.287549649893
+      },
+      "codex": {
+        "records": 36771,
+        "costUsd": 2136.1591695200013,
+        "tokens": 4521888658,
+        "uncached": 196387578,
+        "cached": 4304014464,
+        "writes": 0,
+        "output": 21486616,
+        "unpriced": 0,
+        "speedPremiumUsd": 775.3199546599989,
+        "cacheSavingsUsd": 14701.669537280222
+      }
+    },
+    "cost_estimates_include_speed_premiums": true
+  },
+  "recent_production_tier_sample": {
+    "records": 3000,
+    "default": 2875,
+    "auto": 124,
+    "unreported": 1,
+    "all_snapshot_multipliers": [
+      1,
+      1
+    ]
+  },
+  "writer_sessions": [
+    {
+      "started_at_ms": 1793278933540,
+      "ended_at_ms": null,
+      "clean": 0,
+      "dropped": 0,
+      "rejected": 0,
+      "writer_errors": 0,
+      "written": 7726,
+      "last_commit_at_ms": 1793347034583
+    },
+    {
+      "started_at_ms": 1793258351019,
+      "ended_at_ms": 1793278931288,
+      "clean": 1,
+      "dropped": 0,
+      "rejected": 0,
+      "writer_errors": 0,
+      "written": 4629,
+      "last_commit_at_ms": 1793278931191
+    },
+    {
+      "started_at_ms": 1793257139398,
+      "ended_at_ms": 1793258348777,
+      "clean": 1,
+      "dropped": 0,
+      "rejected": 0,
+      "writer_errors": 0,
+      "written": 270,
+      "last_commit_at_ms": 1793258348669
+    }
+  ],
+  "software": {
+    "t3_version": "0.1.3",
+    "t3_installed_binary_sha256": "e2b8d466d223f0993b31d9a6dafd22bb06558cc1a119a9f932d7b5d363f09b74",
+    "fusebox_version": "0.11.0+gui.eb129cf97dfb"
+  },
+  "evidence_sha256": {
+    "usage-scan-cache-v9.json": "b7ea3a5ecae82f93393e37fd317aec328ee38c02abd2581a6c8ac2ea7546e787",
+    "usage-model-rates.json": "95347f7fbf9e3011d8f7ecb57080490007dcfdd13a2c104e56adf3deb3aaca1b",
+    "usagePricing.js": "b57a27d8dfa88509cc870c2d223f00c232ea9037659a9cc650293673db344bc0",
+    "usageAggregation.js": "2426f240abeff9b7dab2757c6ff83cdc370183620bc3819fadaa7b28c89dfe60",
+    "usageScanCache.js": "461a40eb008fcf3552df280e1129f6c98cc6326f5e851f221376e3fc1c6a0ed0",
+    "UsageService.js": "75cf06dd44f0e94d94515898fa99636ef68a7f32b0aad140d049a7dd4151b27d",
+    "installed-codex-usage.js": "1d4ef90ec506712d7f3abf21e3f01077d1ca80b1579040f6ae13199fa2a8898d",
+    "installed-claude-usage.js": "7be27c466003957d7134f2f062b3bebb2417014d9d43b1e290a1e1aaf47b1469",
+    "production-fixed-window.json": "f38d95402f58d526e7dbe0264b45a6310ed457b6a35bebad92694dc40dfb79df",
+    "production-claude-entries.json.gz": "9558a48f5408b09fa1a01dfe4dd8326766265d66220eb7c66a54a56671501d67",
+    "claude-revision-examples.json": "6fbebc9842e37a10c0c621b9194b11ded469b30f16cf5813cbdfa085a37d9897",
+    "usage-comparison.html": "8db08c855d47fab10d4b7d00c4ed554ebe1024878ff668cd97826db90ba8026b",
+    "multi-environment-production-audit.json": "a55ce57b9e3d95191711807f6080753880e4da087a99e829d608dd0e7326c037",
+    "openai-unpriced-response-identities.json": "7fc580b5ba3c7f048f30a1554cff0c6bf63cb6dd8c6edddf5b4c3ef5c7fac311",
+    "unpriced-native-response-crosscheck.json": "05ee0526d98fe0bf2781670fdbf18ffd657efd5d69def351de0d2cbc80bf0793"
+  },
+  "changes": {
+    "production_state": false,
+    "inference_requests": 0,
+    "software_source_changes": false,
+    "new_temp_host_resources": 0
+  },
+  "verification": {
+    "production_rollups_match_canonical_entries": true,
+    "daily_counts_and_costs_match_provider_totals": true,
+    "four_response_ids_confirm_tier_difference": true,
+    "claude_revision_examples_confirm_early_output_counts": true,
+    "chart_desktop_and_mobile_preview_console_errors": 0,
+    "report_links_resolve": true,
+    "dragon_and_xps_named_clients_present_in_production": true,
+    "no_unpriced_2xx_with_missing_usage": true
+  },
+  "multi_environment_followup": {
+    "read_at": "2026-10-30T08:08:17.090482+00:00",
+    "named_clients": {
+      "The Dragon": {
+        "identified_client_ids": [
+          "the-dragon",
+          "the-dragon-claude",
+          "the-dragon-codex"
+        ],
+        "accounting_entries": 20139,
+        "known_cost_nanos": 2065670883345,
+        "unpriced": 466,
+        "already_included_in_production_total": true,
+        "exact_t3_only_attribution_verified": false
+      },
+      "XPS laptop": {
+        "identified_client_ids": [
+          "dell-xps-14"
+        ],
+        "accounting_entries": 743,
+        "known_cost_nanos": 41606802800,
+        "unpriced": 14,
+        "already_included_in_production_total": true,
+        "exact_t3_only_attribution_verified": false
+      }
+    },
+    "combined_screenshot_minus_thebeast_replay_usd": 2028.5886351842346,
+    "scope_difference_is_not_evidence_of_missing_production_usage": true,
+    "live_proxied_traffic_requires_collector": false,
+    "unpriced_status_counts": [
+      {
+        "provider": "openai",
+        "status": null,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 8
+      },
+      {
+        "provider": "anthropic",
+        "status": null,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 2
+      },
+      {
+        "provider": "anthropic",
+        "status": null,
+        "logical_success": true,
+        "completeness": "partial",
+        "records": 4
+      },
+      {
+        "provider": "openai",
+        "status": 499,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 5778
+      },
+      {
+        "provider": "openai",
+        "status": 502,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 67
+      },
+      {
+        "provider": "openai",
+        "status": 507,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 6
+      },
+      {
+        "provider": "anthropic",
+        "status": 499,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 86
+      },
+      {
+        "provider": "openai",
+        "status": 500,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 9
+      },
+      {
+        "provider": "openai",
+        "status": 503,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 28
+      },
+      {
+        "provider": "anthropic",
+        "status": 429,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 38
+      },
+      {
+        "provider": "openai",
+        "status": 503,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 43
+      },
+      {
+        "provider": "anthropic",
+        "status": 200,
+        "logical_success": true,
+        "completeness": "complete",
+        "records": 69
+      },
+      {
+        "provider": "anthropic",
+        "status": 529,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 34
+      },
+      {
+        "provider": "anthropic",
+        "status": 529,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 23
+      },
+      {
+        "provider": "openai",
+        "status": null,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 1
+      },
+      {
+        "provider": "anthropic",
+        "status": 429,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 7
+      },
+      {
+        "provider": "anthropic",
+        "status": 404,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 2
+      },
+      {
+        "provider": "openai",
+        "status": 400,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 6
+      },
+      {
+        "provider": "anthropic",
+        "status": 401,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 3
+      },
+      {
+        "provider": "openai",
+        "status": 429,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 13
+      },
+      {
+        "provider": "openai",
+        "status": 504,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 4
+      },
+      {
+        "provider": "anthropic",
+        "status": null,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 10
+      },
+      {
+        "provider": "anthropic",
+        "status": 400,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 2
+      },
+      {
+        "provider": "openai",
+        "status": 429,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 13
+      },
+      {
+        "provider": "openai",
+        "status": 401,
+        "logical_success": false,
+        "completeness": "missing",
+        "records": 1
+      },
+      {
+        "provider": "openai",
+        "status": 401,
+        "logical_success": null,
+        "completeness": "missing",
+        "records": 2
+      }
+    ],
+    "unpriced_http_2xx_missing_usage": 0,
+    "native_completed_response_crosscheck": {
+      "candidate_files": 683,
+      "files_read": 683,
+      "bytes_read": 2456168752,
+      "native_response_usage_records_seen": 78947,
+      "unpriced_proxy_response_identities": 5869,
+      "completed_within_budget": true,
+      "elapsed_seconds": 3.499165501096286
+    },
+    "native_completed_response_id_matches": 0,
+    "remote_t3_summaries_independently_replayed": false,
+    "latest_writer": {
+      "started_at_ms": 1793278933540,
+      "dropped": 0,
+      "rejected": 0,
+      "writer_errors": 0,
+      "written": 8221,
+      "last_commit_at_ms": 1793347696564
+    }
+  }
+}

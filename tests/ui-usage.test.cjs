@@ -86,6 +86,24 @@ test('unknown pricing remains unpriced and small backend estimates retain precis
   assert.equal(helpers.dollars(12345000), '$0.0123');
 });
 
+test('coverage distinguishes unavailable usage from missing rates without inventing free calls', () => {
+  const d = dashboard();
+  assert.equal(d.run('usageCoverage({ observations: 100, unpriced: 8, unpriced_reasons: { missing_usage: 8 } })[0]'), '8 missing usage');
+  assert.equal(d.run('usageCoverage({ observations: 5, unpriced: 5, unpriced_reasons: { unknown_model: 5 } })[0]'), '5 no model rate');
+  assert.equal(d.run('usageCoverage({ observations: 10, unpriced: 3, unpriced_reasons: { missing_usage: 2, unknown_model: 1 } })[0]'), '3 unpriced');
+  d.seed({ summary: { combined: { totals: { observations: 100, unpriced: 8, unpriced_reasons: { missing_usage: 7, unknown_model: 1 } } } } });
+  const line = d.run('usageCoverageLine(Usage.summary.combined.totals)');
+  assert.match(line, /92\.0% of calls priced/);
+  assert.match(line, /7 missing usage · 1 without a model rate/);
+  assert.doesNotMatch(line, /8 unpriced/);
+  const notice = d.run('usageNoticesHTML()');
+  assert.match(notice, /7 calls have missing or incomplete token usage/);
+  assert.match(notice, /costs remain unknown and are excluded/);
+  assert.match(notice, /Adding model prices cannot recover missing usage/);
+  d.seed({ summary: { combined: { totals: { observations: 3, unpriced: 0, missing_usage: 3, unpriced_reasons: {} } } } });
+  assert.doesNotMatch(d.run('usageNoticesHTML()'), /costs remain unknown/);
+});
+
 test('usage formatting reuses formatters while retaining unknown, zero and currency precision', () => {
   let constructed = 0;
   const d = dashboard({ Intl: { DateTimeFormat: Intl.DateTimeFormat, NumberFormat: class extends Intl.NumberFormat {

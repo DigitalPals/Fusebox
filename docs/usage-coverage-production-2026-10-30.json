@@ -1,0 +1,551 @@
+{
+  "recorded_at": "2026-10-30T09:29:47.651764+00:00",
+  "deployment": {
+    "backup_sha256": "b8d0ed40eb9e595abba878a2d16d7a9f1507ebfeb5ca284045fe361c4f29479f",
+    "billing_calls": 0,
+    "forced": true,
+    "gate_released": true,
+    "outcome": "deployed",
+    "rollback_version": "0.11.1+gui.05e7012634b1",
+    "transaction": "6c571800a47446bf9d988f19880ea50d",
+    "version": "0.11.1+gui.77b25555372f"
+  },
+  "source": {
+    "source_commit": "f27040a4d39bbd31915baf76552fec7fe6fe1529",
+    "source_working_tree": true,
+    "source_sha256": "77b25555372f28877b83cf83913b340b8be4dfa30a93b66071d0f5fc5ac96137",
+    "source_diff_sha256": "37e8a95edb0add621d20024ecb3906b866c1b6bfec49ec5f69d2ff343a806d5c",
+    "version": "0.11.1+gui.77b25555372f",
+    "origin": "local-gui",
+    "previous_version": "0.11.1+gui.05e7012634b1",
+    "previous_binary_sha256": "30d67e863e007776393891a9afbc9ab48cdb559c045923fb2cc406648c1ad720",
+    "config_sha256": "ed7f01b8f9cc088183eab11cf1c8cd633b2765528c1bd25c38b1a1786d1f7256",
+    "binary_sha256": "a4ceed4804b565dbca5df0b4a9cfef458beba03b9fc8b2dc8cb01b6935106012",
+    "binary_bytes": 19385544,
+    "assets": {
+      "/ui/app.js": "1620b7221add91c6f9297f8861272e5b9a7f01c0f4bfe43c5547f67ffc98a294",
+      "/ui/usage.js": "de5f5d9ecdb84dfd93aef6029e17e931725eb0b63ced00db318d2be67ff1e3a4",
+      "/ui/config.js": "e9172decd498cf0fd29344e1f567b8af2fa2bcce5194586d2ebf6518c29f647f",
+      "/ui/i18n-zh.js": "0b1db826ad87e890bb640b8e85281b6817fbdce8afcb9df32c1663e50da3ae93",
+      "/ui/i18n.js": "9e876f92582a03063909fbe858353f8464e2f3f230a4339d3e2b5299865e0930",
+      "/ui/style.css": "39eba3c0ec39b1e4cfdd92cc5da04cab551006d8bac63f998e14868cfdfce88e",
+      "/ui/icon.svg": "7b521316e3c8fe9d2e8642ddaa943bc3bd3508021846236be70acbb5785e6319",
+      "/manifest.webmanifest": "4586fddb01bd452a62e18fdf0710a501838f45ef51cfa9a9f31d9098310e3015",
+      "/sw.js": "7b0256c8acc215d0be7dd2efbd0325e47a53a97877b0c85ee03284aa13b8d809",
+      "/ui/index.html": "686ca97fec2e0be92412cf49888064c257e134dc24a97024b77c8f9fa9f287bf"
+    },
+    "archive": "cliproxyapi-rust-v0.11.1+gui.77b25555372f-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "2cb226b9e34e5fa0e30b9ab804a83365bf551cfad89c96190ceddca05dfeb888",
+    "maintenance_run_id": "f77bbdd03ce64282a193d5662fd0fa1c"
+  },
+  "scope": "Retain already-received HTTP SSE usage on disconnect; distinguish unknown-cost causes without changing saved usage or prices.",
+  "initial_audit": {
+    "read_at": "2026-10-30T09:08:55.004069+00:00",
+    "observations": 485259,
+    "unpriced": 6361,
+    "missing_usage": 6356,
+    "unknown_model_with_tokens": 5,
+    "cancelled_without_usage": 5868,
+    "successful_native_calls_missing_price": 0,
+    "keeper_internal_model": "codex-auto-review",
+    "recovery_limit": "No token category exists on the 6,356 missing-usage records. The five internal-model keeper records do not identify a publicly priced underlying model.",
+    "change": "Capture metadata from every complete SSE event already received before yielding a client frame; distinguish missing usage, incomplete usage, invalid usage, unknown model, and unsupported pricing in dashboard coverage.",
+    "rust_tests": 768,
+    "dashboard_tests": 145
+  },
+  "verification": {
+    "accounts": 5,
+    "analytics_health": "healthy",
+    "assets": {
+      "/": {
+        "gzip": 16161,
+        "identity": 45485
+      },
+      "/manifest.webmanifest": {
+        "gzip": 468,
+        "identity": 1254
+      },
+      "/sw.js": {
+        "gzip": 2064,
+        "identity": 4119
+      },
+      "/ui/app.js": {
+        "gzip": 72712,
+        "identity": 248378
+      },
+      "/ui/config.js": {
+        "gzip": 30784,
+        "identity": 110213
+      },
+      "/ui/i18n-zh.js": {
+        "gzip": 32732,
+        "identity": 97947
+      },
+      "/ui/i18n.js": {
+        "gzip": 2675,
+        "identity": 6730
+      },
+      "/ui/icon.svg": {
+        "gzip": 251,
+        "identity": 314
+      },
+      "/ui/style.css": {
+        "gzip": 17913,
+        "identity": 97473
+      },
+      "/ui/usage.js": {
+        "gzip": 18264,
+        "identity": 62400
+      }
+    },
+    "billing_calls": 0,
+    "binary_sha256": "a4ceed4804b565dbca5df0b4a9cfef458beba03b9fc8b2dc8cb01b6935106012",
+    "client_identity_inspection": true,
+    "collectors_enrolled": 0,
+    "config_and_routing_verified": true,
+    "configured_imports": 0,
+    "gate_unchanged": true,
+    "legacy_summary_retired": true,
+    "ok": true,
+    "pricing_refresh": {
+      "catalogue_version": "t3-2026-10-30.1",
+      "idempotent": true,
+      "repriced": 0
+    },
+    "provider_session_idle_seconds": 1800,
+    "sessions": {
+      "current_assignments": 197,
+      "expired_assignments": 0,
+      "preserved_assignments": 197,
+      "snapshot_assignments": 197
+    },
+    "usage_backup_bytes": 1891287040,
+    "usage_backup_sha256": "7d856c6a84c465969c540079bb0babcb70d46444ebba3c8fac71e06639a3a5d1",
+    "version": "0.11.1+gui.77b25555372f"
+  },
+  "postflight": {
+    "account_count": 5,
+    "automatic_restarts": 0,
+    "backup_sha256": "b8d0ed40eb9e595abba878a2d16d7a9f1507ebfeb5ca284045fe361c4f29479f",
+    "billing_calls": 0,
+    "binary_sha256": "a4ceed4804b565dbca5df0b4a9cfef458beba03b9fc8b2dc8cb01b6935106012",
+    "client_identity_inspection": true,
+    "configuration_unchanged": true,
+    "coverage": {
+      "historical_costs_unchanged": true,
+      "unpriced": 6186,
+      "unpriced_reasons": {
+        "missing_usage": 6186
+      }
+    },
+    "database": {
+      "bytes": 1891401832,
+      "bytes_per_observation": 3892,
+      "compressing": false,
+      "disk_free_bytes": 12404916224,
+      "free_bytes": 0,
+      "growth_bytes_per_day": 57785080,
+      "incremental_vacuum": true,
+      "live_bytes": 1891389440,
+      "observations": 485946,
+      "uncompressed_rows": 0,
+      "updated_at_ms": 1793352418813
+    },
+    "gate_held": false,
+    "models_listed": 26,
+    "ok": true,
+    "pricing_after": {
+      "entries": {
+        "cache_read": 103653749847,
+        "cache_write": 1911950128,
+        "cost_nanos": 49901123730905,
+        "input": 768387802,
+        "observations": 485946,
+        "output": 331364357,
+        "reasoning": 123844965,
+        "unpriced": 6363,
+        "write_12h": 0,
+        "write_1h": 2294688,
+        "write_30m": 0,
+        "write_5m": 1269844745
+      },
+      "fixed_window": {
+        "cache_read": 69201665571,
+        "cache_write": 1292259694,
+        "cost_nanos": 28106610832030,
+        "input": 448951354,
+        "observations": 313641,
+        "output": 220946690,
+        "reasoning": 85201095,
+        "unpriced": 6186,
+        "write_12h": 0,
+        "write_1h": 2294688,
+        "write_30m": 0,
+        "write_5m": 1251120336
+      }
+    },
+    "pricing_before": {
+      "entries": {
+        "cache_read": 103653749847,
+        "cache_write": 1911950128,
+        "cost_nanos": 49901123730905,
+        "input": 768387802,
+        "observations": 485946,
+        "output": 331364357,
+        "reasoning": 123844965,
+        "unpriced": 6363,
+        "write_12h": 0,
+        "write_1h": 2294688,
+        "write_30m": 0,
+        "write_5m": 1269844745
+      },
+      "fixed_window": {
+        "cache_read": 69201665571,
+        "cache_write": 1292259694,
+        "cost_nanos": 28106610832030,
+        "input": 448951354,
+        "observations": 313641,
+        "output": 220946690,
+        "reasoning": 85201095,
+        "unpriced": 6186,
+        "write_12h": 0,
+        "write_1h": 2294688,
+        "write_30m": 0,
+        "write_5m": 1251120336
+      }
+    },
+    "pricing_refresh": {
+      "catalogue_version": "t3-2026-10-30.1",
+      "duration_seconds": 7.861,
+      "evidence_preserved": true,
+      "idempotent": true,
+      "repriced": 0
+    },
+    "provider_session_idle_seconds": 1800,
+    "proxy_protocol_port_ready": true,
+    "readiness": {
+      "accounts": {
+        "ready": 5,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "rollback_version": "0.11.1+gui.05e7012634b1",
+    "schema_additions": [
+      "usage_entries_unpriced_time"
+    ],
+    "service_active": true,
+    "usage_after": {
+      "observations": 485959,
+      "quick_check": "ok",
+      "schema_sha256": "c76dad8d7a181f7b94e4906e49ad3a6352b381ee58a40f8fe98147e0dc0ba230",
+      "schema_version": 5
+    },
+    "usage_backup_sha256": "7d856c6a84c465969c540079bb0babcb70d46444ebba3c8fac71e06639a3a5d1",
+    "usage_before": {
+      "observations": 485946,
+      "quick_check": "ok",
+      "schema_sha256": "a24297297e8c99232d4a9f812ed1ce37b49bc43ef760823a5c352df7e565f950",
+      "schema_version": 5
+    },
+    "usage_health": {
+      "accepted": 11,
+      "dropped": 0,
+      "prior_unclosed_sessions": 0,
+      "queue_depth": 0,
+      "rejected": 0,
+      "state": "healthy",
+      "writer_errors": 0,
+      "written": 11
+    },
+    "version": "0.11.1+gui.77b25555372f"
+  },
+  "closure": {
+    "checked_at": "2026-10-30T09:28:16.012157+00:00",
+    "gate_not_restarted": true,
+    "gate_original_pid": 93357,
+    "hook_errors": 0,
+    "live_coverage": {
+      "estimated_cost_nanos": 49905896053905,
+      "observations": 485997,
+      "unpriced": 6363,
+      "unpriced_reasons": {
+        "missing_usage": 6358,
+        "unknown_model": 5
+      },
+      "window": [
+        "2026-01-01",
+        "2026-10-31"
+      ]
+    },
+    "maintenance_marker_absent": true,
+    "network_hold_absent": true,
+    "ok": true,
+    "phase": "committed",
+    "release_pending": false,
+    "transaction": "6c571800a47446bf9d988f19880ea50d",
+    "units": {
+      "cli-proxy-api.service": {
+        "ActiveState": "active",
+        "ExecMainStatus": "0",
+        "MainPID": "129872",
+        "NRestarts": "0",
+        "Result": "success",
+        "SubState": "running"
+      },
+      "cliproxy-gate.service": {
+        "ActiveState": "active",
+        "ExecMainStatus": "0",
+        "MainPID": "93357",
+        "NRestarts": "0",
+        "Result": "success",
+        "SubState": "running"
+      },
+      "fusebox-usage-coverage-20261030.service": {
+        "ActiveState": "inactive",
+        "ExecMainStatus": "0",
+        "MainPID": "0",
+        "NRestarts": "0",
+        "Result": "success",
+        "SubState": "dead"
+      }
+    },
+    "version": "0.11.1+gui.77b25555372f"
+  },
+  "fixed_window_coverage": {
+    "estimated_cost_nanos": 28106610832030,
+    "historical_costs_unchanged": true,
+    "historical_observations_unchanged": true,
+    "models": [
+      {
+        "model": "claude-opus-5-5",
+        "unpriced": 193,
+        "unpriced_reasons": {
+          "missing_usage": 193
+        }
+      },
+      {
+        "model": "gpt-6-astra",
+        "unpriced": 1766,
+        "unpriced_reasons": {
+          "missing_usage": 1766
+        }
+      },
+      {
+        "model": "gpt-6.1-sol",
+        "unpriced": 4070,
+        "unpriced_reasons": {
+          "missing_usage": 4070
+        }
+      },
+      {
+        "model": "claude-fable-5-1",
+        "unpriced": 5,
+        "unpriced_reasons": {
+          "missing_usage": 5
+        }
+      },
+      {
+        "model": "gpt-6-sol",
+        "unpriced": 129,
+        "unpriced_reasons": {
+          "missing_usage": 129
+        }
+      },
+      {
+        "model": "claude-sonnet-5-5",
+        "unpriced": 0,
+        "unpriced_reasons": {}
+      },
+      {
+        "model": "claude-opus-4-8",
+        "unpriced": 0,
+        "unpriced_reasons": {}
+      },
+      {
+        "model": "claude-haiku-5-5",
+        "unpriced": 7,
+        "unpriced_reasons": {
+          "missing_usage": 7
+        }
+      },
+      {
+        "model": "gpt-6-luna",
+        "unpriced": 5,
+        "unpriced_reasons": {
+          "missing_usage": 5
+        }
+      },
+      {
+        "model": "claude-haiku-4-5-20251001",
+        "unpriced": 0,
+        "unpriced_reasons": {}
+      },
+      {
+        "model": "gpt-5.6-luna",
+        "unpriced": 0,
+        "unpriced_reasons": {}
+      },
+      {
+        "model": "gpt-5.5",
+        "unpriced": 5,
+        "unpriced_reasons": {
+          "missing_usage": 5
+        }
+      },
+      {
+        "model": "claude-sonnet-4-6",
+        "unpriced": 0,
+        "unpriced_reasons": {}
+      },
+      {
+        "model": "gpt-nonexistent-9",
+        "unpriced": 4,
+        "unpriced_reasons": {
+          "missing_usage": 4
+        }
+      },
+      {
+        "model": "claude-nonexistent-9",
+        "unpriced": 2,
+        "unpriced_reasons": {
+          "missing_usage": 2
+        }
+      }
+    ],
+    "ok": true,
+    "unpriced": 6186,
+    "unpriced_reasons": {
+      "missing_usage": 6186
+    },
+    "window": [
+      "2026-10-01T00:00:00+02:00",
+      "2026-10-30T08:46:00+01:00"
+    ]
+  },
+  "public_https": {
+    "ok": true,
+    "url": "https://10.10.0.235:8317/",
+    "version": "0.11.1+gui.77b25555372f",
+    "tls_verified": true,
+    "health": "ok",
+    "readiness": {
+      "status": "ready",
+      "accounts": {
+        "ready": 5,
+        "total": 5
+      },
+      "usage": "healthy"
+    },
+    "verified_assets": 10,
+    "representations": [
+      "identity",
+      "gzip"
+    ],
+    "inference_calls": 0
+  },
+  "backup": {
+    "archive": "usage.tar",
+    "archive_bytes": 1891297280,
+    "archive_sha256": "7d856c6a84c465969c540079bb0babcb70d46444ebba3c8fac71e06639a3a5d1",
+    "bound_bytes": 4294967296,
+    "database_included": true,
+    "expanded_bytes": 1891287040,
+    "members": 3,
+    "schema": 1,
+    "source": "/var/lib/cli-proxy-api/usage",
+    "transaction": "6c571800a47446bf9d988f19880ea50d",
+    "writer_stopped": true
+  },
+  "pricing_refresh": {
+    "ok": true,
+    "repriced": 0,
+    "idempotent": true,
+    "evidence_preserved": true,
+    "catalogue_version": "t3-2026-10-30.1",
+    "duration_seconds": 7.861
+  },
+  "tests": {
+    "rust_passed": 768,
+    "rust_ignored": 5,
+    "dashboard_passed": 145,
+    "rollout_wrappers_passed": 16,
+    "format_passed": true,
+    "clippy_passed": true,
+    "exact_candidate_passed": true,
+    "previous_release_reopened": true,
+    "provider_inference_calls": 0
+  },
+  "qualification_rehearsal": {
+    "ok": true,
+    "dashboard_seconds": 0.022,
+    "repriced": 0,
+    "evidence_preserved": true,
+    "costs_unchanged": true,
+    "unpriced_reasons": {
+      "missing_usage": 6356,
+      "unknown_model": 5
+    },
+    "database_removed": true,
+    "candidate_stopped": true
+  },
+  "cleanup": {
+    "checked_at": "2026-10-30T09:26:16.603662+00:00",
+    "leases": [
+      {
+        "lease": "0a76677d42514523b6278707c1606c03",
+        "status": "closed",
+        "remaining": [],
+        "preserved_volumes": [],
+        "errors": []
+      },
+      {
+        "lease": "4f707d7ca1d24efc835a5727ffcab62f",
+        "status": "closed",
+        "remaining": [],
+        "preserved_volumes": [],
+        "errors": []
+      }
+    ],
+    "temporary_services_stopped": true,
+    "candidate_restart_verified": true,
+    "existing_dev_service_found": false,
+    "retained_local_snapshot": null,
+    "production_services": "established operator ownership; not enrolled in disposable cleanup",
+    "removed_local_snapshot_files": [
+      {
+        "path": "target/usage-coverage-production-20261030/rehearsal-original.sqlite3",
+        "bytes": 1890512896
+      },
+      {
+        "path": "target/usage-coverage-production-20261030/rehearsal-original.sqlite3-wal",
+        "bytes": 0
+      },
+      {
+        "path": "target/usage-coverage-production-20261030/rehearsal-original.sqlite3-shm",
+        "bytes": 32768
+      }
+    ],
+    "postflight_ok": true,
+    "production_backup_retained": "/var/lib/cliproxy-rust-update/backups/6c571800a47446bf9d988f19880ea50d",
+    "completed_at": "2026-10-30T09:28:44.028344+00:00"
+  },
+  "receipt_sha256": {
+    "receipts/pricing-refresh.json": "e21a7af22726a271078a65661e736c42b6ff774cf2ce63d56678dcb386b4a9c0",
+    "receipts/closure-proof.json": "33d41fcd419a3b4dcd3bf601b6269c6704bbf63703a0d245e1f49bbaa1c3865e",
+    "receipts/usage-backup.json": "08dc2fddcabba603e59f570485783bc80e6e3da4b587e71db5d411caa24b94c7",
+    "receipts/force-observation.json": "ec6011ad833f044408718d56fe3b2ad2d520e3b11983d5e81e2bdc306f1377f5",
+    "receipts/coverage-proof.json": "6913b2de444f59eddb9d036967d7b7c8202063e9f60be8cce9ed1460e9d9639f",
+    "receipts/verification.json": "8f5fd13024f03bf2aadd5683d12e110c301a9f249d967361faebbffdbe03676f",
+    "receipts/baseline.json": "c07fdd757bfbcce6cdab6f2f3df0e1eb0ba5bd681a698d41a12fdd0ed07b089d",
+    "receipts/postflight.json": "25444d39040427d2f305ac21d83c5916eb086de2e37830ac077700e82238aa94",
+    "receipts/operator-record.json": "a030f98e13f0575e2186bd8af56a2dfa66f3b42232e6f050f7261c29de99e8a7",
+    "receipts/usage-coverage-20261030-deployment.json": "2a7af54140ea74f4f89c825e438fe26fc6f0fbddb531fb075481ad782aa7b1a2",
+    "external-proof.json": "56f26f0c18de057ccb3f2d892fda26474f595e9dad6f24e4b58ac11df71022a5",
+    "cleanup-final.json": "0619cbb832a7e2a66f14055b8160e9ac5ec8dd5b3d9b8bf4ec16aa9f81afd777",
+    "build-checks.json": "48e65572fe44586bf75ee19f6657ae7a72cbe0b188f36976436217ce1084f093",
+    "deployment.json": "c7a4684354bd477cbdf3c2110f92cc6ed813dd2c47ae8972a2d490be80faf1ae"
+  },
+  "remaining_recovery": "Missing historical token records cannot be reconstructed from rates. Five codex-auto-review records lack an underlying publicly priced model. The Dragon/XPS native histories remain uninspected pending reachable SSH addresses."
+}

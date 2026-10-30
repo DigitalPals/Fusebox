@@ -1,5 +1,7 @@
 # Fusebox native usage and pricing research
 
+**2026-10-30 update:** default estimates now use the T3 Code category calculation and a pinned LiteLLM snapshot. See [current pricing provenance and rollout](usage-pricing-t3-2026-10-30.md). The official tier/context/region/lifetime tables below document the retained `calculation: provider` rate card and earlier behavior.
+
 Verified on **2026-10-07** against fetched official docs and public vendor source. No local personal history/config/auth inspected, no provider inference calls. Requested execution model `gpt-6.1-sol`, effort `high`: **effective execution model/effort unverified** (this delegated session does not expose an authoritative effective model result). Public model docs verify this model supports `high`; this is distinct from proving the session actually used it.
 
 ## Native source evidence

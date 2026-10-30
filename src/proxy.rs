@@ -235,6 +235,11 @@ impl Tracker {
         }
         child
     }
+    pub fn requested_speed(&mut self, body: &Value) {
+        if let Some(usage) = &mut self.analytics {
+            usage.requested_speed(body);
+        }
+    }
     pub fn embedding_progress(&mut self, tokens: Option<u64>, estimated: bool) {
         self.log.chunks += 1;
         self.stream_usage.input += tokens.unwrap_or(0);
@@ -1089,6 +1094,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     let model = app.pool.canonical(&model, only.as_ref());
     let mut tracker = Tracker::new(&app, call.format, call.stream, call.transport, &model);
     tracker.client_app(&call.headers);
+    tracker.requested_speed(&call.body);
     tracker.session(call.session.as_deref(), call.session_source, &cfg);
     let requested_cache = crate::cache::Requested::of(&call.body);
     tracker.latency_context = cfg.latency_routing.then(|| crate::latency::Context::new(&call.body, call.transport));
@@ -2130,7 +2136,28 @@ fn passthrough_stream(
                 }
                 None => (dec.finish(), true),
             };
+            // Capture every event already received before yielding anything to
+            // the client. Dropping the body during an early frame must not
+            // discard usage later in the same upstream chunk. Keep terminal
+            // state tied to forwarded events so an early disconnect stays 499.
+            let mut received = Vec::with_capacity(batch.len());
             for sse in batch {
+                let done = native == Format::Chat && sse.data.trim() == "[DONE]";
+                let parsed = serde_json::from_str::<Value>(&sse.data).ok();
+                if let Some(v) = &parsed {
+                    tracker.observe_quota_value(v);
+                    tracker.observe_wire(v);
+                }
+                parser.feed_value(&sse, parsed.as_ref(), &mut evs);
+                for ev in &evs {
+                    if let Event::Usage(usage) = ev {
+                        tracker.stream_usage.merge(usage);
+                    }
+                }
+                received.push((sse, parsed, std::mem::take(&mut evs)));
+                if done { break; }
+            }
+            for (sse, parsed, events) in received {
                 if native == Format::Chat && sse.data.trim() == "[DONE]" {
                     if !tracker.stream_finished && tracker.stream_error.is_none() {
                         tracker.observe_stream_event(&premature_end());
@@ -2141,14 +2168,7 @@ fn passthrough_stream(
                     yield Frame::data("[DONE]");
                     return;
                 }
-                // Quota, usage, the stop check and Antigravity's unwrap share one parse.
-                let parsed = serde_json::from_str::<Value>(&sse.data).ok();
-                if let Some(v) = &parsed {
-                    tracker.observe_quota_value(v);
-                    tracker.observe_wire(v);
-                }
-                parser.feed_value(&sse, parsed.as_ref(), &mut evs);
-                for ev in evs.drain(..) {
+                for ev in events {
                     tracker.observe_stream_event(&ev);
                 }
                 let claude_stop = native == Format::Claude

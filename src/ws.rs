@@ -709,6 +709,7 @@ async fn native_turn(
     sess.upstream_quota_epoch = quota_epoch;
     let mut tracker = Tracker::new(app, Format::Responses, true, "ws", &model);
     tracker.client_app(headers);
+    tracker.requested_speed(body);
     tracker.session(sess.key.as_deref(), sess.source, &cfg);
     tracker.latency_context(latency_context);
     tracker.selected(&selected);

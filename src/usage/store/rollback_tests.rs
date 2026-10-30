@@ -21,7 +21,7 @@ impl Drop for Fixture {
 fn database(path: &Path) -> Connection {
     let mut c = Connection::open(path).unwrap();
     migrate(&mut c).unwrap();
-    let catalogue = Catalogue::load(None).unwrap();
+    let catalogue = Catalogue::provider_fixture();
     c.execute("INSERT INTO usage_meta VALUES('catalogue',?1)", [serde_json::to_string(&catalogue).unwrap()]).unwrap();
     reprice(&mut c).unwrap();
     let mut known = Observation::new("proxy", "known".into(), "openai", Utc::now().timestamp_millis());
@@ -135,6 +135,25 @@ fn rollback_copy_preserves_the_source_costs_and_audit_and_converts_compressed_do
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn rollback_copy_removes_the_new_calculation_from_only_the_active_catalogue() {
+    let fixture = Fixture::new();
+    let source = fixture.path("source.sqlite3");
+    let to = fixture.path("rollback.sqlite3");
+    let c = database(&source);
+    let catalogue = Catalogue::load(None).unwrap();
+    c.execute("UPDATE usage_meta SET value=?1 WHERE key='catalogue'", [serde_json::to_string(&catalogue).unwrap()])
+        .unwrap();
+    drop(c);
+    rollback_copy(&source, &to).unwrap();
+    for (path, expected) in [(&source, true), (&to, false)] {
+        let c = Connection::open(path).unwrap();
+        let raw: String = c.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0)).unwrap();
+        let catalogue: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(catalogue.get("calculation").is_some(), expected);
     }
 }
 

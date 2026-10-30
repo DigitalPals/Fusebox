@@ -17,7 +17,7 @@ use std::{
     sync::OnceLock,
 };
 
-const PARSER: &str = "native-2026-10-18-v3";
+const PARSER: &str = "native-2026-10-30-v4";
 const MAX_FILES: usize = 4096;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FILE: u64 = 256 * 1024 * 1024;
@@ -95,6 +95,9 @@ pub enum UsageCommand {
     Reprice {
         #[arg(long)]
         database: PathBuf,
+        /// Recalculate established estimates too, preserving each previous snapshot.
+        #[arg(long)]
+        all: bool,
     },
     /// Import normalized CPA usage keeper events; read-only preview unless --apply is supplied.
     ImportKeeper {
@@ -138,7 +141,7 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         | UsageCommand::Disable { database, .. }
         | UsageCommand::Scan { database, .. }
         | UsageCommand::Backfill { database, .. }
-        | UsageCommand::Reprice { database } => database,
+        | UsageCommand::Reprice { database, .. } => database,
         UsageCommand::ImportKeeper { .. }
         | UsageCommand::EstimateKeeperCache { .. }
         | UsageCommand::Backup { .. }
@@ -160,7 +163,14 @@ pub async fn run_command(command: UsageCommand) -> Result<()> {
         UsageCommand::Disable { source, root, .. } => configure(&store, &source, &root.to_string_lossy(), false).await,
         UsageCommand::Scan { source, .. } => scan(&store, source).await,
         UsageCommand::Backfill { source, .. } => backfill(&store, source).await,
-        UsageCommand::Reprice { .. } => reprice(&store).await,
+        UsageCommand::Reprice { all, .. } => {
+            if all {
+                let count = store.call(store::reprice_all).await?;
+                Ok(json!({"repriced": store.startup_repriced() + count}))
+            } else {
+                reprice(&store).await
+            }
+        }
         UsageCommand::ImportKeeper { .. }
         | UsageCommand::EstimateKeeperCache { .. }
         | UsageCommand::Backup { .. }
@@ -533,6 +543,12 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
         let mut o = Observation::new(source, format!("message:{identity}"), "anthropic", at);
         o.parser_version = PARSER.into();
         o.actual_model = label(message.get("model"));
+        if let Some(cost) = v.get("costUSD").and_then(Value::as_f64) {
+            let nanos = (cost * 1_000_000_000.0).round();
+            if cost >= 0.0 && nanos.is_finite() && nanos < i64::MAX as f64 {
+                o.numeric_metadata.insert("reported_cost_nanos".into(), nanos as u64);
+            }
+        }
         o.response_id = message_id;
         o.provider_request_id = request_id;
         o.session_id = label(v.get("sessionId"));
@@ -627,6 +643,13 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
                 Some(id) => context.turn_tiers.get(&id).cloned().flatten(),
                 None => context.service_tier.clone(),
             });
+            let requested_tier = match label(payload.get("turn_id")) {
+                Some(id) => context.turn_tiers.get(&id).and_then(|tier| tier.as_deref()),
+                None => context.service_tier.as_deref(),
+            };
+            if requested_tier.is_some() {
+                o.set_requested_speed(requested_tier);
+            }
             o.tokens = codex_tokens(usage);
             o.completeness = if o.tokens.total().is_some() { "complete" } else { "partial" }.into();
             if number(usage.get("input_tokens")).is_some()
@@ -696,6 +719,9 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
             o.session_id = Some(session);
             o.actual_model = context.model.clone();
             o.service_tier = context.service_tier.clone();
+            if context.service_tier.is_some() {
+                o.set_requested_speed(context.service_tier.as_deref());
+            }
             o.tokens = total.tokens().ok_or_else(|| anyhow!("inconsistent cumulative categories"))?;
             // Legacy token_count can contain estimates/replay; explicitly partial evidence.
             o.completeness = "partial".into();

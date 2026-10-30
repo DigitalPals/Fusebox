@@ -1,0 +1,32 @@
+{
+  "read_at": "2026-10-30T09:08:55.004069+00:00",
+  "observations": 485259,
+  "unpriced": 6361,
+  "missing_usage": 6356,
+  "unknown_model_with_tokens": 5,
+  "cancelled_without_usage": 5868,
+  "successful_native_calls_missing_price": 0,
+  "keeper_internal_model": "codex-auto-review",
+  "recovery_limit": "No token category exists on the 6,356 missing-usage records. The five internal-model keeper records do not identify a publicly priced underlying model.",
+  "change": "Capture metadata from every complete SSE event already received before yielding a client frame; distinguish missing usage, incomplete usage, invalid usage, unknown model, and unsupported pricing in dashboard coverage.",
+  "rust_tests": 768,
+  "dashboard_tests": 145,
+  "production_deployed": true,
+  "deployed_version": "0.11.1+gui.77b25555372f",
+  "deployment_transaction": "6c571800a47446bf9d988f19880ea50d",
+  "deployment_receipt": "usage-coverage-production-2026-10-30.json",
+  "historical_prices_changed": 0,
+  "final_live_coverage": {
+    "estimated_cost_nanos": 49905896053905,
+    "observations": 485997,
+    "unpriced": 6363,
+    "unpriced_reasons": {
+      "missing_usage": 6358,
+      "unknown_model": 5
+    },
+    "window": [
+      "2026-01-01",
+      "2026-10-31"
+    ]
+  }
+}

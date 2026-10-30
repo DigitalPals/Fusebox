@@ -294,7 +294,7 @@ fn legacy_cache_write_null_is_rejected_but_absence_defaults_zero() {
 }
 
 #[test]
-fn legacy_resume_counts_only_last_response_and_keeps_unknown_write_lifetime_unpriced() {
+fn legacy_resume_counts_only_last_response_and_prices_generic_cache_writes() {
     let mut state = Context::default();
     parse_record("codex", &meta("openai"), &mut state).unwrap();
     parse_record("codex", &context(), &mut state).unwrap();
@@ -304,8 +304,8 @@ fn legacy_resume_counts_only_last_response_and_keeps_unknown_write_lifetime_unpr
     assert_eq!(o.tokens, codex_tokens(&usage()));
     assert_eq!(o.numeric_metadata["per_request_usage"], 1);
     let snapshot = super::super::pricing::Catalogue::load(None).unwrap().price(&o);
-    assert_eq!(snapshot.cost_nanos, None);
-    assert_eq!(snapshot.basis, "unknown_cache_write_ttl");
+    assert_eq!(snapshot.cost_nanos, Some(2_910_000));
+    assert_eq!(snapshot.basis, "t3_current_rate_equivalent");
     assert!(snapshot.partial, "legacy evidence remains an estimate");
     assert!(parse_record("codex", &row, &mut state).unwrap().is_none());
     // A distinct response with identical counts has a larger cumulative total.
@@ -365,6 +365,40 @@ fn codex_speed_switches_survive_checkpoints_and_late_responses() {
     parse_record("codex", &settings(json!({"model":"gpt-6.1-sol"})), &mut state).unwrap();
     late["payload"].as_object_mut().unwrap().remove("turn_id");
     assert_eq!(parse_record("codex", &late, &mut state).unwrap().unwrap().service_tier.as_deref(), Some("standard"));
+}
+
+#[test]
+fn codex_requested_speed_survives_an_explicit_default_response_tier() {
+    let mut state = Context::default();
+    parse_record("codex", &meta("openai"), &mut state).unwrap();
+    parse_record("codex", &json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"priority"}}}), &mut state).unwrap();
+    parse_record("codex", &context(), &mut state).unwrap();
+    let mut row = modern();
+    row["payload"]["service_tier"] = "default".into();
+    let o = parse_record("codex", &row, &mut state).unwrap().unwrap();
+    assert_eq!(o.service_tier.as_deref(), Some("default"));
+    assert_eq!(o.requested_speed(), Some(super::super::types::Speed::Fast));
+    o.validate().unwrap();
+    let price = super::super::pricing::Catalogue::load(None).unwrap().price(&o);
+    assert_eq!(price.tier_multiplier, [2, 1]);
+}
+
+#[test]
+fn claude_reported_cost_is_allowlisted_and_overrides_the_model_estimate() {
+    let mut row = claude("reported", 50);
+    row["costUSD"] = json!(0.123456789);
+    let o = parse_record("claude_code", &row, &mut Context::default()).unwrap().unwrap();
+    o.validate().unwrap();
+    let catalogue = super::super::pricing::Catalogue::load(None).unwrap();
+    assert_eq!(catalogue.price(&o).cost_nanos, Some(123_456_789));
+    let mut custom = catalogue;
+    custom.local_override = true;
+    assert_ne!(custom.price(&o).cost_nanos, Some(123_456_789));
+    for bad in [json!(-1), json!(-0.0000000001), json!("0.1"), json!(1e30)] {
+        row["costUSD"] = bad;
+        let o = parse_record("claude_code", &row, &mut Context::default()).unwrap().unwrap();
+        assert!(!o.numeric_metadata.contains_key("reported_cost_nanos"));
+    }
 }
 
 #[test]

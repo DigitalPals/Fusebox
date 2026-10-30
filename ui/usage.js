@@ -186,8 +186,11 @@ function usageHTML() {
 }
 function usageNoticesHTML() {
   const u = Usage;
+  const reasons = u.summary?.combined?.totals?.unpriced_reasons || {};
+  const missing = Number(reasons.missing_usage || 0) + Number(reasons.incomplete_usage || 0);
   return `${u.error ? `<div class="notice usage-message err" role="alert"><span class="grow">${S.private ? 'Usage could not be loaded. Try refreshing.' : ux(u.error)}</span>${usageButton('refresh', 'Retry', '', false, 'btn sm')}</div>` : ''}
     ${u.actionError && !u.drawerOpen ? `<p class="notice usage-message err" role="alert">${S.private ? 'The action failed. Retry or check server logs.' : ux(u.actionError)}</p>` : ''}
+    ${missing ? `<p class="usage-message meta">${usageCount(missing)} calls have missing or incomplete token usage, often after cancellation or upstream errors. Their costs remain unknown and are excluded from estimates. Adding model prices cannot recover missing usage.</p>` : ''}
     ${u.loading && !u.summary ? '<p class="usage-message meta" role="status">Loading usage metadata…</p>' : ''}`;
 }
 
@@ -234,7 +237,21 @@ function usageCoverageLine(t) {
   const parts = [n ? `${(Math.floor((1 - unpriced / n) * 1000) / 10).toFixed(1)}% of calls priced` : 'No matching calls'];
   if (t.matched) parts.push(`${usageCount(t.matched)} matched across sources, counted once`);
   if (t.weak_identity) parts.push(`${usageCount(t.weak_identity)} history record${t.weak_identity === 1 ? '' : 's'} without a stable ID`);
-  for (const [k, label] of [['unpriced', 'unpriced'], ['partial', 'partial'], ['missing_usage', 'missing usage'], ['pricing_partial', 'with assumptions']]) if (t[k]) parts.push(`${usageCount(t[k])} ${label}`);
+  if (t.unpriced_reasons) {
+    const labels = { missing_usage: 'missing usage', incomplete_usage: 'incomplete usage', invalid_usage: 'invalid usage', unknown_model: 'without a model rate', unsupported_pricing: 'with unsupported pricing' };
+    let classified = 0;
+    for (const [key, label] of Object.entries(labels)) {
+      const count = Number(t.unpriced_reasons[key] || 0);
+      classified += count;
+      if (count) parts.push(`${usageCount(count)} ${label}`);
+    }
+    if (unpriced > classified) parts.push(`${usageCount(unpriced - classified)} unpriced`);
+  } else {
+    if (t.unpriced) parts.push(`${usageCount(t.unpriced)} unpriced`);
+  }
+  if (t.partial) parts.push(`${usageCount(t.partial)} partial`);
+  if (!t.unpriced_reasons && t.missing_usage) parts.push(`${usageCount(t.missing_usage)} missing usage`);
+  if (t.pricing_partial) parts.push(`${usageCount(t.pricing_partial)} with assumptions`);
   if (t.aggregation_overflow) parts.push('a total exceeds the supported range, amount unknown');
   return parts.join(' · ');
 }
@@ -336,6 +353,13 @@ function usageBreakdownRow(dim, r) {
 }
 function usageCoverage(r) {
   const n = Number(r.observations || 0);
+  if (r.unpriced_reasons) {
+    const reasons = r.unpriced_reasons;
+    const missing = Number(reasons.missing_usage || 0) + Number(reasons.incomplete_usage || 0);
+    const noRate = Number(reasons.unknown_model || 0);
+    if (missing && missing === Number(r.unpriced)) return [`${usageCount(missing)} missing usage`, 'warn'];
+    if (noRate && noRate === Number(r.unpriced)) return [`${usageCount(noRate)} no model rate`, 'warn'];
+  }
   if (n && Number(r.unpriced || 0) >= n) return ['Unpriced', 'fg2'];
   if (r.unpriced) return [`${usageCount(r.unpriced)} unpriced`, 'warn'];
   if (r.partial) return [`${usageCount(r.partial)} partial`, 'warn'];

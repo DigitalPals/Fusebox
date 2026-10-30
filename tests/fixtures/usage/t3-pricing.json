@@ -1,0 +1,260 @@
+{
+  "source": "T3 Code 0.1.3 installed usagePricing.js, LiteLLM cache fetched 2026-10-29",
+  "binary_sha256": "e2b8d466d223f0993b31d9a6dafd22bb06558cc1a119a9f932d7b5d363f09b74",
+  "cases": [
+    {
+      "id": "sol-priority-returned-default",
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "speed": "fast",
+      "tokens": [
+        198,
+        200320,
+        0,
+        735
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 55556000
+    },
+    {
+      "id": "sol-ultrafast",
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "speed": "ultrafast",
+      "tokens": [
+        198,
+        200320,
+        0,
+        735
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 166668000
+    },
+    {
+      "id": "sol-long-context-12h",
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "speed": "standard",
+      "tokens": [
+        300000,
+        10000,
+        200,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 611500000
+    },
+    {
+      "id": "haiku-dated",
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        100,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 1645000
+    },
+    {
+      "id": "haiku-long",
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "speed": "standard",
+      "tokens": [
+        110000,
+        100,
+        200,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 11526000
+    },
+    {
+      "id": "opus-fast-1h",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "speed": "fast",
+      "tokens": [
+        1000,
+        2000,
+        300,
+        400
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 27800000
+    },
+    {
+      "id": "sonnet-cache",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "speed": "standard",
+      "tokens": [
+        0,
+        1000000,
+        100,
+        50
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 100750000
+    },
+    {
+      "id": "gpt55-long-fast",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "speed": "fast",
+      "tokens": [
+        300001,
+        100000,
+        200,
+        300
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 3900012500
+    },
+    {
+      "id": "no-ultrafast-rate",
+      "provider": "openai",
+      "model": "gpt-6.1-terra",
+      "speed": "ultrafast",
+      "tokens": [
+        1000,
+        200,
+        100,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 1635000
+    },
+    {
+      "id": "no-cache-creation-rate",
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        100,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 4300000
+    },
+    {
+      "id": "normalized-variant",
+      "provider": "openai",
+      "model": "  GPT-6.1-SOL[1m]  ",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 3020000
+    },
+    {
+      "id": "unknown-model",
+      "provider": "openai",
+      "model": "definitely-unknown",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": null
+    },
+    {
+      "id": "unknown-provider-prefix",
+      "provider": "openai",
+      "model": "unknown/gpt-6.1-sol",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": null
+    },
+    {
+      "id": "reported-claude-cost",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": 12345678,
+      "expected_nanos": 12345678
+    },
+    {
+      "id": "reported-unknown-model",
+      "provider": "anthropic",
+      "model": "unknown",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": 12345678,
+      "expected_nanos": 12345678
+    },
+    {
+      "id": "synthetic",
+      "provider": "anthropic",
+      "model": "<synthetic>",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        200,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": null
+    },
+    {
+      "id": "claude-fast-with-batch-tier",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "speed": "fast",
+      "returned_tier": "batch+fast",
+      "tokens": [
+        1000,
+        2000,
+        300,
+        400
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 27800000
+    },
+    {
+      "id": "claude-priority-is-not-codex-fast",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "speed": "standard",
+      "returned_tier": "priority",
+      "tokens": [
+        1000,
+        2000,
+        300,
+        400
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 13900000
+    }
+  ]
+}

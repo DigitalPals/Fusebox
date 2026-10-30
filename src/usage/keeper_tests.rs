@@ -19,6 +19,15 @@ impl Fixture {
         Connection::open(&fixture.source).unwrap().execute_batch(SCHEMA).unwrap();
         let store = Store::open(&fixture.destination, 1024, 90, None).unwrap();
         store.shutdown().await.unwrap();
+        drop(store);
+        // Historical keeper lifetime-estimate fixtures retain their provider catalogue.
+        Connection::open(&fixture.destination)
+            .unwrap()
+            .execute(
+                "UPDATE usage_meta SET value=?1 WHERE key='catalogue'",
+                [serde_json::to_string(&Catalogue::provider_fixture()).unwrap()],
+            )
+            .unwrap();
         fixture
     }
     fn add(&self, id: i64, claude: bool) {

@@ -175,7 +175,7 @@ async fn copy_revision_purge_and_atomic_checkpoint() {
 }
 #[test]
 fn exact_price_cache_reasoning_thresholds_and_historical() {
-    let c = Catalogue::load(None).unwrap();
+    let c = Catalogue::provider_fixture();
     let mut a = event("proxy", "a");
     assert_eq!(c.price(&a).cost_nanos, Some(3_010_000));
     a.tokens.reasoning = Some(0);
@@ -303,7 +303,7 @@ async fn durable_transaction_rollback_and_request_id_namespace() {
 }
 #[test]
 fn overflow_missing_unsupported_regions_tools_and_catalogue_validation() {
-    let c = Catalogue::load(None).unwrap();
+    let c = Catalogue::provider_fixture();
     let mut a = event("proxy", "a");
     assert!(c.price(&a).partial);
     a.service_tier = Some("standard".into());
@@ -687,9 +687,15 @@ async fn large_exact_integer_cost_overflow_returns_explicit_null() {
 fn dashboard_metrics(value: &mut Value) {
     match value {
         Value::Object(fields) => {
-            for key in
-                ["logical_requests", "attempts", "logical_requests_unknown", "attempts_unknown", "trends", "models"]
-            {
+            for key in [
+                "logical_requests",
+                "attempts",
+                "logical_requests_unknown",
+                "attempts_unknown",
+                "trends",
+                "models",
+                "unpriced_reasons",
+            ] {
                 fields.remove(key);
             }
             for value in fields.values_mut() {
@@ -715,6 +721,79 @@ async fn assert_dashboard_matches(store: &Store, q: Query) {
     for field in ["version", "verified_at"] {
         assert_eq!(fast["pricing"][field], full["pricing"][field]);
     }
+}
+
+#[tokio::test]
+async fn unpriced_reasons_separate_missing_evidence_from_rates_with_source_deduplication() {
+    let p = path("unpriced-reasons");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
+    let at = boundary("2026-10-01T12:00:00Z", chrono_tz::UTC).unwrap();
+    let mut priced = event("proxy", "priced");
+    priced.event_at_ms = at;
+    priced.response_id = Some("shared-priced-response".into());
+    priced.account_id = Some("test-account".into());
+    let mut missing = event("proxy", "cancelled");
+    missing.event_at_ms = at;
+    missing.actual_model = Some("unknown-model-without-usage".into());
+    missing.tokens = Tokens::default();
+    missing.completeness = "missing".into();
+    missing.status = Some(499);
+    let mut incomplete = event("proxy", "incomplete");
+    incomplete.event_at_ms = at;
+    incomplete.tokens.cache_read = None;
+    incomplete.completeness = "partial".into();
+    let mut no_rate = event("proxy", "internal-model");
+    no_rate.event_at_ms = at;
+    no_rate.actual_model = Some("codex-auto-review".into());
+    let mut reported = event("claude_code", "reported-cost-without-tokens");
+    reported.event_at_ms = at;
+    reported.provider = "anthropic".into();
+    reported.tokens = Tokens::default();
+    reported.completeness = "missing".into();
+    reported.numeric_metadata.insert("reported_cost_nanos".into(), 42_000);
+    let mut matched = event("codex", "imported-missing-copy");
+    matched.event_at_ms = at;
+    matched.response_id = priced.response_id.clone();
+    matched.tokens = Tokens::default();
+    matched.completeness = "missing".into();
+    let mut outside = missing.clone();
+    outside.source_event_id = "outside-window".into();
+    outside.event_at_ms = at + 2 * 86_400_000;
+    store
+        .call(move |c| insert_batch(c, &[priced, missing, incomplete, no_rate, reported, matched, outside]))
+        .await
+        .unwrap();
+    let q = Query {
+        start: Some("2026-10-01".into()),
+        end: Some("2026-10-02".into()),
+        timezone: Some("UTC".into()),
+        ..Default::default()
+    };
+    let value = store.dashboard(q.clone()).await.unwrap();
+    let totals = &value["combined"]["totals"];
+    assert_eq!(totals["observations"], 5);
+    assert_eq!(totals["unpriced"], 3);
+    assert_eq!(totals["matched"], 1);
+    assert_eq!(totals["missing_usage"], 2, "a reported price may coexist with missing tokens");
+    assert_eq!(totals["unpriced_reasons"], json!({"missing_usage":1,"incomplete_usage":1,"unknown_model":1}));
+    for model in value["combined"]["breakdowns"]["model"].as_array().unwrap() {
+        let sum: i64 = model["unpriced_reasons"].as_object().unwrap().values().map(|v| v.as_i64().unwrap()).sum();
+        assert_eq!(sum, model["unpriced"].as_i64().unwrap());
+    }
+    assert_eq!(value, store.dashboard_scan(q.clone()).await.unwrap());
+    let only_imported = Query { source: Some("codex".into()), ..q.clone() };
+    let imported = store.dashboard(only_imported).await.unwrap();
+    assert_eq!(imported["combined"]["totals"]["observations"], 0);
+    assert_eq!(imported["combined"]["totals"]["unpriced_reasons"], json!({}));
+    let only_unknown = Query { model: Some("codex-auto-review".into()), ..q };
+    let filtered = store.dashboard(only_unknown).await.unwrap();
+    assert_eq!(filtered["combined"]["totals"]["unpriced_reasons"], json!({"unknown_model":1}));
+    store.call(|c| {
+        let plan: String = c.query_row("EXPLAIN QUERY PLAN SELECT event_at_ms,pricing_basis FROM usage_entries WHERE cost_nanos IS NULL AND event_at_ms>=0 AND event_at_ms<2000000000000", [], |row|row.get(3))?;
+        assert!(plan.contains("usage_entries_unpriced_time"), "{plan}");
+        Ok(())
+    }).await.unwrap();
+    store.shutdown().await.unwrap();
 }
 #[tokio::test]
 async fn dashboard_matches_full_summary_with_overlap_revisions_filters_and_fresh_writes() {
@@ -1136,6 +1215,92 @@ fn insert_legacy(c: &mut Connection, observations: &[Observation]) -> Result<Val
     Ok(result)
 }
 #[tokio::test]
+async fn t3_repair_and_explicit_refresh_preserve_evidence_unknowns_and_audit() {
+    let p = path("t3-reprice");
+    let legacy = Catalogue::provider_fixture();
+    let store = Store::start(&p, 16, 3650, legacy, None).unwrap();
+    let mut haiku = event("proxy", "dated-haiku");
+    haiku.provider = "anthropic".into();
+    haiku.actual_model = Some("claude-haiku-4-5-20251001".into());
+    let mut fast = event("proxy", "requested-fast");
+    fast.service_tier = Some("default".into());
+    fast.set_requested_speed(Some("priority"));
+    let mut missing = event("proxy", "disconnected");
+    missing.tokens = Tokens::default();
+    missing.completeness = "missing".into();
+    missing.status = Some(499);
+    let mut custom = event("proxy", "custom");
+    custom.set_requested_speed(Some("priority"));
+    store.call(move |c| insert_batch(c, &[haiku, fast, missing, custom])).await.unwrap();
+    let before = store
+        .call(|c| {
+            let snapshot: String =
+                c.query_row("SELECT snapshot_json FROM usage_observations WHERE source_event_id='custom'", [], |r| {
+                    r.get(0)
+                })?;
+            let mut snapshot: Value = serde_json::from_str(&snapshot)?;
+            snapshot["local_override"] = true.into();
+            c.execute(
+                "UPDATE usage_observations SET snapshot_json=?1 WHERE source_event_id='custom'",
+                [serde_json::to_string(&snapshot)?],
+            )?;
+            let rows = c
+                .prepare("SELECT source_event_id,payload,fingerprint FROM usage_observations ORDER BY id")?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+    store.shutdown().await.unwrap();
+    drop(store);
+    let store = Store::open(&p, 16, 3650, None).unwrap();
+    assert_eq!(store.startup_repriced(), 1, "only the dated Haiku alias needs startup repair");
+    store
+        .call(|c| {
+            let cost = |c: &Connection, id: &str| {
+                c.query_row("SELECT cost_nanos FROM usage_observations WHERE source_event_id=?1", [id], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
+            };
+            assert_eq!(cost(c, "dated-haiku")?, Some(1_510_000));
+            assert_eq!(cost(c, "requested-fast")?, Some(3_010_000), "startup retains established prices");
+            assert_eq!(cost(c, "disconnected")?, None);
+            assert_eq!(reprice_all(c)?, 1);
+            assert_eq!(cost(c, "requested-fast")?, Some(6_020_000));
+            assert_eq!(cost(c, "custom")?, Some(3_010_000));
+            assert_eq!(cost(c, "disconnected")?, None);
+            assert_eq!(reprice_all(c)?, 0);
+            assert_eq!(reprice(c)?, 0);
+            let revisions: i64 = c.query_row("SELECT count(*) FROM usage_price_revisions", [], |r| r.get(0))?;
+            assert_eq!(revisions, 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let after = store
+        .call(|c| {
+            let mut decoder = codec::Decoder::new(c);
+            let rows = c
+                .prepare("SELECT source_event_id,payload,fingerprint FROM usage_observations ORDER BY id")?
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .map(|(id, payload, fingerprint)| Ok((id, decoder.decode((&payload).into())?, fingerprint)))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap();
+    assert_eq!(before, after, "repricing cannot rewrite returned tiers, tokens or request evidence");
+    let range = all();
+    assert_eq!(store.dashboard(range.clone()).await.unwrap(), store.dashboard_scan(range).await.unwrap());
+    assert_eq!(store.reference_summary(all()).await.unwrap()["proxy"]["unpriced"], 1);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
     let p = path("reprice");
     let store = Store::open(&p, 8, 3650, None).unwrap();
@@ -1201,7 +1366,7 @@ async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
         .await
         .unwrap();
     let item = &page["items"][0];
-    assert_eq!(item["pricing_basis"], "current_rate_equivalent");
+    assert_eq!(item["pricing_basis"], "t3_current_rate_equivalent");
     assert_eq!(item["pricing_snapshot"]["backdated"], true);
     assert_eq!(item["pricing_snapshot"]["partial"], false);
     store.shutdown().await.unwrap();
@@ -1210,7 +1375,7 @@ async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
 #[tokio::test]
 async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots() {
     let p = path("region-reprice");
-    let store = Store::open(&p, 8, 3650, None).unwrap();
+    let store = Store::start(&p, 8, 3650, Catalogue::provider_fixture(), None).unwrap();
     let mut unavailable = anthropic("proxy", "unavailable", Some("msg-unavailable"), &Utc::now().to_rfc3339());
     unavailable.inference_geo = Some("not_available".into());
     let mut unknown = unavailable.clone();
@@ -1237,8 +1402,8 @@ async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots(
         .unwrap();
     store.shutdown().await.unwrap();
     let store = Store::open(&p, 8, 3650, None).unwrap();
-    assert_eq!(store.startup_repriced(), 1);
-    assert_eq!(store.reference_summary(all()).await.unwrap()["proxy"]["unpriced"], 1);
+    assert_eq!(store.startup_repriced(), 2);
+    assert_eq!(store.reference_summary(all()).await.unwrap()["proxy"]["unpriced"], 0);
     store
         .call(move |c| {
             let (cost, raw): (i64, String) = c.query_row(
@@ -1248,13 +1413,8 @@ async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots(
             )?;
             assert!(cost > 0);
             let snapshot: Value = serde_json::from_str(&raw)?;
-            assert_eq!(snapshot["partial"], true);
-            assert!(
-                snapshot["assumptions"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("inference_region_unavailable_global_rate_assumed"))
-            );
+            assert_eq!(snapshot["partial"], false);
+            assert!(snapshot["assumptions"].as_array().unwrap().contains(&json!("t3_flat_category_rates")));
             let after: String =
                 c.query_row("SELECT snapshot_json FROM usage_observations WHERE source_event_id='priced'", [], |r| {
                     r.get(0)
@@ -1323,7 +1483,7 @@ async fn migrations_chain_to_the_current_schema_and_keep_existing_rows() {
 #[tokio::test]
 async fn refreshed_catalogue_repairs_known_prices_and_keeps_an_audit() {
     let p = path("rate-correction");
-    let mut old = Catalogue::load(None).unwrap();
+    let mut old = Catalogue::provider_fixture();
     old.version = "2026-10-07.3".into();
     old.rates.retain(|r| !r.models.iter().any(|m| m == "claude-haiku-5-5"));
     for r in &mut old.rates {

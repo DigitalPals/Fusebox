@@ -203,6 +203,36 @@ async fn historical_proxy_exceeds_ring_survives_restart_and_streams_do_not_doubl
     assert_eq!(summary(&restarted).await["proxy"]["attempts"], 306);
 }
 #[tokio::test]
+async fn requested_speed_prices_http_and_sse_without_overwriting_returned_tier() {
+    let dir = Directory::new();
+    let upstream =
+        serve(Router::new().route("/v1/responses", post(mock)).with_state(Arc::new(AtomicUsize::new(0)))).await;
+    let app = App::new(config(&dir, &upstream.url, false), dir.0.join("config.yaml"));
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let client = reqwest::Client::new();
+    for (tier, stream) in [("priority", false), ("ultrafast", true)] {
+        let r = client
+            .post(format!("{}/v1/responses", proxy.url))
+            .bearer_auth("synthetic-inference")
+            .json(&json!({"model":"gpt-6.1-sol","input":"synthetic","service_tier":tier,"stream":stream}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        r.bytes().await.unwrap();
+    }
+    app.usage.as_ref().unwrap().flush().await.unwrap();
+    let page = app.usage.as_ref().unwrap().details(store::Query::default()).await.unwrap();
+    let mut costs = Vec::new();
+    for item in page["items"].as_array().unwrap() {
+        assert_eq!(item["service_tier"], "default");
+        costs.push(item["pricing_snapshot"]["cost_nanos"].as_i64().unwrap());
+    }
+    costs.sort_unstable();
+    assert_eq!(costs, [1_134_000, 3_402_000]);
+}
+
+#[tokio::test]
 async fn retries_keep_failed_usage_one_logical_request() {
     let dir = Directory::new();
     let upstream =
@@ -236,9 +266,11 @@ async fn native_websocket_and_translated_http_capture_usage() {
     let mut req = format!("{}/v1/responses", proxy.url.replace("http:", "ws:")).into_client_request().unwrap();
     req.headers_mut().insert("authorization", "Bearer synthetic-inference".parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
-    ws.send(WsMessage::Text(json!({"type":"response.create","model":"gpt-6.1-sol","input":[]}).to_string().into()))
-        .await
-        .unwrap();
+    ws.send(WsMessage::Text(
+        json!({"type":"response.create","model":"gpt-6.1-sol","input":[],"service_tier":"priority"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
     let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
     assert!(text.contains("response.completed"));
     ws.close(None).await.unwrap();
@@ -251,6 +283,16 @@ async fn native_websocket_and_translated_http_capture_usage() {
     assert_eq!(s["proxy"]["tokens"]["write_30m"], 12);
     assert_eq!(s["proxy"]["tokens"]["write_12h"], 8);
     assert_eq!(s["proxy"]["tokens"]["reasoning"], 60);
+    let page = app.usage.as_ref().unwrap().details(store::Query::default()).await.unwrap();
+    let native = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["response_id"].as_str().is_some_and(|id| id.starts_with("resp_ws_")))
+        .unwrap();
+    assert_eq!(native["service_tier"], "default");
+    assert_eq!(native["numeric_metadata"]["requested_speed"], 2);
+    assert_eq!(native["pricing_snapshot"]["cost_nanos"], 1_134_000);
 }
 #[tokio::test]
 async fn cancelled_interrupted_and_missing_usage_remain_explicit() {

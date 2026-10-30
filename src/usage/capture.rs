@@ -77,6 +77,7 @@ pub struct RequestUsage {
     store: Option<Store>,
     logical_id: String,
     requested_model: Option<String>,
+    requested_speed: Option<u64>,
     client: Option<String>,
     session: Option<String>,
     current: Option<Capture>,
@@ -93,6 +94,7 @@ impl RequestUsage {
             store: self.store.clone(),
             logical_id: self.logical_id.clone(),
             requested_model: self.requested_model.clone(),
+            requested_speed: self.requested_speed,
             client: self.client.clone(),
             session: self.session.clone(),
             current: None,
@@ -106,6 +108,7 @@ impl RequestUsage {
             store,
             logical_id: uuid::Uuid::new_v4().to_string(),
             requested_model: safe(model),
+            requested_speed: None,
             client: None,
             session: None,
             current: None,
@@ -116,6 +119,12 @@ impl RequestUsage {
     }
     pub fn program(&mut self, name: Option<&'static str>) {
         self.program = name;
+    }
+    /// Capture before request translation or control downgrades. Never overwrite
+    /// the provider-returned tier when pricing the requested T3 speed.
+    pub fn requested_speed(&mut self, body: &Value) {
+        let tier = body["service_tier"].as_str().or_else(|| body["speed"].as_str());
+        self.requested_speed = Some(super::types::Speed::from_tier(tier) as u64);
     }
     pub fn client(&mut self, h: &axum::http::HeaderMap) {
         self.client = client_id(h).and_then(safe);
@@ -141,6 +150,9 @@ impl RequestUsage {
         let mut o = Observation::new("proxy", id.clone(), provider, chrono::Utc::now().timestamp_millis());
         o.parser_version = "proxy-native-v1".into();
         o.requested_model = self.requested_model.clone();
+        if let Some(speed) = self.requested_speed {
+            o.numeric_metadata.insert("requested_speed".into(), speed);
+        }
         o.logical_request_id = Some(self.logical_id.clone());
         o.attempt_id = Some(id);
         o.client_id = self.client.clone();

@@ -284,7 +284,7 @@ fn documents(c: &Connection) -> Result<Vec<Document>> {
 #[tokio::test]
 async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original_text() {
     let p = temp("compress");
-    let store = Store::open(&p, 64, 3650, None).unwrap();
+    let store = Store::start(&p, 64, 3650, Catalogue::provider_fixture(), None).unwrap();
     let records = journal(11, 1200);
     store.call(move |c| insert_batch(c, &records)).await.unwrap();
     let everything = Query { start: Some("2026-03-01".into()), end: Some("2026-05-01".into()), ..Default::default() };
@@ -437,7 +437,7 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
     drop(c);
 
     // And forward again: the same records, the same totals.
-    let store = Store::open(&p, 64, 3650, None).unwrap();
+    let store = Store::start(&p, 64, 3650, Catalogue::provider_fixture(), None).unwrap();
     assert_eq!(store.dashboard_scan(everything.clone()).await.unwrap(), store.dashboard(everything).await.unwrap());
     let back = store.call(|c| documents(c)).await.unwrap();
     assert_eq!(strip(&back), strip(&latest));

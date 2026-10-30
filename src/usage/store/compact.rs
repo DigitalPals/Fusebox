@@ -382,6 +382,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     // audit, and omit rate combinations their calculator cannot represent.
     let catalogue: String = tx.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let mut legacy: Value = serde_json::from_str(&catalogue)?;
+    legacy.as_object_mut().unwrap().remove("calculation");
     let rates = legacy["rates"].as_array_mut().ok_or_else(|| anyhow!("invalid saved catalogue"))?;
     let before_rates = rates.len();
     rates.retain(|r| {
@@ -412,6 +413,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
          DROP TABLE usage_facets;
          DROP TABLE usage_dictionaries;
          DROP INDEX usage_entries_imported;
+         DROP INDEX IF EXISTS usage_entries_unpriced_time;
          DELETE FROM usage_meta WHERE key IN ('database_id','active_dictionary','compact_cursor');
          ALTER TABLE usage_observations DROP COLUMN pricing_partial;
          ALTER TABLE usage_observations DROP COLUMN write_30m;

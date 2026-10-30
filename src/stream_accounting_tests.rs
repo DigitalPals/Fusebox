@@ -162,6 +162,39 @@ async fn interrupted_passthrough_keeps_received_usage_and_stays_cancelled() {
 }
 
 #[tokio::test]
+async fn disconnect_keeps_usage_later_in_an_already_received_sse_batch() {
+    for format in [Format::Responses, Format::Claude, Format::Chat, Format::Gemini] {
+        let (app, tracker) = tracker(format);
+        let capture = tracker.usage_tap().unwrap();
+        let first = match format {
+            Format::Responses => {
+                json!({"type":"response.created","response":{"id":"resp_test","status":"in_progress"}})
+            }
+            Format::Claude => json!({"type":"ping"}),
+            Format::Chat => {
+                json!({"id":"chat_test","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})
+            }
+            Format::Gemini => json!({"candidates":[{"content":{"parts":[{"text":"first"}]}}]}),
+        };
+        let messages = std::iter::once(first).chain(completed_messages(format)).collect();
+        let (response, _server) = response(messages, format == Format::Chat, true).await;
+        let mut stream = passthrough_stream(Box::pin(response.bytes_stream()), format, tracker, false, 16 << 20);
+        // All events arrived in one upstream chunk, but the client reads only
+        // the first event. Do not drop usage already sitting in that chunk.
+        assert!(!terminal(format, &stream.next().await.unwrap()));
+        drop(stream);
+        let log = recorded(&app, 499, 20, 4, 80);
+        assert_eq!(log.error.as_deref(), Some("client disconnected"));
+        let observation = capture.snapshot(Some(499), None, true);
+        assert_eq!(observation.tokens.input, Some(20), "{format:?}");
+        assert_eq!(observation.tokens.cache_read, Some(80), "{format:?}");
+        assert_eq!(observation.tokens.cache_write, Some(0), "{format:?}");
+        assert_eq!(observation.tokens.output, Some(4), "{format:?}");
+        assert_eq!(observation.logical_success, Some(false));
+    }
+}
+
+#[tokio::test]
 async fn interrupted_rendered_stream_keeps_received_usage_and_stays_cancelled() {
     let (app, tracker) = tracker(Format::Responses);
     let events = futures::stream::iter([

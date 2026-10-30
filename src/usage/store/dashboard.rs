@@ -26,6 +26,7 @@ struct Metrics {
     partial: i64,
     missing: i64,
     pricing_partial: i64,
+    unpriced_reasons: BTreeMap<&'static str, i64>,
 }
 impl Metrics {
     fn cost(&self) -> Option<i64> {
@@ -78,7 +79,8 @@ impl Metrics {
         json!({"observations":self.observations,"estimated_cost_nanos":sums[0],
             "known_cost_nanos":if self.known[0]>0 && sums[0].is_none(){None}else{Some(sums[0].unwrap_or(0))},
             "aggregation_overflow":!overflow.is_empty(),"aggregation_overflow_fields":overflow,
-            "unpriced":self.observations-self.known[0],"partial":self.partial,"missing_usage":self.missing,
+            "unpriced":self.observations-self.known[0],"unpriced_reasons":self.unpriced_reasons,
+            "partial":self.partial,"missing_usage":self.missing,
             "pricing_partial":self.pricing_partial,"tokens":tokens,"missing_token_counts":missing})
     }
 }
@@ -186,6 +188,44 @@ impl Summary {
         Ok(())
     }
 
+    /// Only unknown costs need this extra pass. The partial index keeps it tied
+    /// to those records, and scalar columns avoid decoding usage documents.
+    /// Apply the same global source deduplication as the main accounting scan.
+    fn unpriced_reasons(&mut self, conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<()> {
+        let client = dimension("client_id", "o");
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT o.event_at_ms,o.provider,o.model,o.account_id,{client},
+             o.input,o.cache_read,o.cache_write,o.output,o.pricing_basis
+             FROM usage_entries o WHERE o.cost_nanos IS NULL AND {where_sql}
+             AND (o.source='proxy' OR NOT EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association
+                  WHERE p.association_key=o.association_key AND p.source='proxy'))"
+        ))?;
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            read::check()?;
+            let date = DateTime::from_timestamp_millis(row.get(0)?)
+                .context("usage timestamp out of bounds")?
+                .with_timezone(&self.tz)
+                .date_naive();
+            let dims = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
+            let tokens: [Option<i64>; 4] = [row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?];
+            let basis = row.get_ref(9)?.as_str()?.trim_start_matches("local_override:");
+            let reason = if tokens.iter().all(Option::is_none) {
+                "missing_usage"
+            } else if tokens.iter().any(Option::is_none) {
+                "incomplete_usage"
+            } else if basis == "invalid_tokens" {
+                "invalid_usage"
+            } else if basis == "unknown_model" {
+                "unknown_model"
+            } else {
+                "unsupported_pricing"
+            };
+            self.add(date, &dims, |metrics| *metrics.unpriced_reasons.entry(reason).or_default() += 1);
+        }
+        Ok(())
+    }
+
     /// Adds whole rollup buckets. False when a bucket can't be used exactly (a sum
     /// left the 64-bit range, or the bucket crosses a local midnight in this
     /// timezone); the caller then recomputes everything from entries.
@@ -280,6 +320,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
             summary.scan(conn, everything, &where_sql, &values)?;
         }
     }
+    summary.unpriced_reasons(conn, &where_sql, &values)?;
     let Summary { totals, matched, history_only, weak_identity, trends, breakdowns, mut client_models, .. } = summary;
     let mut totals = totals.value();
     totals["matched"] = json!(matched);
@@ -316,7 +357,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
             "trend":trends[usize::from(stack=="model")],"trends":{"provider":trends[0],"model":trends[1]},"breakdowns":out},
         "facets":facets,
         "pricing":{"version":catalogue.version,"verified_at":catalogue.verified_at,
-            "basis":"API list-price equivalent estimate; usage older than the catalogue is priced at today's rates as a backdated current-rate equivalent, not what was paid at the time"}}))
+            "calculation":catalogue.calculation,"basis":catalogue.basis()}}))
 }
 
 /// Select bounded output before expanding aggregates into nested JSON. Large
@@ -369,7 +410,7 @@ fn client_model_values(models: BTreeMap<Option<String>, Metrics>) -> Value {
     models
         .into_iter()
         .map(|(id, m)| {
-            json!({"id":id,"observations":m.observations,"unpriced":m.observations-m.known[0],
+            json!({"id":id,"observations":m.observations,"unpriced":m.observations-m.known[0],"unpriced_reasons":m.unpriced_reasons,
                 "estimated_cost_nanos":cost(&m).and_then(|n| i64::try_from(n).ok())})
         })
         .collect()

@@ -250,7 +250,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let combined = combined_summary(conn, q, &where_sql, &values, &date_expression)?;
     Ok(
-        json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},"proxy":proxy,"sources":sources,"combined":combined,"trend":trend,"group_by":q.group_by.as_deref().unwrap_or("day"),"breakdowns":breakdowns,"facets":facets,"pricing":{"version":catalogue.version,"verified_at":catalogue.verified_at,"basis":"API list-price equivalent estimate; source totals may overlap; usage older than the catalogue is priced at today's rates as a backdated current-rate equivalent, not what was paid at the time"},"reconciliation":{"basis":"proxy evidence only","cross_source_grand_total":null,"identity":"provider response ID only; native stable source event ID within source","conflicts":conflicts}}),
+        json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},"proxy":proxy,"sources":sources,"combined":combined,"trend":trend,"group_by":q.group_by.as_deref().unwrap_or("day"),"breakdowns":breakdowns,"facets":facets,"pricing":{"version":catalogue.version,"verified_at":catalogue.verified_at,"calculation":catalogue.calculation,"basis":catalogue.basis()},"reconciliation":{"basis":"proxy evidence only","cross_source_grand_total":null,"identity":"provider response ID only; native stable source event ID within source","conflicts":conflicts}}),
     )
 }
 fn combined_summary(

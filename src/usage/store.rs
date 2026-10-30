@@ -278,6 +278,9 @@ impl Store {
             // Bounded collector outboxes never serve dashboards. Keep their
             // compact timestamp index and allocation budget unchanged.
             upgrade_dashboard_index(&mut conn)?;
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS usage_entries_unpriced_time ON usage_entries(event_at_ms) WHERE cost_nanos IS NULL;",
+            )?;
         }
         conn.execute("INSERT INTO usage_meta(key,value) VALUES('catalogue',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(&catalogue)?])?;
         conn.execute("INSERT INTO usage_meta(key,value) VALUES('retention_days',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[retention_days.to_string()])?;
@@ -848,6 +851,15 @@ fn backup_file(database: &Path, to: &Path) -> Result<u64> {
 /// Cache writes are corrected only when the stored observation proves its TTL.
 /// Every revision preserves its previous snapshot in the same transaction as rollups.
 pub fn reprice(conn: &mut Connection) -> Result<u64> {
+    reprice_mode(conn, false)
+}
+
+/// Explicitly refresh saved estimates; ordinary startup preserves established prices.
+pub fn reprice_all(conn: &mut Connection) -> Result<u64> {
+    reprice_mode(conn, true)
+}
+
+fn reprice_mode(conn: &mut Connection, all: bool) -> Result<u64> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_price_revisions(
         id INTEGER PRIMARY KEY,observation_id INTEGER NOT NULL REFERENCES usage_observations(id) ON DELETE CASCADE,
@@ -867,11 +879,13 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
             FROM usage_observations WHERE id>?1 AND (
               (cost_nanos IS NULL AND REPLACE(pricing_basis,'local_override:','') IN
                 ('outside_effective_period','unsupported_inference_region','unknown_model','unsupported_service_tier',
-                 'unsupported_service_tier_context','unsupported_regional_model','unsupported_rate_or_overflow'))
+                 'unsupported_service_tier_context','unsupported_regional_model','unsupported_rate_or_overflow',
+                 'unknown_cache_write_ttl'))
               OR (model='claude-sonnet-5-5' AND catalogue_version='2026-10-07.3' AND cache_read>0 AND cost_nanos IS NOT NULL)
               OR (provider='openai' AND cache_write>0 AND (write_30m IS NOT NULL OR write_12h IS NOT NULL)
-                AND (cost_nanos IS NULL OR catalogue_version='2026-10-18.1')))
-            ORDER BY id LIMIT 2000")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,rusqlite::types::Value>(5)?,r.get::<_,String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                AND (cost_nanos IS NULL OR catalogue_version='2026-10-18.1'))
+              OR (?2 AND catalogue_version<>?3))
+            ORDER BY id LIMIT 2000")?.query_map(params![cursor, all, catalogue.version], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,rusqlite::types::Value>(5)?,r.get::<_,String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let Some(last) = rows.last() else { break };
         cursor = last.0;
         let mut documents = Documents::new(&tx)?;
@@ -888,8 +902,10 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
                 if catalogue.local_override || old.local_override {
                     continue;
                 }
-                let Some(rate) = old.rate else { continue };
-                if o.provider == "openai" {
+                if all && old_catalogue != catalogue.version {
+                    correction = "catalogue_refresh";
+                } else if o.provider == "openai" {
+                    let Some(rate) = old.rate else { continue };
                     // Old observations without TTL counts are not repairable.
                     if old_catalogue != "2026-10-18.1"
                         || rate.cache_write_nanos_per_token.is_none()
@@ -902,6 +918,7 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
                     }
                     correction = "openai_cache_write_lifetime_correction";
                 } else {
+                    let Some(rate) = old.rate else { continue };
                     if rate.cache_read_nanos_per_token != Some(200) {
                         continue;
                     }
@@ -909,7 +926,10 @@ pub fn reprice(conn: &mut Connection) -> Result<u64> {
                 }
             }
             let snapshot = catalogue.price(&o);
-            if snapshot.cost_nanos == old_cost && (old_cost.is_some() || snapshot.basis == basis) {
+            if snapshot.cost_nanos == old_cost
+                && (old_cost.is_some() || snapshot.basis == basis)
+                && !(all && old_cost.is_some() && old_catalogue != catalogue.version)
+            {
                 continue;
             }
             // A catalogue change must never remove an established price.

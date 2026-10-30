@@ -37,7 +37,7 @@ fn captures_disjoint_openai_lifetimes_in_both_wire_formats() {
         assert_eq!(o.tokens, event("expected").tokens);
         assert_eq!(o.tokens.total(), Some(1100));
         assert_eq!(o.completeness, "complete");
-        assert_eq!(Catalogue::load(None).unwrap().price(&o).cost_nanos, Some(3_210_000));
+        assert_eq!(Catalogue::provider_fixture().price(&o).cost_nanos, Some(3_210_000));
         observe(&mut o, &json!({"usage":usage}));
         observe(&mut o, &json!({"usage":{output:110}}));
         assert_eq!((o.tokens.write_30m, o.tokens.write_12h), (Some(80), Some(120)));
@@ -47,7 +47,7 @@ fn captures_disjoint_openai_lifetimes_in_both_wire_formats() {
 
 #[test]
 fn lifetime_rates_cover_threshold_tier_and_region_without_double_counting() {
-    let c = Catalogue::load(None).unwrap();
+    let c = Catalogue::provider_fixture();
     let mut o = event("rates");
     // 30m = 1.25x input; 12h = 2.5x input, followed by the tier/region multiplier.
     assert_eq!(c.price(&o).cost_nanos, Some(700 * 2000 + 100 * 100 + 80 * 2500 + 120 * 5000 + 100 * 10000));
@@ -63,7 +63,7 @@ fn lifetime_rates_cover_threshold_tier_and_region_without_double_counting() {
 
 #[test]
 fn absent_or_incomplete_lifetimes_are_unpriced_and_legacy_catalogues_still_load() {
-    let c = Catalogue::load(None).unwrap();
+    let c = Catalogue::provider_fixture();
     let mut o = event("unknown");
     o.tokens.write_30m = None;
     o.tokens.write_12h = None;
@@ -98,7 +98,7 @@ fn absent_or_incomplete_lifetimes_are_unpriced_and_legacy_catalogues_still_load(
 
 #[test]
 fn malformed_lifetime_counts_never_keep_stale_known_lifetimes() {
-    let c = Catalogue::load(None).unwrap();
+    let c = Catalogue::provider_fixture();
     for details in [
         json!({"ttl_30m_tokens":null,"ttl_12h_tokens":120}),
         json!({"ttl_30m_tokens":-1,"ttl_12h_tokens":120}),
@@ -165,7 +165,7 @@ async fn lifetime_columns_survive_reopen_rollups_and_combined_deduplication() {
     assert_eq!(rolled["combined"]["totals"]["tokens"]["cache_write"], 200);
     assert_eq!(rolled["combined"]["totals"]["tokens"]["write_30m"], 80);
     assert_eq!(rolled["combined"]["totals"]["tokens"]["write_12h"], 120);
-    assert_eq!(rolled["combined"]["totals"]["estimated_cost_nanos"], 3_210_000);
+    assert_eq!(rolled["combined"]["totals"]["estimated_cost_nanos"], 2_910_000);
     store.shutdown().await.unwrap();
     drop(store);
     let store = Store::open(&path, 32, 3650, None).unwrap();
@@ -185,7 +185,7 @@ async fn lifetime_columns_survive_reopen_rollups_and_combined_deduplication() {
 fn schema_four_migration_preserves_original_documents_without_guessing() {
     let mut c = Connection::open_in_memory().unwrap();
     migrate(&mut c).unwrap();
-    let cat = Catalogue::load(None).unwrap();
+    let cat = Catalogue::provider_fixture();
     c.execute("INSERT INTO usage_meta VALUES('catalogue',?1)", [serde_json::to_string(&cat).unwrap()]).unwrap();
     let mut o = event("old");
     o.tokens.write_30m = None;
@@ -234,7 +234,7 @@ fn lifetime_details_without_write_total_preserve_evidence_and_remain_unpriced() 
         assert_eq!(o.tokens.cache_write, None, "{details}");
         assert_eq!(o.tokens.input, None, "{details}");
         assert_eq!(o.completeness, "partial", "{details}");
-        assert_eq!(Catalogue::load(None).unwrap().price(&o).cost_nanos, None, "{details}");
+        assert_eq!(Catalogue::provider_fixture().price(&o).cost_nanos, None, "{details}");
         if details["ttl_12h_tokens"].is_u64() {
             assert_eq!(o.tokens.write_12h, Some(120));
         }
@@ -246,7 +246,7 @@ fn richer_lifetime_evidence_wins_replayed_response_in_either_order() {
     for reverse in [false, true] {
         let mut c = Connection::open_in_memory().unwrap();
         migrate(&mut c).unwrap();
-        let cat = Catalogue::load(None).unwrap();
+        let cat = Catalogue::provider_fixture();
         c.execute("INSERT INTO usage_meta VALUES('catalogue',?1)", [serde_json::to_string(&cat).unwrap()]).unwrap();
         let mut known = event("z-known");
         known.response_id = Some("replayed".into());
@@ -271,7 +271,7 @@ fn richer_lifetime_evidence_wins_replayed_response_in_either_order() {
 fn repricing_corrects_only_trustworthy_stored_lifetimes_with_full_audit() {
     let mut c = Connection::open_in_memory().unwrap();
     migrate(&mut c).unwrap();
-    let cat = Catalogue::load(None).unwrap();
+    let cat = Catalogue::provider_fixture();
     let mut legacy = cat.clone();
     legacy.version = "2026-10-18.1".into();
     for rate in &mut legacy.rates {
@@ -349,5 +349,5 @@ fn same_total_partial_breakdown_replaces_old_lifetimes_atomically() {
     );
     assert_eq!(o.tokens.cache_write, Some(10));
     assert_eq!((o.tokens.write_30m, o.tokens.write_12h), (Some(0), None));
-    assert_eq!(Catalogue::load(None).unwrap().price(&o).basis, "unknown_cache_write_ttl");
+    assert_eq!(Catalogue::provider_fixture().price(&o).basis, "unknown_cache_write_ttl");
 }

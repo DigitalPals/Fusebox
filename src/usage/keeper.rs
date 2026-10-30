@@ -73,8 +73,12 @@ fn observation(row: &Row<'_>, origin: &str) -> Result<Option<Observation>> {
     o.auth_type = label(row, 5)?;
     o.account_id =
         label(row, 6)?.map(|id| format!("keeper-account:{}", hash(format!("{origin}\0{provider}\0{id}").as_bytes())));
-    // A requested priority tier can resolve to default. Prefer the response tier.
-    o.service_tier = label(row, 9)?.or(label(row, 8)?);
+    // Preserve the returned tier; T3 pricing separately follows requested speed.
+    let requested_tier = label(row, 8)?;
+    o.service_tier = label(row, 9)?.or(requested_tier.clone());
+    if requested_tier.is_some() {
+        o.set_requested_speed(requested_tier.as_deref());
+    }
     o.logical_success = boolean(row, 10)?.map(|failed| !failed);
     let (input, output, reasoning, read, write, total) =
         (number(row, 12)?, number(row, 13)?, number(row, 14)?, number(row, 15)?, number(row, 16)?, number(row, 17)?);

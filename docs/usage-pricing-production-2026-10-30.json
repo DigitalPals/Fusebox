@@ -1,0 +1,211 @@
+{
+  "deployed_on": "2026-10-30",
+  "verified_at": "2026-10-30T08:59:03.032691+00:00",
+  "production_url": "https://10.10.0.235:8317/",
+  "outcome": "deployed",
+  "forced": true,
+  "version": "0.11.1+gui.05e7012634b1",
+  "binary_sha256": "30d67e863e007776393891a9afbc9ab48cdb559c045923fb2cc406648c1ad720",
+  "source_commit": "f27040a4d39bbd31915baf76552fec7fe6fe1529",
+  "source_working_tree": true,
+  "source_sha256": "05e7012634b13c4813b45620a88c1cb6e286af6cc083e5b0945c2be64892eee2",
+  "source_diff_sha256": "0203fb16970a055aeea09f59bc818aaa076dfef0e274e15596befba65e860d18",
+  "catalogue_version": "t3-2026-10-30.1",
+  "transaction": "2800a2ce55364627b3698974bb149745",
+  "repriced_snapshots": 478340,
+  "recovered_unpriced_records": 81,
+  "recovered_fixed_window_records": 73,
+  "refresh_duration_seconds": 49.032,
+  "second_refresh_changed": 0,
+  "evidence_preserved": true,
+  "retained_observations_during_refresh": 484701,
+  "before": {
+    "entries": {
+      "cache_read": 103343095109,
+      "cache_write": 1907490568,
+      "cost_nanos": 49878824623010,
+      "input": 767266663,
+      "observations": 484701,
+      "output": 330434489,
+      "reasoning": 123467149,
+      "unpriced": 6442,
+      "write_12h": 0,
+      "write_1h": 2294688,
+      "write_30m": 0,
+      "write_5m": 1265385185
+    },
+    "fixed_window": {
+      "cache_read": 69201665571,
+      "cache_write": 1292259694,
+      "cost_nanos": 28113306122780,
+      "input": 448951354,
+      "observations": 313641,
+      "output": 220946690,
+      "reasoning": 85201095,
+      "unpriced": 6259,
+      "write_12h": 0,
+      "write_1h": 2294688,
+      "write_30m": 0,
+      "write_5m": 1251120336
+    }
+  },
+  "after": {
+    "entries": {
+      "cache_read": 103343095109,
+      "cache_write": 1907490568,
+      "cost_nanos": 49794390345710,
+      "input": 767266663,
+      "observations": 484701,
+      "output": 330434489,
+      "reasoning": 123467149,
+      "unpriced": 6361,
+      "write_12h": 0,
+      "write_1h": 2294688,
+      "write_30m": 0,
+      "write_5m": 1265385185
+    },
+    "fixed_window": {
+      "cache_read": 69201665571,
+      "cache_write": 1292259694,
+      "cost_nanos": 28106610832030,
+      "input": 448951354,
+      "observations": 313641,
+      "output": 220946690,
+      "reasoning": 85201095,
+      "unpriced": 6186,
+      "write_12h": 0,
+      "write_1h": 2294688,
+      "write_30m": 0,
+      "write_5m": 1251120336
+    }
+  },
+  "window": [
+    "2026-10-01T00:00:00+02:00",
+    "2026-10-30T08:46:00+01:00"
+  ],
+  "live_verification": {
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "usage_writer": {
+      "state": "healthy",
+      "queue_depth": 0,
+      "accepted": 77,
+      "written": 77,
+      "dropped": 0,
+      "rejected": 0,
+      "writer_errors": 0,
+      "prior_unclosed_sessions": 0
+    },
+    "config_preserved": true,
+    "accounts_preserved": 5,
+    "sessions_preserved": {
+      "current_assignments": 189,
+      "expired_assignments": 0,
+      "preserved_assignments": 189,
+      "snapshot_assignments": 189
+    },
+    "gate_process_unchanged": true,
+    "gate_held": false,
+    "nft_hold_absent": true,
+    "schema_version": 5,
+    "schema_unchanged": true,
+    "sqlite_quick_check": "ok",
+    "rollups_match_canonical_ledger": true,
+    "live_speed_examples": [
+      {
+        "has_price": true,
+        "model": "claude-opus-5-5",
+        "priced_tier": "standard",
+        "requested_speed": 1,
+        "returned_tier": "standard",
+        "tier_multiplier": [
+          1,
+          1
+        ]
+      },
+      {
+        "has_price": true,
+        "model": "gpt-6.1-sol",
+        "priced_tier": "fast",
+        "requested_speed": 2,
+        "returned_tier": "default",
+        "tier_multiplier": [
+          2,
+          1
+        ]
+      },
+      {
+        "has_price": true,
+        "model": "gpt-6.1-sol",
+        "priced_tier": "standard",
+        "requested_speed": 1,
+        "returned_tier": "default",
+        "tier_multiplier": [
+          1,
+          1
+        ]
+      }
+    ],
+    "tls_verified": true,
+    "dashboard_assets_verified": 10,
+    "automatic_backend_restarts": 0
+  },
+  "forced_drain": [
+    {
+      "active_before": 11,
+      "attempt": 0,
+      "drained": true,
+      "drained_after_ms": 70,
+      "hold_lifted_by_cleanup_after_ms": null,
+      "phase": "committed"
+    }
+  ],
+  "backup": {
+    "owner": "John Pals / Fusebox production operator",
+    "directory": "/var/lib/cliproxy-rust-update/backups/2800a2ce55364627b3698974bb149745",
+    "writer_stopped": true,
+    "core_sha256": "51bd69758d98d1765b56f5f00270ac4f48e504a727156445c83795025ead16f0",
+    "usage_archive_sha256": "8cd7ed20443f4da42ada90bf2805698c129a2ed7771bdd36e489e9d4a7b5d71b",
+    "usage_expanded_bytes": 1178370048,
+    "previous_release": "0.11.0+gui.eb129cf97dfb",
+    "retained": true
+  },
+  "deployment_unit": {
+    "name": "fusebox-usage-pricing-20261030.service",
+    "state": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "Result": "success",
+      "UnitFileState": "static"
+    },
+    "owner": "John Pals / Fusebox production operator",
+    "retained_for": "Deployment and independent recovery receipt; no scheduled or automatic execution"
+  },
+  "qualification": {
+    "rust_full": 766,
+    "rust_usage_after_edge_fixes": 166,
+    "t3_golden_examples": 18,
+    "dashboard_tests": 144,
+    "operational_tests": 46,
+    "rollout_tests": 16,
+    "exact_candidate_restart_and_previous_release_reopen": true,
+    "historical_production_copy_rehearsal": true,
+    "managed_lease": "dff38a94b5914850984951bbc611684a",
+    "lease_status": "closed",
+    "remaining_temporary_resources": [],
+    "rehearsal_databases_removed": true
+  },
+  "provider_test_calls": 0,
+  "limitations": [
+    "Repricing cannot recover absent usage tokens or the October 3\u20136 capture gap.",
+    "Historical requested Codex speed discarded by older captures remains unavailable.",
+    "Final Claude usage revisions remain authoritative even where T3 keeps an earlier incomplete revision."
+  ],
+  "private_receipts": "/home/john/Code/Fusebox/target/usage-pricing-production-20261030"
+}

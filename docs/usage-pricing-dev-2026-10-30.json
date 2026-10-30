@@ -1,0 +1,57 @@
+{
+  "binary_sha256": "af38156ac1101b2ebe3869e6fccebbbeebd630cacf63e69f4f15f3cab251965d",
+  "binary_version": "fusebox 0.11.1 (f27040a)",
+  "managed_lease": "e9c0c1b016954a639e527a38cce873cd",
+  "existing_dev_service_found": false,
+  "checks": [
+    "restart repairs dated Haiku while preserving unknown usage and established prices",
+    "rebuilt HTTP/SSE Fast and Ultrafast pricing preserves returned default tier through restart",
+    "full CLI refresh retains evidence, rebuilds totals, audits old prices and is idempotent"
+  ],
+  "restart_verified": true,
+  "external_inference": false,
+  "temporary_processes_stopped": true,
+  "collector_acceptance": {
+    "passed": 12,
+    "checks": [
+      "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+      "collector identity filtering, breakdown and friendly label",
+      "replay does not inflate combined imported totals",
+      "offline outbox survives separate process restart and reconnect",
+      "copied histories across collectors deduplicate using message evidence",
+      "retired summary returns 410 without query work and remains management authenticated",
+      "management/inference separation, wrong credential and oversized batch rejection",
+      "revocation rejects upload and retains offline data",
+      "credential rotation and local re-enrollment preserve idempotency",
+      "imported history from 10 days ago is priced on its local date in the combined trend",
+      "usage reprice CLI is idempotent on an already priced database",
+      "marker transcript/tool/project content absent from databases, exports and logs"
+    ]
+  },
+  "temporary_resource_check": {
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  "smoke_harness_sha256": "f7f385308eb18dc1f1a70b28be17f131fd4726fe111508d6db0ad7d94bac2065",
+  "repository_checks": {
+    "rust_full": {
+      "passed": 766,
+      "ignored": 5
+    },
+    "rust_usage_after_edge_fixes": {
+      "passed": 166,
+      "ignored": 4
+    },
+    "t3_pricer_golden_examples": 18,
+    "dashboard_tests": 144,
+    "operational_tests": 46,
+    "clippy": "passed --all-targets --locked -- -D warnings",
+    "format": "passed",
+    "diff_check": "passed",
+    "catalogue_reproducible": true,
+    "toolchain": "Rust 1.96.1"
+  },
+  "production_modified": false
+}

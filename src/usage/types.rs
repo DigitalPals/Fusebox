@@ -190,10 +190,20 @@ impl Observation {
                         | "cache_downgraded"
                         | "embedding_chunk"
                         | "control_downgrade_count"
-                ) || *v > MAX_TOKENS
+                        | "requested_speed"
+                        | "reported_cost_nanos"
+                ) || *v > if k == "reported_cost_nanos" { i64::MAX as u64 } else { MAX_TOKENS }
             })
         {
             return Err("unsupported numeric metadata".into());
+        }
+        if self.numeric_metadata.get("requested_speed").is_some_and(|n| !(1..=3).contains(n)) {
+            return Err("invalid requested speed".into());
+        }
+        if self.numeric_metadata.contains_key("reported_cost_nanos")
+            && (self.source != "claude_code" || self.provider != "anthropic")
+        {
+            return Err("invalid provider cost evidence".into());
         }
         if let Some(n) = self.numeric_metadata.get("per_request_usage")
             && (*n != 1
@@ -204,6 +214,45 @@ impl Observation {
             return Err("invalid per-request usage evidence".into());
         }
         self.tokens.validate()
+    }
+
+    pub fn requested_speed(&self) -> Option<Speed> {
+        match self.numeric_metadata.get("requested_speed") {
+            Some(1) => Some(Speed::Standard),
+            Some(2) => Some(Speed::Fast),
+            Some(3) => Some(Speed::Ultrafast),
+            _ => None,
+        }
+    }
+
+    pub fn set_requested_speed(&mut self, tier: Option<&str>) {
+        self.numeric_metadata.insert("requested_speed".into(), Speed::from_tier(tier) as u64);
+    }
+}
+
+/// Numeric metadata keeps the observation wire format compatible. These values
+/// are stable on disk and across collectors: 1 standard, 2 fast, 3 ultrafast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum Speed {
+    Standard = 1,
+    Fast = 2,
+    Ultrafast = 3,
+}
+impl Speed {
+    pub fn from_tier(tier: Option<&str>) -> Self {
+        match tier {
+            Some("priority" | "fast") => Self::Fast,
+            Some("ultrafast") => Self::Ultrafast,
+            _ => Self::Standard,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
+        }
     }
 }
 

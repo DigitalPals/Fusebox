@@ -49,7 +49,7 @@ fn reference(groups: BTreeMap<Option<String>, Group>, mut models: Models) -> Vec
             value["models"] = model_rows
                 .into_iter()
                 .map(|(id, m)| {
-                    json!({"id":id,"observations":m.observations,"unpriced":m.observations-m.known[0],
+                    json!({"id":id,"observations":m.observations,"unpriced":m.observations-m.known[0],"unpriced_reasons":m.unpriced_reasons,
                         "estimated_cost_nanos":m.sums[0].and_then(|n|i64::try_from(n).ok())})
                 })
                 .collect();
