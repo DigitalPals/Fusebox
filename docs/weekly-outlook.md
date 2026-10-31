@@ -1,19 +1,22 @@
-# Weekly quota outlook
+# Combined weekly quota
 
-The overview forecasts each provider with at least two enabled subscriptions over
-the next seven days. Its bar is the **lowest projected remaining reserve** anywhere
-in that period, not current quota or a future refill credited early. Individual
-subscription meters show current provider readings. While the forecast is learning,
-the combined bar also shows current quota, labeled **NOW** and **used now** or
-**remaining now** according to the subscription display toggle. The learning
-status and expected ready time stay visible. It switches automatically to the
-forecast when ready. Incomplete or stale quota is never replaced with a made-up
-balance.
+The overview's **Combined weekly quota** shows each provider with at least two
+enabled subscriptions as one **WK** row, drawn like an account's weekly meter: the
+current combined quota, used or remaining as the subscription display toggle says,
+the even-pace mark and a countdown to the next account's reset. Once the forecast
+is ready, the segments it expects recent consumption to use before its lowest point
+over the next seven days are dimmed, and the line under the bar names that point:
+**Forecast low 54% left · Mon 14:00**, or **Forecast high 46% used** in Used mode.
+The time is left out when the lowest point is now. A future refill is never
+credited early. While the forecast is learning or unavailable, the bar shows the
+current quota alone and the status says why. When an account doesn't report its
+weekly quota there is no combined bar: a balance is never made up from the others.
 
 ## Consumption estimate
 
 The existing identity-bound `.quota-attribution.state` journal now also keeps
-bounded five-minute samples of cumulative observed weekly quota consumption.
+samples of cumulative observed weekly quota consumption: every five minutes for
+the last day and hourly before that, for seven days.
 The first observation is a baseline, not new spending. Positive quota changes
 include usage outside Fusebox; token counts and API price estimates are not used.
 A scheduled or banked reset retains the consumption history and adds only the new
@@ -23,13 +26,17 @@ are ignored. As with any sampled estimate, unobserved consumption immediately
 before a reset cannot be recovered from the new window's counter.
 
 Each account needs six hours of observations, with no gap longer than one hour.
-The rate uses up to the most recent 24 hours, interpolating the five-minute anchor
-at the start of the interval. Genuine observed idle time counts; missing readings
-do not. A longer gap begins a new learning period. Readings more than one hour old
-are stale. The displayed learning time assumes readings continue. Known changes
-of subscription plan or credential identity restart learning. Existing journals
-load without history and begin learning; old releases can ignore the new field.
-The history is saved with attribution every 30 seconds and on clean shutdown.
+Its rate is the average of two: the last 24 hours, which follows a change in
+demand, and the last seven days, which keeps one busy or quiet day from swinging
+the forecast. Each covers as much of its span as was observed, interpolating
+between the samples around its start, so until an account has a day of history
+both are the same. Genuine observed idle time counts; missing readings do not. A
+longer gap begins a new learning period. Readings more than one hour old are
+stale. The displayed learning time assumes readings continue. Known changes of
+subscription plan or credential identity restart learning. Existing journals load
+without history and begin learning; old releases can ignore the new field, and
+read the week of samples keeping the last day. The history is saved with
+attribution every 30 seconds and on clean shutdown.
 
 ## Projection
 
@@ -51,10 +58,12 @@ cannot be met. Exactly reaching zero at a reset is low reserve, not an outage.
 - **Low reserve:** no projected gap, minimum reserve below 10%.
 - **Quota gap expected:** demand would exhaust the pool before capacity returns.
 - **Learning usage:** at least one account needs six hours of recent observations;
-  the bar shows current combined quota when all accounts report it.
+  the bar shows current combined quota without a forecast.
 - **Forecast unavailable:** incomplete/invalid quota or reset data, stale readings,
   an expired reset awaiting confirmation, or an account needing sign-in.
 
+The bar's hover gives the daily use the forecast assumes, as a share of the
+combined quota, and until every account has a week of history the shortest one.
 The weekly pool's quiet fault uses the same forecast. Missing data is never
 interpreted as a healthy forecast or zero consumption. Single-account, five-hour
 and model-specific pace warnings retain their own calculations.
@@ -70,6 +79,7 @@ resets are reflected once observed, but their future use is not predicted.
 `state`, `reason`, `horizon_at`, `next_reset_at`, `min_remaining`, `min_at`,
 `exhausts_at`, `recovers_at`, `rate_per_day`, `observed_hours`, and `learning_until`.
 Percentages are weighted pool percentage points; `rate_per_day` is their estimated
-daily consumption. Unknown estimates are null. The existing `used` and `pace`
+daily consumption and `observed_hours` the shortest account history behind it, up
+to seven days. Unknown estimates are null. The existing `used` and `pace`
 fields remain current-window measurements, not forecast values. `runs_out_early`
 and `until` agree with the new weekly projection.

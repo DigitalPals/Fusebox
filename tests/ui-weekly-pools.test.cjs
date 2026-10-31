@@ -29,7 +29,8 @@ function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } 
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('function meterHTML(q'), piece('const PLAN_WEIGHT_NOTE ='), piece('function planCounts(list) {'),
     piece('function weeklyPools() {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='), piece('const POOL_CURRENT_NOTE ='),
-    piece('function poolLearningQuota(p) {'), piece('function poolMeterHTML(p) {'),
+    piece('function poolQuota(p) {'), piece('function poolLow(p, q) {'), piece('function poolLowText(low, at) {'), piece('function poolRateText(o) {'),
+    piece('function poolMeterHTML(p) {'),
     piece('function poolCount(p) {'), piece('function poolBasis(pools) {'), piece('function poolStatusHTML(p) {'), piece('function ovPoolHTML() {'),
   ].join('\n'), context);
   return (code) => {
@@ -96,36 +97,73 @@ test('the meter draws the server’s weekly pools with their accounts', () => {
   assert.deepEqual(load(state(accounts, undefined))('weeklyPools()'), [], 'an overview without pools');
 });
 
-test('the forecast meter always shows the minimum remaining reserve, independently of the quota toggle', () => {
+const segments = (html) => ({ on: (html.match(/<i class="on"><\/i>/g) || []).length, due: (html.match(/<i class="on due"><\/i>/g) || []).length });
+
+test('the combined meter is an account’s weekly row: current quota, even pace and the next reset', () => {
   const S = state([sub('a'), sub('b'), sub('c')], [pool(['a', 'b', 'c'])]);
   const run = load(S);
-  const html = run('ovPoolHTML()');
-  assert.match(html, /Weekly quota outlook/);
-  assert.match(html, /Next 7 days · lowest projected reserve/);
+  let html = run('ovPoolHTML()');
+  assert.match(html, /Combined weekly quota/);
+  assert.match(html, /Now and the 7-day forecast low/);
   assert.match(html, /3 accounts/);
-  assert.match(html, /29%/);
-  assert.match(html, /role="meter"[^>]+aria-label="Claude lowest projected weekly reserve"/);
-  assert.match(html, /aria-valuetext="29% lowest projected reserve over the next 7 days"/);
+  assert.match(html, /WK<\/span><span class="segs[^"]*" role="meter" aria-label="Claude combined weekly quota used"/);
+  assert.match(html, /<b class="pace" style="left:50%"/);
+  assert.match(html, /<span class="pct ">22%<\/span><span class="rst" title="Next account resets [^"]+">↺ <span data-until=/);
   assert.match(html, /Expected to last/);
-  assert.match(html, /Next reset in <span data-until=/);
-  assert.doesNotMatch(html, /class="pace"|points under pace|quota used|78%/);
-  assert.equal((html.match(/<i class="on"><\/i>/g) || []).length, 6);
+  // 22% used now, and 71% at the forecast's lowest point: 4 lit, 10 dimmed.
+  assert.deepEqual(segments(html), { on: 4, due: 10 });
+  assert.match(html, /aria-valuetext="22% used · Healthy · even pace 50% used by now · Forecast high 71% used · 2026-10-19T20:00:00.000Z"/);
+  assert.match(html, /<div class="pool-note" title="[^"]+">Forecast high 71% used · 2026-10-19T20:00:00.000Z<\/div>/);
+  assert.doesNotMatch(html, /lowest reserve|MIN<\/span>|NOW<\/span>/);
   run('S.quotaDisplay = "remaining"');
-  assert.equal(run('ovPoolHTML()'), html);
+  html = run('ovPoolHTML()');
+  assert.match(html, /aria-label="Claude combined weekly quota remaining"/);
+  assert.match(html, /<b class="pace" style="left:50%"/);
+  assert.match(html, /<span class="pct ">78%<\/span>/);
+  // 78% left now, 29% at the lowest point: the 10 segments between are dimmed.
+  assert.deepEqual(segments(html), { on: 6, due: 10 });
+  assert.match(html, /Forecast low 29% left · 2026-10-19T20:00:00.000Z/);
   run('S.overview.pools = []');
   assert.equal(run('ovPoolHTML()'), '');
 });
 
+test('the hover says what the forecast assumes, and a low point now has no time', () => {
+  const outlook = { state: 'on_track', min_remaining: 54.45, min_at: new Date(NOW + 41 * 3600000).toISOString(),
+    next_reset_at: new Date(NOW + 41 * 3600000).toISOString(), rate_per_day: 11.5, observed_hours: 12.14 };
+  const run = load(state([sub('a'), sub('b')], [pool(['a', 'b'], { used: 25.75, pace: 0.42, outlook })]));
+  run('S.quotaDisplay = "remaining"');
+  let html = run('ovPoolHTML()');
+  assert.match(html, /<div class="mrow" title="Current combined weekly quota with its even-pace mark\.[^"]* · Recent use is 12% of the combined quota a day, the average of the last day and the last week of readings\. The shortest account history is 12h\.">/);
+  assert.match(html, /<span class="pct ">74%<\/span>/);
+  assert.match(html, /Forecast low 54% left · /);
+  run('S.overview.pools[0].outlook.observed_hours = 52.5');
+  assert.match(run('ovPoolHTML()'), /The shortest account history is 2d 4h\./);
+  run('S.overview.pools[0].outlook.observed_hours = 168');
+  assert.doesNotMatch(run('ovPoolHTML()'), /shortest account history/);
+  // No use expected: the lowest point is now, with nothing dimmed.
+  run(`S.overview.pools[0].outlook = ${JSON.stringify({ ...outlook, min_remaining: 74.25, min_at: new Date(NOW).toISOString() })}`);
+  html = run('ovPoolHTML()');
+  assert.match(html, />Forecast low 74% left<\/div>/);
+  assert.equal(segments(html).due, 0);
+  // A forecast above the current quota (members it leaves out) is never drawn above it.
+  run('S.overview.pools[0].outlook.min_remaining = 90');
+  html = run('ovPoolHTML()');
+  assert.match(html, /Forecast low 74% left/);
+  assert.equal(segments(html).due, 0);
+});
+
 test('the forecast shows the depletion and recovery times on desktop and mobile', () => {
-  const o = { state: 'run_out', min_remaining: 0, exhausts_at: new Date(NOW + DAY).toISOString(), recovers_at: new Date(NOW + 2 * DAY).toISOString() };
+  const o = { state: 'run_out', min_remaining: 0, min_at: new Date(NOW + DAY).toISOString(), exhausts_at: new Date(NOW + DAY).toISOString(), recovers_at: new Date(NOW + 2 * DAY).toISOString() };
   const run = load(state([sub('a'), sub('b')], [pool(['a', 'b'], { outlook: o })]));
   for (const mobile of [false, true]) {
     run(`mob = () => ${mobile}`);
     const html = run('ovPoolHTML()');
     assert.match(html, /pool-gap err">Quota gap expected/);
     assert.match(html, /Runs out 2026-10-18T20:00:00.000Z · Back 2026-10-19T20:00:00.000Z/);
-    assert.match(html, /aria-valuenow="0"/);
-    assert.doesNotMatch(html, /Expected to last|Healthy/);
+    assert.match(html, /Forecast high 100% used · 2026-10-18T20:00:00.000Z/);
+    assert.match(html, /aria-valuenow="22"/);
+    assert.deepEqual(segments(html), { on: 4, due: 16 }, 'everything left is dimmed');
+    assert.doesNotMatch(html, /Expected to last/);
   }
 });
 
@@ -137,21 +175,25 @@ test('learning shows actual quota in the selected mode and automatically transit
     run(`mob = () => ${mobile}; S.quotaDisplay = 'used'`);
     let html = run('ovPoolHTML()');
     assert.match(html, /Current quota while learning/);
-    assert.match(html, /NOW<\/span>/);
-    assert.match(html, /aria-label="Claude current combined weekly quota used"/);
-    assert.match(html, /64%<\/span><span class="rst">used now/);
+    assert.match(html, /<div class="mrow" title="Current combined weekly quota while the forecast learns/);
+    assert.match(html, /WK<\/span>/);
+    assert.match(html, /aria-label="Claude combined weekly quota used"/);
+    assert.match(html, /class="pace"/);
+    assert.match(html, /64%<\/span><span class="rst"/);
     assert.match(html, /Learning usage.*Estimate after/s);
-    assert.doesNotMatch(html, /lowest reserve|Expected to last|class="pace"/);
+    assert.doesNotMatch(html, /Forecast (low|high)|Expected to last|class="on due"/);
     run('S.quotaDisplay = "remaining"');
     html = run('ovPoolHTML()');
-    assert.match(html, /36%<\/span><span class="rst">remaining now/);
-    assert.match(html, /aria-label="Claude current combined weekly quota remaining"/);
+    assert.match(html, /36%<\/span><span class="rst"/);
+    assert.match(html, /aria-label="Claude combined weekly quota remaining"/);
   }
   run(`S.overview.pools[0].outlook = ${JSON.stringify(pool(['a', 'b']).outlook)}`);
   const ready = run('ovPoolHTML()');
-  assert.match(ready, /29%<\/span><span class="rst">lowest reserve/);
+  assert.match(ready, /36%<\/span><span class="rst"/, 'still the current quota');
+  assert.match(ready, /Forecast low 29% left/);
+  assert.match(ready, /Now and the 7-day forecast low/);
   assert.match(ready, /Expected to last/);
-  assert.doesNotMatch(ready, /NOW<\/span>|remaining now|Learning usage/);
+  assert.doesNotMatch(ready, /Current quota while learning|Learning usage/);
 });
 
 test('learning with incomplete current quota does not invent a balance', () => {
@@ -160,31 +202,42 @@ test('learning with incomplete current quota does not invent a balance', () => {
     run(`S.overview.pools = [${JSON.stringify(pool(['a', 'b'], { outlook: { state: 'learning' }, ...extra }))}]`);
     const html = run('ovPoolHTML()');
     assert.match(html, /Learning usage/);
-    assert.doesNotMatch(html, /role="meter"|used now|remaining now/);
+    assert.match(html, /role="img"/);
+    assert.doesNotMatch(html, /role="meter"|<i class="on/);
   }
 });
 
-test('missing and stale data never look like full or healthy reserves', () => {
+test('without a forecast the meter shows current quota only, and never a projected reserve', () => {
   const run = load(state([sub('a'), sub('b')], []));
   for (const outlook of [null,
     { state: 'unavailable', reason: 'stale_readings' }, { state: 'unavailable', reason: 'awaiting_reset' },
-    { state: 'unavailable', reason: 'missing_quota' }]) {
+    { state: 'unavailable', reason: 'missing_quota' }, { state: 'unavailable', reason: 'missing_quota', min_remaining: 50 }]) {
     run(`S.overview.pools = [${JSON.stringify(pool(['a', 'b'], { outlook }))}]`);
-    const html = run('ovPoolHTML()');
-    assert.match(html, /role="img"/);
-    assert.doesNotMatch(html, /role="meter"|aria-valuenow|Expected to last|Healthy|<i class="on">/);
-    if (outlook?.state === 'learning') assert.match(html, /Learning usage.*Estimate after/s);
+    let html = run('ovPoolHTML()');
+    assert.match(html, /role="meter"[^>]+aria-valuenow="22"/);
+    assert.deepEqual(segments(html), { on: 4, due: 0 });
+    assert.doesNotMatch(html, /Forecast (low|high)|Expected to last|<div class="mrow" title=/);
+    assert.match(html, /Forecast unavailable/);
     if (outlook?.reason === 'stale_readings') assert.match(html, /Quota readings are stale/);
     if (outlook?.reason === 'awaiting_reset') assert.match(html, /Waiting for reset confirmation/);
+    // An account not reporting: no combined quota is made up from the others.
+    run('S.overview.pools[0].reported = 1');
+    html = run('ovPoolHTML()');
+    assert.match(html, /role="img"/);
+    assert.doesNotMatch(html, /role="meter"|<i class="on/);
   }
 });
 
 test('low reserve and fractional percentages remain distinct from an expected quota gap', () => {
   const run = load(state([sub('a'), sub('b')], [pool(['a', 'b'], { outlook: { state: 'tight', min_remaining: 0.3 } })]));
-  const html = run('ovPoolHTML()');
+  let html = run('ovPoolHTML()');
   assert.match(html, /pool-gap warn">Low reserve/);
-  assert.match(html, /&lt;1%/);
-  assert.match(html, /aria-valuenow="0.3"/);
+  assert.match(html, /Forecast high &gt;99% used/);
+  run('S.quotaDisplay = "remaining"');
+  html = run('ovPoolHTML()');
+  assert.match(html, /Forecast low &lt;1% left/);
+  assert.match(html, /aria-valuenow="78"/);
+  assert.deepEqual(segments(html), { on: 0, due: 16 });
   assert.doesNotMatch(html, /Quota gap expected|Expected to last/);
 });
 
@@ -207,7 +260,7 @@ test('the heading says how each provider’s accounts count', () => {
   let html = run('ovPoolHTML()');
   assert.match(html, /title="[^"]*Each provider’s subscriptions together, weighted by plan allowance[^"]*Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10/);
   assert.match(html, /<span class="sub">1 Max, 1 Ultra<\/span>/);
-  assert.match(html, /<span class="pct good">29%<\/span>/);
+  assert.match(html, /<span class="pct ">40%<\/span>/);
   run('S.accounts[1].quota.plan = undefined; S.overview.pools[0].priced = false');
   html = run('ovPoolHTML()');
   assert.match(html, /Each provider’s subscriptions together, weighted equally/);

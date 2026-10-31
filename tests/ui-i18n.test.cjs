@@ -147,13 +147,18 @@ test('model setup and scoped quota explanations translate without changing model
 
 test('weekly forecasts translate reserve, learning and gap messages', () => {
   const { tr } = load().FUSEBOX_I18N;
-  assert.equal(tr('Weekly quota outlook'), '每周额度预测');
+  assert.equal(tr('Combined weekly quota'), '每周额度合计');
+  assert.equal(tr('Now and the 7-day forecast low'), '当前额度及未来 7 天预计最低点');
   assert.equal(tr('Expected to last'), '预计额度充足');
   assert.equal(tr('Learning usage'), '正在学习用量');
   assert.equal(tr('Current quota while learning'), '学习期间显示当前额度');
-  assert.equal(tr('remaining now'), '当前剩余');
-  assert.equal(tr('Claude current combined weekly quota used'), 'Claude 当前每周合计额度已用');
+  assert.equal(tr('Claude combined weekly quota used'), 'Claude 每周合计额度已用');
   assert.equal(tr('Quota readings are stale'), '额度记录已过期');
-  assert.equal(tr('Claude lowest projected weekly reserve'), 'Claude 预计最低每周剩余额度');
-  assert.equal(tr('29% lowest projected reserve over the next 7 days'), '未来 7 天预计最低剩余额度 29%');
+  assert.equal(tr('Forecast low 54% left · Mon 14:00'), '预计最低剩余 54% · 周一 14:00');
+  assert.equal(tr('Forecast high >99% used'), '预计最高已用 >99%');
+  assert.equal(tr('Next account resets Monday, 2 November 2026 at 14:00:00 CET'), '下一个账号将于 2026年11月2日 星期一 14:00:00 CET 重置');
+  assert.equal(tr('Recent use is 12% of the combined quota a day, the average of the last day and the last week of readings. The shortest account history is 2d 4h.'),
+    '近期用量约为每天合计额度的 12%，取最近一天与最近一周记录的平均值。最短的账号记录为 2 天 4 小时。');
+  assert.equal(tr('22% used · Healthy · even pace 50% used by now · Forecast high 71% used · Mon 14:00'),
+    '已用 22% · 正常 · 均匀用量此刻应为 50% · 预计最高已用 71% · 周一 14:00');
 });

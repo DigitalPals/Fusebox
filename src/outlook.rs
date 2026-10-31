@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::quota::Window;
 
 const LOOKBACK_HOURS: i64 = 24;
+const LONG_LOOKBACK_DAYS: i64 = 7;
 const LEARN_HOURS: i64 = 6;
 const MAX_GAP_MINUTES: i64 = 60;
 const SAMPLE_MINUTES: i64 = 5;
+const OLD_SAMPLE_MINUTES: i64 = 60;
 const RESET_JITTER_SECONDS: i64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,8 +21,9 @@ struct Sample {
     spent: f64,
 }
 
-/// Five-minute samples of observed quota consumption, never token-price estimates.
-/// Kept in the existing identity-bound attribution journal, including through restarts.
+/// Samples of observed quota consumption, never token-price estimates: every five minutes
+/// for the last day and hourly before that, for a week. Kept in the existing identity-bound
+/// attribution journal, including through restarts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct History {
     pub name: String,
@@ -81,7 +84,17 @@ impl History {
             if h.samples.back().is_none_or(|s| now - s.at >= Duration::minutes(SAMPLE_MINUTES)) {
                 h.samples.push_back(Sample { at: now, spent: h.spent });
             }
-            let start = now - Duration::hours(LOOKBACK_HOURS);
+            // Older than a day, an hourly sample is enough for the week's average.
+            let recent = now - Duration::hours(LOOKBACK_HOURS);
+            let mut kept: Option<DateTime<Utc>> = None;
+            h.samples.retain(|s| {
+                let keep = s.at >= recent || kept.is_none_or(|k| s.at - k >= Duration::minutes(OLD_SAMPLE_MINUTES));
+                if keep && s.at < recent {
+                    kept = Some(s.at);
+                }
+                keep
+            });
+            let start = now - Duration::days(LONG_LOOKBACK_DAYS);
             // Keep an anchor before the cutoff for interpolation, with bounded storage.
             while h.samples.len() > 2 && h.samples[1].at <= start {
                 h.samples.pop_front();
@@ -89,27 +102,39 @@ impl History {
         }
     }
 
+    /// Consumption a second, and the hours observed. The last day's rate follows a change
+    /// in demand; averaging it with the week's keeps one busy or quiet day from swinging
+    /// the forecast. Each covers as much of its span as was observed.
     fn rate(&self, now: DateTime<Utc>) -> Result<(f64, f64), &'static str> {
         if now < self.at || now - self.at > Duration::minutes(MAX_GAP_MINUTES) {
             return Err("stale_readings");
         }
         let first = self.samples.front().ok_or("collecting_history")?;
-        let start = (self.at - Duration::hours(LOOKBACK_HOURS)).max(first.at);
-        let seconds = (self.at - start).num_milliseconds() as f64 / 1000.0;
-        if seconds < LEARN_HOURS as f64 * 3600.0 {
+        let observed = (self.at - first.at).min(Duration::days(LONG_LOOKBACK_DAYS));
+        if observed < Duration::hours(LEARN_HOURS) {
             return Err("collecting_history");
         }
-        let mut baseline = first.spent;
-        if start > first.at {
-            let next = self.samples.get(1).ok_or("collecting_history")?;
-            let share = (start - first.at).num_milliseconds() as f64 / (next.at - first.at).num_milliseconds() as f64;
-            baseline += share * (next.spent - first.spent);
-        }
-        let rate = (self.spent - baseline) / seconds;
+        let rate = (self.since(Duration::hours(LOOKBACK_HOURS)) + self.since(Duration::days(LONG_LOOKBACK_DAYS))) / 2.0;
         if !rate.is_finite() || rate < 0.0 {
             return Err("invalid_history");
         }
-        Ok((rate, seconds / 3600.0))
+        Ok((rate, observed.num_milliseconds() as f64 / 3_600_000.0))
+    }
+
+    /// Consumption a second over the last `span`, or since the first sample, interpolating
+    /// between the samples around its start.
+    fn since(&self, span: Duration) -> f64 {
+        let Some(first) = self.samples.front() else { return f64::NAN };
+        let start = (self.at - span).max(first.at);
+        let i = self.samples.partition_point(|s| s.at <= start).saturating_sub(1);
+        let before = &self.samples[i];
+        let (next_at, next_spent) = self.samples.get(i + 1).map_or((self.at, self.spent), |s| (s.at, s.spent));
+        let mut baseline = before.spent;
+        if start > before.at && next_at > before.at {
+            let share = (start - before.at).num_milliseconds() as f64 / (next_at - before.at).num_milliseconds() as f64;
+            baseline += share * (next_spent - before.spent);
+        }
+        (self.spent - baseline) / ((self.at - start).num_milliseconds() as f64 / 1000.0)
     }
 }
 
@@ -147,7 +172,7 @@ impl Outlook {
             learning_until: None,
         };
         let mut stock = Vec::new();
-        let (mut total, mut rate, mut hours) = (0.0, 0.0, 24.0_f64);
+        let (mut total, mut rate, mut hours) = (0.0, 0.0, (LONG_LOOKBACK_DAYS * 24) as f64);
         for m in members {
             let reason = if !m.forecast_available {
                 Some("unavailable_account")
@@ -462,12 +487,40 @@ mod tests {
         for minute in 0..=48 * 60 {
             History::observe(&mut hs, &[week(minute as f64 / 60.0, 168.0)], now() + Duration::minutes(minute));
         }
-        assert!(hs[0].samples.len() <= 290);
+        // Five-minute samples for the last day, hourly ones for the day before.
+        assert!(hs[0].samples.len() <= 290 + 24);
         let end = now() + Duration::hours(48);
         near(hs[0].rate(end).unwrap().0 * 86_400.0, 24.0);
         assert_eq!(hs[0].rate(end + Duration::minutes(61)), Err("stale_readings"));
         History::observe(&mut hs, &[week(80.0, 168.0)], end + Duration::hours(2));
         assert_eq!(hs[0].rate(end + Duration::hours(2)), Err("collecting_history"));
         assert_eq!(hs[0].samples.len(), 1);
+    }
+
+    #[test]
+    fn one_busy_or_quiet_day_moves_the_rate_halfway_to_the_week_average() {
+        let mut hs = Vec::new();
+        // Six quiet days, then 48 points in one day.
+        for minute in 0..=7 * 24 * 60 {
+            let used = (minute - 6 * 24 * 60).max(0) as f64 / 30.0;
+            History::observe(&mut hs, &[week(used, 200.0)], now() + Duration::minutes(minute));
+        }
+        let busy = now() + Duration::days(7);
+        let (rate, hours) = hs[0].rate(busy).unwrap();
+        near(rate * 86_400.0, (48.0 + 48.0 / 7.0) / 2.0);
+        near(hours, 168.0);
+        // A quiet day after it: the week still remembers the busy one.
+        for minute in 1..=24 * 60 {
+            History::observe(&mut hs, &[week(48.0, 200.0)], busy + Duration::minutes(minute));
+        }
+        let quiet = busy + Duration::days(1);
+        near(hs[0].rate(quiet).unwrap().0 * 86_400.0, 48.0 / 7.0 / 2.0);
+        // Bounded: a day of five-minute samples, hourly ones for the rest of the week.
+        assert!(hs[0].samples.len() <= 290 + 6 * 24 + 1, "{}", hs[0].samples.len());
+        assert!(hs[0].samples[1].at > quiet - Duration::days(7));
+        assert!(hs[0].samples.front().unwrap().at <= quiet - Duration::days(7));
+        // Older releases read the longer history as it is.
+        let restored: Vec<History> = serde_json::from_str(&serde_json::to_string(&hs).unwrap()).unwrap();
+        assert_eq!(restored, hs);
     }
 }
