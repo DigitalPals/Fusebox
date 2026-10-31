@@ -106,8 +106,32 @@ fn rate(v: &Value, id: &str, name: &str, scope: Scope, out: &mut Reading) {
     }
 }
 
+/// ChatGPT Pro plans currently have no 5-hour limit. Usage then lists a single account
+/// window, a week, as `primary_window` with `secondary_window: null`, where plans with
+/// the limit list it as a window of its own. So both slots must be there, every window
+/// must say how long it is, and none may be shorter than a day; anything less proves nothing.
+pub(super) fn codex_no_five_hour(v: &Value) -> bool {
+    let rate = field(v, "rate_limit", "rateLimit");
+    let mut windows = 0;
+    for (snake, camel) in [("primary_window", "primaryWindow"), ("secondary_window", "secondaryWindow")] {
+        let Some(w) = rate.get(snake).or_else(|| rate.get(camel)) else { return false };
+        if w.is_null() {
+            continue;
+        }
+        match number(field(w, "limit_window_seconds", "limitWindowSeconds")) {
+            Some(s) if (86_400.0..366.0 * 86_400.0).contains(&s) && s.fract() == 0.0 => windows += 1,
+            _ => return false,
+        }
+    }
+    windows > 0
+}
+
 pub(super) fn codex(v: &Value) -> Reading {
-    let mut out = Reading { plan: text(field(v, "plan_type", "planType")), ..Default::default() };
+    let mut out = Reading {
+        plan: text(field(v, "plan_type", "planType")),
+        no_five_hour: codex_no_five_hour(v),
+        ..Default::default()
+    };
     rate(field(v, "rate_limit", "rateLimit"), "codex", "Account allowance", Scope::Account, &mut out);
     rate(
         field(v, "code_review_rate_limit", "codeReviewRateLimit"),

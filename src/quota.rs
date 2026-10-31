@@ -114,7 +114,8 @@ pub struct Quota {
     /// The plan's name as the provider shows it ("Ultra"); `plan` keeps the stable identifier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_name: Option<String>,
-    /// The provider confirmed this account has no 5-hour limit (verified Claude Ultra).
+    /// The provider confirmed this account has no 5-hour limit (verified Claude Ultra,
+    /// ChatGPT Pro).
     /// Any later reading that carries a 5-hour window clears it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub no_five_hour_limit: bool,
@@ -1036,6 +1037,104 @@ mod tests {
         drop(st);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("anthropic-ratelimit-unified-5h-utilization", "0.25".parse().unwrap());
+        observe(acct, &headers, acct.quota_epoch());
+        let st = acct.state.lock();
+        assert!(!st.quota.no_five_hour_limit);
+        assert_eq!(st.quota.five_hour_remaining(model), Some(75.0));
+    }
+
+    /// A ChatGPT Pro usage reading as production saw it on 31 October 2026: one weekly
+    /// window and an explicit null where plans with a 5-hour limit report it.
+    fn pro_usage() -> Value {
+        json!({
+            "plan_type": "pro",
+            "rate_limit": { "allowed": true, "limit_reached": false,
+                "primary_window": { "limit_window_seconds": 604800, "reset_after_seconds": 464551,
+                    "reset_at": 4102444800i64, "used_percent": 17 },
+                "secondary_window": null },
+            "code_review_rate_limit": null,
+            "additional_rate_limits": null,
+            "credits": { "balance": "61840.9086050000", "has_credits": true, "unlimited": false },
+        })
+    }
+
+    #[test]
+    fn only_a_complete_codex_reading_without_a_short_window_proves_there_is_no_five_hour_limit() {
+        assert!(readings::codex_no_five_hour(&pro_usage()));
+        let reading = readings::codex(&pro_usage());
+        assert!(reading.no_five_hour);
+        assert_eq!(reading.windows.len(), 1);
+        assert_eq!((reading.windows[0].name.as_str(), reading.windows[0].used), ("week", 17.0));
+        let window = |secs: i64, used: i64| json!({ "limit_window_seconds": secs, "used_percent": used });
+        let rate = |primary: Value, secondary: Value| {
+            json!({ "rate_limit": { "allowed": true,
+            "limit_reached": false, "primary_window": primary, "secondary_window": secondary } })
+        };
+        // Camel case and a week in the second slot count too.
+        assert!(readings::codex_no_five_hour(
+            &json!({ "rateLimit": { "primaryWindow": window(604800, 3), "secondaryWindow": null } })
+        ));
+        assert!(readings::codex_no_five_hour(&rate(Value::Null, window(604800, 3))));
+        for v in [
+            // Plus, used or idle: a 5-hour window of its own.
+            rate(window(18000, 40), window(604800, 3)),
+            rate(window(18000, 0), window(604800, 0)),
+            // Any window shorter than a day.
+            rate(window(43200, 0), Value::Null),
+            rate(window(604800, 3), window(3600, 0)),
+            // Incomplete or unclassifiable readings prove nothing.
+            json!({ "rate_limit": { "primary_window": window(604800, 3) } }),
+            rate(Value::Null, Value::Null),
+            rate(json!({ "used_percent": 3 }), Value::Null),
+            rate(json!({ "limit_window_seconds": "a week", "used_percent": 3 }), Value::Null),
+            rate(window(604800, 3), json!(5)),
+            json!({ "rate_limit": null }),
+            json!({ "plan_type": "pro" }),
+        ] {
+            assert!(!readings::codex_no_five_hour(&v), "{v}");
+            assert!(!readings::codex(&v).no_five_hour, "{v}");
+        }
+    }
+
+    #[test]
+    fn a_codex_account_without_a_five_hour_limit_retires_the_window_until_one_comes_back() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![crate::config::KeyEntry { api_key: "a".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = &pool.all()[0];
+        assert_eq!(acct.provider, Provider::Codex);
+        let model = "gpt-6.1-sol";
+        let renews = Utc::now() + chrono::Duration::hours(2);
+        acct.exhaust(model, renews, "subscription quota exhausted: x");
+        let mut st = acct.state.lock();
+        let plus = json!({ "plan_type": "plus", "rate_limit": { "allowed": false, "limit_reached": true,
+            "primary_window": { "limit_window_seconds": 18000, "used_percent": 100, "reset_at": renews.timestamp() },
+            "secondary_window": { "limit_window_seconds": 604800, "used_percent": 40, "reset_at": 4102444800i64 } } });
+        usage(&mut st, Provider::Codex, &plus);
+        assert!(st.quota.exhausted(model) && !st.quota_cooldowns.is_empty());
+        assert!(!st.quota.no_five_hour_limit);
+        usage(&mut st, Provider::Codex, &pro_usage());
+        assert!(st.quota.no_five_hour_limit);
+        assert!(st.quota.windows.iter().all(|w| w.name != "5h"));
+        assert_eq!(st.quota.five_hour_remaining(model), None);
+        assert!(!st.quota.exhausted(model));
+        assert!(st.quota_cooldowns.is_empty());
+        assert_eq!(serde_json::to_value(&st.quota).unwrap()["no_five_hour_limit"], true);
+        // Headers with only the week keep the flag; a 5-hour window from headers clears it.
+        drop(st);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-codex-primary-window-minutes", "10080".parse().unwrap());
+        headers.insert("x-codex-primary-used-percent", "18".parse().unwrap());
+        observe(acct, &headers, acct.quota_epoch());
+        assert!(acct.state.lock().quota.no_five_hour_limit);
+        headers.insert("x-codex-primary-window-minutes", "300".parse().unwrap());
+        headers.insert("x-codex-primary-used-percent", "25".parse().unwrap());
+        headers.insert("x-codex-secondary-window-minutes", "10080".parse().unwrap());
+        headers.insert("x-codex-secondary-used-percent", "18".parse().unwrap());
         observe(acct, &headers, acct.quota_epoch());
         let st = acct.state.lock();
         assert!(!st.quota.no_five_hour_limit);

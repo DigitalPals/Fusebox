@@ -110,8 +110,8 @@ pub(super) fn decision(cfg: &Config, quota: &Quota, inv: &Inventory, now: DateTi
     inv.grants
         .iter()
         .filter(|g| g.usable && within_horizon(cfg, g, now))
-        // A grant for a limit the account no longer has (Claude Ultra's 5-hour one)
-        // restores nothing, even just before it expires.
+        // A grant for a limit the account no longer has (the 5-hour one on Claude Ultra
+        // or ChatGPT Pro) restores nothing, even just before it expires.
         .filter(|g| !(quota.no_five_hour_limit && !g.clears.is_empty() && g.clears.iter().all(|s| s == "5h")))
         .filter(|g| {
             // The expiry deadline takes precedence over consumption and natural

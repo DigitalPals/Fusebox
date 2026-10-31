@@ -111,4 +111,9 @@ test('lists leave out the 5-hour meter of an account without that limit; its pag
   assert.match(run(`meterRowsHTML(${JSON.stringify(unknown)})`), /5-hour: not reported/);
   assert.equal((run(`miniMetersHTML(${JSON.stringify(unknown)})`).match(/class="mrow"/g) || []).length, 2);
   assert.equal(run(`noShortNote(${JSON.stringify(unknown)})`), '');
+  // ChatGPT Pro reports the same way and gets the same treatment.
+  const pro = { id: 'p', provider: 'codex', kind: 'oauth', quota: { plan: 'pro', no_five_hour_limit: true, windows: [{ name: 'week', used: 17, resets_at: '2026-11-05T18:04:27Z' }] } };
+  assert.equal((run(`meterRowsHTML(${JSON.stringify(pro)})`).match(/class="mrow"/g) || []).length, 1);
+  assert.equal(run(`noShortNote(${JSON.stringify(pro)})`), ' · no 5h limit');
+  assert.match(run(`quotaWindowsHTML(${JSON.stringify(pro)}, 'lg')`), /5-hour<\/span><span class="dim">No limit/);
 });

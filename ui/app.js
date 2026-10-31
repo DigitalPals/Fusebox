@@ -952,7 +952,7 @@ function windowOf(a, short) {
     .sort((x, y) => y.used - x.used)[0];
 }
 
-// Verified Claude Ultra accounts have no 5-hour limit; the provider says so explicitly.
+// Verified Claude Ultra and ChatGPT Pro accounts have no 5-hour limit; their usage says so.
 const NO_SHORT_LIMIT = 'This account has no five-hour limit; only the weekly limits apply.';
 const noShortLimit = (a) => !!a.quota?.no_five_hour_limit && !windowOf(a, true);
 // The lists leave such an account's 5-hour meter out; the line under its name says why.

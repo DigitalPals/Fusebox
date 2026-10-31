@@ -137,9 +137,9 @@ fn pool(provider: &str, name: &str, model: Option<&str>, members: &[Member], now
         .collect();
     // A member without a model's own limit takes that model's requests until its
     // whole-account limits stop it, and those have pools of their own. One without a
-    // 5-hour limit (Claude Ultra) takes what the others can't, so together they have
-    // none, as long as it is signed in, not paused and has weekly quota left. Otherwise
-    // the pool is the accounts that have the limit.
+    // 5-hour limit (Claude Ultra, ChatGPT Pro) takes what the others can't, so together
+    // they have none, as long as it is signed in, not paused and has weekly quota left.
+    // Otherwise the pool is the accounts that have the limit.
     let carries = |m: &Member| {
         m.no_five_hour
             && m.forecast_available
@@ -462,5 +462,18 @@ mod tests {
         let five_hours: Vec<Pool> = pools(&members(&spent), now()).into_iter().filter(|p| p.window == "5h").collect();
         assert_eq!(five_hours.len(), 1);
         assert_eq!(five_hours[0].weights, [("a".to_string(), 5.0)], "only the limited account is in it");
+        // A ChatGPT Pro account without the limit takes over its own provider's 5 hours only.
+        let codex = |id, no_five_hour, windows| Account { provider: "codex", no_five_hour, ..sub(id, windows) };
+        let both = [
+            sub("a", vec![week(10.0, Some(5.0)), five(90.0, 1.0)]),
+            sub("b", vec![week(10.0, Some(5.0)), five(20.0, 1.0)]),
+            codex("plus", false, vec![week(10.0, Some(5.0)), five(90.0, 1.0)]),
+            codex("pro", true, vec![week(10.0, Some(5.0))]),
+        ];
+        let found: Vec<(String, String)> =
+            pools(&members(&both), now()).into_iter().map(|p| (p.provider, p.window)).collect();
+        assert!(found.contains(&("claude".into(), "5h".into())), "{found:?}");
+        assert!(found.contains(&("codex".into(), "week".into())), "{found:?}");
+        assert!(!found.contains(&("codex".into(), "5h".into())), "{found:?}");
     }
 }
