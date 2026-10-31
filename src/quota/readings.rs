@@ -162,12 +162,13 @@ fn percent(w: &Value) -> Option<f64> {
 /// Verified Ultra accounts have no 5-hour limit: usage says `five_hour: null`, and its
 /// typed list, which names every account-wide limit, has a valid weekly entry but no
 /// session. A null alone is not enough, since plans with the limit report an idle window
-/// that way, and a malformed list proves nothing.
+/// that way, and a list with any entry it can't classify proves nothing.
 pub fn claude_no_five_hour(v: &Value) -> bool {
-    let typed = v["limits"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let Some(typed) = v["limits"].as_array() else { return false };
     v.get("five_hour").is_some_and(Value::is_null)
+        && typed.iter().all(|w| w["kind"].as_str().is_some_and(|k| !k.trim().is_empty()))
+        && !typed.iter().any(|w| w["kind"] == "session" || w["group"] == "session")
         && typed.iter().any(|w| w["kind"] == "weekly_all" && percent(w).is_some())
-        && !typed.iter().any(|w| w["kind"] == "session")
 }
 
 /// What a Claude usage reading says of the 5-hour window.

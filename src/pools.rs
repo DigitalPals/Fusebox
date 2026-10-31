@@ -26,6 +26,8 @@ pub struct Member<'a> {
     pub forecast_available: bool,
     /// The provider confirmed the account has no 5-hour limit.
     pub no_five_hour: bool,
+    /// Paused as a whole for a quota or rate limit.
+    pub paused: bool,
 }
 
 impl Member<'_> {
@@ -136,11 +138,12 @@ fn pool(provider: &str, name: &str, model: Option<&str>, members: &[Member], now
     // A member without a model's own limit takes that model's requests until its
     // whole-account limits stop it, and those have pools of their own. One without a
     // 5-hour limit (Claude Ultra) takes what the others can't, so together they have
-    // none, as long as it is signed in and has weekly quota left. Otherwise the pool is
-    // the accounts that have the limit.
+    // none, as long as it is signed in, not paused and has weekly quota left. Otherwise
+    // the pool is the accounts that have the limit.
     let carries = |m: &Member| {
         m.no_five_hour
             && m.forecast_available
+            && !m.paused
             && !m.windows.iter().any(|w| {
                 w.name == "week" && w.model.is_none() && w.used >= 100.0 && w.resets_at.is_none_or(|r| r > now)
             })
@@ -291,6 +294,7 @@ mod tests {
                 history: &[],
                 forecast_available: true,
                 no_five_hour: a.no_five_hour,
+                paused: false,
             })
             .collect()
     }

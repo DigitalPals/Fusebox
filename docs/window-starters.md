@@ -58,9 +58,11 @@ manual or automatic, and is rechecked hourly in case a limit returns. A new Ultr
 account keeps a temporary five-hour limit until Anthropic verifies it, and is
 started like any other until then. When `five_hour` is null, the list's session
 entry decides: idle only at 0% with no reset time, active with a future reset,
-unknown otherwise. A malformed list proves nothing. A null without any list keeps
-its old meaning, an idle window, except on Ultra, where it is unknown and only a
-status check is made. Once an account reports a five-hour window again, the
+unknown otherwise. A list with an entry that can't be classified, or that names a
+session in any way, proves nothing. A null without any list keeps its old meaning,
+an idle window, except on Ultra or an account already confirmed without a limit,
+where it is unknown and only a status check is made; only a reported five-hour
+window brings the limit back. Once an account reports a five-hour window again, the
 starter rechecks it within five minutes instead of at the hourly recheck.
 
 Before dispatch, Fusebox checks settings again and yields to in-flight requests,

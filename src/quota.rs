@@ -133,6 +133,15 @@ pub struct Quota {
     pub(crate) plan_checked_at: Option<DateTime<Utc>>,
 }
 
+/// Whether two plan identifiers name the same plan: Claude's Ultra may one day be
+/// `ultra` rather than its `max_20x` tier, and that is no change of plan.
+pub fn same_plan(a: &str, b: &str) -> bool {
+    fn canonical(p: &str) -> &str {
+        if p == "ultra" { "max_20x" } else { p }
+    }
+    canonical(a) == canonical(b)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
     /// The plan identifier and the provider's display name.
@@ -157,9 +166,11 @@ impl Quota {
             .filter(move |w| w.resets_at.is_none_or(|r| r > now))
     }
 
-    /// On Claude Ultra (formerly Max 20x), by its plan.
-    pub fn ultra(&self) -> bool {
-        matches!(self.plan.as_deref(), Some("max_20x" | "ultra"))
+    /// On Claude Ultra (formerly Max 20x) by its plan, or already confirmed to have no
+    /// 5-hour limit: either way a bare null may mean there is no window, not an idle one.
+    pub fn may_lack_five_hour(&self) -> bool {
+        self.no_five_hour_limit
+            || matches!(self.plan.as_deref(), Some("max_20x" | "ultra"))
             || self.plan_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("ultra"))
     }
 
@@ -294,7 +305,7 @@ impl Quota {
 
     pub(crate) fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
         if plan.is_some() {
-            if self.plan.is_some() && self.plan != plan {
+            if self.plan.as_deref().zip(plan.as_deref()).is_some_and(|(old, new)| !same_plan(old, new)) {
                 // A usage response can reveal a downgrade before the next plan check.
                 self.subscription_plan = None;
                 self.plan_name = None;
@@ -546,7 +557,7 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     if st.quota_epoch == epoch {
         let before = (st.quota.plan.clone(), st.quota.subscription_plan.clone());
         st.quota.plan_read(Utc::now(), details.as_ref().ok().cloned());
-        if before.0.as_ref().zip(st.quota.plan.as_ref()).is_some_and(|(old, new)| old != new)
+        if before.0.as_ref().zip(st.quota.plan.as_ref()).is_some_and(|(old, new)| !same_plan(old, new))
             || before.1.as_ref().zip(st.quota.subscription_plan.as_ref()).is_some_and(|(old, new)| old != new)
         {
             st.attribution.history.clear();
@@ -901,12 +912,63 @@ mod tests {
             json!({ "five_hour": null, "limits": [] }),
             json!({ "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
             json!({ "five_hour": { "utilization": 3.0 }, "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
-            // A malformed weekly entry proves nothing either.
+            // A malformed weekly entry proves nothing either, nor does a list with an entry
+            // it can't classify, or one that names a session in any way.
             json!({ "five_hour": null, "limits": [{ "kind": "weekly_all" }] }),
             json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 140 }] }),
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 1 }, { "kind": null, "group": "session" }] }),
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 1 }, { "kind": " " }] }),
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 1 }, 5] }),
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 1 }, { "kind": "x", "group": "session" }] }),
         ] {
             assert!(!readings::claude_no_five_hour(&v), "{v}");
         }
+    }
+
+    #[test]
+    fn a_malformed_session_entry_is_no_proof_of_absence() {
+        let mut st = crate::accounts::AccountState::default();
+        st.quota.plan = Some("max_20x".into());
+        let reset = Utc::now() + chrono::Duration::hours(2);
+        let week = json!({ "utilization": 20, "resets_at": Utc::now() + chrono::Duration::days(2) });
+        usage(
+            &mut st,
+            Provider::Claude,
+            &json!({ "five_hour": { "utilization": 100, "resets_at": reset }, "seven_day": week }),
+        );
+        usage(
+            &mut st,
+            Provider::Claude,
+            &json!({ "five_hour": null, "seven_day": week, "limits": [
+                { "kind": "weekly_all", "group": "weekly", "percent": 20, "resets_at": Utc::now() + chrono::Duration::days(2), "is_active": true },
+                { "kind": null, "group": "session", "percent": 100, "resets_at": reset, "is_active": true },
+            ] }),
+        );
+        assert!(!st.quota.no_five_hour_limit);
+        assert!(st.quota.exhausted("claude-sonnet-5-5"));
+    }
+
+    #[test]
+    fn ultra_and_max_20x_are_the_same_plan() {
+        assert!(same_plan("ultra", "max_20x") && same_plan("max_20x", "ultra") && same_plan("pro", "pro"));
+        assert!(!same_plan("max_5x", "max_20x") && !same_plan("max", "ultra"));
+        let mut st = crate::accounts::AccountState::default();
+        let week = |used| Window {
+            name: "week".into(),
+            used,
+            resets_at: Some(Utc::now() + chrono::Duration::days(2)),
+            model: None,
+        };
+        st.set_quota(vec![week(10.0)], Some("max_20x".into()));
+        st.set_quota(vec![week(11.0)], Some("max_20x".into()));
+        st.quota.plan_name = Some("Ultra".into());
+        assert!(!st.attribution.history.is_empty());
+        st.set_quota(vec![week(12.0)], Some("ultra".into()));
+        assert!(!st.attribution.history.is_empty(), "a new identifier for the same plan keeps the history");
+        assert_eq!(st.quota.plan_name.as_deref(), Some("Ultra"));
+        st.set_quota(vec![week(13.0)], Some("max_5x".into()));
+        assert!(st.attribution.history.len() <= 1, "a real change of plan starts over");
+        assert_eq!(st.quota.plan_name, None);
     }
 
     #[test]

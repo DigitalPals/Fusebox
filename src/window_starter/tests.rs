@@ -350,6 +350,24 @@ async fn an_active_typed_session_is_neither_started_nor_overwritten() {
 }
 
 #[tokio::test]
+async fn a_confirmed_absence_survives_an_unclear_reading_before_the_plan_is_known() {
+    let (_temp, app, mock, server) = fixture(1, false).await;
+    let acct = app.pool.all()[0].clone();
+    {
+        let mut st = acct.state.lock();
+        crate::quota::usage(&mut st, Provider::Claude, &ultra());
+        assert!(st.quota.no_five_hour_limit && st.quota.plan.is_none());
+    }
+    let mut partial = ultra();
+    partial.as_object_mut().unwrap().remove("limits");
+    *mock.usage.lock() = partial;
+    assert!(run(&app, true).await.is_err());
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 0);
+    assert!(acct.state.lock().quota.no_five_hour_limit, "only a real 5-hour window brings the limit back");
+    server.abort();
+}
+
+#[tokio::test]
 async fn a_bare_null_on_ultra_is_unknown_and_never_started() {
     let (_temp, app, mock, server) = fixture(1, false).await;
     app.pool.all()[0].state.lock().quota.plan = Some("max_20x".into());

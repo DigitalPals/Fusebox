@@ -317,6 +317,7 @@ mod tests {
                 history: h,
                 forecast_available: true,
                 no_five_hour: false,
+                paused: false,
             })
             .collect();
         Outlook::calculate(&members, true, now())
@@ -374,6 +375,7 @@ mod tests {
             history: &[],
             forecast_available: true,
             no_five_hour: false,
+            paused: false,
         };
         let out = Outlook::calculate(&[m], false, now());
         assert_eq!(out.state, "learning");
@@ -404,6 +406,7 @@ mod tests {
             history: &hs,
             forecast_available: true,
             no_five_hour: false,
+            paused: false,
         };
         let out = Outlook::calculate(&[m], false, now());
         assert_eq!(out.reason, Some("stale_readings"));
@@ -424,6 +427,7 @@ mod tests {
                 history: &hs[i..i + 1],
                 forecast_available: true,
                 no_five_hour: false,
+                paused: false,
             })
             .collect();
         near(Outlook::calculate(&members, true, now()).min_remaining.unwrap(), 820.0 / 11.0);

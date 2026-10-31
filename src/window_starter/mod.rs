@@ -179,7 +179,8 @@ enum Window {
 
 /// Only explicit provider data proves inactivity. Missing, malformed, and a
 /// zero-percent window with a future reset are never treated as unused windows.
-/// `ultra`: the account is on Ultra, where a bare null can mean there is no window.
+/// `ultra`: the account is on Ultra or confirmed without a 5-hour limit, where a bare
+/// null can mean there is no window.
 fn window(value: &Value, now: DateTime<Utc>, ultra: bool) -> Window {
     use crate::quota::FiveHour;
     match crate::quota::claude_five_hour(value, now) {
@@ -348,7 +349,7 @@ impl Api {
         // only where nothing else describes the 5-hour one: a typed session entry
         // or a confirmed absence speaks for itself, and an unclear null stays unknown.
         let mut normalized = usage.clone();
-        let idle = window(&usage, Utc::now(), acct.state.lock().quota.ultra()) == Window::Inactive;
+        let idle = window(&usage, Utc::now(), acct.state.lock().quota.may_lack_five_hour()) == Window::Inactive;
         for key in ["five_hour", "seven_day"] {
             let typed = key == "five_hour" && usage["limits"].is_array();
             if usage.get(key) == Some(&Value::Null) && (key == "seven_day" || (idle && !typed)) {
@@ -414,7 +415,7 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
     let foreground = ForegroundGuard::new(app, id);
     let usage = api.usage(app, acct, id).await?;
     let now = Utc::now();
-    let ultra = acct.state.lock().quota.ultra();
+    let ultra = acct.state.lock().quota.may_lack_five_hour();
     let state = window(&usage, now, ultra);
     if state == Window::Absent {
         let mut view =

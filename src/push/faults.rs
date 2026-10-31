@@ -169,6 +169,7 @@ impl AccountView {
             history: &self.history,
             forecast_available: !self.signin_error(),
             no_five_hour: self.no_five_hour,
+            paused: matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit"))),
         }
     }
 
@@ -792,7 +793,13 @@ mod tests {
         assert!(!warned(&[limited.clone(), ultra(None, 10.0)]), "a working Ultra account takes the overflow");
         assert!(warned(&[limited.clone(), ultra(Some("401: sign in again"), 100.0)]));
         assert!(warned(&[limited.clone(), ultra(Some("refresh failed: invalid_grant"), 10.0)]), "signed out");
-        assert!(warned(&[limited, ultra(None, 100.0)]), "its week used up");
+        assert!(warned(&[limited.clone(), ultra(None, 100.0)]), "its week used up");
+        let paused = AccountView {
+            pauses: BTreeMap::from([("*".to_string(), (now + Duration::hours(2), "rate_limit"))]),
+            ..ultra(None, 10.0)
+        };
+        assert!(paused.unavailable());
+        assert!(warned(&[limited, paused]), "paused as a whole");
     }
 
     #[test]
