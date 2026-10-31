@@ -1,0 +1,317 @@
+{
+  "release": {
+    "source_commit": "faaa97c97130938338194555dc2b76a21e8a33b3",
+    "source_working_tree": false,
+    "source_sha256": "eb129cf97dfb0beb6a021beeb9ce459e60ce53ac8c3225de9e20b916d1154ebf",
+    "version": "0.11.0+gui.eb129cf97dfb",
+    "origin": "local-gui",
+    "previous_version": "0.10.1+gui.c7dcf3a00824",
+    "previous_binary_sha256": "b9907159a3f2994bec789ed0073f2fe0cc005c16d0975b66cfa1bcba1fb6128b",
+    "config_sha256": "ed7f01b8f9cc088183eab11cf1c8cd633b2765528c1bd25c38b1a1786d1f7256",
+    "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6",
+    "binary_bytes": 19347208,
+    "assets": {
+      "/ui/app.js": "1620b7221add91c6f9297f8861272e5b9a7f01c0f4bfe43c5547f67ffc98a294",
+      "/ui/usage.js": "433fb4de55fac32e627faec10b570c17b0f525d6991f55858101d664443aa86c",
+      "/ui/config.js": "e9172decd498cf0fd29344e1f567b8af2fa2bcce5194586d2ebf6518c29f647f",
+      "/ui/i18n-zh.js": "0b1db826ad87e890bb640b8e85281b6817fbdce8afcb9df32c1663e50da3ae93",
+      "/ui/i18n.js": "9e876f92582a03063909fbe858353f8464e2f3f230a4339d3e2b5299865e0930",
+      "/ui/style.css": "39eba3c0ec39b1e4cfdd92cc5da04cab551006d8bac63f998e14868cfdfce88e",
+      "/ui/icon.svg": "7b521316e3c8fe9d2e8642ddaa943bc3bd3508021846236be70acbb5785e6319",
+      "/manifest.webmanifest": "4586fddb01bd452a62e18fdf0710a501838f45ef51cfa9a9f31d9098310e3015",
+      "/sw.js": "7b0256c8acc215d0be7dd2efbd0325e47a53a97877b0c85ee03284aa13b8d809",
+      "/ui/index.html": "21ef57baf7d5ce6aad3c6fe5abfea32e2a1a16036228ea7e031dbe5c729f8c2d"
+    },
+    "archive": "cliproxyapi-rust-v0.11.0+gui.eb129cf97dfb-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "6fd1540a9627eb88be3616105c6c7281bf938a213f4803a34328513d170a4e93",
+    "maintenance_run_id": "237d7af76608490b98613ff8625e81a0"
+  },
+  "deployment": {
+    "backup_sha256": "293c8b9f3e28ae1960f309aebc00efde815fe2cae8090d0df72713aa4519d646",
+    "billing_calls": 0,
+    "forced": true,
+    "gate_released": true,
+    "outcome": "deployed",
+    "rollback_version": "0.10.1+gui.c7dcf3a00824",
+    "transaction": "786fcb1e60e948fa915a616938ae0505",
+    "version": "0.11.0+gui.eb129cf97dfb"
+  },
+  "verification": {
+    "accounts": 5,
+    "analytics_health": "healthy",
+    "assets": {
+      "/": {
+        "gzip": 16161,
+        "identity": 45485
+      },
+      "/manifest.webmanifest": {
+        "gzip": 468,
+        "identity": 1254
+      },
+      "/sw.js": {
+        "gzip": 2064,
+        "identity": 4119
+      },
+      "/ui/app.js": {
+        "gzip": 72712,
+        "identity": 248378
+      },
+      "/ui/config.js": {
+        "gzip": 30784,
+        "identity": 110213
+      },
+      "/ui/i18n-zh.js": {
+        "gzip": 32732,
+        "identity": 97947
+      },
+      "/ui/i18n.js": {
+        "gzip": 2675,
+        "identity": 6730
+      },
+      "/ui/icon.svg": {
+        "gzip": 251,
+        "identity": 314
+      },
+      "/ui/style.css": {
+        "gzip": 17913,
+        "identity": 97473
+      },
+      "/ui/usage.js": {
+        "gzip": 17870,
+        "identity": 60814
+      }
+    },
+    "billing_calls": 0,
+    "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6",
+    "client_identity_inspection": true,
+    "collectors_enrolled": 0,
+    "config_and_routing_verified": true,
+    "configured_imports": 0,
+    "gate_unchanged": true,
+    "legacy_summary_retired": true,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "sessions": {
+      "current_assignments": 207,
+      "expired_assignments": 0,
+      "preserved_assignments": 207,
+      "snapshot_assignments": 207
+    },
+    "usage_backup_bytes": 1153097728,
+    "usage_backup_sha256": "73d696f22a7174dcb1f2b0c9406af6a9abbd848021956c242973e57f6b49a594",
+    "version": "0.11.0+gui.eb129cf97dfb"
+  },
+  "postflight": {
+    "account_count": 5,
+    "automatic_restarts": 0,
+    "backup_sha256": "293c8b9f3e28ae1960f309aebc00efde815fe2cae8090d0df72713aa4519d646",
+    "billing_calls": 0,
+    "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6",
+    "client_identity_inspection": true,
+    "configuration_unchanged": true,
+    "database": {
+      "bytes": 1153114240,
+      "bytes_per_observation": 2432,
+      "compressing": false,
+      "disk_free_bytes": 12771917824,
+      "free_bytes": 0,
+      "growth_bytes_per_day": 33330907,
+      "incremental_vacuum": true,
+      "live_bytes": 1153097728,
+      "observations": 474072,
+      "uncompressed_rows": 0,
+      "updated_at_ms": 1793278936724
+    },
+    "gate_held": false,
+    "models_listed": 26,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "proxy_protocol_port_ready": true,
+    "readiness": {
+      "accounts": {
+        "ready": 3,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "rollback_version": "0.10.1+gui.c7dcf3a00824",
+    "schema_additions": [],
+    "service_active": true,
+    "usage_after": {
+      "observations": 474076,
+      "quick_check": "ok",
+      "schema_sha256": "a24297297e8c99232d4a9f812ed1ce37b49bc43ef760823a5c352df7e565f950",
+      "schema_version": 5
+    },
+    "usage_backup_sha256": "73d696f22a7174dcb1f2b0c9406af6a9abbd848021956c242973e57f6b49a594",
+    "usage_before": {
+      "observations": 474072,
+      "quick_check": "ok",
+      "schema_sha256": "a24297297e8c99232d4a9f812ed1ce37b49bc43ef760823a5c352df7e565f950",
+      "schema_version": 5
+    },
+    "usage_health": {
+      "accepted": 3,
+      "dropped": 0,
+      "prior_unclosed_sessions": 0,
+      "queue_depth": 0,
+      "rejected": 0,
+      "state": "healthy",
+      "writer_errors": 0,
+      "written": 3
+    },
+    "version": "0.11.0+gui.eb129cf97dfb"
+  },
+  "features": {
+    "automatic_restarts": 0,
+    "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6",
+    "checked_at": "2026-10-29T13:02:30.713341+00:00",
+    "chinese_pending_message": true,
+    "discovery_pending_message": true,
+    "model_family_coverage": true,
+    "notifications_sent": 0,
+    "ok": true,
+    "provider_refresh_requests": 0,
+    "real_provider_inference_calls": 0,
+    "reset_requests_sent": 0,
+    "source_commit": "faaa97c97130938338194555dc2b76a21e8a33b3",
+    "source_working_tree": false,
+    "usage_formatter_reuse": true,
+    "version": "0.11.0+gui.eb129cf97dfb"
+  },
+  "public_https": {
+    "ok": true,
+    "url": "https://10.10.0.235:8317/",
+    "version": "0.11.0+gui.eb129cf97dfb",
+    "tls_verified": true,
+    "health": "ok",
+    "readiness": {
+      "status": "ready",
+      "accounts": {
+        "ready": 3,
+        "total": 5
+      },
+      "usage": "healthy"
+    },
+    "verified_assets": 10,
+    "representations": [
+      "identity",
+      "gzip"
+    ],
+    "inference_calls": 0
+  },
+  "forced_drain": [
+    {
+      "active_before": 10,
+      "attempt": 0,
+      "drained": true,
+      "drained_after_ms": 69,
+      "hold_lifted_by_cleanup_after_ms": null,
+      "phase": "committed"
+    }
+  ],
+  "qualification": [
+    {
+      "name": "implementation-tests",
+      "exit_code": 0,
+      "source_commit": "faaa97c97130938338194555dc2b76a21e8a33b3",
+      "receipt": "docs/optimization-opus-validation-2026-10-29.json",
+      "source_hashes_rechecked": 19,
+      "rust": {
+        "passed": 759,
+        "failed": 0,
+        "ignored": 5
+      },
+      "node": {
+        "passed": 144,
+        "failed": 0
+      },
+      "python": {
+        "passed": 46,
+        "failed": 0
+      },
+      "fmt": true,
+      "clippy_all_targets_deny_warnings": true
+    },
+    {
+      "name": "build",
+      "exit_code": 0,
+      "log": "build.log",
+      "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6",
+      "version": "0.11.0+gui.eb129cf97dfb"
+    },
+    {
+      "name": "candidate",
+      "exit_code": 0,
+      "receipts": [
+        "candidate-smoke.json",
+        "candidate-schema.json"
+      ],
+      "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6"
+    },
+    {
+      "name": "rollout",
+      "exit_code": 0,
+      "passed": 15,
+      "log": "rollout-check.log"
+    },
+    {
+      "name": "usage-e2e",
+      "exit_code": 0,
+      "passed": 12,
+      "log": "usage-e2e.log",
+      "binary_sha256": "75bc2d385352d0ca5e01c2f43b78dadc7941aa09f874553f6389eeb291aeb8f6"
+    },
+    {
+      "name": "cleanup",
+      "exit_code": 0,
+      "receipt": "qualification-cleanup.json",
+      "ci_reservation": "ci-job-87e2e27e85584177883e37262f4cc8cd",
+      "ci_reservation_released": true
+    }
+  ],
+  "temporary_cleanup": {
+    "lease": "473973c2ed9a4e85a6630f3f7f7f50be",
+    "status": "closed",
+    "remaining": [],
+    "preserved_volumes": [],
+    "errors": []
+  },
+  "recorded_at": "2026-10-29T13:03:40.232771+00:00",
+  "independent_provenance_check": {
+    "ok": true,
+    "archive_matches_git_commit": true,
+    "archive_files_matching_workspace": 298,
+    "validated_source_hashes_matching_commit": 19,
+    "extracted_source_changes": [
+      "Cargo.toml package version",
+      "Cargo.lock fusebox version"
+    ],
+    "package_members_verified": 3,
+    "generated_assets_verified": 10
+  },
+  "ci_host_reservation": {
+    "id": "ci-job-87e2e27e85584177883e37262f4cc8cd",
+    "released": true
+  },
+  "final_service_check": {
+    "backend_active": true,
+    "backend_pid": 126104,
+    "backend_automatic_restarts": 0,
+    "gate_active": true,
+    "gate_pid": 93357,
+    "gate_automatic_restarts": 0,
+    "deployment_unit_result": "success",
+    "deployment_unit_inactive": true,
+    "temporary_firewall_hold_absent": true
+  },
+  "retention": {
+    "owner": "John Pals / Fusebox production operator",
+    "candidate_and_previous_release": true,
+    "incoming_directory": "/opt/cli-proxy-api-rust/incoming/fusebox-optimization-followup-20261029",
+    "backup_directory": "/var/lib/cliproxy-rust-update/backups/786fcb1e60e948fa915a616938ae0505",
+    "deployment_unit": "fusebox-optimization-followup-20261029.service",
+    "purpose": "Exact source/artifact provenance, deployment recovery, and rollback through the established updater"
+  }
+}
