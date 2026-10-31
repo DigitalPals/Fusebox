@@ -955,7 +955,8 @@ function windowOf(a, short) {
 // Verified Claude Ultra accounts have no 5-hour limit; the provider says so explicitly.
 const NO_SHORT_LIMIT = 'This account has no five-hour limit; only the weekly limits apply.';
 const noShortLimit = (a) => !!a.quota?.no_five_hour_limit && !windowOf(a, true);
-const noLimitSegs = () => `<span class="segs" role="img" aria-label="5-hour: no limit">${'<i></i>'.repeat(20)}</span>`;
+// The lists leave such an account's 5-hour meter out; the line under its name says why.
+const noShortNote = (a) => (noShortLimit(a) ? ' · no 5h limit' : '');
 
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
 const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
@@ -1009,19 +1010,19 @@ function pctHTML(w) {
 
 // One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover.
 function meterRowHTML(a, short) {
-  if (short && noShortLimit(a)) return `<div class="mrow" title="${esc(NO_SHORT_LIMIT)}"><span class="capsm">5H</span>${noLimitSegs()}<span class="pct dim">–</span><span class="rst">No limit</span></div>`;
   const w = windowOf(a, short);
   const label = windowLabel(w, short);
   const reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
   const title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
   return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst"${title}>${reset}</span></div>`;
 }
-const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : `${meterRowHTML(a, true)}${meterRowHTML(a, false)}`}</div>`;
+const meterRowsHTML = (a) => `${noShortLimit(a) ? '' : meterRowHTML(a, true)}${meterRowHTML(a, false)}`;
+const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : meterRowsHTML(a)}</div>`;
 
 function miniMetersHTML(a) {
   if (!a.quota?.windows?.length && a.quota?.limits?.length) return quotaLimitsHTML(a, true);
   const row = (short) => {
-    if (short && noShortLimit(a)) return `<div class="mrow" title="${esc(NO_SHORT_LIMIT)}"><span class="capsm">5H</span>${noLimitSegs()}<span class="pct dim">–</span></div>`;
+    if (short && noShortLimit(a)) return '';
     const w = windowOf(a, short);
     return `<div class="mrow"><span class="capsm">${esc(windowLabel(w, short))}</span>${segsHTML(w, windowTitle(w || { name: short ? '5h' : 'week' }))}${pctHTML(w)}</div>`;
   };
@@ -1355,8 +1356,8 @@ function ovSubsHTML() {
     const items = subs.map((a) => {
       const st = acctState(a);
       return `<div class="item click" data-open="${esc(a.id)}">
-        <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}</span></div>${statusHTML(a, 7)}</div>
-        <div class="meters indent">${meterRowHTML(a, true)}${meterRowHTML(a, false)}</div>
+        <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div>${statusHTML(a, 7)}</div>
+        <div class="meters indent">${meterRowsHTML(a)}</div>
         <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
       </div>`;
     }).join('');
@@ -1367,7 +1368,7 @@ function ovSubsHTML() {
     const st = acctState(a);
     return `<div class="tr click" data-open="${esc(a.id)}">
       <span class="c-idx idx">${String(i + 1).padStart(2, '0')}</span>
-      <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}</span></div></div>
+      <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div></div>
       ${metersHTML(a)}
       <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}</div>
       <span class="c-req r">${fmt(a.counters.requests)}</span>
@@ -2205,7 +2206,7 @@ function accountListHTML() {
       const st = acctState(a);
       const fails = a.counters.failures;
       return `<div class="item click${a.disabled ? ' off' : ''}" data-open="${esc(a.id)}" style="${a.disabled ? 'opacity:.55' : ''}">
-        <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(authName(a))}</span></div>${statusHTML(a, 7)}</div>
+        <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(authName(a))}${esc(noShortNote(a))}</span></div>${statusHTML(a, 7)}</div>
         ${metered(a) ? `<div class="indent">${miniMetersHTML(a)}</div>` : ''}
         <div class="metaline indent">${st.cls === 'cooling' ? `<span>${esc(modelScope(st.model))}</span>` : ''}${bankedLineHTML(a)}<span>${fmt(a.counters.requests)} req · ${liveAgo(a.last_used)}</span>${fails ? `<span class="err">${fmt(fails)} failed</span>` : ''}${a.counters.cancelled ? `<span>${fmt(a.counters.cancelled)} cancelled</span>` : ''}${usageCoverageText(a.counters) ? `<span>Usage: ${usageCoverageText(a.counters)}</span>` : ''}</div>
         ${a.last_error && !a.disabled ? `<span class="errline indent">${esc(hideEmails(a.last_error))}</span>` : ''}
@@ -2218,7 +2219,7 @@ function accountListHTML() {
     return `<div class="acct-item${a.disabled ? ' off' : ''}">
       <div class="tr click" data-open="${esc(a.id)}">
         <span class="c-idx idx">${String(list.indexOf(a) + 1).padStart(2, '0')}</span>
-        <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(acctSub(a))}</span></div></div>
+        <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(acctSub(a) + noShortNote(a))}</span></div></div>
         ${metered(a) ? metersHTML(a) : '<span class="no-limits">No usage limits</span>'}
         <div class="c-status">${statusHTML(a)}${statusExtrasHTML(a)}</div>
         <div class="c-traffic"><span>${fmt(c.requests)} <span class="dim">requests</span></span><span class="subs-line">${aggregateTokensHTML(c, 'input_tokens')} in · ${aggregateTokensHTML(c, 'output_tokens')} out${c.failures ? ` · <span class="err">${fmt(c.failures)} failed</span>` : ''}${c.cancelled ? ` · ${fmt(c.cancelled)} cancelled` : ''}</span>${usageCoverageText(c) ? `<span class="subs-line">Usage: ${usageCoverageText(c)}</span>` : ''}</div>
@@ -2305,21 +2306,21 @@ function detBankedHTML(a) {
 function windowStarterHTML(a) {
   if (!a.window_starter_supported) return '';
   const v = a.window_starter;
+  // Without a 5-hour limit there is no window to start, so there is no starter either.
+  // Fresh quota wins: a 5-hour window reported since the last check means it is back.
+  if (noShortLimit(a) || (v?.status === 'not_needed' && !windowOf(a, true))) return '';
   const busy = !!S.windowStarterBusy?.[a.id];
   const reset = windowOf(a, true)?.resets_at || v?.resets_at;
   const active = reset && Date.parse(reset) > Date.now();
-  // Fresh quota wins: a 5-hour window reported since the last check means it is back.
-  const absent = noShortLimit(a) || (v?.status === 'not_needed' && !windowOf(a, true));
-  const held = !absent && v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
+  const held = v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
   const message = v?.status === 'not_needed' ? '' : v?.message;
-  const status = absent ? (v?.status === 'not_needed' && v.message) || 'This account has no five-hour limit, so there is no window to start'
-    : active ? `Window resets ${when(reset)}` : message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
-  const check = active || held || absent;
+  const status = active ? `Window resets ${when(reset)}` : message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
+  const check = active || held;
   return `<div class="window-starter block" aria-label="Window starter"><div class="cell2"><span class="label">Window starter</span>
     <span class="fg2">${esc(status)}</span>
     ${held ? `<span class="small dim">${esc(`Next starter allowed ${when(v.retry_after)}`)}</span>` : ''}
     ${v?.attempted_at ? `<span class="small dim">${esc(`Last requested ${when(v.attempted_at)}${v.automatic ? ' · automatic' : ' · manual'}`)}</span>` : ''}
-    ${absent ? '' : '<span class="small dim">Starting sends a small Claude request and uses subscription quota.</span>'}</div>
+    <span class="small dim">Starting sends a small Claude request and uses subscription quota.</span></div>
     <div><button type="button" class="btn sm" data-act="${check ? 'window-check' : 'window-start'}" data-id="${esc(a.id)}" ${busy || a.disabled ? 'disabled' : ''}>${busy ? 'Checking…' : check ? 'Check status' : 'Start now'}</button></div></div>`;
 }
 

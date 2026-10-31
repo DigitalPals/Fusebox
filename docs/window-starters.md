@@ -53,8 +53,10 @@ quota; missing or malformed data and zero-percent active windows do not qualify.
 
 Verified Claude Ultra accounts (formerly Max 20x) have no five-hour limit. Their
 usage reports `five_hour: null` and its typed limit list has a weekly entry but no
-session entry. Such an account shows **No five-hour limit**, gets no starter request,
-manual or automatic, and is rechecked hourly in case a limit returns. A new Ultra
+session entry. Such an account shows **No limit** for its five-hour window, has no
+starter on its page, gets no starter request, manual or automatic, and is rechecked
+hourly in case a limit returns. Settings still list it as a starter account, marked
+**no 5h limit**, so its selection survives if the limit returns. A new Ultra
 account keeps a temporary five-hour limit until Anthropic verifies it, and is
 started like any other until then. When `five_hour` is null, the list's session
 entry decides: idle only at 0% with no reset time, active with a future reset,

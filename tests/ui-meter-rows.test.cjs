@@ -24,10 +24,10 @@ function load() {
     piece('const esc = (v) =>'), piece('function left(iso) {'), piece('function compactLeft(iso) {'),
     piece('const hm ='), piece('const weekday ='), piece('const fullResetTime ='), piece('const when ='), piece('const liveLeft ='),
     piece('function quotaOf(w'), piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
-    piece('function windowOf(a, short) {'), piece('const NO_SHORT_LIMIT ='), piece('const noShortLimit ='), piece('const noLimitSegs ='),
+    piece('function windowOf(a, short) {'), piece('const NO_SHORT_LIMIT ='), piece('const noShortLimit ='), piece('const noShortNote ='),
     piece('const windowLabel ='), piece('const windowTitle ='), piece('function windowSeconds(w) {'),
     piece('function windowElapsed(w'), piece('function windowSpent(a, w) {'),
-    piece('const segsHTML ='), piece('function meterHTML(q'), piece('function pctHTML(w) {'), piece('function meterRowHTML(a, short) {'),
+    piece('const segsHTML ='), piece('function meterHTML(q'), piece('function pctHTML(w) {'), piece('function meterRowHTML(a, short) {'), piece('const meterRowsHTML ='),
     piece('function windowBlockHTML(a, w, title, size) {'), piece('function miniMetersHTML(a) {'), piece('function windowHTML(a, short, size) {'),
     piece('function noShortBlockHTML(size) {'), piece('function quotaWindowsHTML(a'),
   ].join('\n'), context);
@@ -85,24 +85,30 @@ test('cooldown scope does not change the reset countdown', () => {
   assert.doesNotMatch(row(run, weekly), /out/, 'a weekly limit used up covers the 5-hour window too');
 });
 
-test('an account without a 5-hour limit says so instead of showing an empty window', () => {
+test('lists leave out the 5-hour meter of an account without that limit; its page says why', () => {
   const run = load();
   const ultra = { id: 'u', provider: 'claude', kind: 'oauth', quota: { no_five_hour_limit: true, windows: [{ name: 'week', used: 23, resets_at: '2026-10-28T16:00:00Z' }] } };
-  const short = row(run, ultra);
-  assert.match(short, /<span class="capsm">5H<\/span>/);
-  assert.match(short, /aria-label="5-hour: no limit"/);
-  assert.match(short, /class="rst">No limit</);
-  assert.match(short, /title="This account has no five-hour limit; only the weekly limits apply\."/);
-  assert.match(row(run, ultra, false), /↺ /, 'the weekly row is unchanged');
-  assert.match(run(`miniMetersHTML(${JSON.stringify(ultra)})`), /aria-label="5-hour: no limit"/);
+  const rows = run(`meterRowsHTML(${JSON.stringify(ultra)})`);
+  assert.equal((rows.match(/class="mrow"/g) || []).length, 1);
+  assert.doesNotMatch(rows, /5H|No limit|not reported/);
+  assert.match(rows, /<span class="capsm">WK<\/span>/);
+  assert.match(rows, /↺ /, 'the weekly row is unchanged');
+  const mini = run(`miniMetersHTML(${JSON.stringify(ultra)})`);
+  assert.equal((mini.match(/class="mrow"/g) || []).length, 1);
+  assert.doesNotMatch(mini, /5H/);
+  assert.equal(run(`noShortNote(${JSON.stringify(ultra)})`), ' · no 5h limit');
   const blocks = run(`quotaWindowsHTML(${JSON.stringify(ultra)}, 'lg')`);
   assert.match(blocks, /^<div class="window"><div class="window-top"><span>5-hour<\/span><span class="dim">No limit<\/span>/);
+  assert.match(blocks, /This account has no five-hour limit; only the weekly limits apply\./);
   assert.match(blocks, /Weekly/);
   assert.match(run(`windowHTML(${JSON.stringify(ultra)}, true, 'xl')`), /5-hour window<\/span><span class="dim">No limit/);
   // A reported 5-hour window always wins, and plain missing data stays "not reported".
   const back = { ...ultra, quota: { ...ultra.quota, windows: [{ name: '5h', used: 10, resets_at: RESET }, ...ultra.quota.windows] } };
-  assert.doesNotMatch(row(run, back), /No limit/);
+  assert.equal((run(`meterRowsHTML(${JSON.stringify(back)})`).match(/class="mrow"/g) || []).length, 2);
+  assert.match(run(`meterRowsHTML(${JSON.stringify(back)})`), /<span class="capsm">5H<\/span>/);
+  assert.equal(run(`noShortNote(${JSON.stringify(back)})`), '');
   const unknown = { ...ultra, quota: { windows: ultra.quota.windows } };
-  assert.doesNotMatch(row(run, unknown), /No limit/);
-  assert.match(row(run, unknown), /not reported/);
+  assert.match(run(`meterRowsHTML(${JSON.stringify(unknown)})`), /5-hour: not reported/);
+  assert.equal((run(`miniMetersHTML(${JSON.stringify(unknown)})`).match(/class="mrow"/g) || []).length, 2);
+  assert.equal(run(`noShortNote(${JSON.stringify(unknown)})`), '');
 });

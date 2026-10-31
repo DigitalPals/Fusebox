@@ -129,6 +129,7 @@ test('combined weekly limits read in Chinese', () => {
   assert.equal(tr('Claude weighted by plan allowance, Codex equally'), 'Claude 按套餐额度加权，Codex 权重相同');
   assert.match(tr('Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10'), /^每个账号按套餐每周额度计权/);
   assert.equal(tr('No limit'), '无限制');
+  assert.equal(tr('Claude · Ultra · no 5h limit'), 'Claude · Ultra · 无 5 小时限制');
   assert.equal(tr('This account has no five-hour limit; only the weekly limits apply.'), '此账号没有五小时限制，只适用每周限制。');
   assert.equal(tr('This account has no five-hour limit, so there is no window to start'), '此账号没有五小时限制，无需启动窗口');
 });

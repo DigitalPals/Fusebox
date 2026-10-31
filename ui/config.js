@@ -660,7 +660,7 @@ function configWindowStarterHTML() {
   return `${configChoice([...path, 'mode'], 'Start idle usage windows', [['off', 'Off'], ['always', 'Always'], ['working-hours', 'During working hours']],
     'Sends a small Claude request to start an inactive five-hour window, even without a job. Uses a little subscription quota, brings its next reset forward and does not increase weekly allowance. Manual starting is available on each supported account.')}
     ${p.mode !== 'off' ? `<div class="cfg-list wide"><span class="label">Starter accounts</span>
-      ${accounts.length ? accounts.map((a) => select(a.id, `${acctLabel(a)}${a.disabled ? ' · disabled' : ''}`)).join('') : '<p class="cfg-description">Connect a Claude subscription with a verified account ID to select it here.</p>'}
+      ${accounts.length ? accounts.map((a) => select(a.id, `${acctLabel(a)}${a.disabled ? ' · disabled' : ''}${noShortNote(a)}`)).join('') : '<p class="cfg-description">Connect a Claude subscription with a verified account ID to select it here.</p>'}
       ${missing.map((id) => select(id, `Unavailable account · ${id}`)).join('')}
       <p class="cfg-description">Only selected accounts start automatically. No selection means no automatic requests. Disabled accounts, real work, active windows and exhausted limits are skipped.</p></div>
       ${configField([...path, 'model'], 'Starter model', { required: true, help: 'A native Claude model available on the selected accounts. Default: claude-haiku-4-5-20251001. No model groups, fallback or premium options.' })}

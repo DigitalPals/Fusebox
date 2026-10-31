@@ -709,6 +709,7 @@
       "No usage": "没有用量",
       "No usage limits": "无用量限额",
       "No limit": "无限制",
+      "no 5h limit": "无 5 小时限制",
       "None required": "无需密钥",
       "None. A disabled account takes no new sessions.": "无。停用的账号不接收新会话。",
       "Normal": "普通",

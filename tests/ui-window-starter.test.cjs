@@ -17,6 +17,7 @@ function load(extra = {}) {
     esc, acctLabel: (a) => a.label, when: (s) => s,
     windowOf: (a) => a.quota?.windows?.find((w) => w.name === '5h'),
     noShortLimit: (a) => !!a.quota?.no_five_hour_limit && !a.quota?.windows?.find((w) => w.name === '5h'),
+    noShortNote: (a) => (ctx.noShortLimit(a) ? ' · no 5h limit' : ''),
     document: { addEventListener() {} }, ...extra };
   vm.createContext(ctx);
   vm.runInContext(config, ctx);
@@ -74,17 +75,19 @@ test('active windows use the provider reset time and unavailable messages are es
   assert.match(run('windowStarterHTML(a)'), /&lt;unsafe>/);
 });
 
-test('accounts without a 5-hour limit offer no start, only a status check', () => {
+test('accounts without a 5-hour limit have no starter; settings say why', () => {
   const { run } = load();
   run(`var a={id:'a',window_starter_supported:true,window_starter_selected:true,quota:{no_five_hour_limit:true,windows:[]}}`);
-  let html = run('windowStarterHTML(a)');
-  assert.match(html, /This account has no five-hour limit, so there is no window to start/);
-  assert.match(html, /data-act="window-check"/);
-  assert.doesNotMatch(html, /data-act="window-start"|uses subscription quota/);
+  assert.equal(run('windowStarterHTML(a)'), '');
   run(`a.quota=null; a.window_starter={status:'not_needed',message:'No limit here',retry_after:'2099-01-01T00:00:00Z'}`);
-  html = run('windowStarterHTML(a)');
-  assert.match(html, /No limit here/);
-  assert.doesNotMatch(html, /Next starter allowed|data-act="window-start"/);
+  assert.equal(run('windowStarterHTML(a)'), '');
+  // Still selectable: the flag can clear again, and the selection should survive that.
+  run(`S.accounts = [{id:'a',label:'ultra',window_starter_supported:true,quota:{no_five_hour_limit:true,windows:[]}},{id:'b',label:'max',window_starter_supported:true}];
+    S.config.values['window-starter'].mode='always'; S.config.values['window-starter'].accounts=['a'];`);
+  const html = run('configWindowStarterHTML()');
+  assert.match(html, /data-id="a" checked><span>ultra · no 5h limit</);
+  assert.match(html, /data-id="b" ><span>max</);
+  assert.doesNotMatch(html, /Unavailable account/);
 });
 
 test('a 5-hour limit reported since the last starter check overrides its not_needed result', () => {

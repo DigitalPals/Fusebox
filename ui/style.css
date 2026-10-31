@@ -422,6 +422,8 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
 .acct-table .segs { max-width: 140px; min-width: 56px; }
 .mini-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .mini-meters .mrow { gap: 6px; }
+/* Only a weekly meter when the account has no 5-hour limit. */
+.mini-meters > .mrow:only-child { grid-column: 1 / -1; }
 .mini-meters .capsm { width: auto; font-size: 10px; }
 .mini-meters .segs { min-width: 0; height: 7px; gap: 1.5px; padding: 0; outline-offset: 1px; }
 .mini-meters .segs i { border-radius: 0; }
