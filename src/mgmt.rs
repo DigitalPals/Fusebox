@@ -103,7 +103,7 @@ pub async fn start_login(app: &Arc<App>, provider: Provider) -> Result<(String, 
             tokio::spawn(async move {
                 let result = async {
                     let signed = crate::device::wait(&app2, provider, &dev).await?;
-                    save_signed(&app2, provider, signed)
+                    save_signed(&app2, provider, signed).await
                 }
                 .await;
                 settle(&app2, &state2, &result);
@@ -140,10 +140,67 @@ pub async fn start_login(app: &Arc<App>, provider: Provider) -> Result<(String, 
     }
 }
 
-fn save_signed(app: &Arc<App>, provider: Provider, s: crate::device::Signed) -> Result<String> {
-    let path = app.cfg().auth_dir().join(&s.file);
-    write_oauth_file(&path, provider, &s.oauth, &s.extra)?;
+/// Where a new sign-in is saved: `name`, unless Fusebox already has this account in a
+/// file named otherwise (older releases used other names). That file is then signed in
+/// again, so the account keeps its ID, selections and settings, and no stale copy is left
+/// retrying a revoked refresh token.
+fn sign_in_path(app: &App, provider: Provider, cred: &crate::accounts::OAuth, name: &str) -> std::path::PathBuf {
+    let fresh = app.cfg().auth_dir().join(name);
+    let exact = Credential::OAuth(cred.clone()).identity(provider);
+    // Older Claude files can lack the account UUID; one email is one Claude account.
+    let by_email = (provider == Provider::Claude && cred.email.is_some())
+        .then(|| Credential::OAuth(crate::accounts::OAuth { account_id: None, ..cred.clone() }).identity(provider));
+    let mut same: Vec<_> = app
+        .pool
+        .all()
+        .iter()
+        .filter(|a| a.provider == provider && matches!(&*a.cred.read(), Credential::OAuth(_)))
+        .filter(|a| {
+            let identity = a.cred.read().identity(provider);
+            identity == exact || by_email.as_ref() == Some(&identity)
+        })
+        .filter_map(|a| a.path.clone())
+        .collect();
+    same.sort();
+    if same.is_empty() || same.contains(&fresh) { fresh } else { same.swap_remove(0) }
+}
+
+/// Saves a sign-in and, when it signs an existing account in again, makes it that
+/// account's credential at once. Waiting out a refresh of the old tokens first keeps the
+/// reload from taking the new ones for an older copy, and the old sign-in's error ends.
+async fn save_sign_in(
+    app: &Arc<App>,
+    provider: Provider,
+    cred: &crate::accounts::OAuth,
+    name: &str,
+    extra: &[(&str, Value)],
+) -> Result<()> {
+    let path = sign_in_path(app, provider, cred, name);
+    let existing = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path.as_path()));
+    let guard = match &existing {
+        Some(a) => Some(a.refresh_lock.clone().lock_owned().await),
+        None => None,
+    };
+    write_oauth_file(&path, provider, cred, extra)?;
+    if let Some(a) = &existing
+        && let Some((_, saved, _, _)) = crate::accounts::read_oauth_file(&path)
+        && Credential::OAuth(saved.clone()).identity(provider) == a.cred.read().identity(provider)
+    {
+        // A refresh save still pending holds the old grant's tokens.
+        *a.pending_oauth_save.lock() = None;
+        *a.cred.write() = Credential::OAuth(saved);
+        let mut st = a.state.lock();
+        if st.last_error(chrono::Utc::now()).is_some_and(crate::push::signin_error) {
+            st.clear_error();
+        }
+    }
+    drop(guard);
     app.reload_accounts();
+    Ok(())
+}
+
+async fn save_signed(app: &Arc<App>, provider: Provider, s: crate::device::Signed) -> Result<String> {
+    save_sign_in(app, provider, &s.oauth, &s.file, &s.extra).await?;
     Ok(s.oauth.email.unwrap_or(s.file))
 }
 
@@ -255,12 +312,10 @@ pub async fn complete_login(app: &Arc<App>, state: &str, code: &str) -> Result<S
     let result = async {
         if provider == Provider::Devin {
             let signed = crate::devin::complete_login(app, code.trim(), &verifier).await?;
-            return save_signed(app, provider, signed);
+            return save_signed(app, provider, signed).await;
         }
         let (cred, name, extra) = oauth::exchange(app, provider, code.trim(), state, &verifier).await?;
-        let path = app.cfg().auth_dir().join(&name);
-        write_oauth_file(&path, provider, &cred, &extra)?;
-        app.reload_accounts();
+        save_sign_in(app, provider, &cred, &name, &extra).await?;
         Ok::<_, anyhow::Error>(cred.email.unwrap_or(name))
     }
     .await;
@@ -1528,6 +1583,132 @@ async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_sign_in_replaces_the_revoked_tokens_even_while_they_refresh() {
+        let dir = std::env::temp_dir().join(format!("fusebox-sign-in-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("claude-d204ac98-x@example.test.json");
+        std::fs::write(
+            &old,
+            json!({"type":"claude","access_token":"old","refresh_token":"revoked","email":"x@example.test",
+                "account_uuid":"u1","expired":"2000-01-01T00:00:00Z"})
+            .to_string(),
+        )
+        .unwrap();
+        let app =
+            App::new(Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() }, dir.join("config.yaml"));
+        let acct = app.pool.all()[0].clone();
+        let id = acct.id.clone();
+        // A refresh of the revoked token is under way when the new sign-in arrives.
+        let refreshing = acct.refresh_lock.clone().lock_owned().await;
+        let fresh = crate::accounts::OAuth {
+            access_token: "new".into(),
+            refresh_token: "fresh".into(),
+            email: Some("x@example.test".into()),
+            account_id: Some("u1".into()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(8)),
+            ..Default::default()
+        };
+        let saving = tokio::spawn({
+            let app = app.clone();
+            async move { save_sign_in(&app, Provider::Claude, &fresh, "claude-x@example.test.json", &[]).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!saving.is_finished(), "the save waits for the refresh");
+        acct.state.lock().set_error("refresh failed: OAuth endpoint returned HTTP 400 (invalid_grant)");
+        drop(refreshing);
+        saving.await.unwrap().unwrap();
+        let all = app.pool.all();
+        assert_eq!(all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [id.as_str()], "one account, same ID");
+        let Credential::OAuth(o) = all[0].cred.read().clone() else { panic!() };
+        assert_eq!((o.access_token.as_str(), o.refresh_token.as_str()), ("new", "fresh"));
+        assert_eq!(all[0].state.lock().last_error(chrono::Utc::now()), None, "the old sign-in's error is over");
+        assert!(!dir.join("claude-x@example.test.json").exists());
+        // Other errors are not the sign-in's to clear.
+        all[0].state.lock().set_error("500: upstream exploded");
+        let again = crate::accounts::OAuth { refresh_token: "fresher".into(), ..o };
+        save_sign_in(&app, Provider::Claude, &again, "claude-x@example.test.json", &[]).await.unwrap();
+        assert_eq!(app.pool.all()[0].state.lock().last_error(chrono::Utc::now()), Some("500: upstream exploded"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_in_again_reuses_the_accounts_file_whatever_it_is_called() {
+        let dir = std::env::temp_dir().join(format!("fusebox-sign-in-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, body: Value| std::fs::write(dir.join(name), body.to_string()).unwrap();
+        // Production on 2026-10-31: an older release named this file with a prefix.
+        file(
+            "claude-d204ac98-x@example.test.json",
+            json!({"type":"claude","access_token":"old","refresh_token":"revoked","email":"x@example.test",
+                "account_uuid":"u1","expired":"2099-01-01T00:00:00Z","priority":10}),
+        );
+        file(
+            "claude-legacy-old@example.test.json",
+            json!({"type":"claude","access_token":"a","refresh_token":"b","email":"old@example.test"}),
+        );
+        file(
+            "codex-w@example.test-plus.json",
+            json!({"type":"codex","access_token":"c","refresh_token":"d","email":"w@example.test","account_id":"w1"}),
+        );
+        let app =
+            App::new(Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() }, dir.join("config.yaml"));
+        let oauth = |id: &str, email: &str| crate::accounts::OAuth {
+            access_token: "new".into(),
+            refresh_token: "fresh".into(),
+            email: Some(email.into()),
+            account_id: Some(id.into()),
+            ..Default::default()
+        };
+        let path = |p: Provider, o: &crate::accounts::OAuth, name: &str| sign_in_path(&app, p, o, name);
+        let x = oauth("u1", "x@example.test");
+        assert_eq!(
+            path(Provider::Claude, &x, "claude-x@example.test.json"),
+            dir.join("claude-d204ac98-x@example.test.json")
+        );
+        let other = oauth("u9", "y@example.test");
+        assert_eq!(
+            path(Provider::Claude, &other, "claude-y@example.test.json"),
+            dir.join("claude-y@example.test.json")
+        );
+        let legacy = oauth("u5", "old@example.test");
+        assert_eq!(
+            path(Provider::Claude, &legacy, "claude-old@example.test.json"),
+            dir.join("claude-legacy-old@example.test.json"),
+            "a Claude file without its UUID is found by email"
+        );
+        // A ChatGPT email can have several workspaces: only the same account ID counts.
+        let workspace = oauth("w2", "w@example.test");
+        assert_eq!(
+            path(Provider::Codex, &workspace, "codex-w@example.test-plus.json"),
+            dir.join("codex-w@example.test-plus.json")
+        );
+        let same = oauth("w1", "w@example.test");
+        assert_eq!(
+            path(Provider::Codex, &same, "codex-w@example.test-pro.json"),
+            dir.join("codex-w@example.test-plus.json")
+        );
+        assert_eq!(path(Provider::Claude, &same, "claude-w@example.test.json"), dir.join("claude-w@example.test.json"));
+
+        // Signing in again keeps the account's ID and settings and replaces only its tokens.
+        let before: Vec<String> = app.pool.all().iter().map(|a| a.id.clone()).collect();
+        let target = path(Provider::Claude, &x, "claude-x@example.test.json");
+        write_oauth_file(&target, Provider::Claude, &x, &[]).unwrap();
+        app.reload_accounts();
+        let after: Vec<String> = app.pool.all().iter().map(|a| a.id.clone()).collect();
+        assert_eq!(after, before, "no second account");
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!((saved["refresh_token"].as_str(), saved["priority"].as_i64()), (Some("fresh"), Some(10)));
+        // Where the usual name already holds the account too, that file is the one used.
+        file(
+            "claude-x@example.test.json",
+            json!({"type":"claude","access_token":"e","refresh_token":"f","email":"x@example.test","account_uuid":"u1"}),
+        );
+        app.reload_accounts();
+        assert_eq!(path(Provider::Claude, &x, "claude-x@example.test.json"), dir.join("claude-x@example.test.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn clearing_an_account_error_is_authenticated_scoped_and_race_safe() {

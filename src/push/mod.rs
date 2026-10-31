@@ -9,6 +9,7 @@ mod crypto;
 mod faults;
 mod webhooks;
 
+pub(crate) use faults::signin_error;
 pub use webhooks::webhook_name;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
