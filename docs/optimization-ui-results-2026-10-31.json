@@ -1,0 +1,367 @@
+{
+  "measuredAt": "2026-10-31T21:41:19.816Z",
+  "node": "v22.22.3",
+  "baselineCommit": "7fef91efbf0134931ac0ab2935e64369456bfb3b",
+  "environment": {
+    "platform": "linux",
+    "architecture": "x64",
+    "cpu": "AMD Ryzen Threadripper 9970X 32-Cores",
+    "logicalCPUs": 64
+  },
+  "sourceSha256": {
+    "baselineUsage": "de5f5d9ecdb84dfd93aef6029e17e931725eb0b63ced00db318d2be67ff1e3a4",
+    "currentUsage": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880",
+    "baselineApp": "c51055d3ad31c6ef319074dea6aa45fe33aa5b5d8b46b6abc0b2be346d34fd28",
+    "currentApp": "991287cd7c4cec8aac80a8f6ea9ca70cc4320f2d53689b286e569686fabfd3be"
+  },
+  "command": "node scripts/ui-benchmark.cjs --baseline-ref 7fef91efbf0134931ac0ab2935e64369456bfb3b",
+  "method": "Real dashboard source in a Node VM with minimal DOM stand-ins. Chart and model-family medians use five batches after warmup: 60 hovers or 10 coverage calculations per batch. Request rows include the local-timezone boundary check, use three warmup renders, then nine alternating before/after runs (order reversed every other run), and preserve raw samples; unchanged non-date helpers are stand-ins. Before/after model routes and request markup must match. Operation counts are collected separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.",
+  "timezone": "Europe/Amsterdam",
+  "eventsPerBatch": 60,
+  "batches": 5,
+  "results": [
+    {
+      "days": 7,
+      "groups": 3,
+      "trendRows": 21,
+      "baseline": {
+        "medianMilliseconds": 0.83,
+        "microsecondsPerHover": 13.84,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 38280,
+          "classChanges": 125
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 0.815,
+        "microsecondsPerHover": 13.59,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 38280,
+          "classChanges": 125
+        }
+      },
+      "speedup": 1.02
+    },
+    {
+      "days": 30,
+      "groups": 20,
+      "trendRows": 600,
+      "baseline": {
+        "medianMilliseconds": 1.036,
+        "microsecondsPerHover": 17.26,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 71682,
+          "classChanges": 148
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.033,
+        "microsecondsPerHover": 17.21,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 71682,
+          "classChanges": 148
+        }
+      },
+      "speedup": 1
+    },
+    {
+      "days": 366,
+      "groups": 40,
+      "trendRows": 14640,
+      "baseline": {
+        "medianMilliseconds": 2.105,
+        "microsecondsPerHover": 35.08,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 73842,
+          "classChanges": 484
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 2.535,
+        "microsecondsPerHover": 42.25,
+        "operationsPerBatch": {
+          "aggregations": 0,
+          "numberFormatters": 0,
+          "dateFormatters": 0,
+          "chartReplacements": 0,
+          "readoutReplacements": 60,
+          "assignedHTMLBytes": 73842,
+          "classChanges": 484
+        }
+      },
+      "speedup": 0.83
+    }
+  ],
+  "modelFamilies": [
+    {
+      "models": 20,
+      "accounts": 5,
+      "baseline": {
+        "medianMilliseconds": 0.181,
+        "microsecondsPerRender": 18.07,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 61
+      },
+      "optimized": {
+        "medianMilliseconds": 0.18,
+        "microsecondsPerRender": 17.95,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 61
+      },
+      "speedup": 1.01
+    },
+    {
+      "models": 120,
+      "accounts": 40,
+      "baseline": {
+        "medianMilliseconds": 2.623,
+        "microsecondsPerRender": 262.28,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 361
+      },
+      "optimized": {
+        "medianMilliseconds": 3.243,
+        "microsecondsPerRender": 324.31,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 361
+      },
+      "speedup": 0.81
+    },
+    {
+      "models": 300,
+      "accounts": 80,
+      "baseline": {
+        "medianMilliseconds": 9.263,
+        "microsecondsPerRender": 926.34,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 901
+      },
+      "optimized": {
+        "medianMilliseconds": 9.308,
+        "microsecondsPerRender": 930.83,
+        "rendersPerBatch": 10,
+        "routeReadsPerRender": 901
+      },
+      "speedup": 1
+    }
+  ],
+  "requestRows": [
+    {
+      "rows": 6,
+      "layout": "desktop",
+      "baseline": {
+        "medianMilliseconds": 0.283,
+        "samplesMilliseconds": [
+          0.2909379999999828,
+          0.2834060000000136,
+          0.2852190000000405,
+          0.27428199999997105,
+          0.30321600000002036,
+          0.2692549999999869,
+          0.27791799999999967,
+          0.3265909999999508,
+          0.2639970000000176
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 0,
+          "nativeLocaleCalls": 12
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 0.045,
+        "samplesMilliseconds": [
+          0.04688099999998485,
+          0.04468700000001036,
+          0.05986000000001468,
+          0.043135000000006585,
+          0.045719000000019605,
+          0.04568899999998166,
+          0.04463700000002291,
+          0.04139199999997345,
+          0.04440599999998085
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 1,
+          "nativeLocaleCalls": 0
+        }
+      }
+    },
+    {
+      "rows": 6,
+      "layout": "mobile",
+      "baseline": {
+        "medianMilliseconds": 0.271,
+        "samplesMilliseconds": [
+          0.2728999999999928,
+          0.2733210000000099,
+          0.2669609999999807,
+          0.2705460000000244,
+          0.263025999999968,
+          0.2697949999999878,
+          0.28180400000002237,
+          0.49855999999999767,
+          0.26327600000001894
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 0,
+          "nativeLocaleCalls": 12
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 0.046,
+        "samplesMilliseconds": [
+          0.04730100000000448,
+          0.04555899999996882,
+          0.04423700000000963,
+          0.04285399999997708,
+          0.04430700000000343,
+          0.04676000000000613,
+          0.04558900000000676,
+          0.042493999999976495,
+          0.05666500000000951
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 1,
+          "nativeLocaleCalls": 0
+        }
+      }
+    },
+    {
+      "rows": 300,
+      "layout": "desktop",
+      "baseline": {
+        "medianMilliseconds": 13.705,
+        "samplesMilliseconds": [
+          13.902635000000032,
+          13.937025000000006,
+          13.816927999999962,
+          12.606094999999982,
+          13.76894500000003,
+          13.53010599999999,
+          13.704768000000001,
+          13.44357599999995,
+          13.659046999999987
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 0,
+          "nativeLocaleCalls": 600
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.01,
+        "samplesMilliseconds": [
+          1.0722620000000234,
+          1.0974999999999682,
+          5.160296999999957,
+          0.9998220000000515,
+          1.009567000000004,
+          0.9796719999999937,
+          0.9976589999999987,
+          0.964870000000019,
+          1.0132229999999822
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 1,
+          "nativeLocaleCalls": 0
+        }
+      }
+    },
+    {
+      "rows": 300,
+      "layout": "mobile",
+      "baseline": {
+        "medianMilliseconds": 12.259,
+        "samplesMilliseconds": [
+          12.259086000000025,
+          12.568497999999977,
+          12.266307999999981,
+          12.22398099999998,
+          12.235600999999974,
+          12.226785999999947,
+          12.329992999999945,
+          38.776148000000035,
+          12.154098999999974
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 0,
+          "nativeLocaleCalls": 600
+        }
+      },
+      "optimized": {
+        "medianMilliseconds": 1.02,
+        "samplesMilliseconds": [
+          24.615095999999994,
+          1.2637789999999995,
+          1.044550000000072,
+          1.0197120000000268,
+          1.0163170000000719,
+          0.9887660000000551,
+          1.057409000000007,
+          0.9985510000000204,
+          1.0005129999999554
+        ],
+        "operationsPerRender": {
+          "dateFormatters": 1,
+          "nativeLocaleCalls": 0
+        }
+      }
+    }
+  ],
+  "liveRefresh": {
+    "scenario": "Three account-event bursts on Models; each 250ms debounce fires before any API read resolves, then all reads resolve in controlled rounds. Counts are deterministic, not latency measurements.",
+    "baseline": {
+      "outstandingAfterBursts": 9,
+      "maximumOutstanding": 9,
+      "totalReads": 9,
+      "endpoints": [
+        "/accounts",
+        "/overview",
+        "/routes",
+        "/accounts",
+        "/overview",
+        "/routes",
+        "/accounts",
+        "/overview",
+        "/routes"
+      ]
+    },
+    "optimized": {
+      "outstandingAfterBursts": 3,
+      "maximumOutstanding": 3,
+      "totalReads": 6,
+      "endpoints": [
+        "/accounts",
+        "/overview",
+        "/routes",
+        "/accounts",
+        "/overview",
+        "/routes"
+      ]
+    }
+  }
+}

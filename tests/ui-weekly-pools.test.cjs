@@ -17,7 +17,7 @@ const NOW = Date.parse('2026-10-17T20:00:00Z');
 const DAY = 86400000;
 function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } }) {
   const context = {
-    S, Date: class extends Date { static now() { return NOW; } },
+    S, Date: class extends Date { static now() { return NOW; } }, UsageTools: require('../ui/usage.js'),
     when: (t) => new Date(t).toISOString(), liveLeft: (t) => `<span data-until="${t}">3h 18m</span>`,
     mob: () => false, acctLogo: () => '<svg></svg>', provName: (a) => ({ claude: 'Claude', codex: 'Codex' }[a.provider]),
   };

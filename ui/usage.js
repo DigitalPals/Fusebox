@@ -87,6 +87,10 @@ const UsageTools = (() => {
     timestamp: [undefined, { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23' }],
     clock: ['en-GB', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }],
     weekday: ['en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }],
+    hourMinute: ['en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }],
+    weekdayName: ['en-GB', { weekday: 'short' }],
+    monthDay: ['en-US', { month: 'short', day: 'numeric' }],
+    reset: ['en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZoneName: 'short' }],
   };
   const timeFormats = new Map();
   const timeFormat = (style, timezone) => {
@@ -102,6 +106,19 @@ const UsageTools = (() => {
     const at = new Date(value);
     return Number.isFinite(at.getTime()) ? timeFormat(style, timezone).format(at) : invalid;
   };
+  // Read the browser's current zone at render/timer boundaries, rather than
+  // constructing a default formatter for every request row or meter tooltip.
+  let localTimezone = null;
+  const refreshLocalTimezone = () => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const changed = timezone !== localTimezone;
+    localTimezone = timezone;
+    return changed;
+  };
+  const localTimeText = (value, style) => {
+    if (localTimezone === null) refreshLocalTimezone();
+    return timeText(value, localTimezone, style);
+  };
   // Local calendar date of an instant in the page's timezone.
   const localDate = (ms, timezone) => timeFormat('date', timezone).format(new Date(ms));
   const beforeProxy = (day, firstProxyMs, timezone) => firstProxyMs != null && Number.isFinite(Number(firstProxyMs)) && day < localDate(Number(firstProxyMs), timezone);
@@ -116,7 +133,7 @@ const UsageTools = (() => {
   const parts = (iso) => { const at = new Date(`${iso}T00:00:00Z`); return { w: W[at.getUTCDay()], m: M[at.getUTCMonth()], d: at.getUTCDate(), y: at.getUTCFullYear(), monday: at.getUTCDay() === 1 }; };
   const dayLabel = (iso) => { const p = parts(iso); return `${p.w} ${p.m} ${p.d}`; };
   const shortDate = (iso) => { const p = parts(iso); return `${p.m} ${p.d}`; };
-  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, timeText, parts, dayLabel, shortDate, bytes };
+  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, timeText, localTimeText, refreshLocalTimezone, parts, dayLabel, shortDate, bytes };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools;
 

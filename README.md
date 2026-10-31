@@ -696,12 +696,17 @@ Plugins are Go shared libraries loaded into CLIProxyAPI's process, and the Redis
 ## Development
 
 ```sh
-cargo test            # translator and protocol tests
-cargo clippy --all-targets
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+node --test tests/*.test.cjs
+python3 -m unittest discover -s tests -p 'test_*.py'
 cargo run -- --config dev.yaml
 ```
 
 The dashboard lives in `ui/`. Its text assets are compressed and embedded at build time, so rebuild after editing them.
+
+After a release build, `python3 scripts/dev-smoke.py` checks native and translated requests against a loopback provider, compressed input, and the current embedded dashboard assets. `python3 scripts/usage-e2e.py --binary target/release/fusebox` checks collectors, durable replay and restart. Both use synthetic data; on `thebeast`, run them inside `agent-resource` as shown in the [optimization report](docs/optimization-report.md), which also documents reproducible component benchmarks.
 
 ### Client compatibility
 

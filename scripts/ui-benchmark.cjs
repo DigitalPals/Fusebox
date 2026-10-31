@@ -8,6 +8,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const os = require('node:os');
+const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 
@@ -116,6 +118,91 @@ function measureFamily(source, data) {
   return { result, timing: { medianMilliseconds: Number(median.toFixed(3)), microsecondsPerRender: Number((median * 1000 / renders).toFixed(2)), rendersPerBatch: renders, routeReadsPerRender: counted.reads() } };
 }
 
+function requestHarness(usageSource, appSource, rows, mobile, counted = false) {
+  const counts = { dateFormatters: 0, nativeLocaleCalls: 0 };
+  const BenchDate = counted ? class extends Date {
+    toLocaleTimeString(...args) { counts.nativeLocaleCalls++; return super.toLocaleTimeString(...args); }
+    toLocaleDateString(...args) { counts.nativeLocaleCalls++; return super.toLocaleDateString(...args); }
+    toLocaleString(...args) { counts.nativeLocaleCalls++; return super.toLocaleString(...args); }
+  } : Date;
+  const context = {
+    Date: BenchDate, Intl: counted ? { NumberFormat: Intl.NumberFormat, DateTimeFormat: function (...args) {
+      counts.dateFormatters++; return new Intl.DateTimeFormat(...args);
+    } } : Intl,
+    URLSearchParams, AbortController,
+    S: { openReq: null }, rows, minuteLabels: new Map(),
+    errLineText: () => '', isFresh: () => false, accountOf: () => null,
+    esc: (value) => String(value ?? ''), ms: (value) => `${value}ms`,
+    routeHTML: () => '', acctCellHTML: () => '', statusCell: () => '<span>200</span>', tokensText: () => '100',
+    reqAcctName: () => 'Test account', noteHTML: () => '', logo: () => '',
+    CLIENT: { responses: 'Responses' }, ENDPOINT: { responses: '/v1/responses' }, PROVIDER: {},
+  };
+  const section = (start, end) => {
+    const at = appSource.indexOf(start), to = appSource.indexOf(end, at);
+    if (at < 0 || to < 0) throw new Error(`Could not find request helper ${start}`);
+    return appSource.slice(at, to);
+  };
+  vm.createContext(context);
+  vm.runInContext(usageSource, context);
+  vm.runInContext(section('const clock =', '// Within a day') + '\n' + section('function reqItemHTML(r) {', '// A live arrival goes on top'), context);
+  const render = vm.runInContext(`() => {
+    if (typeof syncLocalTime === 'function') syncLocalTime();
+    return rows.map(${mobile ? 'reqMobileHTML' : 'reqItemHTML'}).join('');
+  }`, context);
+  return { render, counts, reset() { counts.dateFormatters = counts.nativeLocaleCalls = 0; } };
+}
+
+function measureRequests(rows, mobile) {
+  const input = Array.from({ length: rows }, (_, i) => ({ id: i + 1, ts: new Date(Date.parse('2026-10-31T12:00:00Z') - i * 17000).toISOString(),
+    model: 'model-test', client: 'responses', status: 200, latency_ms: 100, ttft_ms: 20, attempts: 1 }));
+  const before = requestHarness(baseline, baselineApp, input, mobile), after = requestHarness(current, currentApp, input, mobile);
+  if (before.render() !== after.render()) throw new Error('Request row markup changed');
+  for (let i = 0; i < 3; i++) { before.render(); after.render(); }
+  const times = { baseline: [], optimized: [] };
+  // Alternate run order to reduce fixed ordering bias; preserve all nine samples.
+  for (let i = 0; i < 9; i++) for (const [name, h] of i % 2 ? [['optimized', after], ['baseline', before]] : [['baseline', before], ['optimized', after]]) {
+    const start = performance.now(); h.render(); times[name].push(performance.now() - start);
+  }
+  const result = { rows, layout: mobile ? 'mobile' : 'desktop' };
+  for (const [name, usageSource, appSource] of [['baseline', baseline, baselineApp], ['optimized', current, currentApp]]) {
+    const counted = requestHarness(usageSource, appSource, input, mobile, true);
+    counted.render(); counted.reset(); counted.render();
+    result[name] = { medianMilliseconds: Number([...times[name]].sort((a, b) => a - b)[4].toFixed(3)),
+      samplesMilliseconds: times[name], operationsPerRender: { ...counted.counts } };
+  }
+  return result;
+}
+
+async function measureRefresh(source) {
+  let nextTimer = 0, outstanding = 0, maximum = 0;
+  const timers = new Map(), pending = [], calls = [];
+  const context = {
+    S: { route: 'models', locked: null }, overviewAt: 0, AbortController,
+    setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    api(endpoint) {
+      calls.push(endpoint); outstanding++; maximum = Math.max(maximum, outstanding);
+      return new Promise((resolve) => pending.push(() => { outstanding--; resolve({}); }));
+    },
+    refreshSetups() {}, expireActivity() {}, refreshViews() {}, syncResetModal() {},
+  };
+  const start = source.indexOf('const refreshing ='), end = source.indexOf('// Activity outlives account changes', start);
+  if (start < 0 || end < start) throw new Error('Could not find live refresh helpers');
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  for (let burst = 0; burst < 3; burst++) {
+    vm.runInContext('scheduleRefresh("accounts")', context);
+    for (const [id, timer] of [...timers]) if (timer.ms === 250) { timers.delete(id); timer.fn(); }
+  }
+  const outstandingAfterBursts = outstanding;
+  for (let round = 0; pending.length && round < 10; round++) {
+    pending.splice(0).forEach((resolve) => resolve());
+    await new Promise(setImmediate);
+  }
+  if (outstanding || timers.size) throw new Error('Refresh fixture did not drain');
+  return { outstandingAfterBursts, maximumOutstanding: maximum, totalReads: calls.length, endpoints: calls };
+}
+
 const results = [];
 for (const [days, groups] of [[7, 3], [30, 20], [366, 40]]) {
   const data = fixture(days, groups);
@@ -129,12 +216,22 @@ for (const [models, accounts] of [[20, 5], [120, 40], [300, 80]]) {
   if (before.result !== after.result) throw new Error('Model route output changed');
   modelFamilies.push({ models, accounts, baseline: before.timing, optimized: after.timing, speedup: Number((before.timing.medianMilliseconds / after.timing.medianMilliseconds).toFixed(2)) });
 }
+const requestRows = [6, 300].flatMap((rows) => [false, true].map((mobile) => measureRequests(rows, mobile)));
 const report = {
   measuredAt: new Date().toISOString(), node: process.version, baselineCommit,
+  environment: { platform: process.platform, architecture: process.arch, cpu: os.cpus()[0]?.model, logicalCPUs: os.cpus().length },
+  sourceSha256: Object.fromEntries(Object.entries({ baselineUsage: baseline, currentUsage: current, baselineApp, currentApp }).map(([name, value]) => [name, createHash('sha256').update(value).digest('hex')])),
   command: `node scripts/ui-benchmark.cjs --baseline-ref ${baselineCommit}`,
-  method: 'Median of five batches after warmup; real dashboard source in a Node VM with minimal DOM stand-ins. Each chart batch has 60 hovers with a known first proxy timestamp. Model-family batches have 10 coverage calculations over ragged routes and prefixed model aliases; before/after outputs must match. Route reads are counted separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.',
-  eventsPerBatch: events, batches, results, modelFamilies,
+  method: 'Real dashboard source in a Node VM with minimal DOM stand-ins. Chart and model-family medians use five batches after warmup: 60 hovers or 10 coverage calculations per batch. Request rows include the local-timezone boundary check, use three warmup renders, then nine alternating before/after runs (order reversed every other run), and preserve raw samples; unchanged non-date helpers are stand-ins. Before/after model routes and request markup must match. Operation counts are collected separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.',
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  eventsPerBatch: events, batches, results, modelFamilies, requestRows,
 };
-const json = `${JSON.stringify(report, null, 2)}\n`;
-if (options['--output']) fs.writeFileSync(path.resolve(options['--output']), json);
-process.stdout.write(json);
+Promise.all([measureRefresh(baselineApp), measureRefresh(currentApp)]).then(([before, after]) => {
+  report.liveRefresh = {
+    scenario: 'Three account-event bursts on Models; each 250ms debounce fires before any API read resolves, then all reads resolve in controlled rounds. Counts are deterministic, not latency measurements.',
+    baseline: before, optimized: after,
+  };
+  const json = `${JSON.stringify(report, null, 2)}\n`;
+  if (options['--output']) fs.writeFileSync(path.resolve(options['--output']), json);
+  process.stdout.write(json);
+}).catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

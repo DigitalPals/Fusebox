@@ -415,7 +415,41 @@ pub(crate) fn alternating_messages(messages: &[Message]) -> Cow<'_, [Message]> {
     }
 }
 
-pub(crate) fn write_openai_cache_lifetimes(details: &mut Value, usage: &Usage) {
+/// Translation treats absent counts as zero; durable billing capture separately
+/// preserves unknown and partial counts. OpenAI totals include cached input.
+pub(crate) fn openai_usage(u: &Value, wire: Format) -> Option<Usage> {
+    if !u.is_object() {
+        return None;
+    }
+    let (input, details, output, output_details) = match wire {
+        Format::Chat => ("prompt_tokens", "prompt_tokens_details", "completion_tokens", "completion_tokens_details"),
+        Format::Responses => ("input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details"),
+        _ => return None,
+    };
+    let details = &u[details];
+    let cached = details["cached_tokens"].as_u64().unwrap_or(0);
+    let write = details["cache_write_tokens"]
+        .as_u64()
+        .or_else(|| details["cache_creation_tokens"].as_u64())
+        .or_else(|| u["cache_creation_input_tokens"].as_u64())
+        .unwrap_or(0);
+    Some(Usage {
+        input: u[input].as_u64().unwrap_or(0).saturating_sub(cached).saturating_sub(write),
+        cache_read: cached,
+        output: u[output].as_u64().unwrap_or(0),
+        reasoning: u[output_details]["reasoning_tokens"].as_u64().unwrap_or(0),
+        cache_write: write,
+        write_30m: details["cache_write_tokens_details"]["ttl_30m_tokens"].as_u64(),
+        write_12h: details["cache_write_tokens_details"]["ttl_12h_tokens"].as_u64(),
+    })
+}
+
+pub(crate) fn write_openai_cache_details(details: &mut Value, usage: &Usage) {
+    if usage.cache_write > 0 || usage.write_30m.is_some() || usage.write_12h.is_some() {
+        details["cache_write_tokens"] = usage.cache_write.into();
+        // The legacy spelling is an alias, not an additional amount.
+        details["cache_creation_tokens"] = usage.cache_write.into();
+    }
     for (field, tokens) in [("ttl_30m_tokens", usage.write_30m), ("ttl_12h_tokens", usage.write_12h)] {
         if let Some(tokens) = tokens {
             details["cache_write_tokens_details"][field] = tokens.into();

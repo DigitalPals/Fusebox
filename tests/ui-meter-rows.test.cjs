@@ -18,7 +18,7 @@ function piece(start) {
 const NOW = Date.parse('2026-10-23T13:42:00Z');
 const RESET = '2026-10-23T16:40:00Z';
 function load() {
-  const context = { S: { quotaDisplay: 'remaining' }, Date: class extends Date { static now() { return NOW; } }, usedByHTML: () => '' };
+  const context = { S: { quotaDisplay: 'remaining' }, Date: class extends Date { static now() { return NOW; } }, UsageTools: require('../ui/usage.js'), usedByHTML: () => '' };
   vm.createContext(context);
   vm.runInContext([
     piece('const esc = (v) =>'), piece('function left(iso) {'), piece('function compactLeft(iso) {'),

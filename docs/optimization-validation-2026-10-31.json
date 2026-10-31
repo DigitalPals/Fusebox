@@ -1,0 +1,135 @@
+{
+  "baseline": {
+    "rust": {
+      "passed": 785,
+      "failed": 0,
+      "ignored": 5
+    },
+    "node": {
+      "passed": 149,
+      "failed": 0
+    },
+    "python": {
+      "passed": 46,
+      "failed": 0
+    },
+    "format_export_passed": true
+  },
+  "final": {
+    "rust": {
+      "passed": 796,
+      "failed": 0,
+      "ignored": 7
+    },
+    "node": {
+      "passed": 159,
+      "failed": 0
+    },
+    "python": {
+      "passed": 46,
+      "failed": 0
+    },
+    "post_ui_asset_tests": {
+      "passed": 5,
+      "failed": 0
+    },
+    "format_passed": true,
+    "clippy_all_targets_warnings_denied_passed": true,
+    "release_build_passed": true,
+    "javascript_syntax_passed": true,
+    "new_python_compile_passed": true,
+    "git_diff_check_passed": true,
+    "new_ignored_benchmarks_run_explicitly": [
+      "usage_collector_labels_benchmark",
+      "embedding_conversion_and_sizing_benchmark"
+    ]
+  },
+  "ci_limitation": "ci-platform run catalog has no Fusebox job; existing CI admission reservation used for host checks.",
+  "development": {
+    "existing_local_fusebox_services_found": false,
+    "smoke": {
+      "passed": 8,
+      "checks": [
+        "rebuilt service is live and ready with a loopback-only provider",
+        "native request returns expected response and token accounting",
+        "translated request returns expected response and token accounting",
+        "gzip request body decompresses and completes",
+        "current app/usage source is embedded, versioned, gzip-negotiated and conditionally cached",
+        "shared UsageTools loads before app consumers",
+        "rebuilt service exposes management metrics",
+        "mock-backed service exits gracefully"
+      ],
+      "binary_sha256": "2c05a9fec9fd7dd2b7537626c45b3f5f4b4f224e7a121385eacc2bafe213781f",
+      "mock_only": true,
+      "tokio_worker_threads": 4
+    },
+    "collector_restart": {
+      "passed": 12,
+      "checks": [
+        "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+        "collector identity filtering, breakdown and friendly label",
+        "replay does not inflate combined imported totals",
+        "offline outbox survives separate process restart and reconnect",
+        "copied histories across collectors deduplicate using message evidence",
+        "retired summary returns 410 without query work and remains management authenticated",
+        "management/inference separation, wrong credential and oversized batch rejection",
+        "revocation rejects upload and retains offline data",
+        "credential rotation and local re-enrollment preserve idempotency",
+        "imported history from 10 days ago is priced on its local date in the combined trend",
+        "usage reprice CLI is idempotent on an already priced database",
+        "marker transcript/tool/project content absent from databases, exports and logs"
+      ],
+      "isolated_root": "/var/lib/agent-resources/leases/fe509f52c5614c65b04c3d64f5d9703f/workspace/fusebox-usage-e2e-r4an5753"
+    },
+    "cleanup": [
+      {
+        "lease": "fe509f52c5614c65b04c3d64f5d9703f",
+        "status": "closed",
+        "remaining": [],
+        "preserved_volumes": [],
+        "errors": []
+      },
+      {
+        "lease": "85d179a217d9447e9100d5d944174831",
+        "status": "closed",
+        "remaining": [],
+        "preserved_volumes": [],
+        "errors": []
+      }
+    ]
+  },
+  "limitations": [
+    "No production changes or external provider calls.",
+    "No browser layout/paint or responsive screenshots.",
+    "Cross-platform CI and production workload performance not measured."
+  ],
+  "binary_version": "fusebox 0.12.1 (7fef91e)",
+  "binary_sha256": "2c05a9fec9fd7dd2b7537626c45b3f5f4b4f224e7a121385eacc2bafe213781f",
+  "baseline_commit": "7fef91efbf0134931ac0ab2935e64369456bfb3b",
+  "source_sha256": {
+    "README.md": "9290af92ecc199d44eded0b016e4d8796b5704e9a18b37621dc655714daaf065",
+    "scripts/dev-smoke.py": "0bb485abc0d9342bc1f4bae635d4ca41110f87a6fe328fdbfdb9eb6c5b16fe27",
+    "scripts/ui-benchmark.cjs": "1728a842142617d6c62ec84dee1e9d04e3703882d86b4dda3de7374cfc23f2c8",
+    "src/affinity.rs": "c09864c67fe5ccc80df9c423b9412bcdaa9f4b66d920344a0c9ce809d7391315",
+    "src/embeddings.rs": "54625030d63b18bb2ce6a36f56f1c74ec26c0d8bd1939abd265d1a3dcfc784fe",
+    "src/embeddings/optimization_tests.rs": "d0092bb1c262ae4f573cb7d144f6c799dc45408575a89d60cba3482327f07ce2",
+    "src/formats/cache_translation_tests.rs": "e23c0139163e984b6a258d521afd47bfa1836f22d730a074d83c71f56819aad8",
+    "src/formats/chat.rs": "51d87184c8ad6b78d5666f124a8d1cdaf8a4857ed3d5e6d691fc86392afb0892",
+    "src/formats/mod.rs": "b399144a3557451508060195ab46ff2546fdf051cb3c9f6df73604ab4b50cbdc",
+    "src/formats/responses.rs": "3d34885646974b7d3b1e27b9a351f82f262af74993aee68e93e7152770908929",
+    "src/json_size.rs": "515cb32ae37d225f5df79a6ab944e444074c16bb7003dffe5a9b44e8984ffba0",
+    "src/latency.rs": "36ad281a62e6c8d1d9847dc1db49c51199e84fc155919b2c236de95cbf64ab28",
+    "src/main.rs": "1c5a0d7e720bdb74ba7e9e8dd4d21e5afe6ce120959558700e9e2deb606dbedc",
+    "src/usage/collector.rs": "2915ac53290cae1de21bb80517d0c9091978c3704c97324b63fffa8c598a292f",
+    "src/usage/store.rs": "cdbc6d5dac531659270319ebdd7e064a3d5433798deb5f1c9a4475a22b4e6321",
+    "src/usage/store/dashboard.rs": "28a19da09ba6401ec89fa0409aab690af35fe811d7b2c23c99f7969d30b04147",
+    "src/usage/store/labels_tests.rs": "b2147283a61a1db53d6e1f05a22abe8554004ed76e7e9d5f1073fcf5a82ed4a4",
+    "tests/ui-dates.test.cjs": "0031f91f28586052f8b8cf4bed4e6eb424a29a35545b60882d222d7bd76c373c",
+    "tests/ui-live-updates.test.cjs": "a1f5ee8c4ad6f56170648c53120a0716a1ea8b4a7042deeabde214f8bf1fd588",
+    "tests/ui-meter-rows.test.cjs": "0e66564e335957d046f20570b098936d3485adcc34b5d067bd4a7e6b9b3e90dc",
+    "tests/ui-refresh.test.cjs": "c3ac6278c2f959cddb006476dca77448a20ed23a38335e1aff01d0e33b3095bd",
+    "tests/ui-weekly-pools.test.cjs": "a62b7053a7e7048603c796de9f3cb654f507df57f4db2b8fd308340a05e48539",
+    "ui/app.js": "991287cd7c4cec8aac80a8f6ea9ca70cc4320f2d53689b286e569686fabfd3be",
+    "ui/usage.js": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880"
+  }
+}

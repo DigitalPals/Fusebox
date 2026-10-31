@@ -957,25 +957,7 @@ fn history_size(input: &[Value], output: &[Value], limit: usize) -> Option<usize
             seq.end()
         }
     }
-    struct Counter {
-        bytes: usize,
-        limit: usize,
-    }
-    impl std::io::Write for Counter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if buf.len() > self.limit.saturating_sub(self.bytes) {
-                return Err(std::io::Error::other("history exceeds entry limit"));
-            }
-            self.bytes += buf.len();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { bytes: 0, limit };
-    serde_json::to_writer(&mut counter, &History(input, output)).ok()?;
-    Some(counter.bytes)
+    crate::json_size::serialized_size(&History(input, output), limit).ok()
 }
 
 /// Some Codex backends omit output from the final event after streaming it.

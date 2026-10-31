@@ -133,7 +133,7 @@ test('an idle account refreshes when its temporary error expires', () => {
     Date: class extends Date { static now() { return now; } },
     document: { querySelectorAll: () => [] },
     refreshAccounts: () => { refreshes++; },
-    refreshViews() {}, syncResetModal() {},
+    refreshViews() {}, syncResetModal() {}, syncLocalTime() {},
   };
   vm.createContext(context);
   vm.runInContext(section('const TIMED =', 'setInterval(() => { if (!document.hidden) tickTimers();'), context);

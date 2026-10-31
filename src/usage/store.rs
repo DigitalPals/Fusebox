@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -1143,6 +1143,42 @@ fn combined(where_sql: &str) -> String {
         "{where_sql} AND (o.source='proxy' OR NOT EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy'))"
     )
 }
+/// Labels belong to one reader's SQLite snapshot. Cache missing collectors too,
+/// but retain nothing between requests so enrollment and renames stay visible.
+#[derive(Default)]
+struct CollectorLabels {
+    table_exists: Option<bool>,
+    labels: HashMap<String, Option<String>>,
+}
+impl CollectorLabels {
+    fn get(&mut self, conn: &Connection, origin: &str) -> Result<Option<&str>> {
+        let Some(id) = origin.strip_prefix("collector:") else { return Ok(None) };
+        let exists = match self.table_exists {
+            Some(exists) => exists,
+            None => {
+                let exists = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_collectors')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                self.table_exists = Some(exists);
+                exists
+            }
+        };
+        if !exists {
+            return Ok(None);
+        }
+        if !self.labels.contains_key(id) {
+            let label =
+                conn.query_row("SELECT label FROM usage_collectors WHERE id=?1", [id], |r| r.get(0)).optional()?;
+            self.labels.insert(id.into(), label);
+        }
+        Ok(self.labels.get(id).and_then(Option::as_deref))
+    }
+}
+
+// The previous implementation remains an independent test/reference oracle.
+#[cfg(test)]
 fn collector_label(conn: &Connection, origin: &str) -> Result<Option<String>> {
     let Some(id) = origin.strip_prefix("collector:") else { return Ok(None) };
     let exists: bool = conn.query_row(
@@ -1220,6 +1256,7 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
         |r| r.get(0),
     )?;
     let mut decoder = codec::Decoder::new(conn);
+    let mut collector_labels = CollectorLabels::default();
     for row in rows {
         read::check()?;
         let (id, payload, cost, basis, snapshot, key, ingested, suppressed, association) = row?;
@@ -1255,7 +1292,7 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
         value["canonical_key"] = json!(key);
         value["superseded"] = json!(suppressed);
         if let Some(origin) = value["origin_id"].as_str()
-            && let Some(label) = collector_label(conn, origin)?
+            && let Some(label) = collector_labels.get(conn, origin)?
         {
             value["collector_label"] = json!(label);
         }
@@ -1290,3 +1327,7 @@ mod tests;
 #[cfg(test)]
 #[path = "store/lifetime_tests.rs"]
 mod lifetime_tests;
+
+#[cfg(test)]
+#[path = "store/labels_tests.rs"]
+mod labels_tests;

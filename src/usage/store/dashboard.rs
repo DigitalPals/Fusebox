@@ -466,6 +466,7 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
         }
     }
     let mut out = serde_json::Map::new();
+    let mut collector_labels = CollectorLabels::default();
     for (i, (name, values)) in
         ["providers", "models", "accounts", "clients", "sources"].into_iter().zip(facets).enumerate()
     {
@@ -474,7 +475,7 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
             read::check()?;
             items.push(if matches!(i, 2 | 3) {
                 let label = if i == 3 {
-                    collector_label(conn, &value)?.unwrap_or_else(|| value.clone())
+                    collector_labels.get(conn, &value)?.unwrap_or(&value).to_owned()
                 } else {
                     value.clone()
                 };

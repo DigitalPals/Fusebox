@@ -250,13 +250,13 @@ function span(secs) {
   return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
 }
 
-const clock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour12: false });
-const hm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
-const weekday = (iso) => new Date(iso).toLocaleDateString('en-GB', { weekday: 'short' });
-const fullResetTime = (iso) => new Date(iso).toLocaleString('en-GB', {
-  weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZoneName: 'short',
-});
+const clock = (iso) => UsageTools.localTimeText(iso, 'clock');
+const hm = (iso) => UsageTools.localTimeText(iso, 'hourMinute');
+const weekday = (iso) => UsageTools.localTimeText(iso, 'weekdayName');
+const fullResetTime = (iso) => UsageTools.localTimeText(iso, 'reset');
+function syncLocalTime() {
+  if (UsageTools.refreshLocalTimezone()) minuteLabels.clear();
+}
 // Within a day "20:09", otherwise "Fri 14:58".
 const when = (iso) => (Date.parse(iso) - Date.now() < 20 * 3600e3 ? hm(iso) : `${weekday(iso)} ${hm(iso)}`);
 const liveLeft = (iso, compact = false) => `<span data-until="${esc(iso)}"${compact ? ' data-countdown="compact"' : ''}>${esc(compact ? compactLeft(iso) : left(iso))}</span>`;
@@ -374,6 +374,7 @@ function loadRoutes() {
 // overview; model changes ("models") reload the model list. Both are debounced together.
 const refreshing = { accounts: false, models: false };
 let refreshTimer = 0;
+let refreshRunning = false;
 function scheduleRefresh(kind) {
   refreshing[kind] = true;
   clearTimeout(refreshTimer);
@@ -382,22 +383,38 @@ function scheduleRefresh(kind) {
 const refreshAccounts = () => scheduleRefresh('accounts');
 const refreshModels = () => scheduleRefresh('models');
 async function runRefresh() {
-  const { accounts: acc, models: mod } = refreshing;
-  refreshing.accounts = refreshing.models = false;
-  const routes = S.route === 'models';
-  if (!routes) S.routesStale = true;
+  refreshTimer = 0;
+  if (refreshRunning || S.locked) return;
+  refreshRunning = true;
   try {
-    const [accounts, overview, models, routeData] = await Promise.all([
-      acc ? api('/accounts') : null, acc ? api('/overview') : null, mod ? api('/models') : null, routes ? api('/routes') : null,
-    ]);
-    if (accounts) S.accounts = accounts;
-    if (overview) { S.overview = overview; overviewAt = Date.now(); }
-    if (models) { S.models = models; refreshSetups(); }
-    if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
-    if (acc) expireActivity();
-    refreshViews();
-    syncResetModal();
-  } catch {}
+    // Live changes received during a read share one trailing batch. These reads
+    // finish before the next batch starts, including siblings of a failed read.
+    // A stalled fetch is aborted after 30 seconds so it cannot hold the queue.
+    while (!S.locked && (refreshing.accounts || refreshing.models)) {
+      clearTimeout(refreshTimer); refreshTimer = 0;
+      const { accounts: acc, models: mod } = refreshing;
+      refreshing.accounts = refreshing.models = false;
+      const routes = S.route === 'models';
+      if (!routes) S.routesStale = true;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 30000);
+      try {
+        const options = { signal: controller.signal };
+        const results = await Promise.allSettled([
+          acc ? api('/accounts', options) : null, acc ? api('/overview', options) : null, mod ? api('/models', options) : null, routes ? api('/routes', options) : null,
+        ]);
+        if (controller.signal.aborted || S.locked || results.some((r) => r.status === 'rejected')) continue;
+        const [accounts, overview, models, routeData] = results.map((r) => r.value);
+        if (accounts) S.accounts = accounts;
+        if (overview) { S.overview = overview; overviewAt = Date.now(); }
+        if (models) { S.models = models; refreshSetups(); }
+        if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
+        if (acc) expireActivity();
+        refreshViews();
+        syncResetModal();
+      } catch {} finally { clearTimeout(deadline); }
+    }
+  } finally { refreshRunning = false; }
 }
 
 // Activity outlives account changes, but not by more than a minute.
@@ -709,6 +726,7 @@ function replaceHTML(el, html) {
 
 // Re-renders the parts of the current page that show account state.
 function refreshViews() {
+  syncLocalTime();
   renderChrome();
   if (S.locked || !S.overview) return;
   if (S.route === 'overview') {
@@ -815,6 +833,7 @@ function viewClass() {
 }
 
 function render() {
+  syncLocalTime();
   renderChrome();
   view.className = viewClass();
   if (S.locked) { closeResetModal(); closeLayers(); view.innerHTML = lockHTML(); bindLock(); return; }
@@ -1101,7 +1120,7 @@ function quotaClientName(c) {
   return S.private ? HIDDEN : c.label || id;
 }
 const QUOTA_METHOD = 'Each rise in the window’s reported use is split over the requests that finished since the previous rise, by their API list price.';
-const dayLabel = (iso) => `${weekday(iso)} ${new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+const dayLabel = (iso) => `${weekday(iso)} ${UsageTools.localTimeText(iso, 'monthDay')}`;
 
 // One row per client (the five largest, then the rest together), then use from outside
 // Fusebox and from before it looked. Bars span the whole window, in the meter's colour.
@@ -1268,7 +1287,7 @@ function minuteLabel(minute) {
   let label = minuteLabels.get(minute);
   if (label == null) {
     if (minuteLabels.size > 600) minuteLabels.clear();
-    label = new Date(minute * 60000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    label = hm(minute * 60000);
     minuteLabels.set(minute, label);
   }
   return label;
@@ -4213,6 +4232,7 @@ function setTimerText(el, text) {
   el.textContent = text;
 }
 function tickTimers() {
+  syncLocalTime();
   const now = Date.now();
   let expired = S.accounts.some((a) => a.last_error_until && Date.parse(a.last_error_until) <= now);
   let quota = false;

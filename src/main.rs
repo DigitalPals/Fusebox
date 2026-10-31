@@ -22,6 +22,7 @@ mod feature_tests;
 mod files;
 mod formats;
 mod ir;
+mod json_size;
 mod latency;
 mod media;
 mod metrics;

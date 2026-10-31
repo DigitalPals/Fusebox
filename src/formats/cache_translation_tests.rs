@@ -284,6 +284,95 @@ fn raw_openai_cache_write_usage_prefers_canonical_counts_and_keeps_lifetimes() {
 }
 
 #[test]
+fn openai_usage_aliases_defaults_and_saturation_match_on_both_wires() {
+    let cases = [
+        (json!({}), Usage::default()),
+        (
+            json!({"input_tokens":10,"input_tokens_details":{"cached_tokens":15,"cache_write_tokens":20},
+                "output_tokens":4,"output_tokens_details":{"reasoning_tokens":2}}),
+            Usage { cache_read: 15, cache_write: 20, output: 4, reasoning: 2, ..Default::default() },
+        ),
+        (
+            json!({"input_tokens":100,"cache_creation_input_tokens":9,
+                "input_tokens_details":{"cached_tokens":20,"cache_write_tokens":0,"cache_creation_tokens":8,
+                    "cache_write_tokens_details":{"ttl_30m_tokens":0,"ttl_12h_tokens":null}}}),
+            Usage { input: 80, cache_read: 20, write_30m: Some(0), ..Default::default() },
+        ),
+        (
+            json!({"input_tokens":100,"cache_creation_input_tokens":9,
+                "input_tokens_details":{"cached_tokens":20,"cache_write_tokens":-1,"cache_creation_tokens":7}}),
+            Usage { input: 73, cache_read: 20, cache_write: 7, ..Default::default() },
+        ),
+        (
+            json!({"input_tokens":100,"cache_creation_input_tokens":9,
+                "input_tokens_details":{"cached_tokens":20,"cache_write_tokens":1.5,"cache_creation_tokens":"bad"}}),
+            Usage { input: 71, cache_read: 20, cache_write: 9, ..Default::default() },
+        ),
+        (
+            json!({"input_tokens":100,"input_tokens_details":"invalid","cache_creation_input_tokens":5}),
+            Usage { input: 95, cache_write: 5, ..Default::default() },
+        ),
+        (
+            json!({"input_tokens":-1,"output_tokens":"4","output_tokens_details":{"reasoning_tokens":1.5},
+                "input_tokens_details":{"cached_tokens":false,"cache_write_tokens_details":{"ttl_30m_tokens":-1}}}),
+            Usage::default(),
+        ),
+    ];
+    for (usage, expected) in cases {
+        for wire in [Format::Chat, Format::Responses] {
+            let usage = if wire == Format::Chat {
+                json!({"prompt_tokens":usage["input_tokens"],"prompt_tokens_details":usage["input_tokens_details"],
+                    "completion_tokens":usage["output_tokens"],"completion_tokens_details":usage["output_tokens_details"],
+                    "cache_creation_input_tokens":usage["cache_creation_input_tokens"]})
+            } else {
+                usage.clone()
+            };
+            let full = if wire == Format::Chat {
+                json!({"choices":[{"message":{"content":"answer"},"finish_reason":"stop"}],"usage":usage})
+            } else {
+                json!({"status":"completed","output":[],"usage":usage})
+            };
+            let parsed = full_to_events(wire, &full).into_iter().find_map(|event| match event {
+                Event::Usage(usage) => Some(usage),
+                _ => None,
+            });
+            assert_eq!(parsed.as_ref(), Some(&expected), "{wire:?}: {full}");
+
+            let (event, value) = if wire == Format::Chat {
+                (None, json!({"choices":[],"usage":usage}))
+            } else {
+                (Some("response.completed".to_string()), json!({"type":"response.completed","response":full}))
+            };
+            let mut events = Vec::new();
+            parser(wire).feed(&SseEvent { event, data: value.to_string() }, &mut events);
+            assert!(events.iter().any(|event| matches!(event, Event::Usage(usage) if usage == &expected)));
+        }
+    }
+    for invalid in [Value::Null, json!([]), json!("invalid"), json!(1)] {
+        for wire in [Format::Chat, Format::Responses] {
+            let events = full_to_events(wire, &json!({"usage":invalid}));
+            assert!(!events.iter().any(|event| matches!(event, Event::Usage(_))));
+        }
+    }
+}
+
+#[test]
+fn openai_cache_details_omit_unknown_writes_and_keep_known_zero_lifetimes() {
+    for wire in [Format::Chat, Format::Responses] {
+        let field = if wire == Format::Chat { "prompt_tokens_details" } else { "input_tokens_details" };
+        for write_30m in [None, Some(0)] {
+            let mut aggregate = Aggregate::default();
+            aggregate.usage.write_30m = write_30m;
+            let full = render_full(wire, &aggregate, "model", &Request::default());
+            let details = &full["usage"][field];
+            assert_eq!(details.get("cache_write_tokens"), write_30m.map(|_| json!(0)).as_ref());
+            assert_eq!(details.get("cache_creation_tokens"), write_30m.map(|_| json!(0)).as_ref());
+            assert_eq!(details["cache_write_tokens_details"]["ttl_30m_tokens"], json!(write_30m));
+        }
+    }
+}
+
+#[test]
 fn newer_write_totals_do_not_inherit_stale_cache_lifetime_counts() {
     let mut usage = Usage { cache_write: 10, write_30m: Some(8), write_12h: Some(2), ..Default::default() };
     usage.merge(&Usage { cache_write: 20, ..Default::default() });

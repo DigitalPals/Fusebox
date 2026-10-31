@@ -41,25 +41,7 @@ impl Context {
 }
 /// Serialized JSON length, or a value above `cap` once it is exceeded.
 fn serialized_len(value: &Value, cap: usize) -> usize {
-    struct Counter {
-        bytes: usize,
-        cap: usize,
-    }
-    impl std::io::Write for Counter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes = self.bytes.saturating_add(buf.len());
-            if self.bytes > self.cap {
-                return Err(std::io::Error::other("size bucket decided"));
-            }
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { bytes: 0, cap };
-    let _ = serde_json::to_writer(&mut counter, value);
-    counter.bytes
+    crate::json_size::serialized_size(value, cap).unwrap_or_else(|_| cap.saturating_add(1))
 }
 #[derive(Clone, Debug)]
 pub struct Sample {

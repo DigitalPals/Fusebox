@@ -365,16 +365,15 @@ pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outco
         match result {
             Ok((mut v, usage)) => {
                 v["model"] = requested.into();
-                if let Some(key) = cache_key {
-                    let bytes = v.to_string().len();
-                    if bytes <= cache_cfg.cache_bytes {
-                        let value = Arc::new(v.clone());
-                        let mut cache = app.embedding_cache.lock();
-                        // A completed request must not repopulate a cache disabled
-                        // or resized while that request was running.
-                        if app.cfg().embeddings == cache_cfg {
-                            cache.insert(key, value, bytes, &cache_cfg);
-                        }
+                if let Some(key) = cache_key
+                    && let Ok(bytes) = crate::json_size::serialized_size(&v, cache_cfg.cache_bytes)
+                {
+                    let value = Arc::new(v.clone());
+                    let mut cache = app.embedding_cache.lock();
+                    // A completed request must not repopulate a cache disabled
+                    // or resized while that request was running.
+                    if app.cfg().embeddings == cache_cfg {
+                        cache.insert(key, value, bytes, &cache_cfg);
                     }
                 }
                 tracker.finish(200, &usage, None);
@@ -452,15 +451,17 @@ fn response(vectors: Vec<Value>, tokens: u64, encoding: &str) -> Result<(Value, 
             .as_array()
             .filter(|v| !v.is_empty())
             .ok_or_else(|| fail(502, "upstream returned an invalid embedding"))?;
-        let mut bytes = Vec::with_capacity(values.len() * 4);
+        let mut bytes = (encoding == "base64").then(|| Vec::with_capacity(values.len() * 4));
         for value in values {
             let n = value.as_f64().ok_or_else(|| fail(502, "upstream returned a nonnumeric embedding"))? as f32;
             if !n.is_finite() {
                 return Err(fail(502, "upstream returned an out-of-range embedding"));
             }
-            bytes.extend_from_slice(&n.to_le_bytes());
+            if let Some(bytes) = &mut bytes {
+                bytes.extend_from_slice(&n.to_le_bytes());
+            }
         }
-        let embedding = if encoding == "base64" {
+        let embedding = if let Some(bytes) = bytes {
             Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
         } else {
             e
@@ -689,6 +690,9 @@ async fn google_chunk(
     .await;
     (index, result, child)
 }
+
+#[cfg(test)]
+mod optimization_tests;
 
 #[cfg(test)]
 mod tests {

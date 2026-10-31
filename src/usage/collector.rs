@@ -539,19 +539,7 @@ async fn record_failure(store: &Store, code: &str) -> Result<()> {
 }
 
 fn serialized_size(value: &impl Serialize) -> serde_json::Result<usize> {
-    struct Counter(usize);
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.saturating_add(bytes.len());
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value)?;
-    Ok(counter.0)
+    crate::json_size::serialized_size(value, usize::MAX)
 }
 
 /// JSON array elements contribute their own encoded bytes and a separating

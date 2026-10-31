@@ -1,0 +1,1222 @@
+{
+  "measured_at_utc": "2026-10-31T21:43:59.374639+00:00",
+  "baseline_commit": "7fef91efbf0134931ac0ab2935e64369456bfb3b",
+  "environment": {
+    "platform": "Linux-6.12.113+deb13-amd64-x86_64-with-glibc2.41",
+    "processor": "AMD Ryzen Threadripper 9970X (32 cores / 64 threads)",
+    "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)\nbinary: rustc\ncommit-hash: 31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd\ncommit-date: 2026-06-26\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.1\nLLVM version: 22.1.2",
+    "node": "v22.22.3",
+    "python": "3.13.5",
+    "cargo_build_jobs": 4,
+    "capacity_reservation": {
+      "id": "ci-job-20e1f2875b7d4d30b6fbcfe573326a0a",
+      "cpus": 4,
+      "memory_gib": 8,
+      "released": true
+    },
+    "not_cpu_pinned": true,
+    "shared_host": true
+  },
+  "notes": [
+    "Prechange baselines were captured before replacing target production functions.",
+    "Release results pair reference baseline algorithms with current implementation in the same process.",
+    "These local component timings do not measure provider inference, total API latency, peak RSS or subscription savings.",
+    "Float/base64 conversion CPU differences are inconclusive; float conversion is retained for removing discarded binary buffers.",
+    "The UI artifact includes raw alternating samples, source hashes, markup parity and separate deterministic operation counts."
+  ],
+  "source_sha256": {
+    "README.md": "9290af92ecc199d44eded0b016e4d8796b5704e9a18b37621dc655714daaf065",
+    "scripts/dev-smoke.py": "0bb485abc0d9342bc1f4bae635d4ca41110f87a6fe328fdbfdb9eb6c5b16fe27",
+    "scripts/ui-benchmark.cjs": "1728a842142617d6c62ec84dee1e9d04e3703882d86b4dda3de7374cfc23f2c8",
+    "src/affinity.rs": "c09864c67fe5ccc80df9c423b9412bcdaa9f4b66d920344a0c9ce809d7391315",
+    "src/embeddings.rs": "54625030d63b18bb2ce6a36f56f1c74ec26c0d8bd1939abd265d1a3dcfc784fe",
+    "src/embeddings/optimization_tests.rs": "d0092bb1c262ae4f573cb7d144f6c799dc45408575a89d60cba3482327f07ce2",
+    "src/formats/cache_translation_tests.rs": "e23c0139163e984b6a258d521afd47bfa1836f22d730a074d83c71f56819aad8",
+    "src/formats/chat.rs": "51d87184c8ad6b78d5666f124a8d1cdaf8a4857ed3d5e6d691fc86392afb0892",
+    "src/formats/mod.rs": "b399144a3557451508060195ab46ff2546fdf051cb3c9f6df73604ab4b50cbdc",
+    "src/formats/responses.rs": "3d34885646974b7d3b1e27b9a351f82f262af74993aee68e93e7152770908929",
+    "src/json_size.rs": "515cb32ae37d225f5df79a6ab944e444074c16bb7003dffe5a9b44e8984ffba0",
+    "src/latency.rs": "36ad281a62e6c8d1d9847dc1db49c51199e84fc155919b2c236de95cbf64ab28",
+    "src/main.rs": "1c5a0d7e720bdb74ba7e9e8dd4d21e5afe6ce120959558700e9e2deb606dbedc",
+    "src/usage/collector.rs": "2915ac53290cae1de21bb80517d0c9091978c3704c97324b63fffa8c598a292f",
+    "src/usage/store.rs": "cdbc6d5dac531659270319ebdd7e064a3d5433798deb5f1c9a4475a22b4e6321",
+    "src/usage/store/dashboard.rs": "28a19da09ba6401ec89fa0409aab690af35fe811d7b2c23c99f7969d30b04147",
+    "src/usage/store/labels_tests.rs": "b2147283a61a1db53d6e1f05a22abe8554004ed76e7e9d5f1073fcf5a82ed4a4",
+    "tests/ui-dates.test.cjs": "0031f91f28586052f8b8cf4bed4e6eb424a29a35545b60882d222d7bd76c373c",
+    "tests/ui-live-updates.test.cjs": "a1f5ee8c4ad6f56170648c53120a0716a1ea8b4a7042deeabde214f8bf1fd588",
+    "tests/ui-meter-rows.test.cjs": "0e66564e335957d046f20570b098936d3485adcc34b5d067bd4a7e6b9b3e90dc",
+    "tests/ui-refresh.test.cjs": "c3ac6278c2f959cddb006476dca77448a20ed23a38335e1aff01d0e33b3095bd",
+    "tests/ui-weekly-pools.test.cjs": "a62b7053a7e7048603c796de9f3cb654f507df57f4db2b8fd308340a05e48539",
+    "ui/app.js": "991287cd7c4cec8aac80a8f6ea9ca70cc4320f2d53689b286e569686fabfd3be",
+    "ui/usage.js": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880"
+  },
+  "collector_labels": {
+    "prechange_debug": [
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 1,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.0409554,
+          3.078322,
+          3.0885425,
+          3.0319663500000003,
+          3.1350968,
+          3.0365341999999997,
+          3.0296408500000003,
+          3.0444912000000004,
+          3.06735955
+        ],
+        "current_ms_per_page": [
+          3.1192886,
+          3.0903195,
+          3.0401431,
+          3.0260925,
+          3.1229261,
+          3.0679229,
+          3.0315112500000003,
+          3.04048515,
+          3.05097855
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 10,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.07052175,
+          3.0721512,
+          3.07142965,
+          3.06803655,
+          3.0690606,
+          3.0493824999999997,
+          3.0520285,
+          3.0691537500000003,
+          3.0654326999999997
+        ],
+        "current_ms_per_page": [
+          3.0686785,
+          3.0668689000000002,
+          3.0728523,
+          3.06579825,
+          3.0645648999999997,
+          3.0513385,
+          3.0609965499999996,
+          3.0639459,
+          3.0584797000000004
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 500,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.1555755999999997,
+          3.1438064,
+          3.148822,
+          3.1499175999999998,
+          3.1452821999999996,
+          3.2754067499999997,
+          3.15647945,
+          3.1487945,
+          3.1451369
+        ],
+        "current_ms_per_page": [
+          3.15182655,
+          3.1472771500000003,
+          3.1486902499999996,
+          3.14843485,
+          3.1471955,
+          3.2342298,
+          3.1570077000000003,
+          3.2444832,
+          3.14815395
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        }
+      }
+    ],
+    "paired_debug": [
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 1,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.0789099,
+          3.20022465,
+          3.21468695,
+          3.09663805,
+          3.0785473,
+          3.3256577,
+          3.2808403499999996,
+          3.0728683,
+          3.2735284
+        ],
+        "current_ms_per_page": [
+          0.16060639999999998,
+          0.1559253,
+          0.15621475,
+          0.16080370000000002,
+          0.15060184999999998,
+          0.1486219,
+          0.14919524999999997,
+          0.14777055,
+          0.1508647
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 1
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 10,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.1475961,
+          3.07012265,
+          3.09035215,
+          3.10134565,
+          3.1993754,
+          3.3498690999999994,
+          3.1142259500000002,
+          3.0940866500000004,
+          3.11732315
+        ],
+        "current_ms_per_page": [
+          0.1772489,
+          0.1758372,
+          0.17760335,
+          0.17661339999999998,
+          0.17809765,
+          0.1766054,
+          0.17993989999999999,
+          0.17782125000000001,
+          0.1801707
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 10
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 500,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          3.1592852,
+          3.3996167999999996,
+          3.50624465,
+          3.1965852000000003,
+          3.8806773,
+          3.38405845,
+          3.4354943,
+          3.6097306000000002,
+          3.3717124
+        ],
+        "current_ms_per_page": [
+          1.7831706999999999,
+          1.7934146000000002,
+          1.8006935000000002,
+          1.9088180000000001,
+          1.8944204,
+          2.0349591,
+          1.8761584000000002,
+          1.7996054000000001,
+          1.8914314
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 500
+        }
+      }
+    ],
+    "paired_release": [
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 1,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          1.33957685,
+          1.3404996,
+          1.47668885,
+          1.4703518,
+          1.3966025499999999,
+          1.34367795,
+          1.3493389,
+          1.3384371000000002,
+          1.4074713
+        ],
+        "current_ms_per_page": [
+          0.023272,
+          0.0230737,
+          0.024944,
+          0.022909950000000002,
+          0.024921999999999996,
+          0.023137249999999998,
+          0.02558095,
+          0.02396555,
+          0.023239450000000002
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 1
+        },
+        "summary": {
+          "before_median_ms": 1.3493389,
+          "after_median_ms": 0.023272,
+          "time_reduction_percent": 98.2753035579127,
+          "before_min_max_ms": [
+            1.3384371000000002,
+            1.47668885
+          ],
+          "after_min_max_ms": [
+            0.022909950000000002,
+            0.02558095
+          ]
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 10,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          1.33797435,
+          1.40537015,
+          1.52512515,
+          1.4065425,
+          1.5881474,
+          1.4340342000000001,
+          1.3941497999999999,
+          1.5151122,
+          1.3616724999999998
+        ],
+        "current_ms_per_page": [
+          0.03395855,
+          0.0337993,
+          0.0375229,
+          0.0360437,
+          0.036784300000000006,
+          0.036588949999999995,
+          0.035030149999999996,
+          0.0338684,
+          0.034398700000000004
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 10
+        },
+        "summary": {
+          "before_median_ms": 1.4065425,
+          "after_median_ms": 0.035030149999999996,
+          "time_reduction_percent": 97.50948513820236,
+          "before_min_max_ms": [
+            1.33797435,
+            1.5881474
+          ],
+          "after_min_max_ms": [
+            0.0337993,
+            0.0375229
+          ]
+        }
+      },
+      {
+        "rows_per_page": 500,
+        "distinct_origins": 500,
+        "pages_per_sample": 20,
+        "warmups": 3,
+        "alternating_runs": 9,
+        "reference_ms_per_page": [
+          1.48829235,
+          1.6066721999999998,
+          1.5148366999999998,
+          1.54742015,
+          1.6637700500000001,
+          1.4579867,
+          1.46485215,
+          1.414257,
+          1.43665515
+        ],
+        "current_ms_per_page": [
+          0.7435709,
+          0.7219646500000001,
+          0.7055899,
+          0.67024245,
+          0.7712059499999999,
+          0.84730955,
+          0.69908315,
+          0.6928588999999999,
+          0.69353685
+        ],
+        "reference_reads_per_page": {
+          "schema_queries": 500,
+          "label_queries": 500
+        },
+        "current_reads_per_page": {
+          "schema_queries": 1,
+          "label_queries": 500
+        },
+        "summary": {
+          "before_median_ms": 1.48829235,
+          "after_median_ms": 0.7055899,
+          "time_reduction_percent": 52.59063852609335,
+          "before_min_max_ms": [
+            1.414257,
+            1.6637700500000001
+          ],
+          "after_min_max_ms": [
+            0.67024245,
+            0.84730955
+          ]
+        }
+      }
+    ]
+  },
+  "embeddings": {
+    "prechange_debug": [
+      {
+        "case": "response_float",
+        "runs": {
+          "reference_ms": [
+            42.54271025,
+            41.529035,
+            41.69453625,
+            41.27886875,
+            42.6194155,
+            43.319011749999994,
+            44.68356225,
+            42.560069,
+            41.71822125
+          ],
+          "current_ms": [
+            41.4031605,
+            41.220881750000004,
+            41.10749425,
+            41.19720625,
+            44.35423225,
+            48.896046999999996,
+            44.616882,
+            43.25767,
+            41.8873705
+          ]
+        }
+      },
+      {
+        "case": "response_base64",
+        "runs": {
+          "reference_ms": [
+            15.91216975,
+            16.908925,
+            16.81280325,
+            15.98602125,
+            16.004208499999997,
+            15.94816375,
+            16.036409250000002,
+            15.971962,
+            16.0111085
+          ],
+          "current_ms": [
+            16.11444875,
+            17.079276,
+            16.15268375,
+            15.8918895,
+            15.915372000000001,
+            15.87600275,
+            15.823624500000001,
+            15.876263750000001,
+            15.929140250000001
+          ]
+        }
+      },
+      {
+        "case": "cache_size_fits",
+        "json_bytes": 8142138,
+        "limit_bytes": 8142138,
+        "runs": {
+          "reference_ms": [
+            133.44564325,
+            137.22448725,
+            140.17472275,
+            139.97287250000002,
+            138.854241,
+            134.90949650000002,
+            136.13744624999998,
+            136.026926,
+            135.55782825
+          ],
+          "current_ms": [
+            132.78791049999998,
+            135.14981175,
+            144.30346625,
+            137.69368475,
+            133.25250125,
+            133.479926,
+            133.08504,
+            133.8314165,
+            133.818054
+          ]
+        }
+      },
+      {
+        "case": "cache_size_rejected",
+        "json_bytes": 8142138,
+        "limit_bytes": 4096,
+        "runs": {
+          "reference_ms": [
+            137.39039475,
+            134.58683499999998,
+            134.1871315,
+            134.7867405,
+            134.18793825,
+            134.54063575,
+            134.52835275,
+            132.96869425,
+            132.98398724999998
+          ],
+          "current_ms": [
+            135.162129,
+            133.3079505,
+            132.99018600000002,
+            133.80945175,
+            133.39745875,
+            132.10852125,
+            135.08573225,
+            133.46224825,
+            132.97115525
+          ]
+        }
+      }
+    ],
+    "paired_debug": [
+      {
+        "case": "response_float",
+        "runs": {
+          "reference_ms": [
+            54.0468725,
+            42.37487975,
+            46.22974275,
+            43.903745,
+            43.54010575,
+            42.75426775,
+            42.72026125,
+            42.7536715,
+            43.129864749999996
+          ],
+          "current_ms": [
+            35.6265615,
+            34.87982425,
+            43.6265935,
+            35.32157025,
+            35.36599,
+            33.34256375,
+            34.840122,
+            34.59699925,
+            34.39354325
+          ]
+        }
+      },
+      {
+        "case": "response_base64",
+        "runs": {
+          "reference_ms": [
+            16.00799125,
+            16.093407,
+            15.822180000000001,
+            16.29562875,
+            16.92922575,
+            16.2291885,
+            16.317021,
+            16.183820750000002,
+            16.718080999999998
+          ],
+          "current_ms": [
+            16.141352,
+            17.363615999999997,
+            18.002057750000002,
+            16.225378,
+            16.144707,
+            16.31212075,
+            16.44173325,
+            16.677217000000002,
+            17.3619085
+          ]
+        }
+      },
+      {
+        "case": "cache_size_fits",
+        "json_bytes": 8142138,
+        "limit_bytes": 8142138,
+        "runs": {
+          "reference_ms": [
+            137.29699449999998,
+            139.14529975,
+            138.071248,
+            137.1753045,
+            135.2856295,
+            136.1271245,
+            134.75857275,
+            135.80526575,
+            137.72802049999999
+          ],
+          "current_ms": [
+            125.01494525000001,
+            122.93657900000001,
+            127.67434424999999,
+            128.87526625,
+            123.39414699999999,
+            126.53918325,
+            123.497282,
+            121.875608,
+            122.58023925
+          ]
+        }
+      },
+      {
+        "case": "cache_size_rejected",
+        "json_bytes": 8142138,
+        "limit_bytes": 4096,
+        "runs": {
+          "reference_ms": [
+            137.93974849999998,
+            134.26605825,
+            133.87856075,
+            135.92533674999999,
+            133.730966,
+            134.31133375000002,
+            133.72371850000002,
+            134.2843105,
+            134.1632085
+          ],
+          "current_ms": [
+            0.0706085,
+            0.063786,
+            0.070113,
+            0.062872,
+            0.0700075,
+            0.06256149999999999,
+            0.070015,
+            0.06289974999999999,
+            0.07028324999999999
+          ]
+        }
+      }
+    ],
+    "paired_release": [
+      {
+        "case": "response_float",
+        "runs": {
+          "reference_ms": [
+            8.164864000000001,
+            8.061856500000001,
+            8.05170675,
+            8.09562925,
+            7.95927725,
+            8.05536225,
+            7.9878705000000005,
+            8.062297,
+            8.27738825
+          ],
+          "current_ms": [
+            7.972447000000001,
+            8.04362375,
+            7.97537425,
+            8.0787695,
+            8.01878975,
+            7.9774775,
+            8.12697425,
+            8.206471,
+            8.064768749999999
+          ]
+        },
+        "summary": {
+          "before_median_ms": 8.061856500000001,
+          "after_median_ms": 8.04362375,
+          "time_reduction_percent": 0.2261606864374377,
+          "before_min_max_ms": [
+            7.95927725,
+            8.27738825
+          ],
+          "after_min_max_ms": [
+            7.972447000000001,
+            8.206471
+          ]
+        }
+      },
+      {
+        "case": "response_base64",
+        "runs": {
+          "reference_ms": [
+            2.0004915,
+            1.973471,
+            1.8859015,
+            1.92963775,
+            1.9253357500000001,
+            2.04550475,
+            1.9349105,
+            1.9651787500000002,
+            1.9221240000000002
+          ],
+          "current_ms": [
+            2.0589875,
+            2.0803545000000003,
+            1.91408925,
+            1.9598157500000002,
+            1.9222565,
+            1.957282,
+            2.036956,
+            1.96015125,
+            1.951773
+          ]
+        },
+        "summary": {
+          "before_median_ms": 1.9349105,
+          "after_median_ms": 1.9598157500000002,
+          "time_reduction_percent": -1.287152558219118,
+          "before_min_max_ms": [
+            1.8859015,
+            2.04550475
+          ],
+          "after_min_max_ms": [
+            1.91408925,
+            2.0803545000000003
+          ]
+        }
+      },
+      {
+        "case": "cache_size_fits",
+        "json_bytes": 8142138,
+        "limit_bytes": 8142138,
+        "runs": {
+          "reference_ms": [
+            9.0390575,
+            8.968003000000001,
+            8.9656905,
+            8.988472250000001,
+            9.5740315,
+            9.027873000000001,
+            8.96210525,
+            8.956058500000001,
+            8.9427
+          ],
+          "current_ms": [
+            7.208777250000001,
+            7.19698175,
+            7.1980077499999995,
+            7.1883985,
+            7.4654505,
+            7.198732000000001,
+            7.185304,
+            7.18429225,
+            7.1920545
+          ]
+        },
+        "summary": {
+          "before_median_ms": 8.968003000000001,
+          "after_median_ms": 7.19698175,
+          "time_reduction_percent": 19.748223210897685,
+          "before_min_max_ms": [
+            8.9427,
+            9.5740315
+          ],
+          "after_min_max_ms": [
+            7.18429225,
+            7.4654505
+          ]
+        }
+      },
+      {
+        "case": "cache_size_rejected",
+        "json_bytes": 8142138,
+        "limit_bytes": 4096,
+        "runs": {
+          "reference_ms": [
+            8.9511125,
+            9.017576,
+            8.98815575,
+            8.987525999999999,
+            8.962514749999999,
+            9.004676499999999,
+            8.99777525,
+            8.95097825,
+            8.94754975
+          ],
+          "current_ms": [
+            0.00405875,
+            0.0038407499999999995,
+            0.00447175,
+            0.0038407499999999995,
+            0.004344000000000001,
+            0.0038157499999999997,
+            0.00448675,
+            0.0038909999999999995,
+            0.00436675
+          ]
+        },
+        "summary": {
+          "before_median_ms": 8.987525999999999,
+          "after_median_ms": 0.00405875,
+          "time_reduction_percent": 99.95484018627596,
+          "before_min_max_ms": [
+            8.94754975,
+            9.017576
+          ],
+          "after_min_max_ms": [
+            0.0038157499999999997,
+            0.00448675
+          ]
+        }
+      }
+    ]
+  },
+  "dashboard_artifact": "optimization-ui-results-2026-10-31.json",
+  "buffer_evidence": {
+    "float_fixture_vectors": 128,
+    "dimensions_per_vector": 3072,
+    "avoided_float_binary_scratch_requested_bytes": 1572864,
+    "avoided_retained_serialized_json_bytes": 8142138,
+    "measured_peak_rss": false,
+    "measured_allocator_totals": false
+  },
+  "dashboard_previous_verification": {
+    "measuredAt": "2026-10-31T21:34:34.224Z",
+    "node": "v22.22.3",
+    "baselineCommit": "7fef91efbf0134931ac0ab2935e64369456bfb3b",
+    "environment": {
+      "platform": "linux",
+      "architecture": "x64",
+      "cpu": "AMD Ryzen Threadripper 9970X 32-Cores",
+      "logicalCPUs": 64
+    },
+    "sourceSha256": {
+      "baselineUsage": "de5f5d9ecdb84dfd93aef6029e17e931725eb0b63ced00db318d2be67ff1e3a4",
+      "currentUsage": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880",
+      "baselineApp": "c51055d3ad31c6ef319074dea6aa45fe33aa5b5d8b46b6abc0b2be346d34fd28",
+      "currentApp": "991287cd7c4cec8aac80a8f6ea9ca70cc4320f2d53689b286e569686fabfd3be"
+    },
+    "command": "node scripts/ui-benchmark.cjs --baseline-ref 7fef91efbf0134931ac0ab2935e64369456bfb3b",
+    "method": "Real dashboard source in a Node VM with minimal DOM stand-ins. Chart and model-family medians use five batches after warmup: 60 hovers or 10 coverage calculations per batch. Request rows include the local-timezone boundary check, use three warmup renders, then nine alternating before/after runs (order reversed every other run), and preserve raw samples; unchanged non-date helpers are stand-ins. Before/after model routes and request markup must match. Operation counts are collected separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.",
+    "timezone": "Europe/Amsterdam",
+    "requestRows": [
+      {
+        "rows": 6,
+        "layout": "desktop",
+        "baseline": {
+          "medianMilliseconds": 0.306,
+          "samplesMilliseconds": [
+            0.38268499999998085,
+            0.3136610000000246,
+            0.30239499999999,
+            0.3128899999999817,
+            0.30011100000001534,
+            0.3055090000000291,
+            0.2934710000000109,
+            0.2999100000000112,
+            0.4380179999999996
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 0.051,
+          "samplesMilliseconds": [
+            0.06732099999999264,
+            0.05129699999997683,
+            0.051446999999996024,
+            0.06274400000000924,
+            0.05025599999999031,
+            0.054811999999969885,
+            0.04975400000000718,
+            0.04608899999999494,
+            0.0831450000000018
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 1,
+            "nativeLocaleCalls": 0
+          }
+        }
+      },
+      {
+        "rows": 6,
+        "layout": "mobile",
+        "baseline": {
+          "medianMilliseconds": 0.301,
+          "samplesMilliseconds": [
+            0.31019599999996217,
+            0.30652000000003454,
+            0.29597499999999854,
+            0.29345100000000457,
+            0.2921089999999822,
+            0.30108300000000554,
+            0.29590500000000475,
+            0.33592500000003156,
+            0.3080229999999915
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 0.05,
+          "samplesMilliseconds": [
+            0.05779699999999366,
+            0.050525999999990745,
+            0.0498550000000364,
+            0.048662999999976364,
+            0.050105000000030486,
+            0.054201999999975214,
+            0.048992999999995845,
+            0.04671000000001868,
+            0.0791189999999915
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 1,
+            "nativeLocaleCalls": 0
+          }
+        }
+      },
+      {
+        "rows": 300,
+        "layout": "desktop",
+        "baseline": {
+          "medianMilliseconds": 15.34,
+          "samplesMilliseconds": [
+            15.960026000000028,
+            18.549639000000013,
+            15.999924999999962,
+            13.950476999999978,
+            15.340305000000058,
+            14.478929999999991,
+            14.541274000000044,
+            14.995196999999962,
+            16.26528499999995
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 1.32,
+          "samplesMilliseconds": [
+            1.3419979999999896,
+            1.8147579999999834,
+            6.058054000000027,
+            1.1993030000001,
+            1.1687560000000303,
+            1.2062329999999974,
+            1.4896589999999605,
+            1.0820859999998902,
+            1.320114999999987
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 1,
+            "nativeLocaleCalls": 0
+          }
+        }
+      },
+      {
+        "rows": 300,
+        "layout": "mobile",
+        "baseline": {
+          "medianMilliseconds": 13.72,
+          "samplesMilliseconds": [
+            41.271086999999966,
+            14.42983700000002,
+            13.86976500000003,
+            14.108683999999926,
+            13.719759999999951,
+            12.34657500000003,
+            13.212697000000048,
+            13.54121100000009,
+            12.433945999999992
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 1.382,
+          "samplesMilliseconds": [
+            1.5884260000000268,
+            1.3824369999999817,
+            1.7987929999999324,
+            1.1994019999999637,
+            1.122747000000004,
+            1.0439589999999725,
+            1.7089190000000372,
+            31.47262999999998,
+            1.0102980000000343
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 1,
+            "nativeLocaleCalls": 0
+          }
+        }
+      }
+    ],
+    "liveRefresh": {
+      "scenario": "Three account-event bursts on Models; each 250ms debounce fires before any API read resolves, then all reads resolve in controlled rounds. Counts are deterministic, not latency measurements.",
+      "baseline": {
+        "outstandingAfterBursts": 9,
+        "maximumOutstanding": 9,
+        "totalReads": 9,
+        "endpoints": [
+          "/accounts",
+          "/overview",
+          "/routes",
+          "/accounts",
+          "/overview",
+          "/routes",
+          "/accounts",
+          "/overview",
+          "/routes"
+        ]
+      },
+      "optimized": {
+        "outstandingAfterBursts": 3,
+        "maximumOutstanding": 3,
+        "totalReads": 6,
+        "endpoints": [
+          "/accounts",
+          "/overview",
+          "/routes",
+          "/accounts",
+          "/overview",
+          "/routes"
+        ]
+      }
+    }
+  },
+  "dashboard_prechange_verification": {
+    "measuredAt": "2026-10-31T21:25:13.247Z",
+    "node": "v22.22.3",
+    "baselineCommit": "7fef91efbf0134931ac0ab2935e64369456bfb3b",
+    "command": "node scripts/ui-benchmark.cjs --baseline-ref 7fef91efbf0134931ac0ab2935e64369456bfb3b",
+    "method": "Real dashboard source in a Node VM with minimal DOM stand-ins. Chart and model-family medians use five batches after warmup: 60 hovers or 10 coverage calculations per batch. Request rows use three warmup renders, then nine alternating before/after runs (order reversed every other run), and preserve raw samples; unchanged non-date helpers are stand-ins. Before/after model routes and request markup must match. Operation counts are collected separately, outside timed runs. Timing excludes browser DOM parsing, layout and painting.",
+    "timezone": "Europe/Amsterdam",
+    "requestRows": [
+      {
+        "rows": 6,
+        "layout": "desktop",
+        "baseline": {
+          "medianMilliseconds": 0.264,
+          "samplesMilliseconds": [
+            0.28286500000001524,
+            0.2789989999999989,
+            0.2897260000000301,
+            0.2624749999999949,
+            0.26221399999997175,
+            0.26417700000001787,
+            0.26192300000002433,
+            0.37429199999996854,
+            0.2629850000000147
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 0.279,
+          "samplesMilliseconds": [
+            0.2790689999999927,
+            0.2807119999999941,
+            0.28474799999997913,
+            0.3048080000000368,
+            0.3184880000000021,
+            0.2622440000000097,
+            0.26421700000003057,
+            0.2651180000000295,
+            0.2630850000000464
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        }
+      },
+      {
+        "rows": 6,
+        "layout": "mobile",
+        "baseline": {
+          "medianMilliseconds": 0.269,
+          "samplesMilliseconds": [
+            0.270857000000035,
+            0.2743330000000128,
+            0.2680430000000342,
+            0.2690539999999828,
+            0.27782700000000204,
+            0.27124800000001414,
+            0.2680129999999963,
+            0.267721999999992,
+            0.26627000000002
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 0.27,
+          "samplesMilliseconds": [
+            0.27258000000000493,
+            0.26955499999996846,
+            0.26813300000003437,
+            0.266619999999989,
+            0.2683529999999905,
+            0.27404200000000856,
+            0.27009600000002365,
+            0.2668509999999742,
+            0.2739419999999768
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 12
+          }
+        }
+      },
+      {
+        "rows": 300,
+        "layout": "desktop",
+        "baseline": {
+          "medianMilliseconds": 13.403,
+          "samplesMilliseconds": [
+            14.117023000000017,
+            13.402938000000006,
+            13.838064000000031,
+            13.892795000000092,
+            13.340253999999959,
+            52.852947000000086,
+            12.245709999999917,
+            12.15650699999992,
+            12.248405000000048
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 14.067,
+          "samplesMilliseconds": [
+            14.06698799999998,
+            18.793529999999976,
+            13.927828999999974,
+            14.18025799999998,
+            13.429678999999965,
+            14.595051000000012,
+            12.289156000000048,
+            16.360364000000004,
+            12.234544000000028
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        }
+      },
+      {
+        "rows": 300,
+        "layout": "mobile",
+        "baseline": {
+          "medianMilliseconds": 12.425,
+          "samplesMilliseconds": [
+            12.419411999999966,
+            12.327714000000014,
+            12.538510999999971,
+            12.35901899999999,
+            12.424710000000005,
+            52.112994999999955,
+            14.708440999999993,
+            12.23718800000006,
+            12.555214999999862
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        },
+        "optimized": {
+          "medianMilliseconds": 12.355,
+          "samplesMilliseconds": [
+            50.083935999999994,
+            12.318229999999971,
+            12.184098999999946,
+            12.181104000000005,
+            12.354874999999993,
+            12.36982799999987,
+            12.942117999999937,
+            13.141918000000032,
+            12.10735099999988
+          ],
+          "operationsPerRender": {
+            "dateFormatters": 0,
+            "nativeLocaleCalls": 600
+          }
+        }
+      }
+    ]
+  }
+}

@@ -399,26 +399,7 @@ fn finish_of(s: &str) -> Finish {
 }
 
 fn usage_of(u: &Value) -> Option<Usage> {
-    if !u.is_object() {
-        return None;
-    }
-    let prompt = u["prompt_tokens"].as_u64().unwrap_or(0);
-    let details = &u["prompt_tokens_details"];
-    let cached = details["cached_tokens"].as_u64().unwrap_or(0);
-    let write = details["cache_write_tokens"]
-        .as_u64()
-        .or_else(|| details["cache_creation_tokens"].as_u64())
-        .or_else(|| u["cache_creation_input_tokens"].as_u64())
-        .unwrap_or(0);
-    Some(Usage {
-        input: prompt.saturating_sub(cached).saturating_sub(write),
-        cache_read: cached,
-        output: u["completion_tokens"].as_u64().unwrap_or(0),
-        reasoning: u["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
-        cache_write: write,
-        write_30m: details["cache_write_tokens_details"]["ttl_30m_tokens"].as_u64(),
-        write_12h: details["cache_write_tokens_details"]["ttl_12h_tokens"].as_u64(),
-    })
+    super::openai_usage(u, crate::ir::Format::Chat)
 }
 
 impl StreamParser for Parser {
@@ -586,11 +567,7 @@ pub(crate) fn usage_json(u: &Usage) -> Value {
         "prompt_tokens_details": { "cached_tokens": u.cache_read },
         "completion_tokens_details": { "reasoning_tokens": u.reasoning },
     });
-    if u.cache_write > 0 || u.write_30m.is_some() || u.write_12h.is_some() {
-        usage["prompt_tokens_details"]["cache_write_tokens"] = u.cache_write.into();
-        usage["prompt_tokens_details"]["cache_creation_tokens"] = u.cache_write.into();
-    }
-    super::write_openai_cache_lifetimes(&mut usage["prompt_tokens_details"], u);
+    super::write_openai_cache_details(&mut usage["prompt_tokens_details"], u);
     usage
 }
 
