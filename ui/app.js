@@ -113,7 +113,7 @@ const PROVIDER = {
 };
 // Accounts you can sign in to: [id, name, what it connects].
 const SIGNIN = [
-  ['claude', 'Claude', 'Pro or Max subscription'],
+  ['claude', 'Claude', 'Pro, Max or Ultra subscription'],
   ['codex', 'ChatGPT', 'Plus, Pro or Team, for Codex models'],
   ['antigravity', 'Antigravity', 'Google account, Gemini and Claude models'],
   ['xai', 'Grok', 'SuperGrok or X Premium'],
@@ -123,7 +123,7 @@ const SIGNIN = [
   ['vertex', 'Vertex AI', 'Google Cloud service account key'],
 ];
 const LOGIN = {
-  claude: { name: 'Claude', intro: 'Connect a Claude Pro or Max subscription.', port: 54545, example: 'http://localhost:54545/callback?code=…&state=…' },
+  claude: { name: 'Claude', intro: 'Connect a Claude Pro, Max or Ultra subscription.', port: 54545, example: 'http://localhost:54545/callback?code=…&state=…' },
   codex: { name: 'ChatGPT', intro: 'Connect a ChatGPT Plus, Pro or Team subscription for Codex models.', port: 1455, example: 'http://localhost:1455/auth/callback?code=…&state=…' },
   antigravity: { name: 'Antigravity', intro: 'Connect a Google account with Antigravity access for Gemini and Claude models.', port: 51121, example: 'http://localhost:51121/oauth-callback?code=…&state=…' },
   devin: { name: 'Devin', intro: 'Connect a Devin or Windsurf account.', example: 'http://127.0.0.1:…/callback?code=…, or a session token' },
@@ -2308,10 +2308,12 @@ function windowStarterHTML(a) {
   const busy = !!S.windowStarterBusy?.[a.id];
   const reset = windowOf(a, true)?.resets_at || v?.resets_at;
   const active = reset && Date.parse(reset) > Date.now();
-  const absent = v?.status === 'not_needed' || noShortLimit(a);
+  // Fresh quota wins: a 5-hour window reported since the last check means it is back.
+  const absent = noShortLimit(a) || (v?.status === 'not_needed' && !windowOf(a, true));
   const held = !absent && v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
+  const message = v?.status === 'not_needed' ? '' : v?.message;
   const status = absent ? (v?.status === 'not_needed' && v.message) || 'This account has no five-hour limit, so there is no window to start'
-    : active ? `Window resets ${when(reset)}` : v?.message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
+    : active ? `Window resets ${when(reset)}` : message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
   const check = active || held || absent;
   return `<div class="window-starter block" aria-label="Window starter"><div class="cell2"><span class="label">Window starter</span>
     <span class="fg2">${esc(status)}</span>

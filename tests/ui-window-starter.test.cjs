@@ -87,6 +87,16 @@ test('accounts without a 5-hour limit offer no start, only a status check', () =
   assert.doesNotMatch(html, /Next starter allowed|data-act="window-start"/);
 });
 
+test('a 5-hour limit reported since the last starter check overrides its not_needed result', () => {
+  const { run } = load();
+  run(`var a={id:'a',window_starter_supported:true,window_starter_selected:true,
+    quota:{no_five_hour_limit:false,windows:[{name:'5h',used:0,resets_at:null}]},
+    window_starter:{status:'not_needed',message:'This account has no five-hour limit, so there is no window to start'}}`);
+  const html = run('windowStarterHTML(a)');
+  assert.doesNotMatch(html, /This account has no five-hour limit/);
+  assert.match(html, /data-act="window-start"/);
+});
+
 test('manual requests carry a unique ID and status checks never ask for generation', async () => {
   const calls = [];
   const a = { id: 'account/a', window_starter_supported: true };

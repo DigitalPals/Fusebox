@@ -1445,3 +1445,30 @@ async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
     assert_eq!(hooks.lock().len(), 3);
     server.abort();
 }
+
+#[tokio::test]
+async fn a_short_only_reset_is_not_spent_once_the_short_limit_is_gone() {
+    let (temp, app, acct, mut mock) = automatic_fixture(10.0, 0.0, 1);
+    mock.usage["five_hour"] = Value::Null;
+    mock.usage["limits"] = json!([{
+        "kind":"weekly_all", "group":"weekly", "percent":10,
+        "resets_at":Utc::now()+chrono::Duration::days(7), "is_active":true
+    }]);
+    mock.usage["cedar_ember"]["grants"][0]["clears"] = json!(["five_hour"]);
+    mock.inventory = provider::claude(&mock.usage, Utc::now()).unwrap();
+    {
+        let mut st = acct.state.lock();
+        crate::quota::usage(&mut st, Provider::Claude, &mock.usage);
+        assert!(st.quota.no_five_hour_limit);
+        st.banked_resets = Some(reset_view(mock.inventory.clone()));
+    }
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    let _ = execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await;
+    assert_eq!(mock.calls.lock().len(), 0, "even an expiring grant is not spent on a limit that is gone");
+    // A grant that also clears the week is still used before it expires.
+    mock.usage["cedar_ember"]["grants"][0]["clears"] = json!(["five_hour", "seven_day"]);
+    mock.inventory = provider::claude(&mock.usage, Utc::now()).unwrap();
+    acct.state.lock().banked_resets = Some(reset_view(mock.inventory.clone()));
+    let _ = execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await;
+    assert_eq!(mock.calls.lock().len(), 1);
+}

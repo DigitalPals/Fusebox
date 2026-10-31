@@ -16,7 +16,7 @@ use crate::state::App;
 
 mod readings;
 
-pub use readings::claude_no_five_hour;
+pub use readings::{FiveHour, claude_five_hour};
 
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -155,6 +155,12 @@ impl Quota {
             .iter()
             .filter(move |w| w.model.as_ref().is_none_or(|m| model.contains(m.as_str())))
             .filter(move |w| w.resets_at.is_none_or(|r| r > now))
+    }
+
+    /// On Claude Ultra (formerly Max 20x), by its plan.
+    pub fn ultra(&self) -> bool {
+        matches!(self.plan.as_deref(), Some("max_20x" | "ultra"))
+            || self.plan_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("ultra"))
     }
 
     /// Use of the tightest window that applies to `model` (None = no data).
@@ -872,7 +878,7 @@ mod tests {
 
     #[test]
     fn only_a_typed_list_without_a_session_proves_there_is_no_five_hour_limit() {
-        assert!(claude_no_five_hour(&ultra_usage()));
+        assert!(readings::claude_no_five_hour(&ultra_usage()));
         let reading = readings::claude(&ultra_usage());
         assert!(reading.no_five_hour);
         assert!(reading.windows.iter().all(|w| w.name != "5h"));
@@ -883,7 +889,7 @@ mod tests {
             0,
             json!({ "kind": "session", "group": "session", "percent": 0, "resets_at": null, "is_active": true }),
         );
-        assert!(!claude_no_five_hour(&idle));
+        assert!(!readings::claude_no_five_hour(&idle));
         let reading = readings::claude(&idle);
         assert!(!reading.no_five_hour);
         let five = reading.windows.iter().find(|w| w.name == "5h").expect("the session entry stands in");
@@ -895,9 +901,31 @@ mod tests {
             json!({ "five_hour": null, "limits": [] }),
             json!({ "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
             json!({ "five_hour": { "utilization": 3.0 }, "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
+            // A malformed weekly entry proves nothing either.
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all" }] }),
+            json!({ "five_hour": null, "limits": [{ "kind": "weekly_all", "percent": 140 }] }),
         ] {
-            assert!(!claude_no_five_hour(&v), "{v}");
+            assert!(!readings::claude_no_five_hour(&v), "{v}");
         }
+    }
+
+    #[test]
+    fn malformed_typed_limits_never_retire_a_spent_five_hour_window() {
+        let mut st = crate::accounts::AccountState::default();
+        let reset = Utc::now() + chrono::Duration::hours(2);
+        let week = json!({ "utilization": 20, "resets_at": Utc::now() + chrono::Duration::days(2) });
+        usage(
+            &mut st,
+            Provider::Claude,
+            &json!({ "five_hour": { "utilization": 100, "resets_at": reset }, "seven_day": week }),
+        );
+        usage(
+            &mut st,
+            Provider::Claude,
+            &json!({ "five_hour": null, "seven_day": week, "limits": [{ "kind": "weekly_all" }] }),
+        );
+        assert!(!st.quota.no_five_hour_limit);
+        assert!(st.quota.exhausted("claude-sonnet-5-5"));
     }
 
     #[test]

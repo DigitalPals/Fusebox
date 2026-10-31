@@ -179,25 +179,15 @@ enum Window {
 
 /// Only explicit provider data proves inactivity. Missing, malformed, and a
 /// zero-percent window with a future reset are never treated as unused windows.
-fn window(value: &Value, now: DateTime<Utc>) -> Window {
-    if crate::quota::claude_no_five_hour(value) {
-        return Window::Absent;
-    }
-    let Some(w) = value.get("five_hour") else { return Window::Unknown };
-    if w.is_null() {
-        return Window::Inactive;
-    }
-    let Some(used) = w["utilization"].as_f64().filter(|u| u.is_finite() && (0.0..=100.0).contains(u)) else {
-        return Window::Unknown;
-    };
-    match w.get("resets_at") {
-        Some(Value::Null) if used == 0.0 => Window::Inactive,
-        Some(Value::String(s)) => match DateTime::parse_from_rfc3339(s) {
-            Ok(at) if at > now => Window::Active(at.with_timezone(&Utc)),
-            // An old reset alone cannot prove a fresh window has not begun.
-            _ => Window::Unknown,
-        },
-        _ => Window::Unknown,
+/// `ultra`: the account is on Ultra, where a bare null can mean there is no window.
+fn window(value: &Value, now: DateTime<Utc>, ultra: bool) -> Window {
+    use crate::quota::FiveHour;
+    match crate::quota::claude_five_hour(value, now) {
+        FiveHour::Absent => Window::Absent,
+        FiveHour::Idle => Window::Inactive,
+        FiveHour::Null if !ultra => Window::Inactive,
+        FiveHour::Active(at) => Window::Active(at),
+        FiveHour::Null | FiveHour::Unknown => Window::Unknown,
     }
 }
 
@@ -354,12 +344,14 @@ impl Api {
         let usage = self.get("/api/oauth/usage").await?;
         ensure!(native_id(acct)? == id && acct.state.lock().identity_epoch == epoch, "Claude account changed");
         // The general quota merger deliberately retains omitted windows. An
-        // explicit null from this endpoint instead means an inactive window,
-        // unless the account has no 5-hour limit at all.
+        // explicit null from this endpoint instead means an inactive window, but
+        // only where nothing else describes the 5-hour one: a typed session entry
+        // or a confirmed absence speaks for itself, and an unclear null stays unknown.
         let mut normalized = usage.clone();
-        let absent = crate::quota::claude_no_five_hour(&usage);
+        let idle = window(&usage, Utc::now(), acct.state.lock().quota.ultra()) == Window::Inactive;
         for key in ["five_hour", "seven_day"] {
-            if usage.get(key) == Some(&Value::Null) && !(absent && key == "five_hour") {
+            let typed = key == "five_hour" && usage["limits"].is_array();
+            if usage.get(key) == Some(&Value::Null) && (key == "seven_day" || (idle && !typed)) {
                 normalized[key] = json!({"utilization":0.0,"resets_at":null});
             }
         }
@@ -422,7 +414,8 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
     let foreground = ForegroundGuard::new(app, id);
     let usage = api.usage(app, acct, id).await?;
     let now = Utc::now();
-    let state = window(&usage, now);
+    let ultra = acct.state.lock().quota.ultra();
+    let state = window(&usage, now, ultra);
     if state == Window::Absent {
         let mut view =
             View::new("not_needed", "This account has no five-hour limit, so there is no window to start", now);
@@ -566,7 +559,7 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
     // window. Re-read usage, including after an uncertain network completion.
     if current(app, acct, id, &root, false).is_ok()
         && let Ok(usage) = api.usage(app, acct, id).await
-        && let Window::Active(reset) = window(&usage, Utc::now())
+        && let Window::Active(reset) = window(&usage, Utc::now(), ultra)
     {
         let attempt = journal.attempt.as_mut().unwrap();
         attempt.outcome = Outcome::Started;
@@ -591,6 +584,16 @@ fn retry_after(headers: &HeaderMap, now: DateTime<Utc>) -> DateTime<Utc> {
     now + chrono::Duration::seconds(seconds)
 }
 
+/// Whether the poller checks this account now: at its next check, or sooner when an
+/// account found to have no 5-hour limit reports one again (at most every 5 minutes).
+fn due(st: &crate::accounts::AccountState, now: DateTime<Utc>) -> bool {
+    let Some(v) = &st.window_starter else { return true };
+    v.next_check_at <= now
+        || (v.status == "not_needed"
+            && !st.quota.no_five_hour_limit
+            && v.checked_at + chrono::Duration::seconds(CHECK_SECONDS) <= now)
+}
+
 pub async fn poller(app: Arc<App>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -609,9 +612,7 @@ pub async fn poller(app: Arc<App>) {
             if app.shutdown.is_cancelled() {
                 return;
             }
-            if !policy.selected(&acct)
-                || acct.state.lock().window_starter.as_ref().is_some_and(|v| v.next_check_at > Utc::now())
-            {
+            if !policy.selected(&acct) || !due(&acct.state.lock(), Utc::now()) {
                 continue;
             }
             let action = Action { request_id: uuid::Uuid::new_v4().to_string(), check_only: false };

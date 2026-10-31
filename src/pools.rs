@@ -135,10 +135,19 @@ fn pool(provider: &str, name: &str, model: Option<&str>, members: &[Member], now
         .collect();
     // A member without a model's own limit takes that model's requests until its
     // whole-account limits stop it, and those have pools of their own. One without a
-    // 5-hour limit (Claude Ultra) takes what the others can't, so together they have none.
+    // 5-hour limit (Claude Ultra) takes what the others can't, so together they have
+    // none, as long as it is signed in and has weekly quota left. Otherwise the pool is
+    // the accounts that have the limit.
+    let carries = |m: &Member| {
+        m.no_five_hour
+            && m.forecast_available
+            && !m.windows.iter().any(|w| {
+                w.name == "week" && w.model.is_none() && w.used >= 100.0 && w.resets_at.is_none_or(|r| r > now)
+            })
+    };
     if reports.is_empty()
         || (model.is_some() && reports.len() < members.len())
-        || (name == "5h" && model.is_none() && members.iter().any(|m| m.no_five_hour))
+        || (name == "5h" && model.is_none() && members.iter().any(carries))
     {
         return None;
     }
@@ -441,5 +450,13 @@ mod tests {
         ];
         let found: Vec<String> = pools(&members(&mixed), now()).into_iter().map(|p| p.window).collect();
         assert_eq!(found, ["week"]);
+        // Not with its week used up: then the Max account's 5 hours are all there is.
+        let spent = [
+            on("max_5x", "a", vec![week(10.0, Some(5.0)), five(90.0, 1.0)]),
+            Account { no_five_hour: true, ..on("max_20x", "b", vec![week(100.0, Some(5.0))]) },
+        ];
+        let five_hours: Vec<Pool> = pools(&members(&spent), now()).into_iter().filter(|p| p.window == "5h").collect();
+        assert_eq!(five_hours.len(), 1);
+        assert_eq!(five_hours[0].weights, [("a".to_string(), 5.0)], "only the limited account is in it");
     }
 }

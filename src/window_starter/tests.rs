@@ -114,8 +114,12 @@ async fn run(app: &Arc<App>, automatic: bool) -> Result<View> {
 #[test]
 fn provider_inactivity_is_explicit_and_zero_percent_can_be_active() {
     let now = Utc::now();
-    assert_eq!(window(&idle(), now), Window::Inactive);
-    assert_eq!(window(&json!({"five_hour":null}), now), Window::Inactive);
+    for ultra in [false, true] {
+        assert_eq!(window(&idle(), now, ultra), Window::Inactive);
+    }
+    assert_eq!(window(&json!({"five_hour":null}), now, false), Window::Inactive);
+    // On Ultra a bare null can mean no window at all: only a status check, no start.
+    assert_eq!(window(&json!({"five_hour":null}), now, true), Window::Unknown);
     for w in [
         json!({}),
         json!({"five_hour":{}}),
@@ -123,11 +127,25 @@ fn provider_inactivity_is_explicit_and_zero_percent_can_be_active() {
         json!({"five_hour":{"utilization":1,"resets_at":null}}),
         json!({"five_hour":{"utilization":0,"resets_at":"bad"}}),
         json!({"five_hour":{"utilization":0,"resets_at":now-chrono::Duration::hours(1)}}),
+        // A typed list without a session, or a malformed one, proves nothing.
+        json!({"five_hour":null,"limits":[]}),
+        json!({"five_hour":null,"limits":[{"kind":"weekly_all"}]}),
+        json!({"five_hour":null,"limits":[{"kind":"session","percent":"x","resets_at":null}]}),
+        json!({"five_hour":null,"limits":[{"kind":"session","percent":0}]}),
+        json!({"five_hour":null,"limits":{}}),
     ] {
-        assert_eq!(window(&w, now), Window::Unknown, "{w}");
+        assert_eq!(window(&w, now, false), Window::Unknown, "{w}");
     }
     let reset = now + chrono::Duration::hours(2);
-    assert_eq!(window(&json!({"five_hour":{"utilization":0,"resets_at":reset}}), now), Window::Active(reset));
+    assert_eq!(window(&json!({"five_hour":{"utilization":0,"resets_at":reset}}), now, false), Window::Active(reset));
+    // The typed session entry speaks when `five_hour` is null.
+    let session = |percent: f64, resets: Value| json!({"five_hour":null,"limits":[{"kind":"weekly_all","percent":1},{"kind":"session","percent":percent,"resets_at":resets}]});
+    for ultra in [false, true] {
+        assert_eq!(window(&session(0.0, Value::Null), now, ultra), Window::Inactive);
+        assert_eq!(window(&session(100.0, json!(reset)), now, ultra), Window::Active(reset));
+        assert_eq!(window(&session(0.0, json!(reset)), now, ultra), Window::Active(reset));
+        assert_eq!(window(&session(5.0, Value::Null), now, ultra), Window::Unknown);
+    }
     assert!(weekly_available(&idle(), now));
     assert!(weekly_available(&json!({"seven_day":{"utilization":0.0,"resets_at":null}}), now));
     assert!(!weekly_available(&json!({}), now));
@@ -269,7 +287,7 @@ fn ultra() -> Value {
 #[tokio::test]
 async fn accounts_without_a_five_hour_limit_are_never_started() {
     let (_temp, app, mock, server) = fixture(1, false).await;
-    assert_eq!(window(&ultra(), Utc::now()), Window::Absent);
+    assert_eq!(window(&ultra(), Utc::now(), true), Window::Absent);
     *mock.usage.lock() = ultra();
     for check_only in [false, true] {
         let a = app.pool.all()[0].clone();
@@ -290,6 +308,61 @@ async fn accounts_without_a_five_hour_limit_are_never_started() {
     assert_eq!(run(&app, true).await.unwrap().status, "started");
     assert_eq!(mock.posts.load(Ordering::SeqCst), 1);
     assert!(!a.state.lock().quota.no_five_hour_limit);
+    server.abort();
+}
+
+#[test]
+fn a_returning_five_hour_limit_is_checked_before_the_hourly_recheck() {
+    let now = Utc::now();
+    let mut st = crate::accounts::AccountState::default();
+    assert!(due(&st, now), "never checked");
+    let mut view = View::new("not_needed", "none", now - chrono::Duration::minutes(6));
+    view.next_check_at = now + chrono::Duration::minutes(54);
+    st.window_starter = Some(view.clone());
+    st.quota.no_five_hour_limit = true;
+    assert!(!due(&st, now), "still no limit: the hourly recheck stands");
+    st.quota.no_five_hour_limit = false;
+    assert!(due(&st, now), "a 5-hour window came back");
+    st.window_starter.as_mut().unwrap().checked_at = now - chrono::Duration::minutes(1);
+    assert!(!due(&st, now), "not more often than every 5 minutes");
+    st.window_starter = Some(View { status: "active".into(), ..view });
+    assert!(!due(&st, now), "other states wait for their next check");
+}
+
+#[tokio::test]
+async fn an_active_typed_session_is_neither_started_nor_overwritten() {
+    let (_temp, app, mock, server) = fixture(1, false).await;
+    let reset = Utc::now() + chrono::Duration::hours(2);
+    let mut usage = ultra();
+    usage["limits"].as_array_mut().unwrap().push(json!({
+        "kind":"session","group":"session","percent":100,"resets_at":reset,"scope":null,"is_active":true
+    }));
+    *mock.usage.lock() = usage;
+    let view = run(&app, true).await.unwrap();
+    assert_eq!(view.status, "active");
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 0);
+    let acct = app.pool.all()[0].clone();
+    let st = acct.state.lock();
+    assert!(!st.quota.no_five_hour_limit);
+    assert!(st.quota.exhausted("claude-haiku-4-5-20251001"), "the session's exhaustion is kept, not made idle");
+    drop(st);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_bare_null_on_ultra_is_unknown_and_never_started() {
+    let (_temp, app, mock, server) = fixture(1, false).await;
+    app.pool.all()[0].state.lock().quota.plan = Some("max_20x".into());
+    let mut usage = ultra();
+    usage.as_object_mut().unwrap().remove("limits");
+    *mock.usage.lock() = usage.clone();
+    assert!(run(&app, true).await.is_err());
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 0);
+    assert!(app.pool.all()[0].state.lock().quota.windows.iter().all(|w| w.name != "5h"), "no idle window is made up");
+    // The same reading on another plan keeps its old meaning: an idle window.
+    app.pool.all()[0].state.lock().quota.plan = Some("max_5x".into());
+    assert_eq!(run(&app, true).await.unwrap().status, "started");
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 1);
     server.abort();
 }
 

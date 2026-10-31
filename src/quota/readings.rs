@@ -154,14 +154,70 @@ pub(super) fn codex(v: &Value) -> Reading {
     out
 }
 
+/// A typed limit's use: a number from 0 to 100, or nothing.
+fn percent(w: &Value) -> Option<f64> {
+    number(&w["percent"]).filter(|p| (0.0..=100.0).contains(p))
+}
+
 /// Verified Ultra accounts have no 5-hour limit: usage says `five_hour: null`, and its
-/// typed list, which names every account-wide limit, has a weekly entry but no session.
-/// A null alone is not enough, since plans with the limit report an idle window that way.
+/// typed list, which names every account-wide limit, has a valid weekly entry but no
+/// session. A null alone is not enough, since plans with the limit report an idle window
+/// that way, and a malformed list proves nothing.
 pub fn claude_no_five_hour(v: &Value) -> bool {
     let typed = v["limits"].as_array().map(Vec::as_slice).unwrap_or_default();
     v.get("five_hour").is_some_and(Value::is_null)
-        && typed.iter().any(|w| w["kind"] == "weekly_all")
+        && typed.iter().any(|w| w["kind"] == "weekly_all" && percent(w).is_some())
         && !typed.iter().any(|w| w["kind"] == "session")
+}
+
+/// What a Claude usage reading says of the 5-hour window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiveHour {
+    /// Missing, malformed or ambiguous data.
+    Unknown,
+    /// The account has no 5-hour limit (a verified Ultra account).
+    Absent,
+    /// Not started: no use and no renewal time.
+    Idle,
+    /// Started; renews then.
+    Active(DateTime<Utc>),
+    /// `five_hour: null` with no typed list, as older readings put it: an idle window
+    /// on plans that have one, but on Ultra possibly no window at all.
+    Null,
+}
+
+/// The `five_hour` block when it is there, else the typed `session` entry. Only explicit
+/// data proves a window idle; a zero-percent window with a future reset has started.
+pub fn claude_five_hour(v: &Value, now: DateTime<Utc>) -> FiveHour {
+    if claude_no_five_hour(v) {
+        return FiveHour::Absent;
+    }
+    let classify = |used: Option<f64>, reset: Option<&Value>| {
+        let Some(used) = used else { return FiveHour::Unknown };
+        match reset {
+            Some(Value::Null) if used == 0.0 => FiveHour::Idle,
+            Some(Value::String(s)) => match DateTime::parse_from_rfc3339(s) {
+                Ok(at) if at > now => FiveHour::Active(at.with_timezone(&Utc)),
+                // An old reset alone cannot prove a fresh window has not begun.
+                _ => FiveHour::Unknown,
+            },
+            _ => FiveHour::Unknown,
+        }
+    };
+    match v.get("five_hour") {
+        Some(w) if w.is_object() => {
+            let used = w["utilization"].as_f64().filter(|u| u.is_finite() && (0.0..=100.0).contains(u));
+            return classify(used, w.get("resets_at"));
+        }
+        Some(Value::Null) => {}
+        _ => return FiveHour::Unknown,
+    }
+    let Some(typed) = v.get("limits") else { return FiveHour::Null };
+    let Some(typed) = typed.as_array() else { return FiveHour::Unknown };
+    match typed.iter().find(|w| w["kind"] == "session") {
+        Some(w) => classify(percent(w), w.get("resets_at")),
+        None => FiveHour::Unknown,
+    }
 }
 
 pub(super) fn claude(v: &Value) -> Reading {

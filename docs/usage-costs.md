@@ -31,7 +31,7 @@ Unknown models without a reported cost, unsupported modalities, and missing requ
 
 Bundled rows have no historical start date. Earlier usage is labelled `t3_current_rate_equivalent` and `backdated: true`, meaning an equivalent at the snapshot's rates rather than historical spend. Organization catalogues remain supported through `pricing-overrides`: omitted `calculation` retains the previous provider calculation, including its explicit tier, context, region and cache-lifetime rules; `"calculation": "t3"` selects the flat calculation. The [provider rate card](../src/usage/rates.json) is retained for that use. Local overrides are content-hashed and preserved by the refresh command.
 
-In particular, API-token estimates do not describe Claude Pro/Max, ChatGPT Plus/Pro/Team, or other subscription-plan usage. API billing and subscription allowances are separate provider products. The quota meters and cooldowns on Accounts continue to represent provider-reported subscription limits; the Usage page does not combine those limits with API costs.
+In particular, API-token estimates do not describe Claude Pro/Max/Ultra, ChatGPT Plus/Pro/Team, or other subscription-plan usage. API billing and subscription allowances are separate provider products. The quota meters and cooldowns on Accounts continue to represent provider-reported subscription limits; the Usage page does not combine those limits with API costs.
 
 ### Who used a subscription window
 

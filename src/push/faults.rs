@@ -770,6 +770,32 @@ mod tests {
     }
 
     #[test]
+    fn an_ultra_account_that_cannot_serve_leaves_the_five_hour_warning() {
+        let now = Utc::now();
+        let five = |used, reset| Window { name: "5h".into(), used, resets_at: Some(reset), model: None };
+        let week = |used| Window { name: "week".into(), used, resets_at: Some(now + Duration::days(3)), model: None };
+        let limited = AccountView {
+            subscription: true,
+            plan: Some("max_5x".into()),
+            windows: vec![five(90.0, now + Duration::hours(1)), week(10.0)],
+            ..acct("limited", "claude")
+        };
+        let ultra = |last_error: Option<&str>, used| AccountView {
+            subscription: true,
+            plan: Some("max_20x".into()),
+            no_five_hour: true,
+            last_error: last_error.map(String::from),
+            windows: vec![week(used)],
+            ..acct("ultra", "claude")
+        };
+        let warned = |accounts: &[AccountView]| faults(accounts, now).iter().any(|f| f.key == "pace:pool:claude:5h");
+        assert!(!warned(&[limited.clone(), ultra(None, 10.0)]), "a working Ultra account takes the overflow");
+        assert!(warned(&[limited.clone(), ultra(Some("401: sign in again"), 100.0)]));
+        assert!(warned(&[limited.clone(), ultra(Some("refresh failed: invalid_grant"), 10.0)]), "signed out");
+        assert!(warned(&[limited, ultra(None, 100.0)]), "its week used up");
+    }
+
+    #[test]
     fn pools_warn_for_five_hour_and_model_windows_too() {
         let now = Utc::now();
         let five = |used| window("5h", None, used, Duration::hours(1), now);

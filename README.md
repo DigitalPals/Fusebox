@@ -64,7 +64,7 @@ The first run writes a commented `config.yaml` in the current directory (or wher
 **3. Add an account.** Click **Connect account** in the dashboard, or use the terminal:
 
 ```sh
-fusebox login claude        # Claude Pro / Max
+fusebox login claude        # Claude Pro / Max / Ultra
 fusebox login codex         # ChatGPT Plus / Pro / Team
 fusebox login antigravity   # Google account with Antigravity
 fusebox login xai           # SuperGrok / X Premium (shows a code to confirm)
@@ -186,7 +186,7 @@ JSON API requests and multipart image edits support `Content-Encoding: gzip` or 
 
 | Provider | Sign-in | Models | Speaks upstream |
 | --- | --- | --- | --- |
-| Claude | OAuth (Pro / Max) or API key | `claude-*` | Anthropic Messages |
+| Claude | OAuth (Pro / Max / Ultra) or API key | `claude-*` | Anthropic Messages |
 | Codex / ChatGPT | OAuth (Plus / Pro / Team) or OpenAI API key | `gpt-*`, `o*`, `codex-*`, `gpt-image-*` | Responses (+ WebSocket) |
 | Gemini | API key | `gemini-*`, `gemma-*` | Gemini |
 | Vertex AI | Service account or express API key | `gemini-*`, `imagen-*` | Gemini |
