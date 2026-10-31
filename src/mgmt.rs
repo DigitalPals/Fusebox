@@ -174,7 +174,7 @@ async fn save_sign_in(
     cred: &crate::accounts::OAuth,
     name: &str,
     extra: &[(&str, Value)],
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     let path = sign_in_path(app, provider, cred, name);
     let existing = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path.as_path()));
     let guard = match &existing {
@@ -196,11 +196,35 @@ async fn save_sign_in(
     }
     drop(guard);
     app.reload_accounts();
-    Ok(())
+    Ok(path)
+}
+
+/// Reads a new sign-in's usage and plan at once, as the account's quota refresh does,
+/// so its meters fill in without waiting for the next poll round (up to a minute).
+fn read_signed_in(app: &Arc<App>, path: &std::path::Path) {
+    let Some(acct) = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path)) else { return };
+    if !matches!(acct.provider, Provider::Codex | Provider::Claude) || !acct.is_oauth() {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        if oauth::ensure_fresh(&app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
+            return;
+        }
+        acct.state.lock().quota_epoch += 1;
+        if let Err(e) = crate::quota::poll(&app, &acct).await {
+            tracing::debug!(account = %acct.label, "quota check after sign-in failed: {e:#}");
+        }
+        if let Err(e) = crate::quota::poll_plan(&app, &acct).await {
+            tracing::debug!(account = %acct.label, "plan check after sign-in failed: {e:#}");
+        }
+        app.broadcast("accounts", Value::Null);
+    });
 }
 
 async fn save_signed(app: &Arc<App>, provider: Provider, s: crate::device::Signed) -> Result<String> {
-    save_sign_in(app, provider, &s.oauth, &s.file, &s.extra).await?;
+    let path = save_sign_in(app, provider, &s.oauth, &s.file, &s.extra).await?;
+    read_signed_in(app, &path);
     Ok(s.oauth.email.unwrap_or(s.file))
 }
 
@@ -315,7 +339,8 @@ pub async fn complete_login(app: &Arc<App>, state: &str, code: &str) -> Result<S
             return save_signed(app, provider, signed).await;
         }
         let (cred, name, extra) = oauth::exchange(app, provider, code.trim(), state, &verifier).await?;
-        save_sign_in(app, provider, &cred, &name, &extra).await?;
+        let path = save_sign_in(app, provider, &cred, &name, &extra).await?;
+        read_signed_in(app, &path);
         Ok::<_, anyhow::Error>(cred.email.unwrap_or(name))
     }
     .await;

@@ -59,7 +59,9 @@ revoked refresh token. The same account means the same provider and account ID;
 a Claude file without one is matched by email, a ChatGPT one only by its
 workspace's account ID. A refresh of the old tokens that is still running finishes
 first, then the new tokens take effect at once and an error from the old sign-in
-(such as `invalid_grant`) is cleared.
+(such as `invalid_grant`) is cleared. Any Claude or ChatGPT sign-in, new or
+repeated, then reads its usage and plan straight away, so its meters fill in
+without waiting for the next minute's poll.
 
 ## Trusted identity learning
 
