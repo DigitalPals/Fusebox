@@ -849,7 +849,10 @@ function authName(a) {
 
 // ChatGPT's active subscription SKU distinguishes Pro tiers; usage's `pro` does not.
 const CODEX_PLAN_NAMES = new Map([['chatgptprolite', 'Pro 100'], ['chatgptpro', 'Pro 200'], ['chatgptpromax', 'Pro 500']]);
+// Claude renamed Max 5x and Max 20x on 30 October 2026; their tier identifiers stayed.
+const CLAUDE_PLAN_NAMES = new Map([['max_5x', 'Max'], ['max_20x', 'Ultra']]);
 const planName = (a) => (a.provider === 'codex' && CODEX_PLAN_NAMES.get(a.quota?.subscription_plan))
+  || (a.provider === 'claude' && (a.quota?.plan_name || CLAUDE_PLAN_NAMES.get(a.quota?.plan)))
   || (a.quota && a.quota.plan ? cap(String(a.quota.plan).replace(/[_-]+/g, ' ')) : '');
 
 // "Claude · OAuth · token valid 5h 11m"
@@ -949,6 +952,11 @@ function windowOf(a, short) {
     .sort((x, y) => y.used - x.used)[0];
 }
 
+// Verified Claude Ultra accounts have no 5-hour limit; the provider says so explicitly.
+const NO_SHORT_LIMIT = 'This account has no five-hour limit; only the weekly limits apply.';
+const noShortLimit = (a) => !!a.quota?.no_five_hour_limit && !windowOf(a, true);
+const noLimitSegs = () => `<span class="segs" role="img" aria-label="5-hour: no limit">${'<i></i>'.repeat(20)}</span>`;
+
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
 const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
 
@@ -1001,6 +1009,7 @@ function pctHTML(w) {
 
 // One meter row: "5H [segments] 47% ↺ 2h 14m"; full reset time on hover.
 function meterRowHTML(a, short) {
+  if (short && noShortLimit(a)) return `<div class="mrow" title="${esc(NO_SHORT_LIMIT)}"><span class="capsm">5H</span>${noLimitSegs()}<span class="pct dim">–</span><span class="rst">No limit</span></div>`;
   const w = windowOf(a, short);
   const label = windowLabel(w, short);
   const reset = w && w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : '';
@@ -1012,6 +1021,7 @@ const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.
 function miniMetersHTML(a) {
   if (!a.quota?.windows?.length && a.quota?.limits?.length) return quotaLimitsHTML(a, true);
   const row = (short) => {
+    if (short && noShortLimit(a)) return `<div class="mrow" title="${esc(NO_SHORT_LIMIT)}"><span class="capsm">5H</span>${noLimitSegs()}<span class="pct dim">–</span></div>`;
     const w = windowOf(a, short);
     return `<div class="mrow"><span class="capsm">${esc(windowLabel(w, short))}</span>${segsHTML(w, windowTitle(w || { name: short ? '5h' : 'week' }))}${pctHTML(w)}</div>`;
   };
@@ -1020,14 +1030,19 @@ function miniMetersHTML(a) {
 
 // A window as a big bar with its reset line (drawer and account page).
 function windowHTML(a, short, size) {
+  if (short && noShortLimit(a)) return noShortBlockHTML(size);
   const w = windowOf(a, short);
   return windowBlockHTML(a, w, w ? windowTitle(w) : short ? '5-hour' : 'Weekly', size);
+}
+
+function noShortBlockHTML(size) {
+  return `<div class="window"><div class="window-top"><span>5-hour${size === 'xl' ? ' window' : ''}</span><span class="dim">No limit</span></div><span class="note">${esc(NO_SHORT_LIMIT)}</span></div>`;
 }
 
 function quotaWindowsHTML(a, size = 'xl') {
   const windows = (a.quota?.windows || []).filter((w) => quotaOf(w));
   if (!windows.length) return a.quota?.limits?.length ? '' : `${windowHTML(a, true, size)}${windowHTML(a, false, size)}`;
-  return windows.map((w) => windowBlockHTML(a, w, esc(w.model ? scopedTitle(w) : windowTitle(w)), size)).join('');
+  return (noShortLimit(a) ? noShortBlockHTML(size) : '') + windows.map((w) => windowBlockHTML(a, w, esc(w.model ? scopedTitle(w) : windowTitle(w)), size)).join('');
 }
 
 function quotaLimitsHTML(a, compact = false) {
@@ -1365,10 +1380,10 @@ function ovSubsHTML() {
       ${rows}</div>`;
 }
 
-// Plans count by their monthly price; the weights themselves are in src/pools.rs.
-const PLAN_PRICE_NOTE = 'Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10';
+// Plans count by Claude's published weekly allowance; the weights themselves are in src/pools.rs.
+const PLAN_WEIGHT_NOTE = 'Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10';
 
-// How many accounts are on each known plan, most first: [["Max 20x", 2], ["Pro", 1]].
+// How many accounts are on each known plan, most first: [["Ultra", 2], ["Pro", 1]].
 function planCounts(list) {
   const counts = new Map();
   for (const a of list) {
@@ -1440,7 +1455,7 @@ function poolStatusHTML(p) {
   return `<span class="pool-gap ${status.cls}">${status.text}</span><span class="pool-note">${esc(detail)}</span>`;
 }
 
-// "3 accounts · Max 20x" when they share a plan, "2 Max 20x, 1 Pro" when every plan is known
+// "3 accounts · Ultra" when they share a plan, "2 Ultra, 1 Pro" when every plan is known
 // and they differ, and the count first whenever some plan or weekly window is missing.
 function poolCount(p) {
   const count = p.reported < p.accounts ? `${fmt(p.reported)} of ${plural(p.accounts, 'account')} reporting` : plural(p.accounts, 'account');
@@ -1452,19 +1467,19 @@ function poolCount(p) {
   return [count, mix].filter(Boolean).join(' · ');
 }
 
-// How the accounts of each pool count: by plan price, or equally when a plan is unknown.
+// How the accounts of each pool count: by plan allowance, or equally when a plan is unknown.
 function poolBasis(pools) {
   const names = (priced) => pools.filter((p) => !!p.priced === priced).map((p) => provName(p.account)).join(', ');
   const [priced, equal] = [names(true), names(false)];
-  if (!equal) return 'Each provider’s subscriptions together, weighted by plan price';
+  if (!equal) return 'Each provider’s subscriptions together, weighted by plan allowance';
   if (!priced) return 'Each provider’s subscriptions together, weighted equally';
-  return `${priced} weighted by plan price, ${equal} equally`;
+  return `${priced} weighted by plan allowance, ${equal} equally`;
 }
 // A forecast per provider, with the lowest reserve before any of the coming resets.
 function ovPoolHTML() {
   const pools = weeklyPools();
   if (!pools.length) return '';
-  const note = `${POOL_OUTLOOK_NOTE} · ${poolBasis(pools)}${pools.some((p) => p.priced) ? ` · ${PLAN_PRICE_NOTE}` : ''}`;
+  const note = `${POOL_OUTLOOK_NOTE} · ${poolBasis(pools)}${pools.some((p) => p.priced) ? ` · ${PLAN_WEIGHT_NOTE}` : ''}`;
   const learning = pools.every((p) => poolLearningQuota(p));
   const heading = `<div class="sec-head"><h2 class="h-sec">Weekly quota outlook</h2><span class="meta" title="${esc(learning ? POOL_CURRENT_NOTE : note)}">${learning ? 'Current quota while learning' : 'Next 7 days · lowest projected reserve'}</span></div>`;
   if (mob()) {
@@ -2293,14 +2308,17 @@ function windowStarterHTML(a) {
   const busy = !!S.windowStarterBusy?.[a.id];
   const reset = windowOf(a, true)?.resets_at || v?.resets_at;
   const active = reset && Date.parse(reset) > Date.now();
-  const held = v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
-  const status = active ? `Window resets ${when(reset)}` : v?.message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
+  const absent = v?.status === 'not_needed' || noShortLimit(a);
+  const held = !absent && v?.retry_after && Date.parse(v.retry_after) > Date.now() && ['unknown', 'refused'].includes(v.status);
+  const status = absent ? (v?.status === 'not_needed' && v.message) || 'This account has no five-hour limit, so there is no window to start'
+    : active ? `Window resets ${when(reset)}` : v?.message || (a.window_starter_selected ? 'Automatic starting is enabled for this account.' : 'Automatic starting is off for this account.');
+  const check = active || held || absent;
   return `<div class="window-starter block" aria-label="Window starter"><div class="cell2"><span class="label">Window starter</span>
     <span class="fg2">${esc(status)}</span>
     ${held ? `<span class="small dim">${esc(`Next starter allowed ${when(v.retry_after)}`)}</span>` : ''}
     ${v?.attempted_at ? `<span class="small dim">${esc(`Last requested ${when(v.attempted_at)}${v.automatic ? ' · automatic' : ' · manual'}`)}</span>` : ''}
-    <span class="small dim">Starting sends a small Claude request and uses subscription quota.</span></div>
-    <div><button type="button" class="btn sm" data-act="${active || held ? 'window-check' : 'window-start'}" data-id="${esc(a.id)}" ${busy || a.disabled ? 'disabled' : ''}>${busy ? 'Checking…' : active || held ? 'Check status' : 'Start now'}</button></div></div>`;
+    ${absent ? '' : '<span class="small dim">Starting sends a small Claude request and uses subscription quota.</span>'}</div>
+    <div><button type="button" class="btn sm" data-act="${check ? 'window-check' : 'window-start'}" data-id="${esc(a.id)}" ${busy || a.disabled ? 'disabled' : ''}>${busy ? 'Checking…' : check ? 'Check status' : 'Start now'}</button></div></div>`;
 }
 
 async function windowStarterAction(id, checkOnly) {

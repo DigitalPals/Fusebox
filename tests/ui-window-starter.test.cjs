@@ -16,6 +16,7 @@ function load(extra = {}) {
   const ctx = { S: { accounts: [], config: { values: { 'window-starter': structuredClone(policy) }, errors: {}, secrets: {} } },
     esc, acctLabel: (a) => a.label, when: (s) => s,
     windowOf: (a) => a.quota?.windows?.find((w) => w.name === '5h'),
+    noShortLimit: (a) => !!a.quota?.no_five_hour_limit && !a.quota?.windows?.find((w) => w.name === '5h'),
     document: { addEventListener() {} }, ...extra };
   vm.createContext(ctx);
   vm.runInContext(config, ctx);
@@ -71,6 +72,19 @@ test('active windows use the provider reset time and unavailable messages are es
   assert.match(run('windowStarterHTML(a)'), /data-act="window-check"/);
   run('a.quota=null');
   assert.match(run('windowStarterHTML(a)'), /&lt;unsafe>/);
+});
+
+test('accounts without a 5-hour limit offer no start, only a status check', () => {
+  const { run } = load();
+  run(`var a={id:'a',window_starter_supported:true,window_starter_selected:true,quota:{no_five_hour_limit:true,windows:[]}}`);
+  let html = run('windowStarterHTML(a)');
+  assert.match(html, /This account has no five-hour limit, so there is no window to start/);
+  assert.match(html, /data-act="window-check"/);
+  assert.doesNotMatch(html, /data-act="window-start"|uses subscription quota/);
+  run(`a.quota=null; a.window_starter={status:'not_needed',message:'No limit here',retry_after:'2099-01-01T00:00:00Z'}`);
+  html = run('windowStarterHTML(a)');
+  assert.match(html, /No limit here/);
+  assert.doesNotMatch(html, /Next starter allowed|data-act="window-start"/);
 });
 
 test('manual requests carry a unique ID and status checks never ask for generation', async () => {

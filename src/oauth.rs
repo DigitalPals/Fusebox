@@ -427,6 +427,14 @@ pub fn claude_plan(profile: &Value) -> Option<String> {
     Some(plan.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect())
 }
 
+/// The plan's name as Claude shows it ("Ultra", "Max"). Names change while the tier
+/// identifiers stay (Max 20x became Ultra as `default_claude_max_20x`), so this is only
+/// for display.
+pub fn claude_plan_name(profile: &Value) -> Option<String> {
+    let name = profile["organization"]["plan_display_name"].as_str()?.trim();
+    (!name.is_empty() && name.len() <= 40 && !name.chars().any(char::is_control)).then(|| name.to_string())
+}
+
 pub fn file_safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || "@._-".contains(c) { c } else { '_' }).collect()
 }
@@ -1210,5 +1218,17 @@ mod tests {
         assert_eq!(claude_plan(&flagged).as_deref(), Some("pro"));
         assert_eq!(claude_plan(&profile(json!({}), json!({ "has_claude_max": false }))), None);
         assert_eq!(claude_plan(&json!({})), None);
+        // Production on 2026-10-31: Max 20x renamed Ultra, its tier unchanged.
+        let ultra = profile(
+            json!({ "organization_type": "claude_max", "rate_limit_tier": "default_claude_max_20x",
+                "plan_display_name": "Ultra", "plan_display_label": "Ultra plan" }),
+            json!({ "has_claude_max": true }),
+        );
+        assert_eq!(claude_plan(&ultra).as_deref(), Some("max_20x"), "the identifier stays");
+        assert_eq!(claude_plan_name(&ultra).as_deref(), Some("Ultra"));
+        assert_eq!(claude_plan_name(&max("default_claude_max_5x")), None, "older profiles have no name");
+        for odd in [json!(""), json!("  "), json!(5), json!("a\nb"), json!("x".repeat(41))] {
+            assert_eq!(claude_plan_name(&profile(json!({ "plan_display_name": odd }), json!({}))), None);
+        }
     }
 }

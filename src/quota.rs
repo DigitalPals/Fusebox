@@ -16,6 +16,8 @@ use crate::state::App;
 
 mod readings;
 
+pub use readings::claude_no_five_hour;
+
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_SUBSCRIPTION: &str = "https://chatgpt.com/backend-api/subscriptions";
@@ -94,6 +96,8 @@ struct Reading {
     windows: Vec<Window>,
     limits: Vec<Limit>,
     plan: Option<String>,
+    /// The provider confirms the account has no 5-hour limit.
+    no_five_hour: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -107,6 +111,13 @@ pub struct Quota {
     pub refreshed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// The plan's name as the provider shows it ("Ultra"); `plan` keeps the stable identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// The provider confirmed this account has no 5-hour limit (verified Claude Ultra).
+    /// Any later reading that carries a 5-hour window clears it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_five_hour_limit: bool,
     /// The active ChatGPT subscription SKU; `plan` alone does not distinguish Pro tiers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plan: Option<String>,
@@ -124,7 +135,8 @@ pub struct Quota {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
-    Claude(Option<String>),
+    /// The plan identifier and the provider's display name.
+    Claude(Option<String>, Option<String>),
     Codex(Option<String>),
 }
 
@@ -246,7 +258,10 @@ impl Quota {
         match details {
             Some(details) => {
                 match details {
-                    PlanDetails::Claude(plan) => self.plan = plan,
+                    PlanDetails::Claude(plan, name) => {
+                        self.plan = plan;
+                        self.plan_name = name;
+                    }
                     // Usage remains the source of the broad Codex plan. The web
                     // subscription API can use different names for the same tier.
                     PlanDetails::Codex(plan) => self.subscription_plan = plan,
@@ -276,6 +291,7 @@ impl Quota {
             if self.plan.is_some() && self.plan != plan {
                 // A usage response can reveal a downgrade before the next plan check.
                 self.subscription_plan = None;
+                self.plan_name = None;
                 self.plan_checked_at = None;
                 self.plan_failures = 0;
             }
@@ -283,6 +299,9 @@ impl Quota {
         }
         if windows.is_empty() {
             return;
+        }
+        if windows.iter().any(|w| w.name == "5h" && w.model.is_none()) {
+            self.no_five_hour_limit = false;
         }
         // Observations can omit any window. Only replace the same window and model scope;
         // missing data must not erase exhaustion or renewal dates learned earlier.
@@ -489,9 +508,9 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     };
     let http = app.http.control_for_account(acct);
     let details = match acct.provider {
-        Provider::Claude => crate::oauth::claude_profile(&http, &token)
-            .await
-            .map(|profile| PlanDetails::Claude(crate::oauth::claude_plan(&profile))),
+        Provider::Claude => crate::oauth::claude_profile(&http, &token).await.map(|profile| {
+            PlanDetails::Claude(crate::oauth::claude_plan(&profile), crate::oauth::claude_plan_name(&profile))
+        }),
         Provider::Codex => {
             async {
                 let Some(id) = account_id.as_deref().filter(|id| !id.is_empty()) else {
@@ -538,7 +557,9 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
-    let Reading { windows, limits, plan } = reading;
+    let Reading { windows, limits, plan, no_five_hour } = reading;
+    // Only a provider-confirmed absence retires a retained 5-hour window; an omitted one stays.
+    let retired = |w: &Window| no_five_hour && w.name == "5h" && w.model.is_none();
     if windows.is_empty() && limits.is_empty() {
         st.quota.set(windows, plan);
         return;
@@ -552,7 +573,7 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
                 .windows
                 .iter()
                 .filter(|old| old.model.as_ref().is_none_or(|m| model.contains(m)))
-                .all(|old| windows.iter().any(|new| new.name == old.name && new.model == old.model))
+                .all(|old| retired(old) || windows.iter().any(|new| new.name == old.name && new.model == old.model))
                 && st
                     .quota
                     .limits
@@ -563,6 +584,11 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
         .cloned()
         .collect();
     st.set_quota(windows, plan);
+    if no_five_hour {
+        st.quota.windows.retain(|w| !retired(w));
+        st.quota.no_five_hour_limit = true;
+        st.attribution.retire("5h");
+    }
     // An omitted scope cannot erase a spending cap learned on an earlier read.
     for limit in limits {
         st.quota.limits.retain(|old| old.id != limit.id || old.scope != limit.scope);
@@ -829,6 +855,103 @@ mod tests {
         assert_eq!(st.last_error(Utc::now()), Some("500: upstream exploded"));
     }
 
+    /// Usage as a verified Ultra account reported it on 2026-10-31 (trimmed).
+    fn ultra_usage() -> Value {
+        json!({
+            "five_hour": null,
+            "seven_day": { "utilization": 58.0, "resets_at": "2099-11-02T13:00:00.176119+00:00" },
+            "iguana_necktie": null,
+            "limits": [
+                { "kind": "weekly_all", "group": "weekly", "percent": 58, "resets_at": "2099-11-02T13:00:00.176119+00:00",
+                  "scope": null, "is_active": true },
+                { "kind": "weekly_scoped", "group": "weekly", "percent": 0, "resets_at": "2099-11-02T13:00:00+00:00",
+                  "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }, "is_active": false },
+            ],
+        })
+    }
+
+    #[test]
+    fn only_a_typed_list_without_a_session_proves_there_is_no_five_hour_limit() {
+        assert!(claude_no_five_hour(&ultra_usage()));
+        let reading = readings::claude(&ultra_usage());
+        assert!(reading.no_five_hour);
+        assert!(reading.windows.iter().all(|w| w.name != "5h"));
+        assert!(reading.limits.iter().all(|l| !l.name.is_empty()), "account-wide entries make no nameless limits");
+        // An idle window on a plan that has one, as Max reported it the same night.
+        let mut idle = ultra_usage();
+        idle["limits"].as_array_mut().unwrap().insert(
+            0,
+            json!({ "kind": "session", "group": "session", "percent": 0, "resets_at": null, "is_active": true }),
+        );
+        assert!(!claude_no_five_hour(&idle));
+        let reading = readings::claude(&idle);
+        assert!(!reading.no_five_hour);
+        let five = reading.windows.iter().find(|w| w.name == "5h").expect("the session entry stands in");
+        assert_eq!((five.used, five.resets_at), (0.0, None));
+        assert_eq!(reading.windows.iter().filter(|w| w.name == "week").count(), 1, "seven_day wins over weekly_all");
+        // Without a typed list, a null is only an idle or unknown window.
+        for v in [
+            json!({ "five_hour": null, "seven_day": { "utilization": 1.0 } }),
+            json!({ "five_hour": null, "limits": [] }),
+            json!({ "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
+            json!({ "five_hour": { "utilization": 3.0 }, "limits": [{ "kind": "weekly_all", "percent": 1 }] }),
+        ] {
+            assert!(!claude_no_five_hour(&v), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_confirmed_missing_five_hour_limit_retires_the_window_and_its_cooldown() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "a".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = &pool.all()[0];
+        let model = "claude-sonnet-5-5";
+        let renews = Utc::now() + chrono::Duration::hours(2);
+        acct.exhaust(model, renews, "subscription quota exhausted: x");
+        let mut st = acct.state.lock();
+        usage(
+            &mut st,
+            Provider::Claude,
+            &json!({
+                "five_hour": { "utilization": 100.0, "resets_at": renews },
+                "seven_day": { "utilization": 50.0, "resets_at": "2099-11-02T13:00:00Z" },
+            }),
+        );
+        assert!(st.quota.exhausted(model) && !st.quota_cooldowns.is_empty());
+        // The 5-hour limit goes away: a weekly reading alone keeps it, the Ultra one retires it.
+        usage(&mut st, Provider::Claude, &json!({ "seven_day": { "utilization": 51.0 } }));
+        assert!(st.quota.exhausted(model), "an omitted window stays");
+        usage(&mut st, Provider::Claude, &ultra_usage());
+        assert!(st.quota.no_five_hour_limit);
+        assert!(st.quota.windows.iter().all(|w| w.name != "5h"));
+        assert_eq!(st.quota.five_hour_remaining(model), None);
+        assert!(!st.quota.exhausted(model));
+        assert!(st.quota_cooldowns.is_empty());
+        assert_eq!(st.last_error(Utc::now()), None);
+        assert!(st.attribution.current.iter().all(|s| s.name != "5h"));
+        assert!(st.attribution.previous.iter().any(|s| s.name == "5h"), "its last instance is kept as finished");
+        let shown = serde_json::to_value(&st.quota).unwrap();
+        assert_eq!(shown["no_five_hour_limit"], true);
+        // A spent week still blocks.
+        let mut spent = ultra_usage();
+        spent["seven_day"]["utilization"] = json!(100.0);
+        usage(&mut st, Provider::Claude, &spent);
+        assert!(st.quota.exhausted(model));
+        // A limit that comes back, from usage or from headers, is followed again.
+        drop(st);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("anthropic-ratelimit-unified-5h-utilization", "0.25".parse().unwrap());
+        observe(acct, &headers, acct.quota_epoch());
+        let st = acct.state.lock();
+        assert!(!st.quota.no_five_hour_limit);
+        assert_eq!(st.quota.five_hour_remaining(model), Some(75.0));
+    }
+
     #[test]
     fn a_renewed_window_or_an_ended_pause_is_read_at_the_next_round() {
         let now = Utc::now();
@@ -889,13 +1012,13 @@ mod tests {
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         assert!(q.plan_due(now + secs(PLAN_EVERY)));
         // A good read ends the backoff, and its plan replaces the last one, even with none.
-        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()))));
-        assert_eq!((q.plan.as_deref(), q.plan_failures), (Some("max_20x"), 0));
+        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()))));
+        assert_eq!((q.plan.as_deref(), q.plan_name.as_deref(), q.plan_failures), (Some("max_20x"), Some("Ultra"), 0));
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         q.plan_read(now, None);
         assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
-        q.plan_read(now, Some(PlanDetails::Claude(None)));
-        assert_eq!(q.plan, None);
+        q.plan_read(now, Some(PlanDetails::Claude(None, None)));
+        assert_eq!((q.plan.as_deref(), q.plan_name.as_deref()), (None, None));
         // Usage readings without a plan (Claude's) leave it alone.
         q.plan = Some("max_5x".into());
         q.set(vec![Window { name: "week".into(), used: 10.0, resets_at: None, model: None }], None);
@@ -903,6 +1026,10 @@ mod tests {
         let shown = serde_json::to_value(&q).unwrap();
         assert_eq!(shown["plan"], "max_5x");
         assert!(shown.get("plan_checked_at").is_none() && shown.get("plan_failures").is_none());
+        assert!(shown.get("plan_name").is_none() && shown.get("no_five_hour_limit").is_none());
+        q.plan_name = Some("Max".into());
+        q.set(vec![], Some("pro".into()));
+        assert_eq!((q.plan.as_deref(), q.plan_name), (Some("pro"), None), "a changed plan drops the old name");
     }
 
     #[test]

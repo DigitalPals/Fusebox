@@ -154,8 +154,18 @@ pub(super) fn codex(v: &Value) -> Reading {
     out
 }
 
+/// Verified Ultra accounts have no 5-hour limit: usage says `five_hour: null`, and its
+/// typed list, which names every account-wide limit, has a weekly entry but no session.
+/// A null alone is not enough, since plans with the limit report an idle window that way.
+pub fn claude_no_five_hour(v: &Value) -> bool {
+    let typed = v["limits"].as_array().map(Vec::as_slice).unwrap_or_default();
+    v.get("five_hour").is_some_and(Value::is_null)
+        && typed.iter().any(|w| w["kind"] == "weekly_all")
+        && !typed.iter().any(|w| w["kind"] == "session")
+}
+
 pub(super) fn claude(v: &Value) -> Reading {
-    let mut out = Reading::default();
+    let mut out = Reading { no_five_hour: claude_no_five_hour(v), ..Default::default() };
     for (key, name, model) in [
         ("five_hour", "5h", None),
         ("seven_day", "week", None),
@@ -207,6 +217,24 @@ pub(super) fn claude(v: &Value) -> Reading {
     }
     for w in typed {
         let Some(used) = number(&w["percent"]) else { continue };
+        // The account-wide entries repeat `five_hour` and `seven_day`; they stand in only
+        // when those are missing.
+        let whole = match w["kind"].as_str() {
+            Some("session") => Some("5h"),
+            Some("weekly_all") => Some("week"),
+            _ => None,
+        };
+        if let Some(name) = whole {
+            if !out.windows.iter().any(|old| old.name == name && old.model.is_none()) {
+                out.windows.push(Window {
+                    name: name.into(),
+                    used: used.clamp(0.0, 100.0),
+                    resets_at: reset(w),
+                    model: None,
+                });
+            }
+            continue;
+        }
         let model = &w["scope"]["model"];
         let display = text(field(model, "display_name", "displayName")).unwrap_or_default();
         if w["kind"] == "weekly_scoped" && matches!(display.to_ascii_lowercase().as_str(), "fable" | "fable 5") {

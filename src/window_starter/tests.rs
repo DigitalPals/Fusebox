@@ -257,6 +257,42 @@ async fn no_requests_for_unknown_active_exhausted_or_unverified_accounts() {
     server.abort();
 }
 
+/// Usage as a verified Ultra account reported it on 2026-10-31 (trimmed).
+fn ultra() -> Value {
+    let week = Utc::now() + chrono::Duration::days(2);
+    json!({"five_hour":null,"seven_day":{"utilization":10.0,"resets_at":week},"limits":[
+        {"kind":"weekly_all","group":"weekly","percent":10,"resets_at":week,"scope":null,"is_active":true},
+        {"kind":"weekly_scoped","group":"weekly","percent":0,"resets_at":week,"scope":{"model":{"id":null,"display_name":"Fable"}},"is_active":false}
+    ]})
+}
+
+#[tokio::test]
+async fn accounts_without_a_five_hour_limit_are_never_started() {
+    let (_temp, app, mock, server) = fixture(1, false).await;
+    assert_eq!(window(&ultra(), Utc::now()), Window::Absent);
+    *mock.usage.lock() = ultra();
+    for check_only in [false, true] {
+        let a = app.pool.all()[0].clone();
+        let action = Action { request_id: uuid::Uuid::new_v4().to_string(), check_only };
+        let view = start(app.clone(), a, action, !check_only).await.unwrap();
+        assert_eq!(view.status, "not_needed");
+        assert!(view.next_check_at >= Utc::now() + chrono::Duration::minutes(59));
+    }
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 0);
+    let a = app.pool.all()[0].clone();
+    {
+        let st = a.state.lock();
+        assert!(st.quota.no_five_hour_limit);
+        assert!(st.quota.windows.iter().all(|w| w.name != "5h"), "no idle window is made up");
+    }
+    // Once the provider lists a session again, the window is the starter's to start.
+    mock.usage.lock()["limits"].as_array_mut().unwrap().push(json!({"kind":"session","percent":0,"resets_at":null}));
+    assert_eq!(run(&app, true).await.unwrap().status, "started");
+    assert_eq!(mock.posts.load(Ordering::SeqCst), 1);
+    assert!(!a.state.lock().quota.no_five_hour_limit);
+    server.abort();
+}
+
 #[tokio::test]
 async fn pending_or_unknown_attempt_survives_restart_and_coalesces_duplicates() {
     let (temp, app, mock, server) = fixture(2, false).await;

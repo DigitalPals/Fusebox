@@ -25,9 +25,9 @@ function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } 
   vm.runInContext([
     piece('const esc = (v) =>'), piece('function fmt(n) {'), piece('const plural = (n, word'), piece('const cap = (s)'),
     piece('const fullResetTime ='), piece('const accountById ='),
-    piece('const CODEX_PLAN_NAMES ='), piece('const planName = (a)'), piece('function quotaOf(w'),
+    piece('const CODEX_PLAN_NAMES ='), piece('const CLAUDE_PLAN_NAMES ='), piece('const planName = (a)'), piece('function quotaOf(w'),
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
-    piece('function meterHTML(q'), piece('const PLAN_PRICE_NOTE ='), piece('function planCounts(list) {'),
+    piece('function meterHTML(q'), piece('const PLAN_WEIGHT_NOTE ='), piece('function planCounts(list) {'),
     piece('function weeklyPools() {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='), piece('const POOL_CURRENT_NOTE ='),
     piece('function poolLearningQuota(p) {'), piece('function poolMeterHTML(p) {'),
     piece('function poolCount(p) {'), piece('function poolBasis(pools) {'), piece('function poolStatusHTML(p) {'), piece('function ovPoolHTML() {'),
@@ -66,6 +66,17 @@ test('Codex Pro labels use the active SKU and fall back to the broad plan for un
   assert.equal(counted(`poolCount(${JSON.stringify(p)})`), '1 Pro 100, 1 Pro 200, 1 Pro 500');
 });
 
+test('Claude plans show the provider’s name, and the renamed Max tiers their new names', () => {
+  const run = load();
+  const claude = (quota) => run(`planName(${JSON.stringify({ provider: 'claude', quota })})`);
+  assert.equal(claude({ plan: 'max_20x' }), 'Ultra');
+  assert.equal(claude({ plan: 'max_5x' }), 'Max');
+  assert.equal(claude({ plan: 'max_20x', plan_name: 'Ultra Plus' }), 'Ultra Plus', 'the profile’s own name wins');
+  assert.equal(claude({ plan: 'pro' }), 'Pro');
+  assert.equal(claude({ plan: 'max' }), 'Max', 'Max without a multiple stays as written');
+  assert.equal(run(`planName(${JSON.stringify({ provider: 'codex', quota: { plan: 'max_20x' } })})`), 'Max 20x', 'only Claude is renamed');
+});
+
 test('the meter draws the server’s weekly pools with their accounts', () => {
   const accounts = [sub('a', 'max_20x'), sub('b', 'max_20x'), sub('c', 'pro'), sub('x', null, 'codex'), sub('y', null, 'codex')];
   const run = load(state(accounts, [
@@ -78,7 +89,7 @@ test('the meter draws the server’s weekly pools with their accounts', () => {
   const pools = run('weeklyPools()');
   assert.equal(pools.length, 2, 'whole-account weeks only, and only with accounts the page knows');
   assert.equal(pools[0].account.id, 'a');
-  assert.deepEqual(pools[0].plans, [['Max 20x', 2], ['Pro', 1]]);
+  assert.deepEqual(pools[0].plans, [['Ultra', 2], ['Pro', 1]]);
   assert.deepEqual([pools[0].used, pools[0].pace, pools[0].priced], [40, 0.625, true]);
   assert.equal(pools[1].account.id, 'x');
   assert.equal(pools[1].accounts, 3, 'the server counts the members');
@@ -180,13 +191,13 @@ test('low reserve and fractional percentages remain distinct from an expected qu
 test('the count names the plans of the members', () => {
   const run = load();
   const count = (p) => run(`poolCount(${JSON.stringify(p)})`);
-  assert.equal(count({ accounts: 2, reported: 2, plans: [['Max 20x', 1], ['Max 5x', 1]] }), '1 Max 20x, 1 Max 5x', 'the plans count the accounts');
-  assert.equal(count({ accounts: 3, reported: 3, plans: [['Max 20x', 3]] }), '3 accounts · Max 20x');
-  assert.equal(count({ accounts: 3, reported: 3, plans: [['Max 20x', 2]] }), '3 accounts · 2 Max 20x', 'a plan unknown');
+  assert.equal(count({ accounts: 2, reported: 2, plans: [['Ultra', 1], ['Max', 1]] }), '1 Ultra, 1 Max', 'the plans count the accounts');
+  assert.equal(count({ accounts: 3, reported: 3, plans: [['Ultra', 3]] }), '3 accounts · Ultra');
+  assert.equal(count({ accounts: 3, reported: 3, plans: [['Ultra', 2]] }), '3 accounts · 2 Ultra', 'a plan unknown');
   assert.equal(count({ accounts: 2, reported: 2, plans: [['Plus', 1], ['Pro', 1]] }), '1 Plus, 1 Pro');
   assert.equal(count({ accounts: 4, reported: 3, plans: [] }), '3 of 4 accounts reporting');
-  assert.equal(count({ accounts: 3, reported: 2, plans: [['Max 20x', 1], ['Pro', 1]] }), '2 of 3 accounts reporting · 1 Max 20x, 1 Pro');
-  assert.equal(count({ accounts: 3, reported: 2, plans: [['Pro', 2], ['Max 20x', 1]] }), '2 of 3 accounts reporting · 2 Pro, 1 Max 20x', 'a week missing keeps the count first');
+  assert.equal(count({ accounts: 3, reported: 2, plans: [['Ultra', 1], ['Pro', 1]] }), '2 of 3 accounts reporting · 1 Ultra, 1 Pro');
+  assert.equal(count({ accounts: 3, reported: 2, plans: [['Pro', 2], ['Ultra', 1]] }), '2 of 3 accounts reporting · 2 Pro, 1 Ultra', 'a week missing keeps the count first');
   assert.equal(count({ accounts: 2, reported: 2 }), '2 accounts', 'no plans known');
 });
 
@@ -194,15 +205,15 @@ test('the heading says how each provider’s accounts count', () => {
   const S = state([sub('a', 'max_20x'), sub('b', 'max_5x')], [pool(['a', 'b'], { used: 40, pace: 0.625, priced: true })]);
   const run = load(S);
   let html = run('ovPoolHTML()');
-  assert.match(html, /title="[^"]*Each provider’s subscriptions together, weighted by plan price[^"]*Each account counts by its plan’s monthly price/);
-  assert.match(html, /<span class="sub">1 Max 20x, 1 Max 5x<\/span>/);
+  assert.match(html, /title="[^"]*Each provider’s subscriptions together, weighted by plan allowance[^"]*Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10/);
+  assert.match(html, /<span class="sub">1 Max, 1 Ultra<\/span>/);
   assert.match(html, /<span class="pct good">29%<\/span>/);
   run('S.accounts[1].quota.plan = undefined; S.overview.pools[0].priced = false');
   html = run('ovPoolHTML()');
   assert.match(html, /Each provider’s subscriptions together, weighted equally/);
-  assert.match(html, /<span class="sub">2 accounts · 1 Max 20x<\/span>/);
+  assert.match(html, /<span class="sub">2 accounts · 1 Ultra<\/span>/);
   assert.equal(run('poolBasis([{ priced: true, account: { provider: "claude" } }, { priced: false, account: { provider: "codex" } }])'),
-    'Claude weighted by plan price, Codex equally');
+    'Claude weighted by plan allowance, Codex equally');
   // Plan names reach the page escaped.
   run('S.accounts[0].quota.plan = "<b>"');
   assert.match(run('ovPoolHTML()'), /2 accounts · 1 &lt;b&gt;/);

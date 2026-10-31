@@ -21,6 +21,8 @@ use journal::{Attempt, Journal, Outcome};
 
 const CHECK_SECONDS: i64 = 300;
 const UNCERTAIN_SECONDS: i64 = 5 * 3600 + 600;
+/// An account without a 5-hour limit is checked hourly, in case one comes back.
+const NOT_NEEDED_SECONDS: i64 = 3600;
 const MAX_BODY: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,11 +173,16 @@ enum Window {
     Unknown,
     Inactive,
     Active(DateTime<Utc>),
+    /// The account has no 5-hour limit (a verified Ultra account), so nothing to start.
+    Absent,
 }
 
 /// Only explicit provider data proves inactivity. Missing, malformed, and a
 /// zero-percent window with a future reset are never treated as unused windows.
 fn window(value: &Value, now: DateTime<Utc>) -> Window {
+    if crate::quota::claude_no_five_hour(value) {
+        return Window::Absent;
+    }
     let Some(w) = value.get("five_hour") else { return Window::Unknown };
     if w.is_null() {
         return Window::Inactive;
@@ -347,10 +354,12 @@ impl Api {
         let usage = self.get("/api/oauth/usage").await?;
         ensure!(native_id(acct)? == id && acct.state.lock().identity_epoch == epoch, "Claude account changed");
         // The general quota merger deliberately retains omitted windows. An
-        // explicit null from this endpoint instead means an inactive window.
+        // explicit null from this endpoint instead means an inactive window,
+        // unless the account has no 5-hour limit at all.
         let mut normalized = usage.clone();
+        let absent = crate::quota::claude_no_five_hour(&usage);
         for key in ["five_hour", "seven_day"] {
-            if usage.get(key) == Some(&Value::Null) {
+            if usage.get(key) == Some(&Value::Null) && !(absent && key == "five_hour") {
                 normalized[key] = json!({"utilization":0.0,"resets_at":null});
             }
         }
@@ -414,6 +423,12 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
     let usage = api.usage(app, acct, id).await?;
     let now = Utc::now();
     let state = window(&usage, now);
+    if state == Window::Absent {
+        let mut view =
+            View::new("not_needed", "This account has no five-hour limit, so there is no window to start", now);
+        view.next_check_at = now + chrono::Duration::seconds(NOT_NEEDED_SECONDS);
+        return Ok(view);
+    }
     if let Window::Active(reset) = state {
         if let Some(attempt) = journal.attempt.as_mut()
             && matches!(attempt.outcome, Outcome::Pending | Outcome::Unknown)

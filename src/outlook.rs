@@ -316,6 +316,7 @@ mod tests {
                 windows: std::slice::from_ref(w),
                 history: h,
                 forecast_available: true,
+                no_five_hour: false,
             })
             .collect();
         Outlook::calculate(&members, true, now())
@@ -372,6 +373,7 @@ mod tests {
             windows: &ws,
             history: &[],
             forecast_available: true,
+            no_five_hour: false,
         };
         let out = Outlook::calculate(&[m], false, now());
         assert_eq!(out.state, "learning");
@@ -401,6 +403,7 @@ mod tests {
             windows: &ws,
             history: &hs,
             forecast_available: true,
+            no_five_hour: false,
         };
         let out = Outlook::calculate(&[m], false, now());
         assert_eq!(out.reason, Some("stale_readings"));
@@ -420,6 +423,7 @@ mod tests {
                 windows: &ws[i..i + 1],
                 history: &hs[i..i + 1],
                 forecast_available: true,
+                no_five_hour: false,
             })
             .collect();
         near(Outlook::calculate(&members, true, now()).min_remaining.unwrap(), 820.0 / 11.0);

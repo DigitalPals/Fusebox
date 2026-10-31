@@ -124,10 +124,13 @@ test('combined weekly limits read in Chinese', () => {
   assert.equal(tr('On pace'), '符合均匀用量');
   assert.equal(tr('Claude combined weekly quota used'), 'Claude 每周合计额度已用');
   assert.equal(tr('22% used · Healthy · even pace 32% used by now').split(' · ')[2], '均匀用量此刻应为 32%');
-  assert.equal(tr('3 accounts · Max 20x'), '3 个账号 · Max 20x', 'plan names stay as the provider writes them');
-  assert.equal(tr('Each provider’s subscriptions together, weighted by plan price'), '每个提供商的订阅合并计算，按套餐价格加权');
-  assert.equal(tr('Claude weighted by plan price, Codex equally'), 'Claude 按套餐价格加权，Codex 权重相同');
-  assert.match(tr('Each account counts by its plan’s monthly price: Claude Pro 1, Max 5x 5, Max 20x 10'), /^每个账号按套餐月费计权/);
+  assert.equal(tr('3 accounts · Ultra'), '3 个账号 · Ultra', 'plan names stay as the provider writes them');
+  assert.equal(tr('Each provider’s subscriptions together, weighted by plan allowance'), '每个提供商的订阅合并计算，按套餐额度加权');
+  assert.equal(tr('Claude weighted by plan allowance, Codex equally'), 'Claude 按套餐额度加权，Codex 权重相同');
+  assert.match(tr('Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10'), /^每个账号按套餐每周额度计权/);
+  assert.equal(tr('No limit'), '无限制');
+  assert.equal(tr('This account has no five-hour limit; only the weekly limits apply.'), '此账号没有五小时限制，只适用每周限制。');
+  assert.equal(tr('This account has no five-hour limit, so there is no window to start'), '此账号没有五小时限制，无需启动窗口');
 });
 
 test('model setup and scoped quota explanations translate without changing model identifiers', () => {

@@ -229,6 +229,16 @@ impl Attribution {
         }
     }
 
+    /// A whole-account window the provider no longer has: its last instance is finished.
+    pub fn retire(&mut self, name: &str) {
+        while let Some(i) = self.current.iter().position(|s| s.name == name && s.model.is_none()) {
+            let finished = self.current.remove(i);
+            self.previous.insert(0, finished);
+            self.previous.truncate(KEEP_PREVIOUS);
+            self.dirty = true;
+        }
+    }
+
     /// Splits a rise over the attempts that finished since the window's last rise.
     fn attribute(&mut self, i: usize, rise: f64, now: DateTime<Utc>) {
         let (cursor, scope) = (self.current[i].cursor, self.current[i].model.clone());

@@ -34,8 +34,10 @@ The history is saved with attribution every 30 seconds and on clean shutdown.
 ## Projection
 
 The server combines rates and allowances with the same weights: Claude Pro 1,
-Max 5x 5, Max 20x 10 when every reporting plan is known; equal weights otherwise.
-Price weights are an estimate of relative capacity, not published quota sizes.
+Max 5, Ultra 10 when every reporting plan is known; equal weights otherwise.
+These are Anthropic's published weekly allowances relative to Pro (since 30
+October 2026; Max and Ultra were Max 5x and Max 20x, whose tier identifiers
+`max_5x` and `max_20x` remain). They also match the monthly prices.
 
 At each event, consumption since the preceding event is taken from accounts in
 order of their next reset. At the reset, that account's remaining allowance is

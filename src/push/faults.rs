@@ -142,6 +142,8 @@ pub struct AccountView {
     pub subscription: bool,
     /// The subscription plan, as the quota reports it ("max_20x").
     pub plan: Option<String>,
+    /// The provider confirmed the account has no 5-hour limit.
+    pub no_five_hour: bool,
     pub disabled: bool,
     /// From `AccountState::pauses`: model -> (until, kind).
     pub pauses: BTreeMap<String, (DateTime<Utc>, &'static str)>,
@@ -166,6 +168,7 @@ impl AccountView {
             windows: &self.windows,
             history: &self.history,
             forecast_available: !self.signin_error(),
+            no_five_hour: self.no_five_hour,
         }
     }
 
