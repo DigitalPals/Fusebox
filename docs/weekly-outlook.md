@@ -3,14 +3,11 @@
 The overview's **Combined weekly quota** shows each provider with at least two
 enabled subscriptions as one **WK** row, drawn like an account's weekly meter: the
 current combined quota, used or remaining as the subscription display toggle says,
-the even-pace mark and a countdown to the next account's reset. Once the forecast
-is ready, the segments it expects recent consumption to use before its lowest point
-over the next seven days are dimmed, and the line under the bar names that point:
-**Forecast low 54% left · Mon 14:00**, or **Forecast high 46% used** in Used mode.
-The time is left out when the lowest point is now. A future refill is never
-credited early. While the forecast is learning or unavailable, the bar shows the
-current quota alone and the status says why. When an account doesn't report its
-weekly quota there is no combined bar: a balance is never made up from the others.
+the even-pace mark and a countdown to the next account's reset. The bar is never a
+forecast. Beside it, the status says whether the quota is expected to last over the
+next seven days, from the forecast below, or why there is no forecast yet. When an
+account doesn't report its weekly quota there is no combined bar: a balance is
+never made up from the others.
 
 ## Consumption estimate
 
@@ -57,12 +54,11 @@ cannot be met. Exactly reaching zero at a reset is low reserve, not an outage.
 - **Expected to last:** no projected gap, minimum reserve at least 10%.
 - **Low reserve:** no projected gap, minimum reserve below 10%.
 - **Quota gap expected:** demand would exhaust the pool before capacity returns.
-- **Learning usage:** at least one account needs six hours of recent observations;
-  the bar shows current combined quota without a forecast.
+- **Learning usage:** at least one account needs six hours of recent observations.
 - **Forecast unavailable:** incomplete/invalid quota or reset data, stale readings,
   an expired reset awaiting confirmation, or an account needing sign-in.
 
-The bar's hover gives the daily use the forecast assumes, as a share of the
+The status's hover gives the daily use the forecast assumes, as a share of the
 combined quota, and until every account has a week of history the shortest one.
 The weekly pool's quiet fault uses the same forecast. Missing data is never
 interpreted as a healthy forecast or zero consumption. Single-account, five-hour

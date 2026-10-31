@@ -991,19 +991,15 @@ function windowSpent(a, w) {
 // mark shows even pace: where usage would be now if spread evenly over the window.
 const segsHTML = (w, label, cls = '') => meterHTML(quotaOf(w), windowElapsed(w), label, cls, w && w.resets_at);
 
-// The meter for any quota: `t` places the even-pace mark (0 to 1, or null for none), a
-// reset time makes the page refresh once the window renews, and a forecast (`due.used`,
-// 0 to 100, said by `due.text`) dims the segments it expects to be used by then.
-function meterHTML(q, t, label, cls = '', resetsAt = '', due = null) {
+// The meter for any quota: `t` places the even-pace mark (0 to 1, or null for none), and
+// a reset time makes the page refresh once the window renews.
+function meterHTML(q, t, label, cls = '', resetsAt = '') {
   if (!q) return `<span class="segs ${cls}" role="img" aria-label="${esc(label)}: not reported">${'<i></i>'.repeat(20)}</span>`;
   const v = quotaView(q);
   const lit = Math.round(v.value / 5);
-  const end = due ? Math.round((v.mode === 'used' ? due.used : 100 - due.used) / 5) : lit;
-  const [from, to] = [Math.min(lit, end), Math.max(lit, end)];
   const pace = t == null ? '' : `<b class="pace" style="left:${(v.mode === 'used' ? t : 1 - t) * 100}%" aria-hidden="true"></b>`;
   const paceText = t == null ? '' : ` · even pace ${Math.round(t * 100)}% used by now`;
-  const dueText = due ? ` · ${due.text}` : '';
-  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}${paceText}${esc(dueText)}"${resetsAt ? ` data-quota-reset="${esc(resetsAt)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < from ? '<i class="on"></i>' : i < to ? '<i class="on due"></i>' : '<i></i>')).join('')}${pace}</span>`;
+  return `<span class="segs ${q.cls} ${cls}" role="meter" aria-label="${esc(label)} quota ${v.mode}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.value)}" aria-valuetext="${esc(v.text)} · ${v.status}${paceText}"${resetsAt ? ` data-quota-reset="${esc(resetsAt)}"` : ''}>${Array.from({ length: 20 }, (_, i) => (i < lit ? '<i class="on"></i>' : '<i></i>')).join('')}${pace}</span>`;
 }
 
 function pctHTML(w) {
@@ -1407,25 +1403,12 @@ function weeklyPools() {
   }).filter(Boolean);
 }
 
-const POOL_OUTLOOK_NOTE = 'Current combined weekly quota with its even-pace mark. Dimmed segments are what recent consumption would use before the lowest point of the next 7 days, given each account’s scheduled resets. Assumes usage can move between accounts. Five-hour and model limits are separate; banked resets are not predicted.';
-const POOL_CURRENT_NOTE = 'Current combined weekly quota while the forecast learns from recent usage. The forecast appears automatically when enough readings are available.';
+// The status beside the bar comes from this forecast; the bar itself is current quota.
+const POOL_OUTLOOK_NOTE = 'Forecast of the next 7 days from recent consumption and each account’s scheduled resets. Assumes usage can move between accounts. Five-hour and model limits are separate; banked resets are not predicted.';
 
 // Current combined quota, once every account reports its weekly window.
 function poolQuota(p) {
   return p.accounts > 0 && p.reported === p.accounts ? quotaOf({ used: p.used }) : null;
-}
-
-// The forecast's lowest reserve, which can't be above the current quota it starts from.
-function poolLow(p, q) {
-  const o = p.outlook || {};
-  if (!q || !['on_track', 'tight', 'run_out'].includes(o.state) || !Number.isFinite(o.min_remaining)) return null;
-  return Math.max(0, Math.min(q.remaining, o.min_remaining));
-}
-
-// "Forecast low 54% left · Mon 14:00", or the most used in Used mode. No time when it is now.
-function poolLowText(low, at) {
-  const value = S.quotaDisplay === 'used' ? `Forecast high ${quotaPercent(100 - low)} used` : `Forecast low ${quotaPercent(low)} left`;
-  return at && Date.parse(at) - Date.now() >= 60000 ? `${value} · ${when(at)}` : value;
 }
 
 // What the forecast assumes: the daily use, and the shortest account history behind it.
@@ -1447,19 +1430,13 @@ function poolStatus(p) {
 }
 
 // As an account's weekly row: the current quota in the selected mode with the even-pace
-// mark and the next account's reset; the forecast dims what it expects to be used by its
-// lowest point, which the line below names.
+// mark and the next account's reset.
 function poolMeterHTML(p) {
   const o = p.outlook || {};
   const q = poolQuota(p);
-  const low = poolLow(p, q);
-  const forecast = low == null ? '' : poolLowText(low, o.min_at);
-  const meter = meterHTML(q, q && p.pace, `${provName(p.account)} combined weekly`, '', '', low == null ? null : { used: 100 - low, text: forecast });
   const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
   const reset = o.next_reset_at ? `<span class="rst" title="${esc(`Next account resets ${fullResetTime(o.next_reset_at)}`)}">↺ ${liveLeft(o.next_reset_at, true)}</span>` : '<span class="rst"></span>';
-  const title = low == null ? (o.state === 'learning' ? POOL_CURRENT_NOTE : '') : POOL_OUTLOOK_NOTE + poolRateText(o);
-  const note = forecast ? `<div class="pool-note"${o.min_at ? ` title="${esc(fullResetTime(o.min_at))}"` : ''}>${esc(forecast)}</div>` : '';
-  return `<div class="meters"><div class="mrow"${title ? ` title="${esc(title)}"` : ''}><span class="capsm">WK</span>${meter}${pct}${reset}</div>${note}</div>`;
+  return `<div class="meters"><div class="mrow"><span class="capsm">WK</span>${meterHTML(q, q && p.pace, `${provName(p.account)} combined weekly`)}${pct}${reset}</div></div>`;
 }
 
 function poolStatusHTML(p) {
@@ -1475,7 +1452,8 @@ function poolStatusHTML(p) {
       missing_reset: 'Waiting for every account’s reset time', awaiting_reset: 'Waiting for reset confirmation',
       unavailable_account: 'An account needs to sign in again' })[o.reason] || 'Waiting for quota history';
   }
-  return `<span class="pool-gap ${status.cls}">${status.text}</span><span class="pool-note">${esc(detail)}</span>`;
+  const title = ['on_track', 'tight', 'run_out'].includes(o.state) ? POOL_OUTLOOK_NOTE + poolRateText(o) : '';
+  return `<span class="pool-gap ${status.cls}"${title ? ` title="${esc(title)}"` : ''}>${status.text}</span><span class="pool-note">${esc(detail)}</span>`;
 }
 
 // "3 accounts · Ultra" when they share a plan, "2 Ultra, 1 Pro" when every plan is known
@@ -1498,13 +1476,12 @@ function poolBasis(pools) {
   if (!priced) return 'Each provider’s subscriptions together, weighted equally';
   return `${priced} weighted by plan allowance, ${equal} equally`;
 }
-// Each provider's weekly quota now, with a forecast of its lowest point before the coming resets.
+// Each provider's weekly quota now; the status says whether it lasts until the coming resets.
 function ovPoolHTML() {
   const pools = weeklyPools();
   if (!pools.length) return '';
-  const learning = pools.every((p) => p.outlook?.state === 'learning');
-  const note = `${learning ? POOL_CURRENT_NOTE : POOL_OUTLOOK_NOTE} · ${poolBasis(pools)}${pools.some((p) => p.priced) ? ` · ${PLAN_WEIGHT_NOTE}` : ''}`;
-  const heading = `<div class="sec-head"><h2 class="h-sec">Combined weekly quota</h2><span class="meta" title="${esc(note)}">${learning ? 'Current quota while learning' : 'Now and the 7-day forecast low'}</span></div>`;
+  const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_WEIGHT_NOTE)}"` : '';
+  const heading = `<div class="sec-head"><h2 class="h-sec">Combined weekly quota</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>`;
   if (mob()) {
     const items = pools.map((p) => `<div class="item">
         <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div></div>
