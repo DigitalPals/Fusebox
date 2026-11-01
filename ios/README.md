@@ -275,6 +275,12 @@ node scripts/relay-e2e.mjs - health                       # "devices": 0
   ends it (“Claude is back”) when the fault clears. Local updates only, no push-to-update; it can be
   turned off in Settings.
 
+## Privacy
+
+The App Store privacy policy URL is `PRIVACY.md` at the repository root
+(https://github.com/DigitalPals/Fusebox/blob/main/PRIVACY.md). Keep it in step with what the
+app, the push relay and the server store and send.
+
 ## Publishing to TestFlight
 
 ```sh
