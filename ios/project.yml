@@ -66,6 +66,8 @@ targets:
     dependencies:
       - target: FuseboxWidgets
         embed: true
+      - target: FuseboxNotifications
+        embed: true
 
   FuseboxWidgets:
     type: app-extension
@@ -92,6 +94,35 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox.widgets
         PRODUCT_NAME: FuseboxWidgets
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  FuseboxNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: FuseboxNotifications
+      - path: Shared/SharedKeychain.swift
+      - path: Shared/SealedPush.swift
+    info:
+      path: FuseboxNotifications/Info.plist
+      properties:
+        CFBundleDisplayName: Fusebox
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+        FuseboxKeychainGroup: $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    entitlements:
+      path: FuseboxNotifications/FuseboxNotifications.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox.notifications
+        PRODUCT_NAME: FuseboxNotifications
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
 
@@ -130,6 +161,7 @@ schemes:
       targets:
         Fusebox: all
         FuseboxWidgets: all
+        FuseboxNotifications: all
     run:
       config: Debug
     test:

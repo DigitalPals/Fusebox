@@ -76,6 +76,15 @@ struct SettingsView: View {
             }
             .disabled(push.busy)
             .accessibilityIdentifier("push-toggle")
+            if push.isOn, let via = push.via {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Delivery")
+                    Text(via == "relay" ? "Through the Fusebox push relay (encrypted)" : "Direct")
+                        .font(.caption).foregroundStyle(Palette.fg3)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("push-via")
+            }
             if push.isOn {
                 Button("Send test") { Task { await push.sendTest(api: store.api) } }
                     .disabled(push.busy)
@@ -85,9 +94,9 @@ struct SettingsView: View {
                 Text(m).font(.footnote).foregroundStyle(push.messageIsError ? Palette.warn : Palette.fg2)
                     .accessibilityIdentifier("push-message")
             }
-            if push.apnsAvailable == false {
-                Text("This Fusebox can’t send to iPhones yet: Apple push isn’t configured on the server.")
-                    .font(.footnote).foregroundStyle(Palette.fg3)
+            if push.path == .unavailable, !push.isOn {
+                Text(PushManager.unavailableText).font(.footnote).foregroundStyle(Palette.fg3)
+                    .accessibilityIdentifier("push-unavailable")
             }
             let others = push.devices.filter { $0.id != push.subscriptionID }
             if !others.isEmpty {
@@ -96,7 +105,7 @@ struct SettingsView: View {
                         Image(systemName: d.resolvedKind == "apns" ? "iphone" : "globe").foregroundStyle(Palette.fg3)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(d.label ?? "Device").font(.subheadline)
-                            Text("\(d.resolvedKind == "apns" ? "iPhone app" : "Web push")\(d.createdAt.map { " · since \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "")")
+                            Text("\(d.resolvedKind == "apns" ? (d.via == "relay" ? "iPhone app · relay" : "iPhone app") : "Web push")\(d.createdAt.map { " · since \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "")")
                                 .font(.caption).foregroundStyle(Palette.fg3)
                         }
                         Spacer()

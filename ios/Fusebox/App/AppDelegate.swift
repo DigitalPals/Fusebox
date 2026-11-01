@@ -52,13 +52,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 #if DEBUG
 /// Debug builds only: preload the server URL and key for simulator runs, once, into the
 /// Keychain. `FUSEBOX_DEBUG_KEY_FILE` names a file holding the key (the simulator reads the
-/// Mac's files), so the key never appears in a command line or a log.
+/// Mac's files), so the key never appears in a command line or a log. `FUSEBOX_DEBUG_FORCE_RELAY=1`
+/// (read in PushManager) registers through the real push relay without telling the server.
 enum DebugPreload {
     static func run() {
         let env = ProcessInfo.processInfo.environment
         if env["FUSEBOX_DEBUG_RESET"] == "1" {
             Connection.setKey(nil)
-            AppGroup.defaults.removeObject(forKey: "push-subscription-id")
+            for key in ["push-subscription-id", "push-wanted", "push-via", "push-relay-touched"] { AppGroup.defaults.removeObject(forKey: key) }
+            RelayDevice.store(nil)
         }
         if let url = env["FUSEBOX_DEBUG_URL"].flatMap(Connection.normalize) { Connection.serverURL = url }
         if let path = env["FUSEBOX_DEBUG_KEY_FILE"],

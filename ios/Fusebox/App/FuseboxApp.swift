@@ -17,7 +17,9 @@ struct FuseboxApp: App {
         }
         .onChange(of: phase) { _, now in
             switch now {
-            case .active: store.resume()
+            case .active:
+                store.resume()
+                PushManager.shared.foreground()
             case .background: store.stop()
             default: break
             }

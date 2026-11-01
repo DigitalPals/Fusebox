@@ -7,10 +7,11 @@ reads the same management API as the web dashboard (`ui/app.js`, `ui/usage.js`, 
 and uses its words. It runs on iPhone, including the foldable iPhone Duo, iOS 27.0 or later.
 
 - Bundle `com.digitalpals.fusebox` (display name “Fusebox”; App Store name “Fusebox - Subscription
-  Proxy”, app record 6829404456), widgets `com.digitalpals.fusebox.widgets`, team `4R8P9MTF9T`,
-  automatic signing, version 1.0.0.
-- Keychain access group `<team>.com.digitalpals.fusebox.shared`, shared with the widget extension:
-  the management key (only ever in the Keychain), the server URL and the widgets' last snapshot.
+  Proxy”, app record 6829404456), widgets `com.digitalpals.fusebox.widgets`, notification service
+  `com.digitalpals.fusebox.notifications`, team `4R8P9MTF9T`, automatic signing, version 1.0.0.
+- Keychain access group `<team>.com.digitalpals.fusebox.shared`, shared with both extensions:
+  the management key (only ever in the Keychain), the server URL, the widgets' last snapshot, and
+  the push relay's handle and key, which the notification service decrypts with.
   **No App Group**, a deviation from the original plan: App Store Connect API keys can't register
   an App Group, so with one the unattended publish fails (`Authentication failed …` for the
   `group.com.digitalpals.fusebox` capability, while the same archive without it signs). The keychain
@@ -26,7 +27,11 @@ and uses its words. It runs on iPhone, including the foldable iPhone Duo, iOS 27
 ios/
   project.yml              XcodeGen project (the .xcodeproj is generated and not committed)
   Shared/                  compiled into the app and the widget extension
-    Models.swift           the API's JSON (lenient: every field the server may omit is optional)
+    Models.swift           the API's JSON (lenient: every field the server may omit is optional),
+                           and the push path (direct, relay, unavailable) from /api/push
+    SharedKeychain.swift   the keychain access group (also in the notification service)
+    SealedPush.swift       the relay device (handle, key) and opening sealed notifications
+                           (also in the notification service)
     Formatting.swift       RFC 3339 with nanoseconds, and the dashboard's wording (fmt, left, compactLeft, …)
     QuotaRules.swift       quotaOf, windowOf, even pace, account state, plans, combined pools, routing text
     Connection.swift       URL/Keychain storage and the API client
@@ -35,6 +40,7 @@ ios/
     OutageActivity.swift   Live Activity attributes and the widgets' snapshot file
   Fusebox/                 the app (App/, Model/, Views/, Assets.xcassets)
   FuseboxWidgets/          widgets and the Live Activity
+  FuseboxNotifications/    the notification service: decrypts notifications from the push relay
   FuseboxTests/            unit tests (Swift Testing) and anonymised fixtures
   FuseboxUITests/          the UI tour, push and Live Activity checks that also take screenshots
   scripts/
@@ -42,6 +48,7 @@ ios/
     capture-fixtures.mjs   refresh FuseboxTests/Fixtures from a server, anonymised
     make-assets.mjs        app icon, mark and provider logos from assets/ and ui/logos.svg
     ui-screenshots         run a UI test on a simulator and collect its screenshots
+    relay-e2e.mjs          play a Fusebox's side of the push relay for a simulator (Debug)
 ```
 
 ## Build, run, test
@@ -59,7 +66,9 @@ The unit tests decode fixtures captured from the production server (`scripts/cap
 replaces emails, labels, client names, addresses, keys, endpoints and session ids, keeping ids
 consistent across files, and refuses to write a file that still holds a key or a real email), and
 cover the date parser, the dashboard's formatting and quota rules, live socket messages, old and new
-`/api/push` shapes, and deep-link routing.
+`/api/push` shapes and the push path each one gives, opening sealed notifications (including the test
+vector `the_sealed_format_matches_the_apps_test_vector` in `src/push/relay.rs` checks too), and
+deep-link routing.
 
 **Running against a server.** The app opens on Connect: the server URL (your Fusebox's HTTPS
 address, for example its `tailscale serve` name) and the management key. It checks both
@@ -69,8 +78,9 @@ For simulator runs, **Debug builds only** read `FUSEBOX_DEBUG_KEY_FILE` (a file 
 the simulator reads the Mac's files) once into the Keychain, so the key never appears on a command
 line or in a log. `FUSEBOX_DEBUG_URL` sets the URL, `FUSEBOX_DEBUG_RESET=1` forgets the key,
 `FUSEBOX_DEBUG_REGIONS=1` outlines the reserved regions, `FUSEBOX_DEBUG_OUTAGE=claude` adds a
-synthetic “every account used up” fault to try the Live Activity. None of this is compiled into
-Release builds.
+synthetic “every account used up” fault to try the Live Activity, and
+`FUSEBOX_DEBUG_FORCE_RELAY=1` registers through the push relay (below) whatever the server offers,
+without telling the server. None of this is compiled into Release builds.
 
 ```sh
 SIMCTL_CHILD_FUSEBOX_DEBUG_KEY_FILE=~/.config/fusebox-ios/management-key \
@@ -83,7 +93,9 @@ display `3` (the inner panel): XCUIScreen only captures the main (outer) panel, 
 script to take the inner one with `simctl io screenshot --display=3`. The UI tests are tooling for
 screenshots and end-to-end checks against a live server, not part of `xcodebuild test` on the
 Fusebox scheme; `testPushRegistrationAndTestNotification` registers the simulator with the server,
-so remove that device afterwards (Settings, or `DELETE /api/push/subscriptions/{id}`).
+so remove that device afterwards (Settings, or `DELETE /api/push/subscriptions/{id}`), then launch
+the app once with `FUSEBOX_DEBUG_RESET=1` (it forgets the key and that notifications were wanted,
+so the next launch doesn't register again).
 
 ## The iPhone Duo
 
@@ -130,22 +142,59 @@ follows the fault count (faults with `badge: false`, pace warnings, don't count)
 
 ## Push (APNs)
 
-Settings, Notifications: on/off for this iPhone, Send test, and the other registered devices.
-Which events are sent is the server-wide `notifications` config (edit it in the dashboard).
+Settings, Notifications: on/off for this iPhone, how it's delivered (“Direct” or “Through the
+Fusebox push relay (encrypted)”), Send test, and the other registered devices. Which events are
+sent is the server-wide `notifications` config (edit it in the dashboard). docs/notifications.md
+(“The iPhone app”) and docs/push-relay.md describe the server's side.
 
-- `POST /api/push/apns` `{"token": "<hex device token>", "environment": "production"|"development",
-  "label": "<device name>"}` returns `{"id"}`; registering the same token again updates it. Debug
-  builds send `development`, Release (TestFlight, App Store) `production`, decided at compile time.
-  The app re-registers at launch when it's on, so a changed token reaches the server.
-- A server without APNs answers 503 `{"error": "..."}` (older builds 404); Settings shows the text,
-  nothing more happens.
-- `GET /api/push` returns `{"public_key", "subscriptions": [{"id","label","kind","created_at"}], "apns"}`;
-  a missing `kind` reads as `web`, a missing `apns` as false.
-- `DELETE /api/push/subscriptions/{id}` turns this device (or another) off; `POST /api/push/test`
+- **Which path.** `GET /api/push` returns `{"public_key", "subscriptions": [{"id","label","kind","via","created_at"}], "apns", "relay"}`.
+  `apns: true`: register directly. Otherwise a `relay` URL: register through the relay. Otherwise
+  (`relay` null, or an older server without the fields; a missing `kind` reads as `web`, a missing
+  `apns` as false) Settings says this Fusebox can't send to the app: update Fusebox or set `apns`.
+  Each registration reads the path again, so a server that changes is followed at the next launch;
+  a registration on another path (or with a new handle) removes the old subscription.
+- **Directly:** `POST /api/push/apns` `{"token": "<hex device token>", "environment":
+  "production"|"development", "label": "<device name>"}` returns `{"id"}`; the same token again
+  is the same device. Debug builds send `development`, Release (TestFlight, App Store)
+  `production`, decided at compile time.
+- **Through the relay:** `POST {relay}/v1/devices` `{"token", "environment"}` returns a
+  `handle`; the app makes a 32-byte key (`SecRandomCopyBytes`), keeps relay, handle, key and
+  token in the shared keychain group, and sends `POST /api/push/apns` `{"relay": {"handle",
+  "key": "<base64>"}, "label"}`. At launch and in the foreground, at most every 6 hours, it
+  touches the handle (`POST {relay}/v1/devices/{handle}/touch`); a 410 (forgotten) or a new APNs
+  token gets a new handle and key, sent to the server again. Turning off: `DELETE
+  /api/push/subscriptions/{id}`, then `DELETE {relay}/v1/devices/{handle}`.
+- The app re-registers at launch when it's on, so a changed token reaches the server.
+  `DELETE /api/push/subscriptions/{id}` turns this device (or another) off; `POST /api/push/test`
   `{"id"}` sends a test.
-- The payload: `aps.alert.title/body`, `aps.badge` (fault count), `aps.sound`, `aps.thread-id`,
-  plus top-level `path` (the dashboard's hash route), `kind`, `level`, `provider`, `account`.
-  A tap on `#/accounts/<url-encoded id>` opens that account; anything else opens the Overview.
+- **Direct payload:** `aps.alert.title/body`, `aps.badge` (fault count), `aps.sound`,
+  `aps.thread-id`, plus top-level `path` (the dashboard's hash route), `kind`, `level`,
+  `provider`, `account`. A tap on `#/accounts/<url-encoded id>` opens that account; anything else
+  opens the Overview.
+- **Relayed payload:** a generic alert (“Fusebox” / “Open Fusebox to see what happened.”),
+  `mutable-content`, the badge, `thread-id: fusebox`, and top-level `sealed` and `v: 1`.
+  `sealed` is base64 of `nonce(12) ‖ ciphertext ‖ tag(16)`, AES-256-GCM with the AAD
+  `fusebox-push-v1`, of `{"title","body","path","kind","level","provider","account","thread"}`.
+  The notification service (`FuseboxNotifications`) opens it with the stored key, shows the
+  title and body, sets the thread, and puts `path`, `kind`, `level`, `provider` and `account` into
+  userInfo, so a tap routes as a direct one does. Without the key, or when it doesn't open, the
+  generic alert stays. Direct notifications pass through unchanged.
+
+**Trying the relay on a simulator.** The production server has `apns` set, so the app sends there
+directly. To exercise the relay anyway, Debug builds take `FUSEBOX_DEBUG_FORCE_RELAY=1`: they
+register with `https://push.whombat.com` (development), skip `POST /api/push/apns`, and write the
+handle and key to their own container (`Library/Caches/relay-debug.json`; never commit it). Then
+`scripts/relay-e2e.mjs` plays the Fusebox, sealing as `src/push/relay.rs` does:
+
+```sh
+FUSEBOX_URL=https://<your fusebox> FORCE_RELAY=1 \
+  scripts/ui-screenshots <sim> relay testRelayNotificationDecryptsAndOpensAccount &   # turns on, waits
+node scripts/relay-e2e.mjs <sim> wait                     # until the app has its handle
+node scripts/relay-e2e.mjs <sim> send '<account id>' 'Relay check'
+# the test expects the decrypted banner, taps it, expects the account, and turns off (relay DELETE)
+node scripts/relay-e2e.mjs <sim> cleanup                  # only if the test stopped early
+node scripts/relay-e2e.mjs - health                       # "devices": 0
+```
 
 ## Widgets and the Live Activity
 

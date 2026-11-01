@@ -474,8 +474,11 @@ public struct PushStatus: Codable, Sendable, Equatable {
     public var subscriptions: [Device]
     /// Missing on builds before APNs support: treat as false.
     public var apns: Bool?
+    /// The push relay this Fusebox sends through, or null when it's turned off; missing on
+    /// builds before the relay. `PushPath.choose` decides from both.
+    public var relay: String?
 
-    enum CodingKeys: String, CodingKey { case subscriptions, apns, publicKey = "public_key" }
+    enum CodingKeys: String, CodingKey { case subscriptions, apns, relay, publicKey = "public_key" }
 
     public var apnsAvailable: Bool { apns ?? false }
 
@@ -484,9 +487,11 @@ public struct PushStatus: Codable, Sendable, Equatable {
         public var label: String?
         /// "web" or "apns"; missing on builds before APNs support, where every device is a browser.
         public var kind: String?
+        /// For app devices: "direct" or "relay".
+        public var via: String?
         public var createdAt: Date?
 
-        enum CodingKeys: String, CodingKey { case id, label, kind, createdAt = "created_at" }
+        enum CodingKeys: String, CodingKey { case id, label, kind, via, createdAt = "created_at" }
 
         public var resolvedKind: String { kind ?? "web" }
     }
@@ -495,6 +500,36 @@ public struct PushStatus: Codable, Sendable, Equatable {
 public struct APNsRegistration: Codable, Sendable, Equatable {
     public var token: String
     public var environment: String
+    public var label: String
+}
+
+/// How a Fusebox reaches this app (docs/notifications.md, “The iPhone app”), from `GET /api/push`:
+/// directly when it holds the app's push key (`apns`), else through the push relay it names.
+public enum PushPath: Equatable, Sendable {
+    case direct
+    case relay(URL)
+    /// An older Fusebox, or one with `apns` unset and the relay turned off.
+    case unavailable
+
+    public static func choose(_ status: PushStatus) -> PushPath {
+        if status.apns == true { return .direct }
+        if let text = status.relay?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+           let url = URL(string: text), let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme),
+           url.host() != nil {
+            return .relay(url)
+        }
+        return .unavailable
+    }
+}
+
+/// `POST /api/push/apns` for a device reached through the push relay.
+public struct RelayRegistration: Codable, Sendable, Equatable {
+    public struct Relay: Codable, Sendable, Equatable {
+        public var handle: String
+        /// The 32-byte key, standard base64.
+        public var key: String
+    }
+    public var relay: Relay
     public var label: String
 }
 

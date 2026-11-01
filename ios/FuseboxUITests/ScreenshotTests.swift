@@ -20,6 +20,7 @@ final class ScreenshotTests: XCTestCase {
         if let url = env["FUSEBOX_URL"] { app.launchEnvironment["FUSEBOX_DEBUG_URL"] = url }
         if env["FUSEBOX_REGIONS"] == "1" { app.launchEnvironment["FUSEBOX_DEBUG_REGIONS"] = "1" }
         if let p = env["FUSEBOX_OUTAGE"] { app.launchEnvironment["FUSEBOX_DEBUG_OUTAGE"] = p }
+        if env["FUSEBOX_FORCE_RELAY"] == "1" { app.launchEnvironment["FUSEBOX_DEBUG_FORCE_RELAY"] = "1" }
     }
 
     private func shot(_ name: String) {
@@ -172,6 +173,9 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertTrue(message.waitForExistence(timeout: 30))
         shot("push-01-on")
         XCTAssertEqual(message.label, "Notifications are on for this device.", "registration: \(message.label)")
+        let via = app.descendants(matching: .any)["push-via"]
+        XCTAssertTrue(via.waitForExistence(timeout: 5))
+        print("Delivery: \(via.label)")
 
         // The test arrives within seconds as a system banner over the app (Settings is showing).
         // Tapping it routes by its path, the dashboard's notifications page: the Overview.
@@ -197,6 +201,49 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 15))
         sleep(1)
         shot("route-02-account")
+    }
+
+    /// The relay path end to end, with FUSEBOX_FORCE_RELAY=1: registers with the real push
+    /// relay (development) without telling the server, waits on the home screen for a sealed
+    /// notification sent from the Mac (`scripts/relay-e2e send`), expects the notification service
+    /// to have decrypted it, taps it, expects that account's page, and turns notifications off,
+    /// which removes the handle from the relay.
+    func testRelayNotificationDecryptsAndOpensAccount() throws {
+        XCTAssertEqual(app.launchEnvironment["FUSEBOX_DEBUG_FORCE_RELAY"], "1", "run with FUSEBOX_FORCE_RELAY=1")
+        app.launch()
+        waitForData()
+        goToSettings()
+        let toggle = app.switches["push-toggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        let flip = { toggle.switches.firstMatch.exists ? toggle.switches.firstMatch.tap() : toggle.tap() }
+        if (toggle.value as? String) == "1" {
+            flip()
+            XCTAssertTrue(app.staticTexts["Notifications are off for this device."].waitForExistence(timeout: 20))
+        }
+        flip()
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow"]
+        if allow.waitForExistence(timeout: 8) { allow.tap() }
+        let message = app.staticTexts["push-message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 30))
+        XCTAssertEqual(message.label, "Notifications are on for this device.", "registration: \(message.label)")
+        let via = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'push relay (encrypted)'")).firstMatch
+        XCTAssertTrue(via.waitForExistence(timeout: 5), "Settings doesn't say the relay is in use")
+        shot("relay-01-on")
+
+        XCUIDevice.shared.press(.home)
+        // Sent from the Mac while this waits; the title is only in the sealed part.
+        let banner = banner(containing: env["FUSEBOX_RELAY_TITLE"] ?? "Relay check", timeout: 180)
+        shot("relay-02-banner")
+        XCTAssertFalse(banner.label.contains("Open Fusebox to see what happened"), "not decrypted: \(banner.label)")
+        open(banner)
+        XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 15))
+        sleep(1)
+        shot("relay-03-account")
+
+        goToSettings()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        if (toggle.value as? String) == "1" { flip() }
+        XCTAssertTrue(app.staticTexts["Notifications are off for this device."].waitForExistence(timeout: 20))
     }
 
     /// A notification in Notification Center, pulled down from the top of the home screen.
