@@ -1,0 +1,469 @@
+{
+  "recorded_at": "2026-11-01T07:55:08.605668+00:00",
+  "authorization": "User explicitly requested: commit and push to main, force deploy on production.",
+  "deployment": {
+    "backup_sha256": "e3000ad82f066c9c6e715c4fd80cfbf25c65edaf83325a83765585a72948dcd8",
+    "billing_calls": 0,
+    "forced": true,
+    "gate_released": true,
+    "outcome": "deployed",
+    "rollback_version": "0.12.1+gui.8815bfae7fb7",
+    "transaction": "0861ec162b47495eac9bbb4755cfaee5",
+    "version": "0.12.1+gui.ba9e5be2f325"
+  },
+  "source": {
+    "source_commit": "d137e784177180cd2f862b43a1e99d6322f4ba25",
+    "source_working_tree": false,
+    "source_sha256": "ba9e5be2f3257fc1c8eebdebef70df1d1617e75d0a8a0d605b1232deaa954557",
+    "version": "0.12.1+gui.ba9e5be2f325",
+    "origin": "local-gui",
+    "previous_version": "0.12.1+gui.8815bfae7fb7",
+    "previous_binary_sha256": "86d48fca30c0251479034b644858ea998695a97f28868c591cc173251a20a93f",
+    "config_sha256": "ebe614526352faf3b00552359c8c29835cfe84149e64590a40b63043d908cb79",
+    "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+    "binary_bytes": 19485352,
+    "assets": {
+      "/ui/app.js": "991287cd7c4cec8aac80a8f6ea9ca70cc4320f2d53689b286e569686fabfd3be",
+      "/ui/usage.js": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880",
+      "/ui/config.js": "40f1f1304bcf8c38f357ad2750b38bdeff71bd3aec96e00bc5297228657ea5ae",
+      "/ui/i18n-zh.js": "a9a1890fcfec1a1485813f607a9959029b6018ed7bfb4c76c823b401d1cafee6",
+      "/ui/i18n.js": "fe82f7f8b62f4487d326333b1ec3a90eb44e82912c4f6fc339c9a24da382f3dc",
+      "/ui/style.css": "627f568a8b9f28745a69079e8fae0f8875a668307a76d1f0b350023571239145",
+      "/ui/icon.svg": "7b521316e3c8fe9d2e8642ddaa943bc3bd3508021846236be70acbb5785e6319",
+      "/manifest.webmanifest": "4586fddb01bd452a62e18fdf0710a501838f45ef51cfa9a9f31d9098310e3015",
+      "/sw.js": "7b0256c8acc215d0be7dd2efbd0325e47a53a97877b0c85ee03284aa13b8d809",
+      "/ui/index.html": "912e61dcdc597129718dcd9242f1f4e3a7c31784fb11c975efcc3a068387981b"
+    },
+    "archive": "cliproxyapi-rust-v0.12.1+gui.ba9e5be2f325-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "e4ad639d8ace14278f1b8275b6ebf01427fb71b713f74ff1d2ca03842a9ddd40",
+    "maintenance_run_id": "8b761d04e2124a8b8d90b3fa7e1ab683"
+  },
+  "qualification": [
+    {
+      "name": "implementation-tests",
+      "exit_code": 0,
+      "source_commit": "d137e784177180cd2f862b43a1e99d6322f4ba25",
+      "evidence": "implementation-validation.json",
+      "source_fingerprints_verified": 332,
+      "rust": {
+        "passed": 804,
+        "failed": 0,
+        "ignored": 7
+      },
+      "node": {
+        "passed": 159,
+        "failed": 0
+      },
+      "python": {
+        "passed": 46,
+        "failed": 0
+      },
+      "format": true,
+      "clippy_all_targets_warnings_denied": true,
+      "format_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "clippy_log_sha256": "a5c4069282657322d6d0f4b127716214f9365b62d15daaa3c07682164a013a34"
+    },
+    {
+      "name": "build",
+      "exit_code": 0,
+      "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+      "release_log_sha256": "1cef485223e05b7da4fc659d23ca10b4ffe1305e15044eab8f89566055b2a18a"
+    },
+    {
+      "name": "rollout",
+      "exit_code": 0,
+      "wrapper_tests_passed": 15,
+      "log_sha256": "ed389d7fe3eae6c6a79e2264d66b0377ee1c17de6c19c9e7b43c16b1a108397f"
+    },
+    {
+      "name": "candidate",
+      "exit_code": 0,
+      "log": "candidate-check.log",
+      "log_sha256": "4767654173ed62b6a4fb7b9a60494788bc572cd748a1b439d02a8a4ff6b91bcd",
+      "provider_calls": 0
+    },
+    {
+      "name": "dev-smoke",
+      "exit_code": 0,
+      "log": "dev-smoke.json",
+      "log_sha256": "09121f33087a02b672d80c0d63d25da6e648336f2822ff5e1eea2c2dce485e6a",
+      "provider_calls": 0
+    },
+    {
+      "name": "usage-e2e",
+      "exit_code": 0,
+      "log": "usage-e2e.json",
+      "log_sha256": "35d725e151d56afa32c75539df621696428909a5f8f4e58a11462f9d391802b5",
+      "provider_calls": 0
+    },
+    {
+      "name": "cleanup",
+      "exit_code": 0,
+      "receipt": "qualification-cleanup.json",
+      "lease": "fcae216a31e64589b903291eb651beed"
+    }
+  ],
+  "implementation_evidence": {
+    "source_fingerprints_verified": 332,
+    "logs_sha256": {
+      "target/reset-notifications-rust-tests.log": "4f8e46c33eede1f7e2afb8cb95e9c702945c5c42082682ab176e3e35e35c500b",
+      "target/reset-notifications-dashboard-tests.log": "8bc4711601273e4f234443fe3e740c898437d0ec2d0a8f29c52e5edbe5cfd2b1",
+      "target/reset-notifications-python-tests.log": "bea962e8c5527edb8256303d59dc1ef670290679e87eca127a73979ff513d854"
+    },
+    "evidence_sha256": "511e05305822d6c86a5ebb31d8ddb4ad77eb66a4a5616dc00ef7b1e6d3b04b31",
+    "note": "Implementation test logs cover the unchanged source committed as d137e78. Exact-package qualification reran formatting and all-target Clippy and exercised startup, restart, rollback, all embedded assets and synthetic integrations."
+  },
+  "candidate_smoke": {
+    "ok": true,
+    "version": "0.12.1+gui.ba9e5be2f325",
+    "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+    "assets": {
+      "/ui/app.js": {
+        "identity": 249724,
+        "gzip": 73341
+      },
+      "/ui/usage.js": {
+        "identity": 63365,
+        "gzip": 18484
+      },
+      "/ui/config.js": {
+        "identity": 110263,
+        "gzip": 30808
+      },
+      "/ui/i18n-zh.js": {
+        "identity": 97781,
+        "gzip": 32725
+      },
+      "/ui/i18n.js": {
+        "identity": 6730,
+        "gzip": 2674
+      },
+      "/ui/style.css": {
+        "identity": 97530,
+        "gzip": 17940
+      },
+      "/ui/icon.svg": {
+        "identity": 314,
+        "gzip": 251
+      },
+      "/manifest.webmanifest": {
+        "identity": 1254,
+        "gzip": 468
+      },
+      "/sw.js": {
+        "identity": 4119,
+        "gzip": 2064
+      },
+      "/": {
+        "identity": 45485,
+        "gzip": 16160
+      }
+    },
+    "existing_settings_preserved": true,
+    "new_settings": [],
+    "model_check": {
+      "asked": 0,
+      "in_progress": 0,
+      "new": []
+    },
+    "proxy_protocol_port": {
+      "healthz_through_proxy_header": true,
+      "bare_request_closed": true
+    },
+    "schema": 5,
+    "previous_reopened": true,
+    "provider_calls": 0
+  },
+  "candidate_schema": {
+    "ok": true,
+    "version": "0.12.1+gui.ba9e5be2f325",
+    "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+    "previous_binary_sha256": "86d48fca30c0251479034b644858ea998695a97f28868c591cc173251a20a93f",
+    "schema_version": 5,
+    "added_entries": [],
+    "removed_entries": [],
+    "previous_reopened": true
+  },
+  "exact_package_integrations": {
+    "dev_smoke": {
+      "passed": 8,
+      "checks": [
+        "rebuilt service is live and ready with a loopback-only provider",
+        "native request returns expected response and token accounting",
+        "translated request returns expected response and token accounting",
+        "gzip request body decompresses and completes",
+        "current app/usage source is embedded, versioned, gzip-negotiated and conditionally cached",
+        "shared UsageTools loads before app consumers",
+        "rebuilt service exposes management metrics",
+        "mock-backed service exits gracefully"
+      ],
+      "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+      "mock_only": true,
+      "tokio_worker_threads": 4
+    },
+    "collector_acceptance": {
+      "passed": 12,
+      "checks": [
+        "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+        "collector identity filtering, breakdown and friendly label",
+        "replay does not inflate combined imported totals",
+        "offline outbox survives separate process restart and reconnect",
+        "copied histories across collectors deduplicate using message evidence",
+        "retired summary returns 410 without query work and remains management authenticated",
+        "management/inference separation, wrong credential and oversized batch rejection",
+        "revocation rejects upload and retains offline data",
+        "credential rotation and local re-enrollment preserve idempotency",
+        "imported history from 10 days ago is priced on its local date in the combined trend",
+        "usage reprice CLI is idempotent on an already priced database",
+        "marker transcript/tool/project content absent from databases, exports and logs"
+      ]
+    }
+  },
+  "verification": {
+    "accounts": 5,
+    "analytics_health": "healthy",
+    "assets": {
+      "/": {
+        "gzip": 16160,
+        "identity": 45485
+      },
+      "/manifest.webmanifest": {
+        "gzip": 468,
+        "identity": 1254
+      },
+      "/sw.js": {
+        "gzip": 2064,
+        "identity": 4119
+      },
+      "/ui/app.js": {
+        "gzip": 73341,
+        "identity": 249724
+      },
+      "/ui/config.js": {
+        "gzip": 30808,
+        "identity": 110263
+      },
+      "/ui/i18n-zh.js": {
+        "gzip": 32725,
+        "identity": 97781
+      },
+      "/ui/i18n.js": {
+        "gzip": 2674,
+        "identity": 6730
+      },
+      "/ui/icon.svg": {
+        "gzip": 251,
+        "identity": 314
+      },
+      "/ui/style.css": {
+        "gzip": 17940,
+        "identity": 97530
+      },
+      "/ui/usage.js": {
+        "gzip": 18484,
+        "identity": 63365
+      }
+    },
+    "billing_calls": 0,
+    "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+    "client_identity_inspection": true,
+    "collectors_enrolled": 0,
+    "config_and_routing_verified": true,
+    "configured_imports": 0,
+    "gate_unchanged": true,
+    "legacy_summary_retired": true,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "sessions": {
+      "current_assignments": 168,
+      "expired_assignments": 0,
+      "preserved_assignments": 168,
+      "snapshot_assignments": 168
+    },
+    "usage_backup_bytes": 1947807744,
+    "usage_backup_sha256": "d3a15c2048ce2c2b7a5b2f2a7cb5cfddbbf657bcb31ada6bf69bfa3f23c71747",
+    "version": "0.12.1+gui.ba9e5be2f325"
+  },
+  "postflight": {
+    "account_count": 5,
+    "automatic_restarts": 0,
+    "backup_sha256": "e3000ad82f066c9c6e715c4fd80cfbf25c65edaf83325a83765585a72948dcd8",
+    "billing_calls": 0,
+    "binary_sha256": "eed0a8cc537ee2f06e8df4f73702da69b40ab41745dad1fa3459df08b17613a1",
+    "client_identity_inspection": true,
+    "configuration_unchanged": true,
+    "database": {
+      "bytes": 1947824256,
+      "bytes_per_observation": 3824,
+      "compressing": false,
+      "disk_free_bytes": 12347375616,
+      "free_bytes": 0,
+      "growth_bytes_per_day": 46299353,
+      "incremental_vacuum": true,
+      "live_bytes": 1947807744,
+      "observations": 509243,
+      "uncompressed_rows": 0,
+      "updated_at_ms": 1793519650226
+    },
+    "gate_held": false,
+    "models_listed": 26,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "proxy_protocol_port_ready": true,
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "rollback_version": "0.12.1+gui.8815bfae7fb7",
+    "schema_additions": [],
+    "service_active": true,
+    "usage_after": {
+      "observations": 509245,
+      "quick_check": "ok",
+      "schema_sha256": "c76dad8d7a181f7b94e4906e49ad3a6352b381ee58a40f8fe98147e0dc0ba230",
+      "schema_version": 5
+    },
+    "usage_backup_sha256": "d3a15c2048ce2c2b7a5b2f2a7cb5cfddbbf657bcb31ada6bf69bfa3f23c71747",
+    "usage_before": {
+      "observations": 509243,
+      "quick_check": "ok",
+      "schema_sha256": "c76dad8d7a181f7b94e4906e49ad3a6352b381ee58a40f8fe98147e0dc0ba230",
+      "schema_version": 5
+    },
+    "usage_health": {
+      "accepted": 2,
+      "dropped": 0,
+      "prior_unclosed_sessions": 0,
+      "queue_depth": 0,
+      "rejected": 0,
+      "state": "healthy",
+      "writer_errors": 0,
+      "written": 2
+    },
+    "version": "0.12.1+gui.ba9e5be2f325"
+  },
+  "feature_postflight": {
+    "banked_resets_enabled": true,
+    "existing_settings_preserved": true,
+    "explicit_provider_refreshes": 0,
+    "inference_calls": 0,
+    "live_journals": 6,
+    "management_boundary_preserved": true,
+    "notification_copy_served": true,
+    "notifications_banked_resets": true,
+    "ok": true,
+    "previously_unresolved_operations": 0,
+    "receipt_baselines": 5,
+    "receipt_observations": 5,
+    "reset_journal_backup_verified": true,
+    "reset_journals_preserved": 3,
+    "reset_operations_preserved": 4,
+    "reset_requests": 0,
+    "test_notifications": 0,
+    "translated_copy_served": true,
+    "version": "0.12.1+gui.ba9e5be2f325"
+  },
+  "public_https": {
+    "ok": true,
+    "url": "https://10.10.0.235:8317/",
+    "version": "0.12.1+gui.ba9e5be2f325",
+    "tls_verified": true,
+    "health": "ok",
+    "readiness": {
+      "status": "ready",
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "usage": "healthy"
+    },
+    "verified_assets": 10,
+    "representations": [
+      "identity",
+      "gzip"
+    ],
+    "inference_calls": 0
+  },
+  "forced_drain": [
+    {
+      "active_before": 2,
+      "attempt": 0,
+      "drained": true,
+      "drained_after_ms": 67,
+      "hold_lifted_by_cleanup_after_ms": null,
+      "phase": "committed"
+    }
+  ],
+  "predeployment_readiness": {
+    "status": "ready",
+    "accounts": {
+      "ready": 4,
+      "total": 5
+    },
+    "usage": "healthy"
+  },
+  "final_service_check": {
+    "gate_held": false,
+    "gate_unchanged": true,
+    "network_hold_present": false,
+    "ok": true,
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "release_pending": false,
+    "rollout_unit_enabled": "static",
+    "rollout_unit_inactive_successful": true,
+    "unit": {
+      "ActiveState": "active",
+      "ExecMainStartTimestampMonotonic": "5945151463527",
+      "MainPID": "138513",
+      "NRestarts": "0"
+    },
+    "updater_phase": "committed",
+    "version": "0.12.1+gui.ba9e5be2f325"
+  },
+  "cleanup": {
+    "qualification": {
+      "lease": "fcae216a31e64589b903291eb651beed",
+      "status": "closed",
+      "remaining": [],
+      "preserved_volumes": [],
+      "errors": []
+    },
+    "ci_capacity_reservation": "ci-job-697fcfa3cbc14bf69a17803cd056fd2a",
+    "ci_capacity_reservation_released": true
+  },
+  "retention": {
+    "owner": "John Pals / established Fusebox production operator",
+    "incoming_directory": "/opt/cli-proxy-api-rust/incoming/fusebox-reset-notifications-20261101",
+    "backup_directory": "/var/lib/cliproxy-rust-update/backups/0861ec162b47495eac9bbb4755cfaee5",
+    "rollback_version": "0.12.1+gui.8815bfae7fb7",
+    "rollout_unit": "fusebox-reset-notifications-20261101.service",
+    "rollout_unit_state": "static, inactive, successful",
+    "local_private_artifacts": "target/banked-reset-notifications-production-20261101/",
+    "purpose": "Retain exact source, release packages, receipts, recovery tooling and stopped-writer backups for rollback. Preserve the latest banked reset spending journal during rollback. No temporary service retained."
+  },
+  "receipt_sha256": {
+    "receipts/baseline.json": "5d705c6725ff171204bbb0091d1e3bfff695bb04f1795e7f85fdfb40d0f6a9c4",
+    "receipts/deployment-result.json": "3a34c669e87c13e1f898df99dc3948f5cc14a3b5487508445fc244559213bab8",
+    "receipts/deployment.json": "13daa2010d0c2ce25c7c81d7bee23c6041dd4a244c6f8f763a1a179b59417416",
+    "receipts/feature-postflight.json": "64883c11e9f9b3efb9d50001da64ee44229777697273851de1c4b8e900c33c6c",
+    "receipts/final-service-check.json": "56b2ece631ffe478cab521a25b2e8873643e5ad98326aeebc894c87842177543",
+    "receipts/force-observation.json": "093a1bc323934e125b71ea25a1d5595ea70dcd15707edc473cb9e7d2f0030ee5",
+    "receipts/postflight.json": "8369adfa6009fefe9b1a5143d27126786f9ef811f54aa2449f96c8b01c40b8f7",
+    "receipts/verification.json": "b400162f254b9caf0e88e22288820f644456e6831ea69340d5a8b5186a287ffd"
+  },
+  "limitations": [
+    "No browser rendering check, explicit real-provider refresh, inference call, reset request or test notification was made for verification.",
+    "Account readiness was four of five before and after deployment."
+  ]
+}
