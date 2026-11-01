@@ -40,6 +40,24 @@ Grant identities and allocation increases detect new resets even when another re
 
 Rate limits are never sent; they come and go too quickly. The app's icon shows the number of faults the dashboard shows.
 
+## The iPhone app
+
+The native Fusebox app for iPhone gets the same notifications through Apple's push service. The app turns them on for its device under **Settings, Notifications**, and the dashboard lists it among the other devices as "iPhone app". The events chosen in the dashboard apply to it as well.
+
+Apple only takes notifications for an app from a server holding a push key from the developer account the app is signed with. So the app's notifications need that key on your Fusebox, in `config.yaml`:
+
+```yaml
+apns:
+  team-id: ABCDE12345                          # the developer account's team ID
+  key-id: KEY1234567                           # the key's ID, also in its file name
+  key-file: /etc/fusebox/AuthKey_KEY1234567.p8 # readable by Fusebox only
+  topic: com.digitalpals.fusebox               # the app's bundle ID; this is the default
+```
+
+Without it, the app's **Turn on** says that this Fusebox can't send to the app yet. Fusebox reads the key when it first sends and signs a new token for Apple every 50 minutes, so a replaced key file is picked up within the hour, and a changed `apns` setting at once. A device Apple no longer knows (the app was removed, or it registered against the other push environment) is removed, as browsers' expired subscriptions are; opening the app registers it again.
+
+The app registers its device token with `POST /api/push/apns`, using `{"token": "<hex>", "environment": "production" | "development", "label": "<device name>"}`; App Store and TestFlight builds use `production`. It gets back the subscription's `id`. `GET /api/push` lists each device with `"kind": "web"` or `"apns"`, and says whether `apns` is set up. Removing a device and **Send test** work as they do for browsers. A notification carries its alert, the fault count as the badge, and top-level `path` (where it opens in the dashboard, which the app maps onto its own screens), `kind`, `level`, `provider` and `account`.
+
 ## Chat and webhooks
 
 The same notifications can go to chat. Under **Config, Notifications**, paste the URL a service gives you into **Chat and webhooks** and press **Add**; **Send test** sends a test message at once, saved or not. The events chosen below apply to devices and webhooks alike, and the list is saved in `config.yaml`:
@@ -96,6 +114,8 @@ The same socket's `load` event says what each busy account is doing: `in_flight`
 Notifications go from Fusebox to your browser's push service (Google for Chrome and Edge, Mozilla for Firefox, Apple for Safari), which delivers them to the device. The message is end-to-end encrypted ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)); the push service sees only when a message is sent and how large it is. Nothing is sent unless a device has turned notifications on.
 
 Fusebox keeps its push key (VAPID), the subscribed devices and the faults it has sent in `.web-push.state` in the credentials directory (`auth-dir`), readable only by its owner. Deleting the file signs every device out of notifications; they turn them on again from the dashboard.
+
+Notifications for the iPhone app go to Apple's push service as plain JSON over HTTPS, which Apple can read, like any app's notifications.
 
 Webhook messages go straight to the URLs you add, as plain HTTPS requests that service can read.
 

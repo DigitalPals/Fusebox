@@ -81,6 +81,9 @@ pub struct Config {
     /// Which faults send a push notification to the devices that turned them on.
     #[serde(skip_serializing_if = "Notifications::is_default")]
     pub notifications: Notifications,
+    /// Native push for the Fusebox iPhone app, through Apple's push service.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apns: Option<Apns>,
     /// Only route unprefixed model names to accounts without a `prefix`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub force_model_prefix: bool,
@@ -310,6 +313,23 @@ impl Notifications {
     }
 }
 
+/// The Apple Push Notification service key that sends to the iPhone app: a token
+/// signing key (`AuthKey_<key-id>.p8`) from the developer account the app is signed with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Apns {
+    pub team_id: String,
+    pub key_id: String,
+    pub key_file: String,
+    /// The app's bundle ID.
+    #[serde(default = "default_apns_topic")]
+    pub topic: String,
+}
+
+fn default_apns_topic() -> String {
+    "com.digitalpals.fusebox".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct OAuthAlias {
@@ -433,6 +453,7 @@ impl Default for Config {
             log_format: LogFormat::Text,
             tls: Tls::default(),
             notifications: Notifications::default(),
+            apns: None,
             force_model_prefix: false,
             oauth_model_alias: BTreeMap::new(),
             oauth_excluded_models: BTreeMap::new(),
@@ -542,6 +563,14 @@ usage:
 #   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
+
+# The same notifications for the Fusebox iPhone app, sent through Apple's push service
+# with a key from the Apple developer account the app is signed with.
+# apns:
+#   team-id: ABCDE12345
+#   key-id: KEY1234567
+#   key-file: /path/to/AuthKey_KEY1234567.p8
+#   topic: com.digitalpals.fusebox   # the app's bundle ID
 
 # Models released after this Fusebox version, served until it knows them. The dashboard's
 # "Add model" writes here; an entry is removed once Fusebox or the provider lists the model.
@@ -852,6 +881,13 @@ impl Config {
         for hook in &cfg.notifications.webhooks {
             check_webhook_url(hook).map_err(|e| anyhow::anyhow!("notifications.webhooks: {e}"))?;
         }
+        if let Some(apns) = &cfg.apns {
+            let id = |s: &str| s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric());
+            anyhow::ensure!(id(&apns.team_id), "apns.team-id: use the 10-character team ID");
+            anyhow::ensure!(id(&apns.key_id), "apns.key-id: use the 10-character key ID");
+            anyhow::ensure!(!apns.key_file.trim().is_empty(), "apns.key-file: name the .p8 key file");
+            anyhow::ensure!(!apns.topic.trim().is_empty(), "apns.topic: name the app's bundle ID");
+        }
         for (name, caps) in &cfg.model_capabilities {
             anyhow::ensure!(!name.trim().is_empty(), "model-capabilities: empty model name");
             caps.validate()?;
@@ -1001,6 +1037,26 @@ mod tests {
             let err = parse(&clients).unwrap_err().to_string();
             assert!(err.contains(problem), "{err}");
         }
+    }
+
+    #[test]
+    fn apns_settings_are_checked() {
+        let cfg = Config::parse(
+            "apns:\n  team-id: ABCDE12345\n  key-id: KEY1234567\n  key-file: /etc/fusebox/AuthKey_KEY1234567.p8\n",
+        )
+        .unwrap();
+        let apns = cfg.apns.as_ref().unwrap();
+        assert_eq!((apns.team_id.as_str(), apns.topic.as_str()), ("ABCDE12345", "com.digitalpals.fusebox"));
+        assert!(Config::parse("").unwrap().apns.is_none());
+        assert!(!serde_yaml::to_string(&Config::default()).unwrap().contains("apns"), "unset, it isn't written");
+        for (text, problem) in [
+            ("apns: {team-id: ABC, key-id: KEY1234567, key-file: k.p8}", "team-id"),
+            ("apns: {team-id: ABCDE12345, key-id: KEY1234567, key-file: ''}", "key-file"),
+            ("apns: {team-id: ABCDE12345, key-id: KEY1234567, key-file: k.p8, topic: ' '}", "topic"),
+        ] {
+            assert!(format!("{:#}", Config::parse(text).unwrap_err()).contains(problem), "{text}");
+        }
+        assert!(Config::parse("apns: {team-id: ABCDE12345, key-id: KEY1234567, key-file: k.p8, key: x}").is_err());
     }
 
     #[test]

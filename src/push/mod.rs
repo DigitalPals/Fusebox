@@ -1,10 +1,12 @@
 //! Push notifications for faults. Devices subscribe from the dashboard (Config,
-//! Notifications); a background check works out the faults every 30 seconds and sends
-//! each new one, end-to-end encrypted, through the browser's push service.
+//! Notifications) or the iPhone app; a background check works out the faults every 30
+//! seconds and sends each new one, end-to-end encrypted through the browser's push
+//! service, or through Apple's push service to the app.
 //!
 //! State lives in `<auth-dir>/.web-push.state` (0600): the VAPID key, the subscriptions
 //! and the faults already sent, so a restart does not send them again.
 
+mod apns;
 mod crypto;
 mod faults;
 mod webhooks;
@@ -73,6 +75,9 @@ pub struct Subscription {
     pub origin: String,
     pub label: String,
     pub created_at: DateTime<Utc>,
+    /// The iPhone app, reached through Apple's push service; Web Push otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apns: Option<apns::Device>,
 }
 
 #[derive(Default)]
@@ -87,6 +92,7 @@ pub struct Push {
     path: PathBuf,
     stored: Mutex<Stored>,
     vapid: Mutex<Option<Arc<crypto::Vapid>>>,
+    apns: apns::Tokens,
     tracker: Mutex<Tracker>,
 }
 
@@ -100,7 +106,13 @@ impl Push {
             }),
             Err(_) => Stored::default(),
         };
-        Self { path, stored: Mutex::new(stored), vapid: Mutex::new(None), tracker: Mutex::default() }
+        Self {
+            path,
+            stored: Mutex::new(stored),
+            vapid: Mutex::new(None),
+            apns: apns::Tokens::default(),
+            tracker: Mutex::default(),
+        }
     }
 
     fn save(&self, stored: &Stored) {
@@ -498,9 +510,18 @@ async fn notify(app: &App, fault: &Fault, badge: usize) {
     }
 }
 
-/// One encrypted push. The payload uses the Declarative Web Push shape, which Safari
-/// can show by itself; the dashboard's service worker reads the same fields elsewhere.
+/// One push to one device: through Apple's push service to the iPhone app, or
+/// encrypted through the browser's push service. The Web Push payload uses the
+/// Declarative Web Push shape, which Safari can show by itself; the dashboard's service
+/// worker reads the same fields elsewhere.
 async fn deliver(app: &App, sub: &Subscription, fault: &Fault, badge: usize, urgency: &str) -> Result<StatusCode> {
+    if let Some(device) = &sub.apns {
+        let cfg = app.cfg();
+        let client = app.http.control(None);
+        let (base, high) = (device.environment.base(), urgency == "high");
+        return apns::send(&client, base, &app.push.apns, cfg.apns.as_ref(), device, fault, badge, high, TTL_SECONDS)
+            .await;
+    }
     let payload = json!({
         "web_push": 8030,
         "notification": {
@@ -542,6 +563,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/push", get(status))
         .route("/push/subscriptions", post(subscribe))
+        .route("/push/apns", post(subscribe_apns))
         .route("/push/subscriptions/{id}", delete(unsubscribe))
         .route("/push/test", post(test))
         .route("/push/webhooks/test", post(test_webhook))
@@ -583,9 +605,19 @@ async fn status(State(app): State<Arc<App>>) -> Response {
         .push
         .subscriptions()
         .iter()
-        .map(|s| json!({ "id": s.id, "label": s.label, "origin": s.origin, "endpoint": s.endpoint, "created_at": s.created_at }))
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "origin": s.origin,
+                "endpoint": s.endpoint,
+                "created_at": s.created_at,
+                "kind": if s.apns.is_some() { "apns" } else { "web" },
+            })
+        })
         .collect();
-    Json(json!({ "public_key": vapid.public_key, "subscriptions": devices })).into_response()
+    let apns = app.cfg().apns.is_some();
+    Json(json!({ "public_key": vapid.public_key, "subscriptions": devices, "apns": apns })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -603,6 +635,12 @@ struct Keys {
     auth: String,
 }
 
+/// A device label as people typed or the device named itself.
+fn clean_label(label: &str, fallback: &str) -> String {
+    let label: String = label.trim().chars().filter(|c| !c.is_control()).take(80).collect();
+    if label.is_empty() { fallback.into() } else { label }
+}
+
 fn validate(new: NewSubscription) -> Result<Subscription> {
     let endpoint = url::Url::parse(&new.endpoint).context("The push endpoint is not a URL")?;
     ensure!(
@@ -615,27 +653,63 @@ fn validate(new: NewSubscription) -> Result<Subscription> {
     ensure!(crypto::decode(&new.keys.auth).is_ok_and(|a| a.len() == 16), "Invalid auth secret");
     let origin = url::Url::parse(&new.origin).context("Invalid dashboard origin")?;
     ensure!(matches!(origin.scheme(), "https" | "http"), "Invalid dashboard origin");
-    let label: String = new.label.trim().chars().filter(|c| !c.is_control()).take(80).collect();
     Ok(Subscription {
         id: uuid::Uuid::new_v4().simple().to_string(),
         endpoint: new.endpoint,
         p256dh: new.keys.p256dh,
         auth: new.keys.auth,
         origin: origin.origin().ascii_serialization(),
-        label: if label.is_empty() { "Browser".into() } else { label },
+        label: clean_label(&new.label, "Browser"),
         created_at: Utc::now(),
+        apns: None,
     })
 }
 
 async fn subscribe(State(app): State<Arc<App>>, Json(new): Json<NewSubscription>) -> Response {
-    let sub = match validate(new) {
-        Ok(s) => s,
+    match validate(new) {
+        Ok(sub) => add(&app, sub),
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct NewApnsDevice {
+    token: String,
+    environment: apns::Environment,
+    #[serde(default)]
+    label: String,
+}
+
+/// The iPhone app registers its device token here; the same token again updates it.
+async fn subscribe_apns(State(app): State<Arc<App>>, Json(new): Json<NewApnsDevice>) -> Response {
+    if app.cfg().apns.is_none() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This Fusebox can't send to the iPhone app yet: set apns in config.yaml with the app's push key",
+        );
+    }
+    let device = match apns::Device::new(&new.token, new.environment) {
+        Ok(d) => d,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    let sub = Subscription {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        endpoint: device.endpoint(),
+        p256dh: String::new(),
+        auth: String::new(),
+        origin: String::new(),
+        label: clean_label(&new.label, "iPhone"),
+        created_at: Utc::now(),
+        apns: Some(device),
+    };
+    add(&app, sub)
+}
+
+fn add(app: &App, sub: Subscription) -> Response {
     match app.push.subscribe(sub) {
         Ok((id, first)) => {
             if first {
-                app.push.seed(&faults::faults(&views(&app), Utc::now()));
+                app.push.seed(&faults::faults(&views(app), Utc::now()));
             }
             Json(json!({ "id": id })).into_response()
         }

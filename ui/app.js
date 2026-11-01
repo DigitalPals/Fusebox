@@ -3507,7 +3507,7 @@ function pushDeviceInner() {
   return `<div class="cfg-list-head"><div class="cell2"><h3>This device</h3><p class="cfg-description">${esc(text)}</p></div>${actions ? `<div class="push-actions">${actions}</div>` : ''}</div>
     ${p.msg ? `<p class="msg err" role="alert">${esc(p.msg)}</p>` : ''}
     ${others.length ? `<div class="push-devices"><span class="label">Other devices</span>${others.map((d) => `<div class="push-device">
-      <span class="dot s6 ok" aria-hidden="true"></span><span class="grow"><span>${esc(d.label)}</span><span class="meta">${esc(d.origin.replace(/^https?:\/\//, ''))} \u00b7 added ${esc(day(d.created_at))}</span></span>
+      <span class="dot s6 ok" aria-hidden="true"></span><span class="grow"><span>${esc(d.label)}</span><span class="meta">${esc(d.kind === 'apns' ? 'iPhone app' : d.origin.replace(/^https?:\/\//, ''))} \u00b7 added ${esc(day(d.created_at))}</span></span>
       <button type="button" class="btn sm" data-act="push-remove" data-id="${esc(d.id)}" ${p.busy ? 'disabled' : ''} aria-label="Remove ${esc(d.label)}">Remove</button></div>`).join('')}</div>` : ''}`;
 }
 
