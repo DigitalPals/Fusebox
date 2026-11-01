@@ -751,7 +751,7 @@ async fn requests(State(app): State<Arc<App>>, Query(q): Query<RequestsQuery>) -
 
 /// What has tripped: expired sign-ins, used-up limits, rate limits, account errors,
 /// runs of failed requests and providers with no account left. The same rules as the
-/// faults menu and push notifications.
+/// faults menu and push notifications. Dismissed faults are left out (`/faults/dismissed`).
 async fn faults(State(app): State<Arc<App>>) -> Json<Value> {
     Json(crate::push::current_faults(&app))
 }
@@ -1389,7 +1389,8 @@ fn live_load(app: &App) -> String {
 }
 
 fn live_faults(app: &App) -> String {
-    format!(r#"{{"type":"faults","data":{}}}"#, crate::push::current_faults(app))
+    let (shown, dismissed) = crate::push::listed_faults(app);
+    format!(r#"{{"type":"faults","data":{shown},"dismissed":{dismissed}}}"#)
 }
 
 /// One ticker for every dashboard: account load and faults are checked each second
@@ -1930,16 +1931,46 @@ mod tests {
                 .unwrap();
         request.headers_mut().insert("authorization", "Bearer secret".parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let mut next_faults = async || loop {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        // Waits for a faults message with this list (the ticker's first broadcast may repeat
+        // the state the socket started with).
+        let mut faults_become = async |want: &Value, what: &str| loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("{what}"))
+                .unwrap()
+                .unwrap();
             let msg: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            if msg["type"] == "faults" {
-                return msg["data"].clone();
+            if msg["type"] == "faults" && msg["data"] == *want {
+                return msg["dismissed"].clone();
             }
         };
-        assert_eq!(next_faults().await, listed, "a new socket starts with every fault");
+        faults_become(&listed, "a new socket starts with every fault").await;
+
+        // Dismissed, the fault leaves the list everywhere, and comes back when restored.
+        let post = |path: &str, body: Value| {
+            client
+                .post(format!("http://{addr}/{path}"))
+                .header("x-forwarded-for", "100.64.0.7")
+                .bearer_auth("secret")
+                .json(&body)
+                .send()
+        };
+        let get = |path: &str| {
+            let request = client.get(format!("http://{addr}/{path}")).header("x-forwarded-for", "100.64.0.7");
+            async move { request.bearer_auth("secret").send().await.unwrap().json::<Value>().await.unwrap() }
+        };
+        let key = fault["key"].clone();
+        assert_eq!(post("faults/dismiss", json!({"key": "error:nobody"})).await.unwrap().status(), 404);
+        assert_eq!(post("faults/dismiss", json!({"key": key})).await.unwrap().status(), 200);
+        assert_eq!(faults_become(&json!([]), "a dismissed fault leaves the live list").await, listed);
+        assert_eq!(get("faults").await, json!([]));
+        assert_eq!(get("faults/dismissed").await, listed);
+        assert_eq!(post("faults/restore", json!({"key": key})).await.unwrap().status(), 200);
+        assert_eq!(faults_become(&listed, "a restored fault is listed again").await, json!([]));
+        assert_eq!(get("faults/dismissed").await, json!([]));
+
         account.state.lock().clear_error();
-        assert_eq!(next_faults().await, json!([]), "a cleared fault is sent at once");
+        faults_become(&json!([]), "a cleared fault is sent at once").await;
         server.abort();
     }
 

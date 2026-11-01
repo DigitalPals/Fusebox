@@ -18,8 +18,6 @@ enum RequestFilter: String, CaseIterable, Identifiable {
 
 struct RequestsList: View {
     @Environment(AppStore.self) private var store
-    /// Bound in the split layout (the inspector shows the selected request); nil on a phone.
-    var selection: Binding<Int?>?
     @SceneStorage("requests.filter") private var filter: RequestFilter = .all
     @State private var search = ""
 
@@ -55,19 +53,13 @@ struct RequestsList: View {
         .accessibilityIdentifier("requests")
     }
 
-    @ViewBuilder private func row(_ r: RequestLog) -> some View {
-        let content = RequestRow(request: r)
-            .padding(.horizontal, Metrics.panelPadding)
-            .padding(.vertical, 12)
-        if let selection {
-            Button { selection.wrappedValue = r.id } label: {
-                content.background(selection.wrappedValue == r.id ? Palette.segOn : .clear)
-            }
-            .buttonStyle(RowButtonStyle())
-            .accessibilityAddTraits(selection.wrappedValue == r.id ? .isSelected : [])
-        } else {
-            NavigationLink(value: r.id) { content }.buttonStyle(RowButtonStyle())
+    private func row(_ r: RequestLog) -> some View {
+        NavigationLink(value: r.id) {
+            RequestRow(request: r)
+                .padding(.horizontal, Metrics.panelPadding)
+                .padding(.vertical, 12)
         }
+        .buttonStyle(RowButtonStyle())
     }
 
     private func matches(_ r: RequestLog) -> Bool {

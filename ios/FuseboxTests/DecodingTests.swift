@@ -112,9 +112,14 @@ struct DecodingTests {
 
     @Test func liveMessages() throws {
         let faults = Data(##"{"type":"faults","data":[{"key":"provider:claude","kind":"provider","level":"err","provider":"claude","provider_name":"Claude","account_id":null,"label":null,"title":"Every Claude account is used up","detail":"Requests for Claude models will fail.","until":"2026-11-02T12:59:59.684362+00:00","path":"#/accounts","badge":true}]}"##.utf8)
-        guard case .faults(let list) = try LiveMessage.decode(faults) else { Issue.record("not faults"); return }
+        guard case .faults(let list, let dismissed) = try LiveMessage.decode(faults) else { Issue.record("not faults"); return }
         #expect(list[0].kind == "provider")
         #expect(list[0].until != nil)
+        #expect(dismissed == nil, "a Fusebox that can't dismiss faults sends no dismissed list")
+        let withDismissed = Data(##"{"type":"faults","data":[],"dismissed":[{"key":"rate:a","kind":"rate_limit","level":"warn","title":"Rate limited","badge":true}]}"##.utf8)
+        guard case .faults(let shown, let hidden) = try LiveMessage.decode(withDismissed) else { Issue.record("not faults"); return }
+        #expect(shown.isEmpty)
+        #expect(hidden?.map(\.key) == ["rate:a"])
 
         let load = Data(#"{"type":"load","data":{"file:a.json":{"in_flight":2,"sessions":1,"ongoing_sessions":1}}}"#.utf8)
         #expect(try LiveMessage.decode(load) == .load(["file:a.json": AccountLoad(inFlight: 2, sessions: 1)]))

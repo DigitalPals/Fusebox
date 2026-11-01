@@ -138,6 +138,8 @@ public struct FuseboxAPI: Sendable {
     public func overview() async throws -> Overview { try await get("/overview") }
     public func accounts() async throws -> [Account] { try await get("/accounts") }
     public func faults() async throws -> [Fault] { try await get("/faults") }
+    /// The dismissed faults that haven't cleared yet (404 from a Fusebox that can't dismiss).
+    public func dismissedFaults() async throws -> [Fault] { try await get("/faults/dismissed") }
     public func requests(limit: Int? = nil) async throws -> [RequestLog] {
         try await get(limit.map { "/requests?limit=\($0)" } ?? "/requests")
     }

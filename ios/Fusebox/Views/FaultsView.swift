@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// What has tripped (`/api/faults`): errors first, then warnings, then pace warnings.
+/// What has tripped (`/api/faults`): errors first, then warnings, then pace warnings. Each
+/// fault can be dismissed until it clears; dismissing is shared with the dashboard.
 struct FaultsList: View {
     @Environment(AppStore.self) private var store
     @Environment(\.navigate) private var navigate
-    /// The split layout shows the account beside the list.
-    var selection: Binding<String?>?
+    @State private var toastText: String?
 
     var body: some View {
         ScrollView {
@@ -16,18 +16,24 @@ struct FaultsList: View {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(store.faults.enumerated()), id: \.element.id) { i, f in
                             if i > 0 { Hairline().padding(.horizontal, Metrics.panelPadding) }
-                            Button { open(f) } label: {
-                                FaultRow(fault: f)
-                                    .padding(.horizontal, Metrics.panelPadding)
-                                    .padding(.vertical, 14)
-                                    .background(isSelected(f) ? Palette.segOn : .clear)
+                            HStack(alignment: .top, spacing: 0) {
+                                Button { open(f) } label: {
+                                    FaultRow(fault: f)
+                                        .padding(.leading, Metrics.panelPadding)
+                                        .padding(.vertical, 14)
+                                }
+                                .buttonStyle(RowButtonStyle())
+                                DismissFaultButton(fault: f) { dismiss(f) }
+                                    .padding(.top, 4)
+                                    .padding(.trailing, 4)
                             }
-                            .buttonStyle(RowButtonStyle())
+                            .contextMenu { DismissFaultMenuItem { dismiss(f) } }
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .panelBackground()
                 }
+                if !store.dismissedFaults.isEmpty { dismissedFooter }
             }
             .pageContent()
         }
@@ -36,25 +42,75 @@ struct FaultsList: View {
         .refreshable { await store.refreshAll() }
         .overlay {
             if store.faults.isEmpty {
-                EmptyState("Nothing has tripped", systemImage: "checkmark.circle", message: "Expired sign-ins, used-up limits, rate limits and account errors show here.")
+                EmptyState(store.dismissedFaults.isEmpty ? "Nothing has tripped" : "Nothing else has tripped",
+                           systemImage: "checkmark.circle",
+                           message: "Expired sign-ins, used-up limits, rate limits and account errors show here.")
                     .foregroundStyle(Palette.fg2)
             }
         }
+        .toast($toastText)
         .accessibilityIdentifier("faults")
     }
 
-    private func isSelected(_ f: Fault) -> Bool {
-        guard let id = selection?.wrappedValue else { return false }
-        return id == f.accountID
+    /// How many are dismissed, and a way to bring them back.
+    private var dismissedFooter: some View {
+        let n = store.dismissedFaults.count
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("\(n) dismissed until \(n == 1 ? "it clears" : "they clear")")
+                .font(Typeface.meta).foregroundStyle(Palette.fg3)
+            Spacer(minLength: 8)
+            LinkButton("Show again") {
+                Task {
+                    do { try await store.restoreDismissedFaults() } catch { toastText = error.localizedDescription }
+                }
+            }
+            .accessibilityIdentifier("faults-restore")
+        }
+        .padding(.horizontal, 4)
+        .accessibilityIdentifier("faults-dismissed")
+    }
+
+    private func dismiss(_ f: Fault) {
+        Task {
+            do { try await store.dismiss(f) } catch { toastText = error.localizedDescription }
+        }
     }
 
     /// An account's fault opens the account; a provider's or a pace warning the Overview.
     private func open(_ f: Fault) {
         if let id = f.accountID {
-            if let selection { selection.wrappedValue = id } else { navigate(.account(id)) }
+            navigate(.account(id))
         } else {
             navigate(f.kind == "provider" ? .accounts : DeepLink.route(path: f.path))
         }
+    }
+}
+
+/// The ✕ at the end of a fault's row: hides it, here and on the dashboard, until it clears.
+struct DismissFaultButton: View {
+    var fault: Fault
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Palette.fg3)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Dismiss \(fault.title)")
+        .accessibilityHint("Hidden until it clears")
+        .accessibilityIdentifier("dismiss-\(fault.key)")
+    }
+}
+
+/// The same, in a fault row's long-press menu.
+struct DismissFaultMenuItem: View {
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) { Label("Dismiss until it clears", systemImage: "xmark") }
     }
 }
 

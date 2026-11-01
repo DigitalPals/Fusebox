@@ -74,6 +74,45 @@ fn a_fault_is_sent_once_after_two_checks_and_survives_a_restart() {
 }
 
 #[test]
+fn a_dismissed_fault_stays_hidden_until_it_clears_or_becomes_an_error() {
+    let temp = Temp::new();
+    let push = Push::load(&temp.0);
+    let t0 = Instant::now();
+    let warn = |key: &str| Fault { key: key.into(), level: "warn", ..Default::default() };
+    let err = |key: &str| Fault { key: key.into(), level: "err", ..Default::default() };
+    let keys = |list: Vec<Fault>| list.into_iter().map(|f| f.key).collect::<Vec<_>>();
+    let split = |push: &Push, faults: Vec<Fault>, secs: u64| {
+        let (shown, dismissed) = push.split(faults, t0 + Duration::from_secs(secs));
+        (keys(shown), keys(dismissed))
+    };
+
+    push.dismiss(&warn("rate:a"));
+    push.dismiss(&warn("quota:b"));
+    assert_eq!(
+        split(&push, vec![warn("rate:a"), warn("quota:b"), err("signin:c")], 0),
+        (vec!["signin:c".to_string()], vec!["rate:a".to_string(), "quota:b".to_string()])
+    );
+    // Dismissals are kept across a restart.
+    let push = Push::load(&temp.0);
+    // A warning that turns into an error shows again.
+    assert_eq!(split(&push, vec![err("rate:a"), warn("quota:b")], 1).0, ["rate:a"]);
+    assert_eq!(split(&push, vec![warn("rate:a"), warn("quota:b")], 2).0, ["rate:a"], "not dismissed any more");
+    // Gone briefly (flapping), it stays dismissed; gone a minute, it has cleared and shows when it trips again.
+    assert!(split(&push, vec![], 10).0.is_empty());
+    assert_eq!(split(&push, vec![warn("quota:b")], 30).1, ["quota:b"]);
+    assert!(split(&push, vec![], 40).0.is_empty());
+    assert!(split(&push, vec![], 99).0.is_empty());
+    assert!(push.has_dismissed(), "gone for 59 seconds");
+    assert!(split(&push, vec![], 100).0.is_empty());
+    assert_eq!(split(&push, vec![warn("quota:b")], 101).0, ["quota:b"]);
+    assert!(!push.has_dismissed());
+
+    push.dismiss(&warn("quota:b"));
+    assert!(push.restore(Some("quota:b")));
+    assert!(!push.restore(None), "nothing left to restore");
+}
+
+#[test]
 fn settings_choose_what_is_sent() {
     let temp = Temp::new();
     let push = Push::load(&temp.0);

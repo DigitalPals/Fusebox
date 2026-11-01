@@ -440,7 +440,9 @@ public struct LiveTick: Codable, Sendable, Equatable {
 public enum LiveMessage: Sendable, Equatable {
     case request(RequestLog)
     case load([String: AccountLoad])
-    case faults([Fault])
+    /// The faults the lists show, and those dismissed until they clear (nil from a Fusebox
+    /// that can't dismiss faults).
+    case faults([Fault], dismissed: [Fault]?)
     case tick(LiveTick)
     case accounts
     case models
@@ -456,7 +458,9 @@ public enum LiveMessage: Sendable, Equatable {
         switch type {
         case "request": return .request(try payload(RequestLog.self))
         case "load": return .load(try payload([String: AccountLoad].self))
-        case "faults": return .faults(try payload([Fault].self))
+        case "faults":
+            let p = try decoder.decode(LiveFaults.self, from: data)
+            return .faults(p.data, dismissed: p.dismissed)
         case "tick": return .tick(try payload(LiveTick.self))
         case "accounts": return .accounts
         case "models": return .models
@@ -466,6 +470,7 @@ public enum LiveMessage: Sendable, Equatable {
 }
 
 private struct LivePayload<U: Decodable>: Decodable { var data: U }
+private struct LiveFaults: Decodable { var data: [Fault]; var dismissed: [Fault]? }
 
 // MARK: - Push
 

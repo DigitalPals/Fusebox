@@ -134,29 +134,31 @@ so the next launch doesn't register again).
 The layout follows the size class and the space the scene gets, never the device model or screen
 size, so folding, unfolding and resizing beside another app all go through the same path:
 
-- **Compact width** (folded, on the 5.4" outer screen, or narrow beside another app): a tab bar
-  (Overview, Accounts, Requests, Usage, Settings) with a NavigationStack in each, and a faults button
-  with its count in every header, as the dashboard's phone layout.
-- **Regular width** (unfolded, 7.6" inner screen): a NavigationSplitView with the sections in a
-  sidebar. Accounts and Faults are three columns (list and account detail); the request log is the
-  detail column with the selected request in an inspector. Overview cards reflow into columns.
+- **One layout, folded or unfolded.** A tab bar (Overview, Accounts, Requests, Usage, Settings) with
+  a NavigationStack in each, and a faults button with its count in every header, as the dashboard's
+  phone layout. iOS 27.1 puts the tab bar and the header buttons down the right edge on both the outer
+  screen and the unfolded inner screen. `MainView` sets the scene's horizontal size class to compact,
+  so an unfolded Duo (regular width) keeps the outer screen's tabs. Builds up to 1.0.0 (3) switched to a
+  NavigationSplitView with a sidebar behind a menu button. Each page is one column at most
+  `Metrics.column` (600pt) wide, centred on the inner screen (`pageContent()`). The page doesn't spread
+  into two columns.
 - **Keeping the place.** The section, the selected account and the selected request are
-  `@SceneStorage`. In compact width they drive the stacks' paths, in regular width the split view's
-  selections, so a fold or an unfold shows the same account or request in the other layout.
+  `@SceneStorage` and drive the stacks' paths, so a fold or an unfold keeps the same account or request.
 - **Clear of the fold.** iOS 27.1 really has the reserved-region API: SwiftUI's `ReservedRegion`
   with kinds `.division` and `.occlusion`, read through `GeometryProxy.reservedRegions(kind:options:)`
   (UIKit: `UIView.reservedRegions(of:)`), plus `ArrangementView` with `.automatic`, `.split` and
   `.overlay` styles. On the Duo simulator the inner screen (951 × 669 pt, landscape) reports a
   `.division` region at x = 455–495 pt, inactive while the phone lies flat, and an active occlusion
-  for the status area. The app uses it in three places (all behind `#available(iOS 27.1, *)`; the
+  for the status area. The app uses it in two places (all behind `#available(iOS 27.1, *)`; the
   deployment target stays 27.0):
   - `FoldAwareColumns` puts card columns on either side of the division instead of across it
-    (always when it's active; when inactive, whenever the width gives two columns anyway).
-  - In the three-column layout the list column's width is capped at the division's leading edge.
+    (always when it's active; when inactive, whenever the width gives two columns anyway), but
+    only when a whole column fits on each side. In the unfolded Duo's centred 600pt column it
+    doesn't, so pages stay one column there.
   - `clearOfFold()` insets a column's content when an *active* division runs along its leading or
     trailing part, so buttons such as Refresh and the on/off switch never sit on a hinge that
     content must divide at. The insets are never negative, at most a third of the width each, and
-    dropped when less than 280pt would be left. The request inspector takes the page beyond it.
+    dropped when less than 280pt would be left.
   - **Columns take the width offered now.** `FoldAwareColumns` places its columns with a `Layout`
     (`ColumnsLayout`) in exactly the proposed width; the measured geometry only chooses the number
     of columns and the hinge, and a hinge that doesn't fit the current width is ignored. Build 2
@@ -168,17 +170,19 @@ size, so folding, unfolding and resizing beside another app all go through the s
     the window.
 
   `ArrangementView` isn't used: the standard containers plus the division region cover these
-  screens, and its split style would duplicate what NavigationSplitView already does.
+  screens.
 - **Folded and unfolded on the simulator.** A booted (or rebooted, or erased) iPhone Duo simulator
   starts *folded*: the outer screen is active (`xcrun devicectl device info displays --device <id>`
   shows display 1 `active`, display 3, the inner panel, not). On it iOS 27.1 puts the status bar,
   the navigation bar's buttons and the tab bar down the right edge, as on the device, and
   `scripts/ui-screenshots <duo> outer` runs the tour there (XCUIScreen captures the outer panel;
   XCUI doesn't report the side tab bar as a tab bar, so the tests find tabs by their buttons).
-  Unfolding needs DeviceHub's hinge slider: neither simctl nor devicectl has a posture command
-  (`screenConfig power`, orientation, a fold notification and an erase don't change it). For the
-  unfolded layout without the GUI, a resizable session at the inner panel's size gives the same
-  regular-width split view, and Debug builds take a synthetic hinge, because the session has none:
+  Neither simctl nor devicectl has a posture command (`screenConfig power`, orientation, a fold
+  notification and an erase don't change it). T3 Code's `agent-device fold open | closed` changes
+  the pose through a HID hinge event (it may report that it can't read the angle back; check
+  which display is `active`). DeviceHub's hinge slider does the same. Without either, a resizable
+  session at the inner panel's size gives the same regular-width scene, and Debug builds take a
+  synthetic hinge, because the session has none:
 
   ```sh
   SIMCTL_CHILD_FUSEBOX_DEBUG_KEY_FILE=… SIMCTL_CHILD_FUSEBOX_DEBUG_DIVISION=455-495 \
@@ -194,6 +198,12 @@ and totals; an `accounts` message refetches accounts and the overview. While the
 the app reconnects with backoff (1 s up to 15 s) and polls everything every 30 seconds; coming back
 to the foreground it reconnects and reloads, as the dashboard does after a while away. The app badge
 follows the fault count (faults with `badge: false`, pace warnings, don't count).
+
+Faults have a ✕ (and a long-press **Dismiss until it clears**) that dismisses them on the server:
+gone from every iPhone and dashboard, and from the badge, until the fault clears or a warning becomes
+an error (`POST /api/faults/dismiss`, see `docs/notifications.md`). The `faults` message's
+`dismissed` list, or `GET /api/faults/dismissed` while polling, gives the count under the list, with
+**Show again** (`POST /api/faults/restore`).
 
 ## Push (APNs)
 

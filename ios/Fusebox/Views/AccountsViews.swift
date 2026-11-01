@@ -5,8 +5,6 @@ import SwiftUI
 
 struct AccountsList: View {
     @Environment(AppStore.self) private var store
-    /// Bound in the split layout; nil on a phone, where rows push the detail.
-    var selection: Binding<String?>?
 
     var body: some View {
         ScrollView {
@@ -47,19 +45,10 @@ struct AccountsList: View {
         return "\(ready) ready" + (cooling > 0 ? " · \(cooling) cooling" : "")
     }
 
-    @ViewBuilder private func row(_ a: Account) -> some View {
-        if let selection {
-            Button { selection.wrappedValue = a.id } label: {
-                AccountRowContent(account: a, selected: selection.wrappedValue == a.id)
-            }
+    private func row(_ a: Account) -> some View {
+        NavigationLink(value: a.id) { AccountRowContent(account: a) }
             .buttonStyle(RowButtonStyle())
-            .accessibilityAddTraits(selection.wrappedValue == a.id ? .isSelected : [])
             .accessibilityIdentifier("account-row-\(a.id)")
-        } else {
-            NavigationLink(value: a.id) { AccountRowContent(account: a) }
-                .buttonStyle(RowButtonStyle())
-                .accessibilityIdentifier("account-row-\(a.id)")
-        }
     }
 }
 

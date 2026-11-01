@@ -144,6 +144,16 @@ struct FoldLayoutTests {
         #expect(one.count == 1 && one[0].x == 0 && one[0].width == 402)
     }
 
+    /// Unfolded, a page is one centred column (`Metrics.column`); an active hinge through it
+    /// leaves no room for a column on each side, so it stays one column.
+    @Test func theCentredColumnStaysOneColumnOverAnActiveHinge() {
+        let centred = FoldGeometry(width: 568, division: CGRect(x: 263, y: 0, width: 40, height: 669), active: true)
+        let plan = FoldPlan(centred, minColumnWidth: 340, spacing: 16)
+        #expect(plan.columns == 1 && plan.division == nil)
+        let wide = FoldGeometry(width: 951, division: CGRect(x: 455, y: 0, width: 40, height: 669), active: true)
+        #expect(FoldPlan(wide, minColumnWidth: 340, spacing: 16).columns == 2)
+    }
+
     @Test func onlyAnActiveHingeInsets() {
         let hinge = CGRect(x: 0, y: 0, width: 40, height: 669)
         #expect(FoldInsets(width: 496, height: 669, regions: [(hinge, false)]).leading == 0)

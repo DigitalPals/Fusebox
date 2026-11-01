@@ -3,28 +3,20 @@ import SwiftUI
 
 struct OverviewView: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
-    private enum Block: String, Identifiable { case faults, load, other, latest; var id: String { rawValue } }
+    private enum Block: String, Identifiable { case other, latest; var id: String { rawValue } }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Metrics.sectionGap) {
                 header
                 if let e = store.loadError, store.overview == nil { errorCard(e) }
-                if sizeClass == .compact {
-                    // Phones: the dashboard's phone order, subscriptions before load.
-                    if !store.faults.isEmpty { FaultsCard() }
-                    subscriptions
-                    pools
-                    LoadCard()
-                    FoldAwareColumns(items: bottomBlocks, minColumnWidth: 360) { block(for: $0) }
-                } else {
-                    FoldAwareColumns(items: topBlocks, minColumnWidth: 360) { block(for: $0) }
-                    subscriptions
-                    pools
-                    FoldAwareColumns(items: bottomBlocks, minColumnWidth: 360) { block(for: $0) }
-                }
+                // The dashboard's phone order, subscriptions before load, folded or unfolded.
+                if !store.faults.isEmpty { FaultsCard() }
+                subscriptions
+                pools
+                LoadCard()
+                FoldAwareColumns(items: bottomBlocks, minColumnWidth: 360) { block(for: $0) }
             }
             .pageContent()
         }
@@ -57,16 +49,12 @@ struct OverviewView: View {
         }
     }
 
-    private var topBlocks: [Block] { (store.faults.isEmpty ? [] : [.faults]) + [.load] }
-
     private var bottomBlocks: [Block] {
         (store.accounts.contains { !$0.metered } ? [.other] : []) + [.latest]
     }
 
     @ViewBuilder private func block(for b: Block) -> some View {
         switch b {
-        case .faults: FaultsCard()
-        case .load: LoadCard()
         case .other: OtherCircuitsCard()
         case .latest: LatestRequestsCard()
         }
@@ -340,6 +328,7 @@ struct FaultsCard: View {
                 if i > 0 { Hairline() }
                 Button { open(f) } label: { FaultRow(fault: f).padding(.vertical, 12) }
                     .buttonStyle(RowButtonStyle())
+                    .contextMenu { DismissFaultMenuItem { Task { try? await store.dismiss(f) } } }
             }
         }
     }

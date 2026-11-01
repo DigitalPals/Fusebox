@@ -91,8 +91,16 @@ The URL says how a message is sent:
 
 Desktop widgets and scripts can read the same faults through the management API, with the management key as a bearer token, like every other `/api` route:
 
-- `GET /api/faults` lists them, errors first.
-- `/api/live` sends a `faults` event with the whole list as soon as a socket connects, then again whenever the list changes. The dashboard's `load` events work the same way.
+- `GET /api/faults` lists them, errors first, without the dismissed ones.
+- `/api/live` sends a `faults` event with the whole list as soon as a socket connects, then again whenever the list changes. The dashboard's `load` events work the same way. Its `dismissed` field lists the dismissed faults that haven't cleared.
+
+### Dismissing faults
+
+The ✕ beside a fault in the dashboard's faults menu, or in the iPhone app's Faults list, dismisses it everywhere: on every dashboard and every iPhone, and from the app badge. It stays hidden until it clears (gone for a minute, so a fault that flickers stays dismissed) or until a warning becomes an error. If it trips again after that, it shows again. Dismissing hides a fault from the lists only. Notifications already sent stay sent, and `fusebox_faults` in `/metrics` still counts it. Dismissals are kept in `<auth-dir>/.web-push.state` and survive a restart. The menu's **Show again** brings every dismissed fault back.
+
+- `POST /api/faults/dismiss` with `{"key": "<fault key>"}` dismisses a current fault (404 when it has already cleared).
+- `POST /api/faults/restore` with `{"key": "<fault key>"}` shows one fault again; `{}` shows them all.
+- `GET /api/faults/dismissed` lists the dismissed faults that haven't cleared.
 
 ```json
 {

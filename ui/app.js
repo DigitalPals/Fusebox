@@ -46,6 +46,7 @@ const S = {
   routes: null,
   routesStale: true, // account or model changes since S.routes was fetched
   faultList: null, // the server's faults (live "faults"); null until the first arrives
+  dismissedFaults: 0, // how many of the menu's faults are dismissed (live "faults")
   activity: {}, // account id -> { series, sessions, at, fetched }
   load: null, // account id -> { in_flight, sessions } for busy accounts; null while disconnected
   live: 'connecting',
@@ -169,6 +170,7 @@ const ICON = {
   search: svg('<circle cx="6" cy="6" r="4.25"/><path d="M9.2 9.2l3 3"/>', 14, 1.3),
   eye: svg('<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>', 16, 1.3),
   eyeOff: svg('<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/><path d="M2.5 13.5l11-11"/>', 16, 1.3),
+  x: svg('<path d="M4 4l8 8M12 4l-8 8"/>', 14, 1.4),
   external: svg('<path d="M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"/>', 16, 1.5),
 };
 const WORDMARK = $('.brand .wordmark').outerHTML;
@@ -493,7 +495,7 @@ function setLive(state) {
 function onLive(msg) {
   if (msg.type === 'request') return onRequest(msg.data);
   if (msg.type === 'load') return onLoad(msg.data);
-  if (msg.type === 'faults') return onFaults(msg.data);
+  if (msg.type === 'faults') return onFaults(msg.data, msg.dismissed);
   if (msg.type === 'accounts') return refreshAccounts();
   if (msg.type === 'models') return refreshModels();
   if (msg.type === 'login') return pollLogin();
@@ -507,9 +509,11 @@ function onLive(msg) {
   }
 }
 
-// The server's faults, sent whenever they change (see faultItems).
-function onFaults(list) {
+// The server's faults, sent whenever they change (see faultItems), and the ones dismissed
+// from the menu, which stay away until they clear.
+function onFaults(list, dismissed) {
   S.faultList = faultItems(list);
+  S.dismissedFaults = faultItems(dismissed).length;
   renderFaults();
   if (S.route === 'accounts' && !S.sub && !S.locked && S.overview) {
     patch('acct-filters', acctFiltersHTML);
@@ -525,7 +529,7 @@ function onFaults(list) {
 const FAULT_RANK = { err: 0, warn: 1, pace: 2 };
 function faultItems(list) {
   const items = (Array.isArray(list) ? list : []).filter((f) => f.account_id || f.kind === 'storage' || f.kind === 'pace').map((f) => ({
-    lvl: f.level === 'err' ? 'err' : 'warn', id: f.account_id || null, title: f.title, signin: f.kind === 'signin',
+    key: f.key || '', lvl: f.level === 'err' ? 'err' : 'warn', id: f.account_id || null, title: f.title, signin: f.kind === 'signin',
     provider: f.provider_name || '', label: f.label || '', kind: f.kind || '', detail: f.detail || '', badge: f.badge !== false,
     path: f.path || '',
   }));
@@ -2103,9 +2107,43 @@ function renderFaultsMenu(list = faultsList()) {
     const where = al.kind === 'storage' ? esc(al.provider || 'Usage')
       : !al.id ? `${esc(al.provider)} · all subscriptions`
         : `${esc(a ? provName(a) : al.provider || '')} · ${esc(a ? acctLabel(a) : al.label ? who(al.label) : '')}`;
-    return `<button class="fault-item" type="button" data-act="alert-open" data-id="${i}"${tip}><span class="dot ${al.lvl}"></span><span class="cell2"><b>${esc(al.title)}</b><span class="mono">${where}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
+    // Only the server's faults have a key to dismiss them by.
+    const dismiss = al.key ? `<button class="icon-btn fault-x" type="button" data-act="fault-dismiss" data-id="${esc(al.key)}" aria-label="Dismiss ${esc(al.title)}" title="Dismiss until it clears">${ICON.x}</button>` : '';
+    return `<div class="fault-row"><button class="fault-item" type="button" data-act="alert-open" data-id="${i}"${tip}><span class="dot ${al.lvl}"></span><span class="cell2"><b>${esc(al.title)}</b><span class="mono">${where}</span></span><span class="chev" aria-hidden="true">›</span></button>${dismiss}</div>`;
   }).join('');
-  $('#lay-faults').innerHTML = `<div class="scrim menu" data-act="close-faults"></div><div class="faults-menu" id="faults-menu" role="dialog" aria-label="Faults"${style}>${items || '<p class="pal-none">Nothing tripped. Every account is in rotation.</p>'}</div>`;
+  const n = S.faultList ? S.dismissedFaults : 0;
+  const restore = n ? `<div class="faults-foot"><span>${n} dismissed until ${n === 1 ? 'it clears' : 'they clear'}</span><button class="linkbtn" type="button" data-act="faults-restore">Show again</button></div>` : '';
+  const none = n ? '<p class="pal-none">Nothing else tripped.</p>' : '<p class="pal-none">Nothing tripped. Every account is in rotation.</p>';
+  $('#lay-faults').innerHTML = `<div class="scrim menu" data-act="close-faults"></div><div class="faults-menu" id="faults-menu" role="dialog" aria-label="Faults"${style}>${items || none}${restore}</div>`;
+}
+
+// Dismisses a fault everywhere (the dashboards and the app) until it clears or a warning
+// turns into an error. The menu updates at once; the live list confirms it.
+async function dismissFault(key) {
+  const at = $$('#faults-menu .fault-x').findIndex((b) => b.dataset.id === key);
+  if (S.faultList) {
+    S.faultList = S.faultList.filter((f) => f.key !== key);
+    S.dismissedFaults += 1;
+    renderFaults();
+  }
+  const next = $$('#faults-menu .fault-x')[at] || $$('#faults-menu .fault-x').at(-1) || $('#faults-menu [data-act="faults-restore"]');
+  next?.focus();
+  try {
+    await api('/faults/dismiss', { method: 'POST', body: JSON.stringify({ key }) });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function restoreFaults() {
+  try {
+    await api('/faults/restore', { method: 'POST', body: '{}' });
+    S.dismissedFaults = 0;
+    renderFaults();
+    $('#faults-menu .fault-item')?.focus();
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 function closeLayers() {
@@ -3820,6 +3858,8 @@ document.addEventListener('click', (e) => {
     case 'faults': return toggleFaults(el);
     case 'close-faults': return closeFaults();
     case 'alert-open': return runAlert(id);
+    case 'fault-dismiss': return dismissFault(id);
+    case 'faults-restore': return restoreFaults();
     case 'open-acc': return openAccount(id);
     case 'close-drawer': return closeDrawer();
     case 'to-list': location.hash = '#/accounts'; return;

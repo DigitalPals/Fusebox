@@ -138,7 +138,8 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
     metric("fusebox_account_failures_total", "counter", "Failed requests on the account since start.", failures);
     metric("fusebox_account_quota_used_percent", "gauge", "Subscription usage window, percent used.", used);
     metric("fusebox_account_quota_resets_timestamp_seconds", "gauge", "When a usage window resets.", resets);
-    let faults = crate::push::current_faults(&app);
+    // Dismissing a fault in the dashboard hides it there, not from monitoring.
+    let faults = crate::push::every_fault(&app);
     let mut kinds = std::collections::BTreeMap::<String, usize>::new();
     for f in faults.as_array().into_iter().flatten() {
         *kinds.entry(f["kind"].as_str().unwrap_or("other").to_string()).or_default() += 1;
@@ -146,7 +147,7 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
     metric(
         "fusebox_faults",
         "gauge",
-        "What has tripped, as the dashboard's faults button lists it.",
+        "What has tripped, as the dashboard's faults button lists it, dismissed or not.",
         kinds.into_iter().map(|(k, n)| (format!("kind=\"{}\"", label(&k)), n as f64)).collect(),
     );
     let cfg = app.cfg();

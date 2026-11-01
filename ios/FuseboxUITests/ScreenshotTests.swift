@@ -54,14 +54,12 @@ final class ScreenshotTests: XCTestCase {
         sleep(3)
     }
 
-    /// The compact layout: a tab bar, at the bottom or (the iPhone Duo's outer screen, iOS 27.1) down
-    /// the side, where XCUI doesn't report it as a tab bar. The split layout's sidebar items have ids.
-    private var isPhone: Bool { app.tabBars.firstMatch.exists || tabButton("Settings").exists }
-
+    /// The tab bar, at the bottom or (the iPhone Duo's outer screen, iOS 27.1) down the side,
+    /// where XCUI doesn't report it as a tab bar. Unfolded, the app keeps the same tabs.
     private func tabButton(_ title: String) -> XCUIElement {
         let inBar = app.tabBars.buttons[title]
         if inBar.exists { return inBar }
-        return app.buttons.matching(NSPredicate(format: "label == %@ AND NOT (identifier BEGINSWITH %@)", title, "sidebar-")).firstMatch
+        return app.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
     }
 
     private func tab(_ title: String) {
@@ -70,80 +68,46 @@ final class ScreenshotTests: XCTestCase {
         b.tap()
     }
 
-    /// Every main screen, in whichever layout the size class gives.
+    /// Every main screen, folded or unfolded (the same tabs and one column either way).
     func testTour() throws {
         app.launch()
         waitForData()
         // The scene restores where it was left; start the tour on the Overview.
-        if !app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 5) {
-            if isPhone { tab("Overview") } else { showSidebar(); app.buttons["sidebar-overview"].firstMatch.tap(); hideSidebar() }
-        }
+        if !app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 5) { tab("Overview") }
         XCTAssertTrue(app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 20))
         sleep(1)
         shot("01-overview")
-
-        if isPhone {
-            app.swipeUp()
-            shot("02-overview-scrolled")
-            app.swipeDown(); app.swipeDown()
-            tab("Accounts")
-            XCTAssertTrue(app.descendants(matching: .any)["accounts"].waitForExistence(timeout: 10))
-            shot("03-accounts")
-            firstElement("account-row-").tap()
-            XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 10))
-            sleep(2)
-            shot("04-account-detail")
-            app.swipeUp()
-            shot("05-account-detail-scrolled")
-            tab("Requests")
-            sleep(2)
-            shot("06-requests")
-            firstElement("request-").tap()
-            XCTAssertTrue(app.descendants(matching: .any)["request-detail"].waitForExistence(timeout: 10))
-            shot("07-request-detail")
-            tab("Usage")
-            _ = app.descendants(matching: .any)["usage-total"].waitForExistence(timeout: 20)
-            sleep(2)
-            shot("08-usage")
-            app.swipeUp()
-            shot("09-usage-breakdown")
-            tab("Settings")
-            sleep(2)
-            shot("10-settings")
-            tab("Overview")
-            app.buttons["faults-button"].firstMatch.tap()
-            sleep(1)
-            shot("11-faults")
-        } else {
-            showSidebar()
-            shot("02-sidebar")
-            app.buttons["sidebar-accounts"].firstMatch.tap()
-            sleep(2)
-            shot("02b-accounts-list")
-            firstElement("account-row-").tap()
-            XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 10))
-            sleep(2)
-            shot("03-accounts-detail")
-            showSidebar()
-            app.buttons["sidebar-requests"].firstMatch.tap()
-            sleep(2)
-            firstElement("request-").tap()
-            XCTAssertTrue(app.descendants(matching: .any)["request-detail"].waitForExistence(timeout: 10))
-            shot("04-requests-inspector")
-            showSidebar()
-            app.buttons["sidebar-usage"].firstMatch.tap()
-            _ = app.descendants(matching: .any)["usage-total"].waitForExistence(timeout: 20)
-            sleep(2)
-            shot("05-usage")
-            showSidebar()
-            app.buttons["sidebar-faults"].firstMatch.tap()
-            sleep(2)
-            shot("06-faults")
-            showSidebar()
-            app.buttons["sidebar-overview"].firstMatch.tap()
-            sleep(1)
-            shot("07-overview-again")
-        }
+        app.swipeUp()
+        shot("02-overview-scrolled")
+        app.swipeDown(); app.swipeDown()
+        tab("Accounts")
+        XCTAssertTrue(app.descendants(matching: .any)["accounts"].waitForExistence(timeout: 10))
+        shot("03-accounts")
+        firstElement("account-row-").tap()
+        XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 10))
+        sleep(2)
+        shot("04-account-detail")
+        app.swipeUp()
+        shot("05-account-detail-scrolled")
+        tab("Requests")
+        sleep(2)
+        shot("06-requests")
+        firstElement("request-").tap()
+        XCTAssertTrue(app.descendants(matching: .any)["request-detail"].waitForExistence(timeout: 10))
+        shot("07-request-detail")
+        tab("Usage")
+        _ = app.descendants(matching: .any)["usage-total"].waitForExistence(timeout: 20)
+        sleep(2)
+        shot("08-usage")
+        app.swipeUp()
+        shot("09-usage-breakdown")
+        tab("Settings")
+        sleep(2)
+        shot("10-settings")
+        tab("Overview")
+        app.buttons["faults-button"].firstMatch.tap()
+        sleep(1)
+        shot("11-faults")
     }
 
     /// The account page when the window gets narrower under it, as on the iPhone Duo's outer
@@ -153,7 +117,6 @@ final class ScreenshotTests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         app.launch()
         waitForData()
-        guard isPhone else { throw XCTSkip("needs the compact layout") }
         tab("Accounts")
         firstElement("account-row-").tap()
         XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 10))
@@ -177,18 +140,6 @@ final class ScreenshotTests: XCTestCase {
         let any = e.waitForExistence(timeout: 10) ? e : app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix)).firstMatch
         XCTAssertTrue(any.waitForExistence(timeout: 10), "no \(prefix)… element")
         return any
-    }
-
-    private func hideSidebar() {
-        guard app.buttons["sidebar-overview"].firstMatch.isHittable else { return }
-        let toggle = app.navigationBars.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar' OR identifier CONTAINS[c] 'sidebar' OR label CONTAINS[c] 'Hide'")).firstMatch
-        if toggle.exists { toggle.tap(); sleep(1) }
-    }
-
-    private func showSidebar() {
-        if app.buttons["sidebar-overview"].firstMatch.isHittable { return }
-        let toggle = app.navigationBars.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar' OR identifier CONTAINS[c] 'sidebar' OR label CONTAINS[c] 'Show'")).firstMatch
-        if toggle.exists { toggle.tap(); sleep(1) }
     }
 
     /// Turns notifications on, sends a real test through Fusebox and APNs, and taps it.
@@ -373,12 +324,7 @@ final class ScreenshotTests: XCTestCase {
     }
 
     private func goToSettings() {
-        if isPhone {
-            tab("Settings")
-        } else {
-            showSidebar()
-            app.buttons.matching(NSPredicate(format: "label == 'Settings'")).firstMatch.tap()
-        }
+        tab("Settings")
         sleep(1)
     }
 }

@@ -39,6 +39,9 @@ enum Metrics {
     static let panelGap: CGFloat = 16
     static let sectionGap: CGFloat = 24
     static let panelPadding: CGFloat = 16
+    /// The widest a page's column gets (margins included): an iPhone Duo unfolded shows one
+    /// centred column, as on the outer screen, not the page spread across the inner screen.
+    static let column: CGFloat = 600
 }
 
 // MARK: - Panels
@@ -69,14 +72,16 @@ extension View {
             .overlay { if rivets { Rivets() } }
     }
 
-    /// The page's scroll content: a 16pt margin, kept off the hinge.
+    /// The page's scroll content: a 16pt margin, kept off the hinge, in one column at most
+    /// `Metrics.column` wide, centred when the screen is wider (the scroll view stays full width).
     func pageContent() -> some View {
         self
             .padding(.horizontal, Metrics.page)
             .padding(.top, 8)
             .padding(.bottom, 24)
             .clearOfFold()
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: Metrics.column, alignment: .leading)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -391,8 +396,10 @@ struct FoldPlan: Equatable {
     init(_ g: FoldGeometry, minColumnWidth: CGFloat, spacing: CGFloat) {
         let w = max(g.width, 1)
         let n = max(1, min(3, Int((w + spacing) / (minColumnWidth + spacing))))
-        // Two columns either way, or a hinge that content must not span: divide at the fold.
-        if let d = g.division, g.divisionActive || n == 2 {
+        // Two columns either way, or a hinge that content must not span: divide at the fold,
+        // when a whole column fits on each side of it (in the unfolded Duo's centred column it
+        // doesn't, and the page stays one column).
+        if let d = g.division, g.divisionActive || n == 2, d.minX >= minColumnWidth, g.width - d.maxX >= minColumnWidth {
             columns = 2; division = d
         } else {
             columns = n; division = nil
@@ -456,6 +463,10 @@ struct FoldGeometry: Equatable, Sendable {
 
     static let zero = FoldGeometry()
     private init() { width = 0 }
+
+    init(width: CGFloat, division: CGRect?, active: Bool) {
+        self.width = width; self.division = division; divisionActive = active
+    }
 
     nonisolated init(_ proxy: GeometryProxy) {
         width = proxy.size.width

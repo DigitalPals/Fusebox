@@ -14,6 +14,8 @@ final class AppStore {
     var overview: Overview?
     var accounts: [Account] = []
     var faults: [Fault] = []
+    /// Faults dismissed (here, on another iPhone or on the dashboard) until they clear.
+    var dismissedFaults: [Fault] = []
     var requests: [RequestLog] = []
     var requestsFull = false
     var load: [String: AccountLoad] = [:]
@@ -84,7 +86,7 @@ final class AppStore {
         stop()
         Connection.setKey(nil)
         api = nil
-        overview = nil; accounts = []; faults = []; requests = []; load = [:]; activity = [:]
+        overview = nil; accounts = []; faults = []; dismissedFaults = []; requests = []; load = [:]; activity = [:]
         WidgetSnapshot(overview: nil, accounts: [], faults: []).save()
         WidgetCenter.shared.reloadAllTimelines()
         UNUserNotificationCenter.current().setBadgeCount(0)
@@ -119,7 +121,7 @@ final class AppStore {
             async let r = api.requests(limit: requestsFull ? nil : 60)
             let (ov, ac, fa, rq) = try await (o, a, f, r)
             overview = ov; accounts = ac; requests = rq
-            setFaults(fa)
+            setFaults(fa, dismissed: try? await api.dismissedFaults())
             loadError = nil
             lastLoaded = .now
             dataChanged()
@@ -213,7 +215,7 @@ final class AppStore {
         switch m {
         case .request(let r): onRequest(r)
         case .load(let l): load = l
-        case .faults(let f): setFaults(f)
+        case .faults(let f, let dismissed): setFaults(f, dismissed: dismissed)
         case .tick(let t):
             overview?.totals = t.totals ?? overview?.totals
             overview?.active = t.active ?? overview?.active
@@ -254,7 +256,9 @@ final class AppStore {
 
     // MARK: Faults, badge, widgets, Live Activities
 
-    private func setFaults(_ incoming: [Fault]) {
+    /// `dismissed` nil leaves the dismissed list as it was.
+    private func setFaults(_ incoming: [Fault], dismissed: [Fault]? = nil) {
+        if let dismissed { dismissedFaults = dismissed }
         var f = incoming
         #if DEBUG
         // Debug builds, FUSEBOX_DEBUG_OUTAGE=<provider>: add a provider-exhausted fault, back in 47
@@ -293,6 +297,32 @@ final class AppStore {
         widgetReloadedAt = .now
         WidgetSnapshot(overview: overview, accounts: accounts, faults: faults).save()
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    // MARK: Dismissing faults
+
+    /// Hides a fault everywhere (this app, other iPhones, the dashboard) until it clears, or
+    /// until a warning turns into an error. The list updates at once; the live list confirms it.
+    func dismiss(_ fault: Fault) async throws {
+        guard let api else { return }
+        struct Body: Encodable { var key: String }
+        setFaults(faults.filter { $0.key != fault.key }, dismissed: dismissedFaults.filter { $0.key != fault.key } + [fault])
+        do {
+            try await api.send("POST", "/faults/dismiss", json: Body(key: fault.key))
+        } catch let e as APIError where e.status == 404 {
+            // It cleared in the meantime: nothing left to dismiss.
+        } catch {
+            await refreshAll()
+            throw error
+        }
+    }
+
+    /// Shows every dismissed fault again.
+    func restoreDismissedFaults() async throws {
+        guard let api else { return }
+        struct Body: Encodable {}
+        try await api.send("POST", "/faults/restore", json: Body())
+        setFaults(faults + dismissedFaults, dismissed: [])
     }
 
     // MARK: Account actions (as the dashboard's buttons)
