@@ -524,6 +524,18 @@ mod tests {
         assert_eq!(Relayed::new(&handle, &STANDARD.encode(key)).unwrap().endpoint(), format!("relay:{handle}"));
     }
 
+    /// The same vector is in the iPhone app's tests (ios/FuseboxTests), so both sides
+    /// agree on the sealed format: base64 of nonce, ciphertext and tag, with the AAD.
+    #[test]
+    fn the_sealed_format_matches_the_apps_test_vector() {
+        let key = STANDARD.decode("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=").unwrap();
+        let sealed = "ZGVmZ2hpamtsbW5vMzmqDw2FM7wEQByEuxAOmGKxb23lQZoch7TUOJLRwCy2xWKiI3biJsfRDUyYMPuPfiP5ilAmJAaZnsH2geTA7nusqGexJVJr7E+ELTHrVocNFjEWi+f9p6uZFP5ZMGEw7RL9CwU5y1HQlr+wxmiVnVFO8i7vE8pb3Fu/k7HdZqMQpbrbAFUsQqdreifl5Srn+uXHZDU59LAdsw4/j2fMnvVDBWayv42BHjzE1cBWwq31nrjHQ5Fo7RttcD2m5TK7uUp024Z/B24sXUdBMVKAbSEstDilO2Dch3xn9pGSp6gJOzXHramsjmeW4IC5";
+        let opened: Value = serde_json::from_slice(&open(&key, sealed).unwrap()).unwrap();
+        assert_eq!(opened["title"], "Claude sign-in expired");
+        assert_eq!(opened["path"], "#/accounts/claude-user1.json");
+        assert_eq!(opened["thread"], "claude");
+    }
+
     #[test]
     fn limits_count_per_key_and_window() {
         let mut limits = Limits::default();
