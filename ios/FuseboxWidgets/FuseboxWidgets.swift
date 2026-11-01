@@ -65,14 +65,14 @@ struct CombinedWeeklyView: View {
             case .systemMedium:
                 VStack(alignment: .leading, spacing: 8) {
                     header
-                    ForEach(pools.prefix(3)) { PoolRow(pool: $0, compact: false) }
+                    ForEach(pools.prefix(3)) { PoolRow(pool: $0, compact: false, mode: entry.data.mode) }
                     Spacer(minLength: 0)
                     footer
                 }
             default:
                 VStack(alignment: .leading, spacing: 6) {
                     header
-                    ForEach(pools.prefix(1)) { PoolRow(pool: $0, compact: true) }
+                    ForEach(pools.prefix(1)) { PoolRow(pool: $0, compact: true, mode: entry.data.mode) }
                     Spacer(minLength: 0)
                     footer
                 }
@@ -92,6 +92,8 @@ struct CombinedWeeklyView: View {
         }
     }
 
+    private var mode: QuotaDisplay { entry.data.mode }
+
     private var footer: some View {
         Text(entry.data.stale ? "Last seen \(Fmt.hm(entry.data.date))" : "Updated \(Fmt.hm(entry.data.date))")
             .font(Typeface.data(9.5)).foregroundStyle(Palette.fg3)
@@ -102,9 +104,9 @@ struct CombinedWeeklyView: View {
             HStack(spacing: 4) {
                 Text("\(p.providerName) weekly").font(Typeface.sans(15, .semibold, relativeTo: .headline)).widgetAccentable()
                 Spacer(minLength: 0)
-                Text(p.reading.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(15, weight: .medium, relativeTo: .headline))
+                Text(p.reading.map { Fmt.percent($0.value(mode)) } ?? "–").font(Typeface.data(15, weight: .medium, relativeTo: .headline))
             }
-            Gauge(value: p.reading?.used ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
+            Gauge(value: p.reading?.value(mode) ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
             if let r = p.pool.outlook?.nextResetAt {
                 Text("↺ \(Fmt.compactLeft(r, now: entry.date)) · \(p.status.text)").font(Typeface.sans(11.5, relativeTo: .caption2))
             } else {
@@ -114,10 +116,10 @@ struct CombinedWeeklyView: View {
     }
 
     private func circular(_ p: WeeklyPool) -> some View {
-        Gauge(value: p.reading?.used ?? 0, in: 0...100) {
+        Gauge(value: p.reading?.value(mode) ?? 0, in: 0...100) {
             Text("WK")
         } currentValueLabel: {
-            Text(p.reading.map { "\(Int($0.used.rounded()))" } ?? "–")
+            Text(p.reading.map { "\(Int($0.value(mode).rounded()))" } ?? "–")
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .widgetAccentable()
@@ -127,6 +129,7 @@ struct CombinedWeeklyView: View {
 struct PoolRow: View {
     var pool: WeeklyPool
     var compact: Bool
+    var mode: QuotaDisplay
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -134,10 +137,10 @@ struct PoolRow: View {
                 ProviderLogo(pool.logo, size: 12)
                 Text(pool.providerName).font(Typeface.sans(12.5, .medium, relativeTo: .caption)).foregroundStyle(Palette.fg).lineLimit(1)
                 Spacer(minLength: 2)
-                Text(pool.reading.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(12.5))
+                Text(pool.reading.map { Fmt.percent($0.value(mode)) } ?? "–").font(Typeface.data(12.5))
                     .foregroundStyle(pool.reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
             }
-            SegmentedMeter(pool.reading, pace: pool.reading == nil ? nil : pool.pool.pace, height: compact ? 7 : 8,
+            SegmentedMeter(pool.reading, pace: pool.reading == nil ? nil : pool.pool.pace, mode: mode, height: compact ? 7 : 8,
                            label: "\(pool.providerName) combined weekly", knockout: Palette.bg)
             // Small: the verdict and the next reset on their own lines, so neither is cut short.
             let reset = pool.pool.outlook?.nextResetAt.map { Text("↺ \(Fmt.compactLeft($0))").font(Typeface.data(compact ? 10 : 10.5)).foregroundStyle(Palette.fg3) }
@@ -227,6 +230,8 @@ struct SubscriptionWidgetView: View {
         }
     }
 
+    private var mode: QuotaDisplay { entry.data.mode }
+
     private func home(_ a: Account) -> some View {
         let st = a.state(now: entry.date)
         return VStack(alignment: .leading, spacing: 7) {
@@ -259,13 +264,13 @@ struct SubscriptionWidgetView: View {
             HStack(spacing: 4) {
                 Text(Quotas.label(w, short: short)).capsLabel(10)
                 Spacer(minLength: 0)
-                Text(r.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(11.5))
+                Text(r.map { Fmt.percent($0.value(mode)) } ?? "–").font(Typeface.data(11.5))
                     .foregroundStyle(r.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
                 if let reset = w?.resetsAt, family != .systemSmall {
                     Text("↺ \(Fmt.compactLeft(reset, now: entry.date))").font(Typeface.data(10)).foregroundStyle(Palette.fg3)
                 }
             }
-            SegmentedMeter(r, pace: Quotas.elapsed(w, now: entry.date), height: 7, label: w.map(Quotas.title) ?? "Quota", knockout: Palette.bg)
+            SegmentedMeter(r, pace: Quotas.elapsed(w, now: entry.date), mode: mode, height: 7, label: w.map(Quotas.title) ?? "Quota", knockout: Palette.bg)
         }
     }
 
@@ -278,8 +283,8 @@ struct SubscriptionWidgetView: View {
                     let r = QuotaReading(w, now: entry.date)
                     HStack(spacing: 4) {
                         Text(Quotas.label(w, short: short)).font(Typeface.label(11)).frame(width: 22, alignment: .leading)
-                        Gauge(value: r?.used ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
-                        Text(r.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(11.5, relativeTo: .caption2))
+                        Gauge(value: r?.value(mode) ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
+                        Text(r.map { Fmt.percent($0.value(mode)) } ?? "–").font(Typeface.data(11.5, relativeTo: .caption2))
                     }
                 }
             }

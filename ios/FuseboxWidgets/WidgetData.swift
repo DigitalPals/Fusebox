@@ -11,6 +11,8 @@ struct WidgetData: Sendable {
     var date: Date
     var stale: Bool
     var connected: Bool
+    /// Used or left, as chosen in the app.
+    var mode: QuotaDisplay = .current
 
     static func load() async -> WidgetData {
         guard let api = Connection.api else {

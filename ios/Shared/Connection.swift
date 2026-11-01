@@ -1,6 +1,6 @@
 import Foundation
 
-/// The app's own preferences (quota display, push subscription). The widgets don't need them.
+/// The app's own preferences (push subscription). The widgets don't need them.
 public enum AppGroup {
     public static var defaults: UserDefaults { .standard }
 }

@@ -71,7 +71,7 @@ const S = {
   setupModels: Object.create(null), setupContexts: Object.create(null),
   served: store.get('served') === '1', // this browser has seen Fusebox serve a request
   private: store.get('private') === '1', // hide emails and keys
-  quotaDisplay: store.get('quota-display') === 'remaining' ? 'remaining' : 'used',
+  quotaDisplay: store.get('quota-display') === 'used' ? 'used' : 'remaining',
   confirm: null,
   resets: {}, // account-specific confirmations and errors
   errorClears: {}, // pending error dismissals and action failures, separate from provider errors
@@ -1176,7 +1176,7 @@ function quotaControlsHTML(short = false, label = true) {
 }
 
 function setQuotaDisplay(mode, persist = true) {
-  S.quotaDisplay = mode === 'remaining' ? 'remaining' : 'used';
+  S.quotaDisplay = mode === 'used' ? 'used' : 'remaining';
   if (persist) store.set('quota-display', S.quotaDisplay);
   refreshViews();
 }

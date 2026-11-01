@@ -16,7 +16,7 @@ public struct SegmentedMeter: View {
 
     @Environment(\.displayScale) private var scale
 
-    public init(_ reading: QuotaReading?, pace: Double? = nil, mode: QuotaDisplay = .used, height: CGFloat = 9,
+    public init(_ reading: QuotaReading?, pace: Double? = nil, mode: QuotaDisplay = .standard, height: CGFloat = 9,
                 label: String = "Quota", knockout: Color = Palette.surface) {
         self.reading = reading; self.pace = pace; self.mode = mode; self.height = height; self.label = label
         self.knockout = knockout

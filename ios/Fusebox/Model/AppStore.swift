@@ -25,7 +25,11 @@ final class AppStore {
     var lastLoaded: Date?
     /// Settings: show meters as used or remaining (the dashboard's toggle).
     var quotaDisplay: QuotaDisplay {
-        didSet { AppGroup.defaults.set(quotaDisplay.rawValue, forKey: "quota-display") }
+        didSet {
+            guard quotaDisplay != oldValue else { return }
+            QuotaDisplay.stored = quotaDisplay
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
     var liveActivitiesEnabled: Bool {
         didSet { AppGroup.defaults.set(liveActivitiesEnabled, forKey: "live-activities"); syncOutages() }
@@ -44,7 +48,12 @@ final class AppStore {
     #endif
 
     init() {
-        quotaDisplay = QuotaDisplay(rawValue: AppGroup.defaults.string(forKey: "quota-display") ?? "") ?? .used
+        // Builds 1–4 kept the choice in the app's own defaults, out of the widgets' reach.
+        if QuotaDisplay.stored == nil, let old = AppGroup.defaults.string(forKey: "quota-display").flatMap(QuotaDisplay.init(rawValue:)) {
+            QuotaDisplay.stored = old
+        }
+        AppGroup.defaults.removeObject(forKey: "quota-display")
+        quotaDisplay = QuotaDisplay.current
         liveActivitiesEnabled = AppGroup.defaults.object(forKey: "live-activities") as? Bool ?? true
         api = Connection.api
     }

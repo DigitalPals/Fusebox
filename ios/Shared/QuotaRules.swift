@@ -65,6 +65,18 @@ public struct QuotaReading: Equatable, Sendable {
 public enum QuotaDisplay: String, Sendable, CaseIterable {
     case used, remaining
     public var word: String { self == .used ? "used" : "left" }
+
+    /// What's left, like the dashboard, until someone picks "Used".
+    public static let standard: QuotaDisplay = .remaining
+
+    /// The app's choice, kept in the shared keychain so the widgets follow it; nil before one is made.
+    public static var stored: QuotaDisplay? {
+        get { SharedKeychain.data("quota-display").flatMap { String(data: $0, encoding: .utf8) }.flatMap(QuotaDisplay.init(rawValue:)) }
+        set { SharedKeychain.set("quota-display", newValue.map { Data($0.rawValue.utf8) }) }
+    }
+
+    /// What the meters show now.
+    public static var current: QuotaDisplay { stored ?? standard }
 }
 
 /// What the segmented meter draws, as the dashboard draws it (ui/app.js `meterHTML`):
