@@ -67,6 +67,30 @@ public enum QuotaDisplay: String, Sendable, CaseIterable {
     public var word: String { self == .used ? "used" : "left" }
 }
 
+/// What the segmented meter draws, as the dashboard draws it (ui/app.js `meterHTML`):
+/// 20 segments of 5%, lit for the shown share (used, or left), coloured by how much is
+/// *used* in either mode (`meter` below 75%, `warn` from 75%, `err` from 95%), and the
+/// even-pace mark where usage would be if spread evenly, mirrored when showing what's left.
+public struct MeterModel: Equatable, Sendable {
+    public static let segments = 20
+
+    /// How many segments are lit, from the leading edge.
+    public var lit: Int
+    /// The lit segments' level; nil when nothing is reported.
+    public var level: QuotaReading.Level?
+    /// The pace mark's position along the bar, 0 (leading edge) to 1; nil without one.
+    public var pace: Double?
+
+    public init(_ reading: QuotaReading?, pace elapsed: Double?, mode: QuotaDisplay) {
+        guard let reading else { lit = 0; level = nil; pace = nil; return }
+        lit = min(Self.segments, max(0, Int((reading.value(mode) / 5).rounded())))
+        level = reading.level
+        pace = elapsed.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }.map { mode == .used ? $0 : 1 - $0 }
+    }
+
+    public func isLit(_ segment: Int) -> Bool { segment < lit }
+}
+
 public enum Quotas {
     /// A window's length from its name ("5h", "day", "week", "week fable"), in seconds.
     public static func seconds(_ w: QuotaWindow?) -> TimeInterval? {
@@ -92,6 +116,17 @@ public enum Quotas {
         guard let len = seconds(w), let reset = w?.resetsAt else { return nil }
         let left = reset.timeIntervalSince(now)
         return left >= 0 && left <= len ? 1 - left / len : nil
+    }
+
+    /// When the window's pace so far would use it up before it resets, the time it runs out
+    /// (DESIGN.md "Pace mark": at least a quarter of the window gone and 20% used; the list's
+    /// reset cell then reads "out 1h 40m" in `warn`). Nil when it lasts, or it's used up already.
+    public static func runsOut(_ w: QuotaWindow?, now: Date = .now) -> Date? {
+        guard let w, let len = seconds(w), let reset = w.resetsAt, let t = elapsed(w, now: now),
+              let r = QuotaReading(w, now: now), t >= 0.25, r.used >= 20, r.used < 100 else { return nil }
+        let perSecond = r.used / (t * len)
+        let out = now.addingTimeInterval((100 - r.used) / perSecond)
+        return out < reset ? out : nil
     }
 
     public static func isShort(_ w: QuotaWindow) -> Bool { w.name.range(of: #"^\d+h$"#, options: .regularExpression) != nil }

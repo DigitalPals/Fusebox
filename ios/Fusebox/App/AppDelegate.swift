@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 /// Keychain. `FUSEBOX_DEBUG_KEY_FILE` names a file holding the key (the simulator reads the
 /// Mac's files), so the key never appears in a command line or a log. `FUSEBOX_DEBUG_FORCE_RELAY=1`
 /// (read in PushManager) registers through the real push relay without telling the server.
+@MainActor
 enum DebugPreload {
     static func run() {
         let env = ProcessInfo.processInfo.environment
@@ -69,6 +70,9 @@ enum DebugPreload {
             if Connection.serverURL == nil { Connection.serverURL = URL(string: Connection.defaultURL) }
             if Connection.key != key { Connection.setKey(key) }
         }
+        // `FUSEBOX_DEBUG_OPEN=fusebox://accounts/<id>`: start there (screenshots of a scene that
+        // `simctl openurl` can't reach, such as a resizable session).
+        if let open = env["FUSEBOX_DEBUG_OPEN"].flatMap(URL.init(string:)) { Router.shared.pending = DeepLink.route(url: open) }
     }
 }
 #endif

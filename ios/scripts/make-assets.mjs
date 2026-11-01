@@ -70,7 +70,8 @@ function imageset(name, svg, template) {
     properties: { 'preserves-vector-representation': true, ...(template ? { 'template-rendering-intent': 'template' } : { 'template-rendering-intent': 'original' }) },
   });
 }
-imageset('Mark', readFileSync(join(repo, 'assets/icon.svg'), 'utf8').replace(/<title>.*?<\/title>/, ''), false);
+// One colour, drawn in the text colour (fg): no amber in the app.
+imageset('Mark', readFileSync(join(repo, 'assets/icon.svg'), 'utf8').replace(/<title>.*?<\/title>/, '').replace(/fill="#[0-9A-Fa-f]{3,6}"/g, 'fill="#000000"'), true);
 
 const logos = readFileSync(join(repo, 'ui/logos.svg'), 'utf8');
 for (const m of logos.matchAll(/<symbol id="(logo-[^"]+)"[^>]*viewBox="([^"]+)"[^>]*>([\s\S]*?)<\/symbol>/g)) {

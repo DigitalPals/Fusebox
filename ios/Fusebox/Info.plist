@@ -39,6 +39,14 @@
 	<string>public.app-category.developer-tools</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>UIAppFonts</key>
+	<array>
+		<string>IBMPlexSans.ttf</string>
+		<string>IBMPlexSansCondensed-Medium.ttf</string>
+		<string>IBMPlexSansCondensed-SemiBold.ttf</string>
+		<string>DMMono-Regular.ttf</string>
+		<string>DMMono-Medium.ttf</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

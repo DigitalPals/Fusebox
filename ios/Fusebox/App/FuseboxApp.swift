@@ -6,13 +6,15 @@ struct FuseboxApp: App {
     @State private var store = AppStore()
     @Environment(\.scenePhase) private var phase
 
+    init() { NavigationStyle.apply() }
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(store)
                 .environment(PushManager.shared)
                 .environment(Router.shared)
-                .tint(Palette.brand)
+                .tint(Palette.fg)
                 .onOpenURL { Router.shared.pending = DeepLink.route(url: $0) }
         }
         .onChange(of: phase) { _, now in

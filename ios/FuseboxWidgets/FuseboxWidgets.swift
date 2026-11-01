@@ -57,7 +57,7 @@ struct CombinedWeeklyView: View {
         if !entry.data.connected {
             NotConnected()
         } else if pools.isEmpty {
-            Text(entry.data.accounts.isEmpty ? "No data" : "No combined limits").font(.caption).foregroundStyle(Palette.fg3)
+            Text(entry.data.accounts.isEmpty ? "No data" : "No combined limits").font(Typeface.small).foregroundStyle(Palette.fg3)
         } else {
             switch family {
             case .accessoryCircular: circular(pools[0])
@@ -72,7 +72,7 @@ struct CombinedWeeklyView: View {
             default:
                 VStack(alignment: .leading, spacing: 6) {
                     header
-                    ForEach(pools.prefix(2)) { PoolRow(pool: $0, compact: true) }
+                    ForEach(pools.prefix(1)) { PoolRow(pool: $0, compact: true) }
                     Spacer(minLength: 0)
                     footer
                 }
@@ -82,33 +82,33 @@ struct CombinedWeeklyView: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            Text("Combined weekly").capsLabel(10)
+            Text(family == .systemSmall ? "Weekly" : "Combined weekly").capsLabel(10.5).lineLimit(1)
             Spacer(minLength: 0)
             let n = entry.data.faults.filter(\.countsOnBadge).count
             if n > 0 {
-                Text("\(n)").font(Typeface.data(10, weight: .semibold)).foregroundStyle(Palette.warn)
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)).foregroundStyle(Palette.warn)
+                StatusDot(entry.data.faults.contains { $0.level == "err" } ? Palette.err : Palette.warn, size: 7)
+                Text("\(n)").font(Typeface.data(11, weight: .medium)).foregroundStyle(Palette.fg)
             }
         }
     }
 
     private var footer: some View {
         Text(entry.data.stale ? "Last seen \(Fmt.hm(entry.data.date))" : "Updated \(Fmt.hm(entry.data.date))")
-            .font(.system(size: 9)).foregroundStyle(Palette.fg3)
+            .font(Typeface.data(9.5)).foregroundStyle(Palette.fg3)
     }
 
     private func rectangular(_ p: WeeklyPool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
-                Text("\(p.providerName) weekly").font(.headline).widgetAccentable()
+                Text("\(p.providerName) weekly").font(Typeface.sans(15, .semibold, relativeTo: .headline)).widgetAccentable()
                 Spacer(minLength: 0)
-                Text(p.reading.map { Fmt.percent($0.used) } ?? "–").font(.headline).monospacedDigit()
+                Text(p.reading.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(15, weight: .medium, relativeTo: .headline))
             }
             Gauge(value: p.reading?.used ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
             if let r = p.pool.outlook?.nextResetAt {
-                Text("↺ \(Fmt.compactLeft(r, now: entry.date)) · \(p.status.text)").font(.caption2)
+                Text("↺ \(Fmt.compactLeft(r, now: entry.date)) · \(p.status.text)").font(Typeface.sans(11.5, relativeTo: .caption2))
             } else {
-                Text(p.status.text).font(.caption2)
+                Text(p.status.text).font(Typeface.sans(11.5, relativeTo: .caption2))
             }
         }
     }
@@ -132,32 +132,38 @@ struct PoolRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 ProviderLogo(pool.logo, size: 12)
-                Text(pool.providerName).font(.caption.weight(.medium)).foregroundStyle(Palette.fg).lineLimit(1)
+                Text(pool.providerName).font(Typeface.sans(12.5, .medium, relativeTo: .caption)).foregroundStyle(Palette.fg).lineLimit(1)
                 Spacer(minLength: 2)
-                Text(pool.reading.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(12, weight: .medium))
+                Text(pool.reading.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(12.5))
                     .foregroundStyle(pool.reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
             }
             SegmentedMeter(pool.reading, pace: pool.reading == nil ? nil : pool.pool.pace, height: compact ? 7 : 8,
-                           label: "\(pool.providerName) combined weekly")
-            HStack(spacing: 4) {
-                Text(pool.status.text).foregroundStyle(statusColor)
-                if let r = pool.pool.outlook?.nextResetAt { Text("· ↺ \(Fmt.compactLeft(r))").foregroundStyle(Palette.fg3) }
+                           label: "\(pool.providerName) combined weekly", knockout: Palette.bg)
+            // Small: the verdict and the next reset on their own lines, so neither is cut short.
+            let reset = pool.pool.outlook?.nextResetAt.map { Text("↺ \(Fmt.compactLeft($0))").font(Typeface.data(compact ? 10 : 10.5)).foregroundStyle(Palette.fg3) }
+            if compact {
+                Text(pool.status.text).font(Typeface.sans(10.5, relativeTo: .caption2)).foregroundStyle(statusColor).lineLimit(1)
+                if let reset { reset.lineLimit(1) }
+            } else {
+                HStack(spacing: 4) {
+                    Text(pool.status.text).font(Typeface.sans(11, relativeTo: .caption2)).foregroundStyle(statusColor)
+                    if let reset { Text("·").font(Typeface.sans(11, relativeTo: .caption2)).foregroundStyle(Palette.fg3); reset }
+                }
+                .lineLimit(1)
             }
-            .font(.system(size: compact ? 9.5 : 10.5))
-            .lineLimit(1)
         }
     }
 
     private var statusColor: Color {
-        switch pool.status.level { case "err": Palette.err; case "warn": Palette.warn; case "ok": Palette.ok; default: Palette.fg2 }
+        Palette.state(pool.status.level)
     }
 }
 
 struct NotConnected: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Image("Mark").resizable().scaledToFit().frame(height: 20)
-            Text("Open Fusebox to connect").font(.caption).foregroundStyle(Palette.fg2)
+            Image("Mark").renderingMode(.template).resizable().scaledToFit().frame(height: 20).foregroundStyle(Palette.fg)
+            Text("Open Fusebox to connect").font(Typeface.small).foregroundStyle(Palette.fg2)
         }
     }
 }
@@ -217,7 +223,7 @@ struct SubscriptionWidgetView: View {
             default: home(a)
             }
         } else {
-            Text("Choose a subscription").font(.caption).foregroundStyle(Palette.fg3)
+            Text("Choose a subscription").font(Typeface.small).foregroundStyle(Palette.fg3)
         }
     }
 
@@ -227,21 +233,21 @@ struct SubscriptionWidgetView: View {
             HStack(spacing: 6) {
                 ProviderLogo(a.logo, size: 14)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(a.label).font(.caption.weight(.medium)).foregroundStyle(Palette.fg).lineLimit(1)
-                    Text(a.planName.map { "\(a.providerName) \($0)" } ?? a.providerName).font(.system(size: 10)).foregroundStyle(Palette.fg3)
+                    Text(a.label).font(Typeface.sans(12.5, .medium, relativeTo: .caption)).foregroundStyle(Palette.fg).lineLimit(1)
+                    Text(a.planName.map { "\(a.providerName) \($0)" } ?? a.providerName).font(Typeface.sans(10.5, relativeTo: .caption2)).foregroundStyle(Palette.fg3)
                 }
                 Spacer(minLength: 0)
-                StatusDot(st.color, size: 7)
+                StatusDot(st.color, size: 8)
             }
             ForEach([true, false], id: \.self) { short in
                 if !(short && a.noShortLimit) { meter(a, short: short) }
             }
             Spacer(minLength: 0)
             if st.kind == .cooling, let until = st.until {
-                (Text("\(st.word) · back in ") + Text(until, style: .relative)).font(.system(size: 10)).foregroundStyle(Palette.warn).lineLimit(1)
+                (Text("\(st.word) · back in ") + Text(until, style: .relative)).font(Typeface.sans(10.5, relativeTo: .caption2)).foregroundStyle(Palette.warn).lineLimit(1)
             } else {
                 Text(entry.data.stale ? "Last seen \(Fmt.hm(entry.data.date))" : "Updated \(Fmt.hm(entry.data.date))")
-                    .font(.system(size: 9)).foregroundStyle(Palette.fg3)
+                    .font(Typeface.data(9.5)).foregroundStyle(Palette.fg3)
             }
         }
     }
@@ -251,29 +257,29 @@ struct SubscriptionWidgetView: View {
         let r = QuotaReading(w, now: entry.date)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
-                Text(Quotas.label(w, short: short)).font(Typeface.label(10)).foregroundStyle(Palette.fg3)
+                Text(Quotas.label(w, short: short)).capsLabel(10)
                 Spacer(minLength: 0)
-                Text(r.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(11, weight: .medium))
+                Text(r.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(11.5))
                     .foregroundStyle(r.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
                 if let reset = w?.resetsAt, family != .systemSmall {
                     Text("↺ \(Fmt.compactLeft(reset, now: entry.date))").font(Typeface.data(10)).foregroundStyle(Palette.fg3)
                 }
             }
-            SegmentedMeter(r, pace: Quotas.elapsed(w, now: entry.date), height: 7, label: w.map(Quotas.title) ?? "Quota")
+            SegmentedMeter(r, pace: Quotas.elapsed(w, now: entry.date), height: 7, label: w.map(Quotas.title) ?? "Quota", knockout: Palette.bg)
         }
     }
 
     private func rectangular(_ a: Account) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(a.label).font(.headline).lineLimit(1).widgetAccentable()
+            Text(a.label).font(Typeface.sans(15, .semibold, relativeTo: .headline)).lineLimit(1).widgetAccentable()
             ForEach([true, false], id: \.self) { short in
                 if !(short && a.noShortLimit) {
                     let w = a.window(short: short, now: entry.date)
                     let r = QuotaReading(w, now: entry.date)
                     HStack(spacing: 4) {
-                        Text(Quotas.label(w, short: short)).font(.caption2.weight(.semibold)).frame(width: 22, alignment: .leading)
+                        Text(Quotas.label(w, short: short)).font(Typeface.label(11)).frame(width: 22, alignment: .leading)
                         Gauge(value: r?.used ?? 0, in: 0...100) {}.gaugeStyle(.accessoryLinearCapacity)
-                        Text(r.map { Fmt.percent($0.used) } ?? "–").font(.caption2).monospacedDigit()
+                        Text(r.map { Fmt.percent($0.used) } ?? "–").font(Typeface.data(11.5, relativeTo: .caption2))
                     }
                 }
             }
@@ -295,22 +301,22 @@ struct OutageLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
                         ProviderLogo(Provider.logo(provider: context.attributes.provider), size: 18)
-                        Text(context.attributes.providerName).font(.headline)
+                        Text(context.attributes.providerName).font(Typeface.sans(16, .semibold, relativeTo: .headline))
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    countdown(context.state).font(.title3.monospacedDigit()).foregroundStyle(Palette.brand)
+                    countdown(context.state).font(Typeface.data(20, relativeTo: .title3)).foregroundStyle(Palette.fg)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     Text(context.state.recovered ? context.state.title : "\(context.state.title). \(context.state.detail).")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        .font(Typeface.small).foregroundStyle(Palette.fg2).lineLimit(2)
                 }
             } compactLeading: {
                 ProviderLogo(Provider.logo(provider: context.attributes.provider), size: 16)
             } compactTrailing: {
-                countdown(context.state).monospacedDigit().frame(maxWidth: 64).foregroundStyle(Palette.brand)
+                countdown(context.state).font(Typeface.data(14, relativeTo: .body)).frame(maxWidth: 64).foregroundStyle(Palette.fg)
             } minimal: {
-                Image(systemName: context.state.recovered ? "checkmark" : "bolt.slash.fill").foregroundStyle(Palette.brand)
+                Image(systemName: context.state.recovered ? "checkmark" : "bolt.slash.fill").foregroundStyle(context.state.recovered ? Palette.ok : Palette.err)
             }
             .widgetURL(URL(string: "fusebox://accounts"))
         }
@@ -335,22 +341,22 @@ struct OutageLockScreen: View {
         HStack(alignment: .center, spacing: 12) {
             ProviderLogo(Provider.logo(provider: context.attributes.provider), size: 28)
             VStack(alignment: .leading, spacing: 3) {
-                Text(s.title).font(.headline).foregroundStyle(Palette.fg).lineLimit(2)
-                Text(s.recovered ? s.detail : s.detail).font(.caption).foregroundStyle(Palette.fg3)
+                Text(s.title).font(Typeface.sans(16, .semibold, relativeTo: .headline)).foregroundStyle(Palette.fg).lineLimit(2)
+                Text(s.detail).font(Typeface.small).foregroundStyle(Palette.fg3)
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
                 if s.recovered {
-                    Image(systemName: "checkmark.circle.fill").font(.title2).foregroundStyle(Palette.ok)
+                    HStack(spacing: 6) { StatusDot(Palette.ok); Text("Back").font(Typeface.sans(17, .medium, relativeTo: .title3)).foregroundStyle(Palette.fg) }
                 } else if let back = s.backAt, back > .now {
                     Text(timerInterval: Date.now...back, countsDown: true)
-                        .font(.title2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(Palette.brand)
+                        .font(Typeface.data(24, weight: .medium, relativeTo: .title2))
+                        .foregroundStyle(Palette.fg)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 120, alignment: .trailing)
-                    Text("Back \(Fmt.when(back))").font(.caption2).foregroundStyle(Palette.fg3)
+                    Text("back \(Fmt.when(back))").font(Typeface.data(11)).foregroundStyle(Palette.fg3)
                 } else {
-                    Text("Sign in again").font(.caption).foregroundStyle(Palette.warn)
+                    Text("Sign in again").font(Typeface.small).foregroundStyle(Palette.warn)
                 }
             }
         }

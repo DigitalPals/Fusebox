@@ -37,6 +37,12 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.developer-tools
         NSSupportsLiveActivities: true
+        UIAppFonts:
+          - IBMPlexSans.ttf
+          - IBMPlexSansCondensed-Medium.ttf
+          - IBMPlexSansCondensed-SemiBold.ttf
+          - DMMono-Regular.ttf
+          - DMMono-Medium.ttf
         UILaunchScreen:
           UIColorName: LaunchBackground
         UIApplicationSceneManifest:
@@ -84,6 +90,12 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        UIAppFonts:
+          - IBMPlexSans.ttf
+          - IBMPlexSansCondensed-Medium.ttf
+          - IBMPlexSansCondensed-SemiBold.ttf
+          - DMMono-Regular.ttf
+          - DMMono-Medium.ttf
         FuseboxKeychainGroup: $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
     entitlements:
       path: FuseboxWidgets/FuseboxWidgets.entitlements

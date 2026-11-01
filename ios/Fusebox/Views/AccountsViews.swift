@@ -9,91 +9,56 @@ struct AccountsList: View {
     var selection: Binding<String?>?
 
     var body: some View {
-        Group {
-            if let selection {
-                List(selection: selection) { rows }
-            } else {
-                List { rows }
+        ScrollView {
+            VStack(alignment: .leading, spacing: Metrics.sectionGap) {
+                if !store.accounts.isEmpty {
+                    SectionHead("\(store.accounts.count) accounts", meta: meta) { QuotaModeToggle() }
+                }
+                ForEach(store.groups, id: \.provider) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            ProviderLogo(group.accounts[0].logo, size: 16)
+                            Text(group.name).capsLabel(12, color: Palette.fg2)
+                            Text("\(group.accounts.count)").font(Typeface.data(12)).foregroundStyle(Palette.fg3)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(.isHeader)
+                        RowsPanel(items: group.accounts, rivets: true) { row($0) }
+                    }
+                }
             }
+            .pageContent()
         }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
         .background(Palette.bg)
         .refreshable { await store.refreshAll() }
-        .navigationTitle("Accounts")
+        .navigationTitle(AppSection.accounts.pageTitle)
         .overlay {
             if store.accounts.isEmpty {
-                ContentUnavailableView("No accounts connected", systemImage: "person.crop.circle.badge.plus",
-                                       description: Text("Sign in with a subscription or add an API key from the web dashboard."))
+                EmptyState("No accounts connected", systemImage: "person.crop.circle.badge.plus", message: "Sign in with a subscription or add an API key from the web dashboard.")
+                    .foregroundStyle(Palette.fg2)
             }
         }
         .accessibilityIdentifier("accounts")
     }
 
-    @ViewBuilder private var rows: some View {
-        ForEach(store.groups, id: \.provider) { group in
-            Section {
-                ForEach(group.accounts) { a in
-                    if selection != nil {
-                        AccountRow(account: a).tag(a.id)
-                    } else {
-                        NavigationLink(value: a.id) { AccountRow(account: a) }
-                    }
-                }
-            } header: {
-                HStack(spacing: 6) {
-                    ProviderLogo(group.accounts[0].logo, size: 14)
-                    Text(group.name).capsLabel(11.5)
-                    Text("\(group.accounts.count)").font(Typeface.data(10.5)).foregroundStyle(Palette.fg3)
-                }
-            }
-            .listRowBackground(Palette.surface)
-        }
+    private var meta: String {
+        let ready = store.accounts.filter { $0.state().kind == .ready }.count
+        let cooling = store.accounts.filter { $0.state().kind == .cooling }.count
+        return "\(ready) ready" + (cooling > 0 ? " · \(cooling) cooling" : "")
     }
-}
 
-struct AccountRow: View {
-    @Environment(AppStore.self) private var store
-    var account: Account
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(account.label).font(.subheadline.weight(.medium)).foregroundStyle(Palette.fg).lineLimit(1)
-                    Text("\(account.planName.map { "\($0) · " } ?? "")\(account.authName)")
-                        .font(.caption).foregroundStyle(Palette.fg3)
-                }
-                Spacer(minLength: 4)
-                StatusLabel(account: account, inFlight: store.inFlight(account.id))
+    @ViewBuilder private func row(_ a: Account) -> some View {
+        if let selection {
+            Button { selection.wrappedValue = a.id } label: {
+                AccountRowContent(account: a, selected: selection.wrappedValue == a.id)
             }
-            if account.metered {
-                CompactMeters(account: account, mode: store.quotaDisplay)
-            }
-        }
-        .padding(.vertical, 2)
-        .accessibilityIdentifier("account-row-\(account.id)")
-    }
-}
-
-/// The list's small meters: label, segments and percentage only.
-struct CompactMeters: View {
-    var account: Account
-    var mode: QuotaDisplay
-    var body: some View {
-        VStack(spacing: 4) {
-            if !account.noShortLimit { row(short: true) }
-            row(short: false)
-        }
-    }
-    private func row(short: Bool) -> some View {
-        let w = account.window(short: short)
-        let r = QuotaReading(w)
-        return HStack(spacing: 8) {
-            Text(Quotas.label(w, short: short)).font(Typeface.label(10)).foregroundStyle(Palette.fg3).frame(width: 26, alignment: .leading)
-            SegmentedMeter(r, pace: Quotas.elapsed(w), mode: mode, height: 7, label: w.map(Quotas.title) ?? "Quota").frame(maxWidth: 160)
-            Text(r.map { Fmt.percent($0.value(mode)) } ?? "–").font(Typeface.data(11)).foregroundStyle(Palette.fg2)
-            Spacer(minLength: 0)
+            .buttonStyle(RowButtonStyle())
+            .accessibilityAddTraits(selection.wrappedValue == a.id ? .isSelected : [])
+            .accessibilityIdentifier("account-row-\(a.id)")
+        } else {
+            NavigationLink(value: a.id) { AccountRowContent(account: a) }
+                .buttonStyle(RowButtonStyle())
+                .accessibilityIdentifier("account-row-\(a.id)")
         }
     }
 }
@@ -108,8 +73,10 @@ struct AccountDetailView: View {
         if let a = store.account(id) {
             AccountDetail(account: a)
         } else {
-            ContentUnavailableView("This account is gone", systemImage: "person.crop.circle.badge.questionmark",
-                                   description: Text("It was removed or its credentials changed."))
+            EmptyState("This account is gone", systemImage: "person.crop.circle.badge.questionmark", message: "It was removed or its credentials changed.")
+                .foregroundStyle(Palette.fg2)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Palette.bg)
         }
     }
 }
@@ -124,9 +91,11 @@ private enum PendingAction: Identifiable {
     }
 }
 
+/// One account, laid out as the dashboard's account page: the head (logo, email, plan,
+/// status, Refresh and the breaker), then Limits, Banked resets, Cooldowns, Activity, New
+/// sessions and Sign-in.
 struct AccountDetail: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.openURL) private var openURL
     var account: Account
 
     @State private var busy = false
@@ -134,23 +103,31 @@ struct AccountDetail: View {
     @State private var pending: PendingAction?
     @State private var errorText: String?
 
-    private enum Block: String, Identifiable { case limits, resets, cooldowns, activity, routing; var id: String { rawValue } }
+    private enum Block: String, Identifiable { case limits, resets, cooldowns, activity, priority, signin; var id: String { rawValue } }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: Metrics.panelGap) {
                 head
-                if let errorText { Text(errorText).font(.footnote).foregroundStyle(Palette.err) }
+                if let errorText {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        StatusDot(Palette.err)
+                        Text(errorText).font(Typeface.meta).foregroundStyle(Palette.err)
+                    }
+                }
                 if account.lastError != nil { errorBox }
                 FoldAwareColumns(items: blocks, minColumnWidth: 360) { block($0) }
             }
-            .padding(16)
-            .clearOfFold()
+            .pageContent()
         }
         .background(Palette.bg)
         .navigationTitle(account.label)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbar }
+        // The email is the page's own title; the bar keeps only the way back.
+        .toolbar {
+            ToolbarItem(placement: .principal) { Text(account.providerName).capsLabel(12, color: Palette.fg2) }
+            ToolbarItem(placement: .primaryAction) { if busy { ProgressView() } }
+        }
         .task(id: account.id) { await store.loadActivity(account.id) }
         .refreshable { await store.loadActivity(account.id); store.refreshAccounts() }
         .toast($toastText)
@@ -166,9 +143,7 @@ struct AccountDetail: View {
         var b: [Block] = []
         if account.metered { b.append(.limits) }
         if account.hasBankedResets(enabled: store.overview?.bankedResets ?? false) { b.append(.resets) }
-        b.append(.cooldowns)
-        b.append(.activity)
-        b.append(.routing)
+        b += [.cooldowns, .activity, .priority, .signin]
         return b
     }
 
@@ -178,80 +153,90 @@ struct AccountDetail: View {
         case .resets: BankedResetsCard(account: account, busy: busy, refresh: { await run("Checked") { try await store.refreshQuota(account.id) } }, use: useReset)
         case .cooldowns: cooldowns
         case .activity: ActivityCard(account: account)
-        case .routing: routing
+        case .priority: priority
+        case .signin: signin
         }
     }
 
     // MARK: Head
 
     private var head: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                ProviderLogo(account.logo, size: 28)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(account.label).font(.title3.weight(.semibold)).foregroundStyle(Palette.fg).lineLimit(1).minimumScaleFactor(0.7)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                ProviderLogo(account.logo, size: 32).padding(.top, 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(account.label).font(Typeface.title).foregroundStyle(Palette.fg)
+                        .lineLimit(2).minimumScaleFactor(0.75)
+                        .accessibilityAddTraits(.isHeader)
                         .accessibilityIdentifier("account-detail")
-                    Text([account.providerName + (account.planName.map { " \($0)" } ?? ""), account.authName].joined(separator: " · "))
-                        .font(.footnote).foregroundStyle(Palette.fg3)
+                    Text([account.providerName, account.planName, account.authName].compactMap { $0 }.joined(separator: " · "))
+                        .font(Typeface.meta).foregroundStyle(Palette.fg3)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // Status, Refresh and the breaker on one line when they fit, else status above the two.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    status.frame(maxWidth: .infinity, alignment: .leading)
+                    actions
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    status
+                    HStack(spacing: 10) { actions }
                 }
             }
-            HStack(spacing: 8) {
-                StatusLabel(account: account, inFlight: store.inFlight(account.id))
-                Text("· last used \(Fmt.ago(account.lastUsed))").font(.footnote).foregroundStyle(Palette.fg3)
-            }
-            actions
         }
+        .padding(.top, 4)
+    }
+
+    private var status: some View {
+        StatusLabel(account: account, inFlight: store.inFlight(account.id), font: Typeface.sans(15, relativeTo: .subheadline))
+            .accessibilityIdentifier("account-status")
     }
 
     /// Refresh and the on/off switch: the dashboard's breaker.
-    private var actions: some View {
-        HStack(spacing: 10) {
-            if account.kind == "oauth" && ["claude", "codex"].contains(account.provider) {
-                Button {
-                    Task { await run("Quota refreshed") { try await store.refreshQuota(account.id) } }
-                } label: { Label("Refresh quota", systemImage: "arrow.clockwise") }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("refresh-quota")
+    @ViewBuilder private var actions: some View {
+        if account.kind == "oauth" && ["claude", "codex"].contains(account.provider) {
+            Button {
+                Task { await run("Quota refreshed") { try await store.refreshQuota(account.id) } }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise").labelStyle(.titleOnly)
             }
-            Toggle(isOn: Binding(get: { !account.disabled }, set: { on in pending = on ? .enable : .disable })) {
-                Text(account.disabled ? "Disabled" : "Enabled").font(.subheadline)
-            }
-            .toggleStyle(.switch)
-            .fixedSize()
-            .tint(Palette.meter)
-            .accessibilityIdentifier("account-toggle")
+            .buttonStyle(.outline)
+            .disabled(busy)
+            .accessibilityIdentifier("refresh-quota")
         }
+        Toggle(isOn: Binding(get: { !account.disabled }, set: { on in pending = on ? .enable : .disable })) {
+            Text(account.disabled ? "Disabled" : "Enabled").font(Typeface.sans(15)).foregroundStyle(Palette.fg)
+        }
+        .toggleStyle(BreakerToggleStyle(labelFirst: false))
+        .padding(.leading, 6).padding(.trailing, 14)
+        .frame(height: 40)
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.lineStrong, lineWidth: 1))
+        .fixedSize()
         .disabled(busy)
-    }
-
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            if busy { ProgressView() }
-        }
+        .accessibilityIdentifier("account-toggle")
     }
 
     // MARK: Blocks
 
     private var errorBox: some View {
         Card {
-            HStack {
-                Text("Last error").capsLabel()
-                Spacer()
+            PanelHead("Last error") {
                 Button("Clear error") { if let id = account.lastErrorID { pending = .clearError(id) } }
-                    .font(.footnote).disabled(account.lastErrorID == nil || busy)
+                    .buttonStyle(FuseButtonStyle(.destructive, compact: true))
+                    .disabled(account.lastErrorID == nil || busy)
             }
-            Text(account.lastError ?? "").font(Typeface.data(12)).foregroundStyle(Palette.err).textSelection(.enabled)
-            Text("Clears the saved message. A new failure will appear again.").font(.caption).foregroundStyle(Palette.fg3)
+            Text(account.lastError ?? "").font(Typeface.data(12.5)).foregroundStyle(Palette.err).textSelection(.enabled)
+            Text("Clears the saved message. A new failure will appear again.").font(Typeface.small).foregroundStyle(Palette.fg3)
         }
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.errLine, lineWidth: 1))
     }
 
     private var limits: some View {
-        Card(rivets: true) {
-            HStack {
-                Text("Limits · \(store.quotaDisplay.word)").capsLabel()
-                Spacer()
-                QuotaModeToggle()
-            }
+        Card(rivets: true, spacing: 18) {
+            PanelHead("Limits · \(store.quotaDisplay.word)") { QuotaModeToggle() }
+                .accessibilityIdentifier("limits-panel")
             let windows = (account.quota?.windows ?? []).filter { QuotaReading($0) != nil }
             if account.noShortLimit {
                 WindowBlock(title: "5-hour window", reading: nil, pace: nil, note: "This account has no five-hour limit; only the weekly limits apply.", mode: store.quotaDisplay, noLimit: true)
@@ -269,9 +254,11 @@ struct AccountDetail: View {
                 WindowBlock(title: (w.model != nil ? Quotas.scopedTitle(w) : Quotas.title(w)) + " window", reading: r,
                             pace: Quotas.elapsed(w),
                             note: w.resetsAt.map { "\(back ? "Back" : "Resets") \(Fmt.when($0)) · in \(Fmt.left($0))" } ?? "No reset time reported",
-                            mode: store.quotaDisplay)
+                            mode: store.quotaDisplay, runsOut: Quotas.runsOut(w))
             }
-            ForEach(Array((account.quota?.limits ?? []).filter { !(($0.id ?? "").hasSuffix(":gate") && $0.usedPercent == 0) }.enumerated()), id: \.offset) { _, l in
+            let limits = (account.quota?.limits ?? []).filter { !(($0.id ?? "").hasSuffix(":gate") && $0.usedPercent == 0) }
+            ForEach(Array(limits.enumerated()), id: \.offset) { _, l in
+                Hairline()
                 LimitBlock(limit: l, mode: store.quotaDisplay)
             }
         }
@@ -283,71 +270,94 @@ struct AccountDetail: View {
         let reason: (String) -> String = { m in
             ["quota": "Usage limit used up", "rate_limit": "Rate limited", "checking": "Checking quota"][account.cooldownKinds?[m] ?? ""] ?? "Rate limited"
         }
-        return Card {
-            HStack {
-                Text("Cooldowns").capsLabel()
-                Spacer()
-                if !cds.isEmpty { Button("Clear all") { pending = .clearCooldowns }.font(.footnote).disabled(busy) }
+        return Card(spacing: 10) {
+            PanelHead("Cooldowns") {
+                if !cds.isEmpty { Button("Clear all") { pending = .clearCooldowns }.buttonStyle(.outlineSmall).disabled(busy) }
             }
             if cds.isEmpty {
                 Text("No models cooling down. A rate limit pauses only that model on this account.")
-                    .font(.footnote).foregroundStyle(Palette.fg3)
+                    .font(Typeface.meta).foregroundStyle(Palette.fg3)
             }
             ForEach(cds, id: \.0) { model, until in
-                HStack {
-                    Text(model == "*" ? "All models" : model).font(Typeface.data(12)).foregroundStyle(Palette.fg)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(reason(model)).font(.caption).foregroundStyle(Palette.fg2)
-                        Text(model == "*" && account.quotaResetUnknown == true ? "Reset time unknown" : "back \(Fmt.when(until)) · \(Fmt.left(until))")
-                            .font(.caption).foregroundStyle(Palette.warn)
+                Hairline()
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        cooldownModel(model)
+                        Spacer(minLength: 8)
+                        cooldownWhen(model, until, reason(model))
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        cooldownModel(model)
+                        cooldownWhen(model, until, reason(model))
                     }
                 }
+                .padding(.top, 2)
             }
         }
     }
 
-    private var routing: some View {
+    private func cooldownModel(_ model: String) -> some View {
+        Text(model == "*" ? "All models" : model).font(Typeface.data(13, relativeTo: .subheadline)).foregroundStyle(Palette.fg)
+    }
+
+    private func cooldownWhen(_ model: String, _ until: Date, _ reason: String) -> some View {
+        HStack(spacing: 10) {
+            Text(reason).font(Typeface.meta).foregroundStyle(Palette.fg2)
+            TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                Text(model == "*" && account.quotaResetUnknown == true ? "Reset time unknown" : "back \(Fmt.when(until, now: ctx.date)) · \(Fmt.left(until, now: ctx.date))")
+                    .font(Typeface.meta).foregroundStyle(Palette.warn)
+            }
+        }
+    }
+
+    private var priority: some View {
         let p = account.priority ?? 0
         let pick = p > 0 ? 10 : p < 0 ? -10 : 0
         let help = [10: "Takes new sessions before accounts set to Normal or Last.",
                     0: "Takes new sessions by the routing strategy, with the other Normal accounts.",
                     -10: "Takes new sessions only when no other account can."][pick]!
-        let c = account.counters ?? Counters()
-        return Card {
-            HStack {
-                Text("New sessions").capsLabel()
-                Spacer()
-                Picker("Priority", selection: Binding(get: { pick }, set: { v in
+        return Card(spacing: 10) {
+            PanelHead("New sessions") {
+                FuseSegmented("Priority", selection: Binding(get: { pick }, set: { v in
+                    guard v != pick else { return }
                     Task { await run(v > 0 ? "Takes new sessions first" : v < 0 ? "Takes new sessions last" : "Back to normal priority") {
                         try await store.setPriority(account.id, v)
                     } }
-                })) {
-                    Text("First").tag(10); Text("Normal").tag(0); Text("Last").tag(-10)
-                }
-                .pickerStyle(.segmented).fixedSize().disabled(busy)
+                }), options: [(10, "First"), (0, "Normal"), (-10, "Last")])
+                .disabled(busy)
                 .accessibilityIdentifier("priority")
             }
-            Text(help).font(.caption).foregroundStyle(Palette.fg3)
-            Divider().overlay(Palette.line)
-            Text("Since start").capsLabel()
-            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
-                GridRow { fig(c.requests, "Requests"); fig(c.failures, "Failed"); fig(c.cancelled, "Cancelled") }
-                GridRow { fig(c.inputTokens, "Tokens in"); fig(c.outputTokens, "Tokens out"); fig(c.cacheTokens, "Cached") }
-            }
-            Divider().overlay(Palette.line)
-            Text("Sign-in").capsLabel()
-            Text(account.signinLine()).font(.footnote).foregroundStyle(Palette.fg2)
-            if let file = account.file {
-                Text(file).font(Typeface.data(11)).foregroundStyle(Palette.fg3).lineLimit(1).truncationMode(.middle)
-            }
+            Text(help).font(Typeface.meta).foregroundStyle(Palette.fg2)
         }
     }
 
-    private func fig(_ v: Int?, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(Fmt.count(v)).font(.subheadline.weight(.medium)).monospacedDigit().foregroundStyle(Palette.fg)
-            Text(label).font(.caption2).foregroundStyle(Palette.fg3)
+    private var signin: some View {
+        let token: String? = {
+            guard account.kind == "oauth", let exp = account.expiresAt else { return nil }
+            let secs = exp.timeIntervalSinceNow
+            return secs > 0 ? "valid \(Fmt.span(secs)) · refreshes on its own" : "expired"
+        }()
+        return Card(spacing: 0) {
+            PanelHead("Sign-in").padding(.bottom, 4)
+            Hairline()
+            KeyValueRow(key: "Method", value: account.authName)
+            if let plan = account.planName {
+                Hairline()
+                KeyValueRow(key: "Plan", value: "\(account.providerName) \(plan)")
+            }
+            if let token {
+                Hairline()
+                KeyValueRow(key: "Token", value: token, valueColor: token == "expired" ? Palette.err : Palette.fg)
+            }
+            if let file = account.file {
+                Hairline()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Stored in").font(Typeface.row).foregroundStyle(Palette.fg3)
+                    Text(file).font(Typeface.data(12.5)).foregroundStyle(Palette.fg).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 10)
+            }
         }
     }
 
@@ -428,7 +438,8 @@ extension String {
     func ifEmpty(_ other: String) -> String { isEmpty ? other : self }
 }
 
-/// A window as a big bar with its reset line.
+/// A window as the account page draws it: its name and a big percentage, the 20pt meter with
+/// the pace mark, and the reset line under it.
 struct WindowBlock: View {
     var title: String
     var reading: QuotaReading?
@@ -436,18 +447,28 @@ struct WindowBlock: View {
     var note: String
     var mode: QuotaDisplay
     var noLimit = false
+    var runsOut: Date?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title).font(.subheadline).foregroundStyle(Palette.fg2)
-                Spacer()
-                Text(noLimit ? "No limit" : reading.map { Fmt.percent($0.value(mode)) } ?? "–")
-                    .font(.system(size: noLimit ? 13 : 20, weight: .medium)).monospacedDigit()
-                    .foregroundStyle(reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .lastTextBaseline, spacing: 12) {
+                Text(title).font(Typeface.row).foregroundStyle(Palette.fg2)
+                Spacer(minLength: 8)
+                if noLimit {
+                    Text("No limit").font(Typeface.row).foregroundStyle(Palette.fg3)
+                } else {
+                    Text(reading.map { Fmt.percent($0.value(mode)) } ?? "–")
+                        .font(Typeface.bigFigure).tracking(-0.6)
+                        .foregroundStyle(reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
+                }
             }
-            if !noLimit { SegmentedMeter(reading, pace: pace, mode: mode, height: 16, label: title) }
-            Text(note).font(.caption).foregroundStyle(Palette.fg3)
+            if !noLimit { SegmentedMeter(reading, pace: pace, mode: mode, height: 20, label: title) }
+            Text(note).font(Typeface.meta).foregroundStyle(Palette.fg3)
+                .fixedSize(horizontal: false, vertical: true)
+            if let runsOut {
+                Text("At this pace it runs out \(Fmt.when(runsOut)), in \(Fmt.left(runsOut))")
+                    .font(Typeface.meta).foregroundStyle(Palette.warn)
+            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -471,17 +492,23 @@ struct LimitBlock: View {
         case "overage": "Optional paid usage; separate from subscription allowance"
         default: "Separate feature allowance"
         }
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(l.name).font(.subheadline).foregroundStyle(Palette.fg2)
-                Spacer()
-                if let reading { Text(Fmt.percent(reading.value(mode))).font(Typeface.data(13)).foregroundStyle(Palette.fg) }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(l.name).font(Typeface.row).foregroundStyle(Palette.fg2)
+                Spacer(minLength: 8)
+                if let reading {
+                    Text(Fmt.percent(reading.value(mode))).font(Typeface.data(14, relativeTo: .subheadline)).foregroundStyle(Palette.fg)
+                } else {
+                    Text(l.enabled == false ? "Disabled" : detail).font(Typeface.meta).foregroundStyle(Palette.fg3)
+                }
             }
-            if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(Palette.fg2) }
-            if l.enabled == false { Text("Disabled").font(.caption).foregroundStyle(Palette.fg3) }
-            if let reading { SegmentedMeter(reading, mode: mode, height: 10, label: l.name) }
-            Text(scope).font(.caption).foregroundStyle(Palette.fg3)
+            if let reading {
+                SegmentedMeter(reading, mode: mode, height: 9, label: l.name)
+                if !detail.isEmpty { Text(detail).font(Typeface.data(12)).foregroundStyle(Palette.fg2) }
+            }
+            Text(scope).font(Typeface.small).foregroundStyle(Palette.fg3)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -493,49 +520,48 @@ struct BankedResetsCard: View {
 
     var body: some View {
         let r = account.bankedResets
-        Card {
-            HStack {
-                Text("Banked resets").capsLabel()
-                Spacer()
+        Card(spacing: 10) {
+            PanelHead("Banked resets") {
                 if let checked = r?.checkedAt {
-                    Text("Checked \(Fmt.ago(checked))").font(.caption2).foregroundStyle(Palette.fg3)
+                    Text("Checked \(Fmt.ago(checked))").font(Typeface.small).foregroundStyle(Palette.fg3)
                 }
             }
-            Text("↻ \(account.bankedLabel)").font(.subheadline.weight(.medium))
+            Text("↻ \(account.bankedLabel)").font(Typeface.sans(17, .medium, relativeTo: .headline))
                 .foregroundStyle(account.bankedNeedsReview ? Palette.warn : Palette.fg)
             ForEach(r?.inventory?.grants ?? []) { g in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(g.label ?? "Subscription reset").font(.footnote.weight(.medium)).foregroundStyle(Palette.fg)
+                        Text(g.label ?? "Subscription reset").font(Typeface.rowMedium).foregroundStyle(Palette.fg)
                         Spacer()
-                        Text("\(g.remaining ?? 0) left").font(Typeface.data(11)).foregroundStyle(Palette.fg2)
+                        Text("\(g.remaining ?? 0) left").font(Typeface.data(12)).foregroundStyle(Palette.fg2)
                     }
                     Text("\(g.expiresAt.map { "Expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "No expiry reported") · Clears \((g.clears ?? []).joined(separator: ", ").ifEmpty("provider limits"))")
-                        .font(.caption).foregroundStyle(Palette.fg3)
+                        .font(Typeface.small).foregroundStyle(Palette.fg3)
                 }
             }
-            Text(account.bankedPolicyText()).font(.caption).foregroundStyle(Palette.fg3)
-            if let reason = r?.inventory?.reason, r?.error == nil { Text(reason).font(.caption).foregroundStyle(Palette.fg3) }
+            Text(account.bankedPolicyText()).font(Typeface.meta).foregroundStyle(Palette.fg2)
+            if let reason = r?.inventory?.reason, r?.error == nil { Text(reason).font(Typeface.meta).foregroundStyle(Palette.fg3) }
             if let op = r?.operation, let msg = op.message {
-                Text(msg).font(.caption).foregroundStyle(["applied", "reconciled_used"].contains(op.status ?? "") ? Palette.ok : Palette.fg2)
+                Text(msg).font(Typeface.meta).foregroundStyle(["applied", "reconciled_used"].contains(op.status ?? "") ? Palette.ok : Palette.fg2)
             }
             if account.bankedNeedsReview {
                 Text("A reset may have been used. Resolve it in the web dashboard before using another.")
-                    .font(.caption).foregroundStyle(Palette.warn)
+                    .font(Typeface.meta).foregroundStyle(Palette.warn)
             }
-            if let e = r?.error { Text(e).font(.caption).foregroundStyle(Palette.err) }
-            HStack {
-                Button("Refresh") { Task { await refresh() } }.buttonStyle(.bordered).disabled(busy)
+            if let e = r?.error { Text(e).font(Typeface.meta).foregroundStyle(Palette.err) }
+            HStack(spacing: 10) {
+                Button("Refresh") { Task { await refresh() } }.buttonStyle(.outline).disabled(busy)
                 Button("Use 1 reset", action: use)
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.outline)
                     .disabled(busy || account.disabled || r?.inventory?.eligible != true || (account.bankedCount ?? 0) == 0 || account.bankedNeedsReview)
                     .accessibilityIdentifier("use-reset")
             }
+            .padding(.top, 4)
         }
     }
 }
 
-/// The account's last hour, and the coding sessions pinned to it.
+/// The account's last hour, its totals since start, and the coding sessions pinned to it.
 struct ActivityCard: View {
     @Environment(AppStore.self) private var store
     var account: Account
@@ -543,41 +569,55 @@ struct ActivityCard: View {
     var body: some View {
         let act = store.activity[account.id]
         let series = act?.series ?? []
-        let nowMinute = Int(Date.now.timeIntervalSince1970 / 60)
-        Card {
-            Text("Load · last 60 min").capsLabel()
-            if series.isEmpty {
-                Text(act == nil ? "Loading…" : "No requests in the last hour.").font(.footnote).foregroundStyle(Palette.fg3)
-            } else {
-                Chart(series) { b in
-                    BarMark(x: .value("Minute", b.date, unit: .minute), y: .value("Requests", b.requests), width: .ratio(0.7))
-                        .foregroundStyle(b.minute == nowMinute ? Palette.brand : (b.failed ?? 0) > 0 ? Palette.err : Palette.meter.opacity(0.55))
+        let c = account.counters ?? Counters()
+        Card(spacing: 12) {
+            PanelHead("Activity") {
+                TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                    Text(store.inFlight(account.id) > 0 ? "In use now" : "Last used \(Fmt.ago(account.lastUsed, now: ctx.date))")
+                        .font(Typeface.small).foregroundStyle(Palette.fg3)
                 }
-                .chartYScale(domain: 0...max(4, series.map(\.requests).max() ?? 0))
-                .chartXAxis(.hidden).chartYAxis(.hidden)
-                .frame(height: 54)
+            }
+            Text("Load · last 60 min").capsLabel(10.5)
+            if series.isEmpty {
+                Text(act == nil ? "Loading…" : "No requests in the last hour.").font(Typeface.meta).foregroundStyle(Palette.fg3)
+            } else {
+                LoadChart(series: series, height: 56)
                 Text("\(Fmt.plural(series.reduce(0) { $0 + $1.requests }, "request")) in the last hour")
-                    .font(.caption).foregroundStyle(Palette.fg3)
+                    .font(Typeface.small).foregroundStyle(Palette.fg3)
+            }
+            Hairline().padding(.vertical, 2)
+            Text("Since start").capsLabel(10.5)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow { Figure(value: Fmt.count(c.requests), label: "Requests"); Figure(value: Fmt.count(c.failures), label: "Failed", color: (c.failures ?? 0) > 0 ? Palette.err : Palette.fg); Figure(value: Fmt.count(c.cancelled), label: "Cancelled") }
+                GridRow { Figure(value: Fmt.compact(c.inputTokens), label: "Tokens in"); Figure(value: Fmt.compact(c.outputTokens), label: "Tokens out"); Figure(value: Fmt.compact(c.cacheTokens), label: "Cached") }
             }
             let sessions = act?.sessions ?? []
-            Divider().overlay(Palette.line)
-            Text("Pinned sessions · \(sessions.count)").capsLabel()
-            if sessions.isEmpty {
-                Text("No coding sessions are pinned to this account.").font(.footnote).foregroundStyle(Palette.fg3)
+            Hairline().padding(.vertical, 2)
+            HStack {
+                Text("Pinned sessions").capsLabel(10.5)
+                Spacer()
+                Text("\(sessions.count)").font(Typeface.data(12)).foregroundStyle(Palette.fg3)
             }
-            ForEach(sessions.prefix(8)) { s in
-                HStack(alignment: .firstTextBaseline) {
-                    StatusDot(s.active == true ? Palette.ok : Palette.idle, size: 6)
-                    VStack(alignment: .leading, spacing: 1) {
+            if sessions.isEmpty {
+                Text("No coding sessions are pinned to this account.").font(Typeface.meta).foregroundStyle(Palette.fg3)
+            } else {
+                Text("Coding sessions stay on this account so their prompt cache keeps working.")
+                    .font(Typeface.small).foregroundStyle(Palette.fg3)
+            }
+            ForEach(Array(sessions.prefix(8).enumerated()), id: \.element.id) { i, s in
+                if i > 0 { Hairline(color: Palette.lineSoft) }
+                HStack(alignment: .top, spacing: 10) {
+                    StatusDot(s.active == true ? Palette.ok : Palette.idle, size: 7).padding(.top, 6)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text([s.clientApp ?? s.client, s.keyLabel].compactMap { $0 }.joined(separator: " · ").ifEmpty("Session"))
-                            .font(.footnote).foregroundStyle(Palette.fg)
+                            .font(Typeface.row).foregroundStyle(Palette.fg).lineLimit(1)
                         Text([s.model, s.session.map { String($0.prefix(8)) }].compactMap { $0 }.joined(separator: " · "))
-                            .font(Typeface.data(11)).foregroundStyle(Palette.fg3)
+                            .font(Typeface.data(12)).foregroundStyle(Palette.fg3).lineLimit(1)
                     }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text("\(Fmt.count(s.requests)) req").font(.caption).foregroundStyle(Palette.fg2)
-                        Text(Fmt.ago(s.lastSeen)).font(.caption2).foregroundStyle(Palette.fg3)
+                    Spacer(minLength: 8)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(Fmt.count(s.requests)) req").font(Typeface.data(12)).foregroundStyle(Palette.fg2)
+                        Text(Fmt.ago(s.lastSeen)).font(Typeface.small).foregroundStyle(Palette.fg3)
                     }
                 }
             }

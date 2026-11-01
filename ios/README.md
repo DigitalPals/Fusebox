@@ -36,7 +36,11 @@ ios/
     QuotaRules.swift       quotaOf, windowOf, even pace, account state, plans, combined pools, routing text
     Connection.swift       URL/Keychain storage and the API client
     DeepLink.swift         notification `path` and fusebox:// routing
-    Components.swift       the segmented meter, provider logos, status dots
+    Components.swift       the segmented meter (with the pace mark), provider logos, status dots
+    Theme.swift            the design system: DESIGN.md's colour tokens, the three typefaces, and the
+                           buttons, breaker switch and segmented control
+    Fonts/                 IBM Plex Sans (variable), IBM Plex Sans Condensed, DM Mono, from ui/fonts
+                           (woff2 unwrapped to TTF, unmodified), with their SIL OFL 1.1 licences
     OutageActivity.swift   Live Activity attributes and the widgets' snapshot file
   Fusebox/                 the app (App/, Model/, Views/, Assets.xcassets)
   FuseboxWidgets/          widgets and the Live Activity
@@ -47,9 +51,35 @@ ios/
     publish-testflight     archive, sign, upload, wait, assign to the TestFlight group
     capture-fixtures.mjs   refresh FuseboxTests/Fixtures from a server, anonymised
     make-assets.mjs        app icon, mark and provider logos from assets/ and ui/logos.svg
+    make-colors.mjs        DESIGN.md's colour tokens as asset-catalogue colours (dark and light)
     ui-screenshots         run a UI test on a simulator and collect its screenshots
     relay-e2e.mjs          play a Fusebox's side of the push relay for a simulator (Debug)
 ```
+
+## Design
+
+The app follows the web dashboard's design system (`DESIGN.md` at the repository root; tokens
+and sizes from `ui/style.css`), in dark and light:
+
+- **Colour.** The tokens are asset-catalogue colours with a dark and a light appearance
+  (`scripts/make-colors.mjs` writes them; `Palette` reads them): `bg`, `surface`, `surface-inset`,
+  the `line` family, the `fg` ramp, `idle`, `meter`, `seg-on`, and the state colours `ok`/`warn`/`err`
+  (darker in light mode). Colour is only for state (dots, short status words, meter segments) and
+  provider logos. **No amber anywhere**: the tint, the tab selection, buttons and links are `fg`,
+  and the mark is a one-colour template.
+- **Type.** IBM Plex Sans for reading, IBM Plex Sans Condensed in tracked capitals for labels,
+  section heads and page titles, DM Mono for data (times, ids, countdowns, model names). All
+  three have tabular figures; every size scales with Dynamic Type (`relativeTo:`).
+- **Surfaces.** Flat `surface` panels with a 1pt `line` hairline and 8pt corners, 16pt page
+  margins, rows separated by hairlines. Outline buttons (`line-strong`, `fg` text), at most one
+  primary (`fg` fill) per view, destructive actions in `err` text; the dashboard's segmented control
+  and square-knobbed breaker switch (`meter` when on). Touch targets are at least 44pt.
+- **Segmented meter.** 20 segments of 5% with 2pt gaps and 1pt corners, lit `meter` below 75%
+  used, `warn` from 75%, `err` from 95% (always measured on used, in Left mode too), unlit `line`;
+  9pt in lists, 20pt on the account page. The pace mark is a 2pt `fg-3` tick at the elapsed share
+  of the window, drawn over the segments and 3–4pt past them above and below, mirrored in Left
+  mode, with a 1pt gap in the panel's colour on each side so it reads over lit segments in both
+  appearances. `MeterModel` and `Quotas.runsOut` hold the maths (`FuseboxTests/MeterTests.swift`).
 
 ## Build, run, test
 
@@ -77,7 +107,9 @@ against `/api/overview` before saving and shows the server's error text when tha
 For simulator runs, **Debug builds only** read `FUSEBOX_DEBUG_KEY_FILE` (a file holding the key;
 the simulator reads the Mac's files) once into the Keychain, so the key never appears on a command
 line or in a log. `FUSEBOX_DEBUG_URL` sets the URL, `FUSEBOX_DEBUG_RESET=1` forgets the key,
-`FUSEBOX_DEBUG_REGIONS=1` outlines the reserved regions, `FUSEBOX_DEBUG_OUTAGE=claude` adds a
+`FUSEBOX_DEBUG_REGIONS=1` outlines the reserved regions, `FUSEBOX_DEBUG_DIVISION=455-495[,active]`
+adds a synthetic hinge (a vertical division region at those window x positions),
+`FUSEBOX_DEBUG_OPEN=fusebox://…` starts on that page, `FUSEBOX_DEBUG_OUTAGE=claude` adds a
 synthetic “every account used up” fault to try the Live Activity, and
 `FUSEBOX_DEBUG_FORCE_RELAY=1` registers through the push relay (below) whatever the server offers,
 without telling the server. None of this is compiled into Release builds.
@@ -121,16 +153,39 @@ size, so folding, unfolding and resizing beside another app all go through the s
   - `FoldAwareColumns` puts card columns on either side of the division instead of across it
     (always when it's active; when inactive, whenever the width gives two columns anyway).
   - In the three-column layout the list column's width is capped at the division's leading edge.
-  - `clearOfFold()` insets a column's content when the division runs along its leading or trailing
-    part (the account detail, the request log, Usage, Settings), so buttons such as Refresh quota
-    and the on/off switch never sit on the hinge. The request inspector takes the page beyond it.
+  - `clearOfFold()` insets a column's content when an *active* division runs along its leading or
+    trailing part, so buttons such as Refresh and the on/off switch never sit on a hinge that
+    content must divide at. The insets are never negative, at most a third of the width each, and
+    dropped when less than 280pt would be left. The request inspector takes the page beyond it.
+  - **Columns take the width offered now.** `FoldAwareColumns` places its columns with a `Layout`
+    (`ColumnsLayout`) in exactly the proposed width; the measured geometry only chooses the number
+    of columns and the hinge, and a hinge that doesn't fit the current width is ignored. Build 2
+    sized columns from the last measured width, which could grow but never shrink, so when the
+    window got narrower (the outer screen moving its bars to the side, a rotation to portrait) the
+    page stayed wider than the screen and was cut off on the left.
+    `testAccountDetailNarrowingKeepsContentOnScreen` (UI test) rotates an account page from
+    landscape to portrait and checks its title, status, Refresh, switch and Limits panel lie inside
+    the window.
 
   `ArrangementView` isn't used: the standard containers plus the division region cover these
   screens, and its split style would duplicate what NavigationSplitView already does.
-- What the simulator can't do: the Duo simulator can't be folded from the command line (neither
-  simctl nor devicectl has a posture command, and `devicectl device appResize` refuses the inner
-  panel's orientation), so the folded layout was checked through the same compact code path on the
-  iPhone 18 Pro.
+- **Folded and unfolded on the simulator.** A booted (or rebooted, or erased) iPhone Duo simulator
+  starts *folded*: the outer screen is active (`xcrun devicectl device info displays --device <id>`
+  shows display 1 `active`, display 3, the inner panel, not). On it iOS 27.1 puts the status bar,
+  the navigation bar's buttons and the tab bar down the right edge, as on the device, and
+  `scripts/ui-screenshots <duo> outer` runs the tour there (XCUIScreen captures the outer panel;
+  XCUI doesn't report the side tab bar as a tab bar, so the tests find tabs by their buttons).
+  Unfolding needs DeviceHub's hinge slider: neither simctl nor devicectl has a posture command
+  (`screenConfig power`, orientation, a fold notification and an erase don't change it). For the
+  unfolded layout without the GUI, a resizable session at the inner panel's size gives the same
+  regular-width split view, and Debug builds take a synthetic hinge, because the session has none:
+
+  ```sh
+  SIMCTL_CHILD_FUSEBOX_DEBUG_KEY_FILE=… SIMCTL_CHILD_FUSEBOX_DEBUG_DIVISION=455-495 \
+  SIMCTL_CHILD_FUSEBOX_DEBUG_OPEN='fusebox://accounts' xcrun simctl launch <duo> com.digitalpals.fusebox
+  xcrun devicectl device appResize start --device <duo> --preferred-size 951x669 &
+  xcrun simctl io <duo> screenshot --display=5 inner.png     # display 5 is the resizable one
+  ```
 
 ## Live data
 

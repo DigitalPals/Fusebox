@@ -18,23 +18,23 @@ struct UsageView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Picker("Range", selection: $days) {
-                    Text("Today").tag(1); Text("7 days").tag(7); Text("30 days").tag(30)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("usage-range")
+            VStack(alignment: .leading, spacing: Metrics.panelGap) {
+                FuseSegmented("Range", selection: $days, options: [(1, "Today"), (7, "7 days"), (30, "30 days")], fill: true)
+                    .accessibilityIdentifier("usage-range")
                 if let filter {
                     Button { self.filter = nil } label: {
-                        Label("\(dimTitle(filter.dim)): \(rowName(dim: filter.dim, id: filter.id))", systemImage: "xmark.circle.fill")
-                            .font(.footnote)
+                        HStack(spacing: 8) {
+                            Text("\(dimTitle(filter.dim)): \(rowName(dim: filter.dim, id: filter.id))").lineLimit(1)
+                            Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.fg3)
+                        }
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.outlineSmall)
+                    .accessibilityLabel("Remove filter \(dimTitle(filter.dim)) \(rowName(dim: filter.dim, id: filter.id))")
                 }
                 if let error {
                     Card {
-                        Text(error).font(.footnote).foregroundStyle(Palette.err)
-                        Button("Retry") { Task { await load() } }.buttonStyle(.bordered)
+                        HStack(spacing: 8) { StatusDot(Palette.err); Text(error).font(Typeface.meta).foregroundStyle(Palette.err) }
+                        Button("Retry") { Task { await load() } }.buttonStyle(.outline)
                     }
                 }
                 if let c = data?.combined {
@@ -46,16 +46,16 @@ struct UsageView: View {
                         }
                     }
                 } else if loading {
-                    ProgressView("Loading usage…").frame(maxWidth: .infinity).padding(40)
+                    ProgressView("Loading usage…").font(Typeface.meta).foregroundStyle(Palette.fg3)
+                        .frame(maxWidth: .infinity).padding(40)
                 }
                 Text("What your traffic would cost at published API prices, in USD. An estimate, not a subscription bill.")
-                    .font(.caption).foregroundStyle(Palette.fg3)
+                    .font(Typeface.small).foregroundStyle(Palette.fg3)
             }
-            .padding(16)
-            .clearOfFold()
+            .pageContent()
         }
         .background(Palette.bg)
-        .navigationTitle("Usage")
+        .navigationTitle(AppSection.usage.pageTitle)
         .refreshable { await load() }
         .task(id: "\(days)|\(filter?.dim ?? ""):\(filter?.id ?? "")") { await load() }
         .task {
@@ -106,27 +106,24 @@ struct UsageView: View {
     private func costCard(_ c: UsageDashboard.Combined) -> some View {
         let t = c.totals ?? UsageAggregate()
         let tokens = t.tokens
-        let word = days == 1 ? "TODAY" : "LAST \(days) DAYS"
+        let word = days == 1 ? "today" : "last \(days) days"
         let avg = t.estimatedCostNanos.map { Fmt.dollars(nanos: $0 / Int64(max(1, days))) } ?? "Unpriced"
-        return Card {
-            Text("Estimated cost · \(word)").capsLabel()
-            Text(Fmt.dollars(nanos: t.estimatedCostNanos ?? ((t.observations ?? 0) == 0 ? 0 : nil)))
-                .font(.system(size: 30, weight: .medium)).monospacedDigit().foregroundStyle(Palette.fg)
-                .accessibilityIdentifier("usage-total")
-            Text(days == 1 ? "So far today · priced calls only" : "Avg \(avg) a day · priced calls only")
-                .font(.caption).foregroundStyle(Palette.fg3)
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                GridRow { stat(Fmt.count(t.observations), "Calls"); stat(Fmt.compact(tokens?.input), "Tokens in"); stat(Fmt.compact(tokens?.output), "Tokens out") }
-                GridRow { stat(Fmt.compact(tokens?.cacheRead), "Cache read"); stat(tokens?.cacheWrite == nil ? "Unknown" : Fmt.compact(tokens?.cacheWrite), "Cache write"); stat(Fmt.count(t.historyOnly ?? 0), "History only") }
+        return Card(spacing: 14) {
+            PanelHead("Estimated cost · \(word)")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Fmt.dollars(nanos: t.estimatedCostNanos ?? ((t.observations ?? 0) == 0 ? 0 : nil)))
+                    .font(Typeface.sans(34, .medium, relativeTo: .largeTitle)).tracking(-0.7).foregroundStyle(Palette.fg)
+                    .accessibilityIdentifier("usage-total")
+                Text(days == 1 ? "So far today · priced calls only" : "Avg \(avg) a day · priced calls only")
+                    .font(Typeface.meta).foregroundStyle(Palette.fg3)
             }
-            Text(coverage(t)).font(.caption).foregroundStyle(Palette.fg2)
-        }
-    }
-
-    private func stat(_ v: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(v).font(.subheadline.weight(.medium)).monospacedDigit().foregroundStyle(Palette.fg)
-            Text(label).font(.caption2).foregroundStyle(Palette.fg3)
+            Hairline()
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 14) {
+                GridRow { Figure(value: Fmt.count(t.observations), label: "Calls"); Figure(value: Fmt.compact(tokens?.input), label: "Tokens in"); Figure(value: Fmt.compact(tokens?.output), label: "Tokens out") }
+                GridRow { Figure(value: Fmt.compact(tokens?.cacheRead), label: "Cache read"); Figure(value: tokens?.cacheWrite == nil ? "Unknown" : Fmt.compact(tokens?.cacheWrite), label: "Cache write"); Figure(value: Fmt.count(t.historyOnly ?? 0), label: "History only") }
+            }
+            Text(coverage(t)).font(Typeface.small).foregroundStyle(Palette.fg2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -156,56 +153,79 @@ struct UsageView: View {
         let names = model.keys.map(groupName)
         let colors = model.keys.enumerated().map { i, k in k == UsageChart.other ? Palette.chartOther : Palette.chart[i % Palette.chart.count] }
         let readout = model.days.first { $0.date == selectedDay } ?? model.days[safe: model.peak]
-        return Card {
-            HStack {
-                Text("By day").capsLabel()
-                Spacer()
-                Picker("Stack", selection: $stack) { Text("Provider").tag("provider"); Text("Model").tag("model") }
-                    .pickerStyle(.segmented).fixedSize().controlSize(.small)
-                Picker("Value", selection: $metric) { Text("Cost").tag("cost"); Text("Calls").tag("calls") }
-                    .pickerStyle(.segmented).fixedSize().controlSize(.small)
+        return Card(spacing: 14) {
+            PanelHead("By day")
+            HStack(spacing: 8) {
+                FuseSegmented("Stack", selection: $stack, options: [("provider", "Provider"), ("model", "Model")])
+                Spacer(minLength: 0)
+                FuseSegmented("Value", selection: $metric, options: [("cost", "Cost"), ("calls", "Calls")])
             }
             if days > 1 {
                 Chart(model.parts) { p in
-                    BarMark(x: .value("Day", p.day, unit: .day), y: .value(metric == "calls" ? "Calls" : "Cost", p.value))
+                    BarMark(x: .value("Day", p.day, unit: .day), y: .value(metric == "calls" ? "Calls" : "Cost", p.value), width: .ratio(0.62))
                         .foregroundStyle(by: .value("Group", groupName(p.key)))
-                        .opacity(selectedDay == nil || selectedDay == p.date ? 1 : 0.4)
+                        .opacity(selectedDay == nil || selectedDay == p.date ? 1 : 0.35)
                 }
                 .chartForegroundStyleScale(domain: names, range: colors)
-                .chartLegend(position: .top, alignment: .leading)
+                .chartLegend(.hidden)
                 .chartXSelection(value: Binding(get: { model.days.first { $0.date == selectedDay }?.day },
                                                 set: { d in selectedDay = d.flatMap { day in model.days.first { Calendar.current.isDate($0.day, inSameDayAs: day) }?.date } }))
                 .chartYAxis {
-                    AxisMarks { v in
+                    AxisMarks(position: .leading) { v in
                         AxisGridLine().foregroundStyle(Palette.line)
-                        AxisValueLabel { if let d = v.as(Double.self) { Text(metric == "calls" ? Fmt.compact(Int(d)) : Fmt.dollarsShort(d)) } }
+                        AxisValueLabel { if let d = v.as(Double.self) { Text(metric == "calls" ? Fmt.compact(Int(d)) : Fmt.dollarsShort(d)).font(Typeface.data(10.5)).foregroundStyle(Palette.fg3) } }
                     }
                 }
                 .chartXAxis {
-                    AxisMarks(values: .stride(by: .day, count: days > 10 ? 7 : 1)) { _ in
-                        AxisValueLabel(format: days > 10 ? .dateTime.month(.abbreviated).day() : .dateTime.weekday(.abbreviated), centered: true)
+                    AxisMarks(values: .stride(by: .day, count: days > 10 ? 7 : 1)) { v in
+                        AxisValueLabel(centered: true) {
+                            if let d = v.as(Date.self) {
+                                Text(days > 10 ? d.formatted(.dateTime.month(.abbreviated).day()) : d.formatted(.dateTime.weekday(.abbreviated)))
+                                    .font(Typeface.label(10.5)).foregroundStyle(Palette.fg3)
+                            }
+                        }
                     }
                 }
                 .frame(height: 180)
                 .accessibilityIdentifier("usage-chart")
+                legend(names, colors)
             }
             if let d = readout {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("\(selectedDay == nil ? "Peak day" : "Day") · \(dayLabel(d.date))")
-                        .font(.caption).foregroundStyle(Palette.fg3)
-                    Text("\(d.priced ? Fmt.dollars(nanos: d.costNanos) : d.calls > 0 ? "Unpriced" : "$0.00") · \(Fmt.plural(d.calls, "call"))")
-                        .font(Typeface.data(12)).foregroundStyle(Palette.fg)
+                Hairline()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(selectedDay == nil ? "Peak day" : "Day") · \(dayLabel(d.date))").capsLabel(10.5)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(d.priced ? Fmt.dollars(nanos: d.costNanos) : d.calls > 0 ? "Unpriced" : "$0.00")
+                            .font(Typeface.figure).foregroundStyle(Palette.fg)
+                        Spacer()
+                        Text(Fmt.plural(d.calls, "call")).font(Typeface.data(12.5)).foregroundStyle(Palette.fg2)
+                    }
+                    .padding(.bottom, 2)
                     ForEach(Array(model.keys.enumerated()), id: \.offset) { i, k in
                         if d.groupCalls[i] > 0 {
-                            HStack(spacing: 6) {
-                                RoundedRectangle(cornerRadius: 2).fill(colors[i]).frame(width: 8, height: 8)
-                                Text(groupName(k)).font(.caption).foregroundStyle(Palette.fg2).lineLimit(1)
+                            HStack(spacing: 8) {
+                                RoundedRectangle(cornerRadius: 2).fill(colors[i]).frame(width: 9, height: 9)
+                                    .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Palette.lineStrong, lineWidth: 0.5))
+                                Text(groupName(k)).font(Typeface.meta).foregroundStyle(Palette.fg2).lineLimit(1)
                                 Spacer()
                                 Text(metric == "calls" ? "\(Fmt.count(d.groupCalls[i])) calls" : Fmt.dollars(nanos: d.groupCost[i]))
-                                    .font(Typeface.data(11)).foregroundStyle(Palette.fg2)
+                                    .font(Typeface.data(12)).foregroundStyle(Palette.fg2)
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// The stack's groups, darkest step first, wrapping to the panel's width.
+    private func legend(_ names: [String], _ colors: [Color]) -> some View {
+        FlowLayout(spacing: 12, lineSpacing: 6) {
+            ForEach(Array(names.enumerated()), id: \.offset) { i, n in
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 2).fill(colors[i]).frame(width: 9, height: 9)
+                        .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Palette.lineStrong, lineWidth: 0.5))
+                    Text(n).font(Typeface.small).foregroundStyle(Palette.fg2).lineLimit(1)
                 }
             }
         }
@@ -235,51 +255,56 @@ struct UsageView: View {
         let limit = dim == "model" ? 20 : 8
         let shown = showAll ? rows : Array(rows.prefix(limit))
         let total = Double(c.totals?.estimatedCostNanos ?? 0)
-        return Card {
-            Text("Breakdown · \(days == 1 ? "today" : "last \(days) days")").capsLabel()
-            Picker("Breakdown", selection: $dim) {
-                Text("Model").tag("model"); Text("Account").tag("account"); Text("Provider").tag("provider"); Text("Client").tag("client")
-            }
-            .pickerStyle(.segmented)
-            if rows.isEmpty { Text("No records match these filters.").font(.footnote).foregroundStyle(Palette.fg3) }
-            ForEach(Array(shown.enumerated()), id: \.offset) { _, r in
-                let share = total > 0 ? Double(r.estimatedCostNanos ?? 0) / total : 0
-                Button {
-                    if let id = r.id { filter = (dim, id) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            if dim != "client" { ProviderLogo(Provider.logo(provider: Provider.usageKey(dim == "provider" ? r.id : r.provider)), size: 14) }
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(rowName(dim: dim, id: r.id)).font(dim == "model" ? Typeface.data(12) : .footnote)
-                                    .foregroundStyle(Palette.fg).lineLimit(1)
-                                if let sub = rowSub(r) { Text(sub).font(.caption2).foregroundStyle(Palette.fg3) }
-                            }
-                            Spacer()
-                            Text(Fmt.dollars(nanos: r.estimatedCostNanos)).font(Typeface.data(12))
-                                .foregroundStyle(r.estimatedCostNanos == nil ? Palette.fg3 : Palette.fg)
-                        }
-                        HStack(spacing: 8) {
-                            GeometryReader { g in
-                                ZStack(alignment: .leading) {
-                                    Capsule().fill(Palette.segOff)
-                                    Capsule().fill(Palette.meter).frame(width: g.size.width * share)
-                                }
-                            }
-                            .frame(height: 4)
-                            Text("\(share > 0 ? (share < 0.01 ? "<1%" : "\(Int((share * 100).rounded()))%") : "—") · \(Fmt.count(r.observations)) calls")
-                                .font(.caption2).foregroundStyle(Palette.fg3).fixedSize()
-                        }
-                    }
-                    .contentShape(Rectangle())
+        return Card(spacing: 12) {
+            PanelHead("Breakdown · \(days == 1 ? "today" : "last \(days) days")")
+            FuseSegmented("Breakdown", selection: $dim, options: [("model", "Model"), ("account", "Account"), ("provider", "Provider"), ("client", "Client")], fill: true)
+            if rows.isEmpty { Text("No records match these filters.").font(Typeface.meta).foregroundStyle(Palette.fg3) }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { i, r in
+                    if i > 0 { Hairline() }
+                    breakdownRow(r, share: total > 0 ? Double(r.estimatedCostNanos ?? 0) / total : 0)
                 }
-                .buttonStyle(.plain)
-                .disabled(r.id == nil)
             }
             if rows.count > limit {
-                Button(showAll ? "Show top \(limit)" : "Show all \(rows.count)") { showAll.toggle() }.font(.footnote).tint(Palette.brand)
+                Button(showAll ? "Show top \(limit)" : "Show all \(rows.count)") { showAll.toggle() }.buttonStyle(.outlineSmall)
             }
         }
+    }
+
+    private func breakdownRow(_ r: UsageAggregate, share: Double) -> some View {
+        Button {
+            if let id = r.id { filter = (dim, id) }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 10) {
+                    if dim != "client" { ProviderLogo(Provider.logo(provider: Provider.usageKey(dim == "provider" ? r.id : r.provider)), size: 15).padding(.top, 2) }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(rowName(dim: dim, id: r.id)).font(dim == "model" ? Typeface.data(13, relativeTo: .subheadline) : Typeface.row)
+                            .foregroundStyle(Palette.fg).lineLimit(1)
+                        if let sub = rowSub(r) { Text(sub).font(Typeface.small).foregroundStyle(Palette.fg3).lineLimit(1) }
+                    }
+                    Spacer(minLength: 8)
+                    Text(Fmt.dollars(nanos: r.estimatedCostNanos)).font(Typeface.data(13, relativeTo: .subheadline))
+                        .foregroundStyle(r.estimatedCostNanos == nil ? Palette.fg3 : Palette.fg)
+                }
+                HStack(spacing: 10) {
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 1).fill(Palette.segOff)
+                            RoundedRectangle(cornerRadius: 1).fill(Palette.meter).frame(width: max(share > 0 ? 2 : 0, g.size.width * share))
+                        }
+                    }
+                    .frame(height: 4)
+                    Text("\(share > 0 ? (share < 0.01 ? "<1%" : "\(Int((share * 100).rounded()))%") : "—") · \(Fmt.count(r.observations)) calls")
+                        .font(Typeface.data(11.5)).foregroundStyle(Palette.fg3).lineLimit(1)
+                        .frame(width: 128, alignment: .trailing)
+                }
+            }
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(RowButtonStyle())
+        .disabled(r.id == nil)
     }
 
     private func dimTitle(_ d: String) -> String { ["model": "Model", "account": "Account", "provider": "Provider", "client": "Client"][d] ?? d }
@@ -376,4 +401,43 @@ struct UsageChart {
 
 extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+/// Lays children out left to right, wrapping to a new line when the width runs out.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+
+    private func lines(_ width: CGFloat, _ subviews: Subviews) -> [[(Int, CGSize)]] {
+        var lines: [[(Int, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for (i, s) in subviews.enumerated() {
+            let size = s.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            if x > 0, x + size.width > width { lines.append([]); x = 0 }
+            lines[lines.count - 1].append((i, size))
+            x += size.width + spacing
+        }
+        return lines
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? .greatestFiniteMagnitude
+        let ls = lines(width, subviews)
+        let height = ls.map { $0.map(\.1.height).max() ?? 0 }.reduce(0, +) + lineSpacing * CGFloat(max(0, ls.count - 1))
+        let used = ls.map { l in l.map(\.1.width).reduce(0, +) + spacing * CGFloat(max(0, l.count - 1)) }.max() ?? 0
+        return CGSize(width: min(width, used), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for line in lines(bounds.width, subviews) {
+            var x = bounds.minX
+            let h = line.map(\.1.height).max() ?? 0
+            for (i, size) in line {
+                subviews[i].place(at: CGPoint(x: x, y: y + (h - size.height) / 2), anchor: .topLeading, proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += h + lineSpacing
+        }
+    }
 }

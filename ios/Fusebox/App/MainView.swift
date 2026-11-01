@@ -40,10 +40,21 @@ struct MainView: View {
         .onChange(of: section) { _, now in
             if sizeClass != .compact, [.accounts, .faults].contains(now) { columns = .doubleColumn }
         }
+        // Unfolding on Accounts or Faults: the list beside the account, not the account alone.
+        .onChange(of: sizeClass) { _, now in
+            guard now != .compact else { return }
+            // The phone's faults sheet becomes the Faults section.
+            if faultsSheet { faultsSheet = false; section = .faults }
+            if [.accounts, .faults].contains(section) { columns = .doubleColumn }
+        }
     }
 
     private func go(_ link: DeepLink) {
         faultsSheet = false
+        // Unfolded, a list section shows its list beside the detail, however it was reached.
+        if sizeClass != .compact {
+            switch link { case .account, .accounts, .faults: columns = .doubleColumn; default: break }
+        }
         switch link {
         case .overview: section = .overview
         case .account(let id): section = .accounts; accountID = id
@@ -103,6 +114,8 @@ struct MainView: View {
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { faultsSheet = false } } }
             }
             .presentationDetents([.medium, .large])
+            .presentationBackground(Palette.bg)
+            .presentationCornerRadius(18)
         }
         .onAppear { if section == .faults { faultsSheet = true; section = .overview } }
     }
@@ -111,12 +124,14 @@ struct MainView: View {
     @ToolbarContentBuilder private var faultsButton: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Button { go(.faults) } label: {
-                Label("Faults", systemImage: store.faults.isEmpty ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                // An icon-sized item, so it stays in the bar wherever iOS puts it (on the iPhone
+                // Duo's outer screen the bars run down the side); the count is its badge.
+                Label("Faults", systemImage: store.faults.isEmpty ? "checkmark" : "exclamationmark.triangle")
                     .labelStyle(.iconOnly)
-                    .foregroundStyle(store.faults.contains { $0.level == "err" } ? Palette.err : store.faults.isEmpty ? Palette.fg3 : Palette.warn)
+                    .foregroundStyle(store.faults.isEmpty ? Palette.fg3 : Palette.fg)
             }
-            .badge(store.badgeCount)
-            .accessibilityLabel("Faults, \(store.faults.count)")
+            .badge(store.faults.count)
+            .accessibilityLabel(store.faults.isEmpty ? "No faults" : "Faults, \(store.faults.count)")
             .accessibilityIdentifier("faults-button")
         }
     }
@@ -140,9 +155,12 @@ struct MainView: View {
             }
             Section {
                 NavigationLink(value: AppSection.settings) { Label(AppSection.settings.title, systemImage: AppSection.settings.icon) }
+                    .accessibilityIdentifier("sidebar-settings")
             }
         }
-        .navigationTitle("Fusebox")
+        .scrollContentBackground(.hidden)
+        .background(Palette.bg)
+        .navigationTitle("FUSEBOX")
         .safeAreaInset(edge: .bottom) {
             HStack { LiveBadge(state: store.live); Spacer() }.padding(.horizontal, 20).padding(.vertical, 10)
         }
@@ -169,7 +187,8 @@ struct MainView: View {
             } detail: {
                 NavigationStack {
                     if accountID.isEmpty {
-                        ContentUnavailableView("Choose an account", systemImage: "person.2", description: Text("Its limits, activity and banked resets show here."))
+                        EmptyState("Choose an account", systemImage: "person.2", message: "Its limits, activity and banked resets show here.")
+                            .background(Palette.bg)
                     } else {
                         AccountDetailView(id: accountID)
                     }

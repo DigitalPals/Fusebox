@@ -48,11 +48,27 @@ final class ScreenshotTests: XCTestCase {
 
     private func waitForData() {
         let live = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Live'")).firstMatch
+        // The scene restores where it was left; the Live badge is on the Overview.
+        if !live.waitForExistence(timeout: 8), tabButton("Overview").exists { tabButton("Overview").tap() }
         XCTAssertTrue(live.waitForExistence(timeout: 40), "no live connection to the server")
         sleep(3)
     }
 
-    private var isPhone: Bool { app.tabBars.firstMatch.exists }
+    /// The compact layout: a tab bar, at the bottom or (the iPhone Duo's outer screen, iOS 27.1) down
+    /// the side, where XCUI doesn't report it as a tab bar. The split layout's sidebar items have ids.
+    private var isPhone: Bool { app.tabBars.firstMatch.exists || tabButton("Settings").exists }
+
+    private func tabButton(_ title: String) -> XCUIElement {
+        let inBar = app.tabBars.buttons[title]
+        if inBar.exists { return inBar }
+        return app.buttons.matching(NSPredicate(format: "label == %@ AND NOT (identifier BEGINSWITH %@)", title, "sidebar-")).firstMatch
+    }
+
+    private func tab(_ title: String) {
+        let b = tabButton(title)
+        XCTAssertTrue(b.waitForExistence(timeout: 10), "no \(title) tab")
+        b.tap()
+    }
 
     /// Every main screen, in whichever layout the size class gives.
     func testTour() throws {
@@ -60,7 +76,7 @@ final class ScreenshotTests: XCTestCase {
         waitForData()
         // The scene restores where it was left; start the tour on the Overview.
         if !app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 5) {
-            if isPhone { app.tabBars.buttons["Overview"].tap() } else { showSidebar(); app.buttons["sidebar-overview"].firstMatch.tap(); hideSidebar() }
+            if isPhone { tab("Overview") } else { showSidebar(); app.buttons["sidebar-overview"].firstMatch.tap(); hideSidebar() }
         }
         XCTAssertTrue(app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 20))
         sleep(1)
@@ -70,7 +86,7 @@ final class ScreenshotTests: XCTestCase {
             app.swipeUp()
             shot("02-overview-scrolled")
             app.swipeDown(); app.swipeDown()
-            app.tabBars.buttons["Accounts"].tap()
+            tab("Accounts")
             XCTAssertTrue(app.descendants(matching: .any)["accounts"].waitForExistence(timeout: 10))
             shot("03-accounts")
             firstElement("account-row-").tap()
@@ -79,22 +95,22 @@ final class ScreenshotTests: XCTestCase {
             shot("04-account-detail")
             app.swipeUp()
             shot("05-account-detail-scrolled")
-            app.tabBars.buttons["Requests"].tap()
+            tab("Requests")
             sleep(2)
             shot("06-requests")
             firstElement("request-").tap()
             XCTAssertTrue(app.descendants(matching: .any)["request-detail"].waitForExistence(timeout: 10))
             shot("07-request-detail")
-            app.tabBars.buttons["Usage"].tap()
+            tab("Usage")
             _ = app.descendants(matching: .any)["usage-total"].waitForExistence(timeout: 20)
             sleep(2)
             shot("08-usage")
             app.swipeUp()
             shot("09-usage-breakdown")
-            app.tabBars.buttons["Settings"].tap()
+            tab("Settings")
             sleep(2)
             shot("10-settings")
-            app.tabBars.buttons["Overview"].tap()
+            tab("Overview")
             app.buttons["faults-button"].firstMatch.tap()
             sleep(1)
             shot("11-faults")
@@ -127,6 +143,32 @@ final class ScreenshotTests: XCTestCase {
             app.buttons["sidebar-overview"].firstMatch.tap()
             sleep(1)
             shot("07-overview-again")
+        }
+    }
+
+    /// The account page when the window gets narrower under it, as on the iPhone Duo's outer
+    /// screen when its side bars arrive, or after rotating to portrait: every text and control
+    /// must stay inside the window (build 2 kept the wider width and clipped the left edge).
+    func testAccountDetailNarrowingKeepsContentOnScreen() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        waitForData()
+        guard isPhone else { throw XCTSkip("needs the compact layout") }
+        tab("Accounts")
+        firstElement("account-row-").tap()
+        XCTAssertTrue(app.descendants(matching: .any)["account-detail"].waitForExistence(timeout: 10))
+        sleep(2)
+        shot("narrow-01-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        sleep(3)
+        shot("narrow-02-portrait")
+        let window = app.windows.firstMatch.frame
+        for id in ["account-detail", "account-status", "refresh-quota", "account-toggle", "limits-panel"] {
+            let e = app.descendants(matching: .any)[id].firstMatch
+            guard e.exists else { continue }
+            let f = e.frame
+            XCTAssertGreaterThanOrEqual(f.minX, window.minX - 0.5, "\(id) starts left of the window: \(f) in \(window)")
+            XCTAssertLessThanOrEqual(f.maxX, window.maxX + 0.5, "\(id) ends right of the window: \(f) in \(window)")
         }
     }
 
@@ -332,7 +374,7 @@ final class ScreenshotTests: XCTestCase {
 
     private func goToSettings() {
         if isPhone {
-            app.tabBars.buttons["Settings"].tap()
+            tab("Settings")
         } else {
             showSidebar()
             app.buttons.matching(NSPredicate(format: "label == 'Settings'")).firstMatch.tap()

@@ -27,5 +27,13 @@
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>IBMPlexSans.ttf</string>
+		<string>IBMPlexSansCondensed-Medium.ttf</string>
+		<string>IBMPlexSansCondensed-SemiBold.ttf</string>
+		<string>DMMono-Regular.ttf</string>
+		<string>DMMono-Medium.ttf</string>
+	</array>
 </dict>
 </plist>
