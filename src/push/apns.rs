@@ -79,7 +79,7 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    fn token(&self, cfg: &Apns) -> Result<String> {
+    pub(super) fn token(&self, cfg: &Apns) -> Result<String> {
         let mut cached = self.cached.lock();
         if let Some((made_for, made, token)) = cached.as_ref()
             && made_for == cfg
@@ -168,15 +168,36 @@ pub async fn send(
     ttl_seconds: u32,
 ) -> Result<StatusCode> {
     let cfg = cfg.ok_or_else(|| anyhow!("Apple push isn't set up on this server (apns in config.yaml)"))?;
+    let message = Message { payload: &payload(fault, badge), collapse_id: &collapse_id(&fault.key), high, ttl_seconds };
+    post(client, base, tokens, cfg, &device.token, &message).await
+}
+
+/// One alert as Apple's push service takes it.
+pub struct Message<'a> {
+    pub payload: &'a Value,
+    pub collapse_id: &'a str,
+    pub high: bool,
+    pub ttl_seconds: u32,
+}
+
+/// Posts one alert to a device token; shared with the push relay.
+pub async fn post(
+    client: &reqwest::Client,
+    base: &str,
+    tokens: &Tokens,
+    cfg: &Apns,
+    device_token: &str,
+    message: &Message<'_>,
+) -> Result<StatusCode> {
     let resp = client
-        .post(format!("{base}/3/device/{}", device.token))
+        .post(format!("{base}/3/device/{device_token}"))
         .header("authorization", format!("bearer {}", tokens.token(cfg)?))
         .header("apns-topic", &cfg.topic)
         .header("apns-push-type", "alert")
-        .header("apns-priority", if high { "10" } else { "5" })
-        .header("apns-expiration", (Utc::now().timestamp() + i64::from(ttl_seconds)).to_string())
-        .header("apns-collapse-id", collapse_id(&fault.key))
-        .json(&payload(fault, badge))
+        .header("apns-priority", if message.high { "10" } else { "5" })
+        .header("apns-expiration", (Utc::now().timestamp() + i64::from(message.ttl_seconds)).to_string())
+        .header("apns-collapse-id", message.collapse_id)
+        .json(message.payload)
         .send()
         .await
         .context("Apple's push service is unreachable")?;

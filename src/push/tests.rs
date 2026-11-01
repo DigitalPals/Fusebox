@@ -413,3 +413,52 @@ async fn the_iphone_app_registers_and_apple_answers_are_handled() {
     server.abort();
     service.abort();
 }
+
+#[tokio::test]
+async fn the_iphone_app_registers_through_the_relay_without_an_apns_key() {
+    let temp = Temp::new();
+    let cfg = Config { auth_dir: temp.0.to_string_lossy().into(), management_key: "k".into(), ..Default::default() };
+    assert_eq!(cfg.push_relay, relay::DEFAULT_URL, "the relay is on by default");
+    let app = App::new(cfg.clone(), temp.0.join("config.yaml"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let router = crate::mgmt::router(app.clone()).with_state(app.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap()
+    });
+    let client = reqwest::Client::new();
+    let handle = URL_SAFE_NO_PAD.encode([5u8; 32]);
+    let key = base64::engine::general_purpose::STANDARD.encode([6u8; 32]);
+    let register = |body: Value| client.post(format!("{origin}/push/apns")).bearer_auth("k").json(&body).send();
+
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!((status["apns"].clone(), status["relay"].clone()), (json!(false), json!(relay::DEFAULT_URL)));
+    // Without apns, a device token can't be used directly.
+    let direct = register(json!({ "token": "ab".repeat(32), "environment": "production" })).await.unwrap();
+    assert_eq!(direct.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(direct.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("relay"));
+    for bad in [json!({ "label": "x" }), json!({ "relay": { "handle": "short", "key": key } })] {
+        assert_eq!(register(bad).await.unwrap().status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+    let body = json!({ "relay": { "handle": handle, "key": key }, "label": "John's iPhone" });
+    let created: Value = register(body.clone()).await.unwrap().json().await.unwrap();
+    let again: Value = register(body.clone()).await.unwrap().json().await.unwrap();
+    assert_eq!(created["id"], again["id"], "the same handle is the same device");
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["subscriptions"][0]["kind"], "apns");
+    assert_eq!(status["subscriptions"][0]["via"], "relay");
+    assert_eq!(app.push.subscriptions()[0].relay.as_ref().unwrap().handle, handle);
+
+    // Turned off, the relay takes no new devices.
+    app.set_config(Config { push_relay: String::new(), ..cfg });
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["relay"], Value::Null);
+    let off = register(json!({ "relay": { "handle": URL_SAFE_NO_PAD.encode([9u8; 32]), "key": key } })).await.unwrap();
+    assert_eq!(off.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(Config::parse("push-relay: http://push.example.com\n").is_err(), "the relay takes https only");
+    assert_eq!(Config::parse("push-relay: ''\n").unwrap().push_relay, "");
+    server.abort();
+}

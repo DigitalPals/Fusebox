@@ -42,21 +42,26 @@ Rate limits are never sent; they come and go too quickly. The app's icon shows t
 
 ## The iPhone app
 
-The native Fusebox app for iPhone gets the same notifications through Apple's push service. The app turns them on for its device under **Settings, Notifications**, and the dashboard lists it among the other devices as "iPhone app". The events chosen in the dashboard apply to it as well.
+The native Fusebox app for iPhone gets the same notifications. The app turns them on for its device under **Settings, Notifications**, and the dashboard lists it among the other devices as "iPhone app". The events chosen in the dashboard apply to it as well.
 
-Apple only takes notifications for an app from a server holding a push key from the developer account the app is signed with. So the app's notifications need that key on your Fusebox, in `config.yaml`:
+Apple delivers notifications for an app only from a server holding a push key of the developer account the app is signed with. So the app's notifications reach your phone in one of two ways:
 
-```yaml
-apns:
-  team-id: ABCDE12345                          # the developer account's team ID
-  key-id: KEY1234567                           # the key's ID, also in its file name
-  key-file: /etc/fusebox/AuthKey_KEY1234567.p8 # readable by Fusebox only
-  topic: com.digitalpals.fusebox               # the app's bundle ID; this is the default
-```
+- **Through the push relay (the default).** The app registers with the Fusebox push relay at `https://push.whombat.com` and gets back a handle. It gives your Fusebox that handle and a key it made itself. Fusebox encrypts each notification with that key (AES-256-GCM) and gives the relay only the handle and the ciphertext. The relay passes them to Apple, and the app decrypts them on the phone. So the relay and Apple see that a notification was sent and how big it is, but not what it says, and your Fusebox never learns the phone's device token. Nothing needs setting up. To use another relay, set `push-relay: https://…` in `config.yaml`; `push-relay: ""` turns it off. [Running a relay](push-relay.md) describes the relay itself.
+- **Directly, with the app's push key.** This is for whoever signs the app, or anyone who builds it with their own Apple developer account and bundle ID:
 
-Without it, the app's **Turn on** says that this Fusebox can't send to the app yet. Fusebox reads the key when it first sends and signs a new token for Apple every 50 minutes, so a replaced key file is picked up within the hour, and a changed `apns` setting at once. A device Apple no longer knows (the app was removed, or it registered against the other push environment) is removed, as browsers' expired subscriptions are; opening the app registers it again.
+  ```yaml
+  apns:
+    team-id: ABCDE12345                          # the developer account's team ID
+    key-id: KEY1234567                           # the key's ID, also in its file name
+    key-file: /etc/fusebox/AuthKey_KEY1234567.p8 # readable by Fusebox only
+    topic: com.digitalpals.fusebox               # the app's bundle ID; this is the default
+  ```
 
-The app registers its device token with `POST /api/push/apns`, using `{"token": "<hex>", "environment": "production" | "development", "label": "<device name>"}`; App Store and TestFlight builds use `production`. It gets back the subscription's `id`. `GET /api/push` lists each device with `"kind": "web"` or `"apns"`, and says whether `apns` is set up. Removing a device and **Send test** work as they do for browsers. A notification carries its alert, the fault count as the badge, and top-level `path` (where it opens in the dashboard, which the app maps onto its own screens), `kind`, `level`, `provider` and `account`.
+  Fusebox reads the key when it first sends and signs a new token for Apple every 50 minutes, so a replaced key file is picked up within the hour, and a changed `apns` setting at once. When `apns` is set, the app registers directly instead of through the relay.
+
+A device that Apple or the relay no longer knows is removed, the same way a browser's expired subscription is: for example, when the app was removed or registered against the other push environment. Opening the app registers it again.
+
+The app registers with `POST /api/push/apns`. Directly, it sends `{"token": "<hex>", "environment": "production" | "development", "label": "<device name>"}`; App Store and TestFlight builds use `production`. Through the relay, it sends `{"relay": {"handle": "<from the relay>", "key": "<32 bytes, base64>"}, "label": "<device name>"}`. Either way it gets back the subscription's `id`. `GET /api/push` lists each device with `"kind": "web"` or `"apns"` and, for app devices, `"via": "direct"` or `"relay"`. It also says whether `apns` is set up and which `relay` URL is in use (or `null`). Removing a device and **Send test** work as they do for browsers. A direct notification carries its alert, the fault count as the badge, and top-level `path` (where it opens in the dashboard, which the app maps onto its own screens), `kind`, `level`, `provider` and `account`. A relayed one carries the badge and a generic alert, plus `sealed`, which holds the same fields encrypted.
 
 ## Chat and webhooks
 
@@ -115,7 +120,7 @@ Notifications go from Fusebox to your browser's push service (Google for Chrome 
 
 Fusebox keeps its push key (VAPID), the subscribed devices and the faults it has sent in `.web-push.state` in the credentials directory (`auth-dir`), readable only by its owner. Deleting the file signs every device out of notifications; they turn them on again from the dashboard.
 
-Notifications for the iPhone app go to Apple's push service as plain JSON over HTTPS, which Apple can read, like any app's notifications.
+Notifications for the iPhone app sent directly go to Apple's push service as plain JSON over HTTPS, which Apple can read, like any app's notifications. Through the relay they are encrypted for the device, so neither the relay nor Apple can read them.
 
 Webhook messages go straight to the URLs you add, as plain HTTPS requests that service can read.
 

@@ -9,6 +9,7 @@
 mod apns;
 mod crypto;
 mod faults;
+pub mod relay;
 mod webhooks;
 
 pub(crate) use faults::signin_error;
@@ -78,6 +79,9 @@ pub struct Subscription {
     /// The iPhone app, reached through Apple's push service; Web Push otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apns: Option<apns::Device>,
+    /// The iPhone app, reached through the push relay with notifications sealed for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<relay::Relayed>,
 }
 
 #[derive(Default)]
@@ -515,6 +519,11 @@ async fn notify(app: &App, fault: &Fault, badge: usize) {
 /// Declarative Web Push shape, which Safari can show by itself; the dashboard's service
 /// worker reads the same fields elsewhere.
 async fn deliver(app: &App, sub: &Subscription, fault: &Fault, badge: usize, urgency: &str) -> Result<StatusCode> {
+    if let Some(device) = &sub.relay {
+        let client = app.http.control(None);
+        let relay_url = app.cfg().push_relay.clone();
+        return relay::send(&client, &relay_url, device, fault, badge, urgency == "high", TTL_SECONDS).await;
+    }
     if let Some(device) = &sub.apns {
         let cfg = app.cfg();
         let client = app.http.control(None);
@@ -612,12 +621,17 @@ async fn status(State(app): State<Arc<App>>) -> Response {
                 "origin": s.origin,
                 "endpoint": s.endpoint,
                 "created_at": s.created_at,
-                "kind": if s.apns.is_some() { "apns" } else { "web" },
+                "kind": if s.apns.is_some() || s.relay.is_some() { "apns" } else { "web" },
+                "via": if s.relay.is_some() { Some("relay") } else if s.apns.is_some() { Some("direct") } else { None },
             })
         })
         .collect();
-    let apns = app.cfg().apns.is_some();
-    Json(json!({ "public_key": vapid.public_key, "subscriptions": devices, "apns": apns })).into_response()
+    let cfg = app.cfg();
+    let relay = (!cfg.push_relay.is_empty()).then(|| cfg.push_relay.clone());
+    Json(
+        json!({ "public_key": vapid.public_key, "subscriptions": devices, "apns": cfg.apns.is_some(), "relay": relay }),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -662,6 +676,7 @@ fn validate(new: NewSubscription) -> Result<Subscription> {
         label: clean_label(&new.label, "Browser"),
         created_at: Utc::now(),
         apns: None,
+        relay: None,
     })
 }
 
@@ -674,33 +689,66 @@ async fn subscribe(State(app): State<Arc<App>>, Json(new): Json<NewSubscription>
 
 #[derive(Deserialize)]
 struct NewApnsDevice {
-    token: String,
-    environment: apns::Environment,
+    /// Direct: the device token, for a Fusebox holding the app's APNs key.
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    environment: Option<apns::Environment>,
+    /// Through the push relay: the handle the relay gave the device, and its key.
+    #[serde(default)]
+    relay: Option<NewRelayed>,
     #[serde(default)]
     label: String,
 }
 
-/// The iPhone app registers its device token here; the same token again updates it.
+#[derive(Deserialize)]
+struct NewRelayed {
+    handle: String,
+    key: String,
+}
+
+/// The iPhone app registers here, with its device token when this Fusebox holds the
+/// app's APNs key, or with its relay handle and key otherwise. Registering the same
+/// token or handle again updates the device.
 async fn subscribe_apns(State(app): State<Arc<App>>, Json(new): Json<NewApnsDevice>) -> Response {
-    if app.cfg().apns.is_none() {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "This Fusebox can't send to the iPhone app yet: set apns in config.yaml with the app's push key",
-        );
-    }
-    let device = match apns::Device::new(&new.token, new.environment) {
-        Ok(d) => d,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    let cfg = app.cfg();
+    let (endpoint, apns, relay) = match (new.relay, new.token, new.environment) {
+        (Some(r), _, _) => {
+            if cfg.push_relay.is_empty() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The push relay is turned off on this Fusebox (push-relay in config.yaml)",
+                );
+            }
+            match relay::Relayed::new(&r.handle, &r.key) {
+                Ok(d) => (d.endpoint(), None, Some(d)),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        (None, Some(token), Some(environment)) => {
+            if cfg.apns.is_none() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "This Fusebox can't send to the iPhone app directly: register through the push relay, or set apns in config.yaml with the app's push key",
+                );
+            }
+            match apns::Device::new(&token, environment) {
+                Ok(d) => (d.endpoint(), Some(d), None),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        _ => return error(StatusCode::BAD_REQUEST, "Send token and environment, or relay with handle and key"),
     };
     let sub = Subscription {
         id: uuid::Uuid::new_v4().simple().to_string(),
-        endpoint: device.endpoint(),
+        endpoint,
         p256dh: String::new(),
         auth: String::new(),
         origin: String::new(),
         label: clean_label(&new.label, "iPhone"),
         created_at: Utc::now(),
-        apns: Some(device),
+        apns,
+        relay,
     };
     add(&app, sub)
 }

@@ -84,6 +84,10 @@ pub struct Config {
     /// Native push for the Fusebox iPhone app, through Apple's push service.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apns: Option<Apns>,
+    /// The push relay iPhone apps without `apns` get their notifications through;
+    /// empty turns it off.
+    #[serde(skip_serializing_if = "is_default_push_relay")]
+    pub push_relay: String,
     /// Only route unprefixed model names to accounts without a `prefix`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub force_model_prefix: bool,
@@ -326,6 +330,10 @@ pub struct Apns {
     pub topic: String,
 }
 
+fn is_default_push_relay(url: &String) -> bool {
+    url == crate::push::relay::DEFAULT_URL
+}
+
 fn default_apns_topic() -> String {
     "com.digitalpals.fusebox".into()
 }
@@ -454,6 +462,7 @@ impl Default for Config {
             tls: Tls::default(),
             notifications: Notifications::default(),
             apns: None,
+            push_relay: crate::push::relay::DEFAULT_URL.into(),
             force_model_prefix: false,
             oauth_model_alias: BTreeMap::new(),
             oauth_excluded_models: BTreeMap::new(),
@@ -571,6 +580,10 @@ usage:
 #   key-id: KEY1234567
 #   key-file: /path/to/AuthKey_KEY1234567.p8
 #   topic: com.digitalpals.fusebox   # the app's bundle ID
+#
+# Without apns, the app gets them through the Fusebox push relay, sealed so the relay
+# can't read them. Another relay, or "" to turn it off:
+# push-relay: https://push.whombat.com
 
 # Models released after this Fusebox version, served until it knows them. The dashboard's
 # "Add model" writes here; an entry is removed once Fusebox or the provider lists the model.
@@ -887,6 +900,10 @@ impl Config {
             anyhow::ensure!(id(&apns.key_id), "apns.key-id: use the 10-character key ID");
             anyhow::ensure!(!apns.key_file.trim().is_empty(), "apns.key-file: name the .p8 key file");
             anyhow::ensure!(!apns.topic.trim().is_empty(), "apns.topic: name the app's bundle ID");
+        }
+        if !cfg.push_relay.is_empty() {
+            let url = url::Url::parse(&cfg.push_relay).map_err(|_| anyhow::anyhow!("push-relay: not a URL"))?;
+            anyhow::ensure!(url.scheme() == "https" || url.host_str() == Some("127.0.0.1"), "push-relay: use https");
         }
         for (name, caps) in &cfg.model_capabilities {
             anyhow::ensure!(!name.trim().is_empty(), "model-capabilities: empty model name");
