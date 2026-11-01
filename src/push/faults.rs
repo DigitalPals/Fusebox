@@ -20,8 +20,8 @@ pub enum Event {
     /// A named client's key used from a new address, or refused at one. Sent as it
     /// happens rather than found by the check.
     ClientAddress,
-    /// A banked reset used automatically, needing review, or expired unused. Sent as it
-    /// happens.
+    /// A new banked reset, one used automatically, needing review, or expired unused.
+    /// Sent when observed, independently of the fault check.
     BankedReset,
     /// Counted for the app badge, never sent (rate limits come and go too often).
     #[default]

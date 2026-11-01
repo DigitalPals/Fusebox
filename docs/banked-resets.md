@@ -10,6 +10,8 @@ banked-resets: true
 
 While off, nothing contacts these endpoints and no journal is created. While on, each Claude and ChatGPT subscription is checked every 30 minutes, and again whenever you open its reset panel or press **Refresh**.
 
+With notifications on (`notifications.banked-resets`, enabled by default), devices and webhooks hear when an account receives new banked resets, including ones that cannot be redeemed yet. The message includes the account, number received, total banked and any reported expiry, and opens the account's page. The first successful read establishes a quiet baseline; saved receipt history prevents repeat alerts across refreshes, restarts and duplicate credential files. Detection uses the same inventory checks, normally within about 30 minutes. See [notifications](notifications.md) for count-only detection and delivery limits.
+
 ## Using a reset
 
 Overview and Accounts show “↻ 2 resets banked” under the status of native Codex and Claude OAuth subscriptions that have resets, and the account drawer and account page add a “Use 1 reset” button. Accounts with none, or whose reset status can't be read, show nothing; unresolved operations keep “↻ Review reset” so recovery remains accessible. Click it to open a modal with grant expiry, scopes, and current eligibility. Purchased monetary credits are separate.
@@ -57,7 +59,7 @@ Use **Check outcome** only after checking the provider account. **Reset was used
 
 ## Storage and deployment
 
-The journal lives in `<startup-auth-dir>/.banked-resets/`. It contains request IDs, provider identity bindings, selected grant/scope, timestamps, and outcomes; no OAuth tokens. Filenames hash the Codex account or Claude organization identity. Unix directories/files use `0700`/`0600`. Atomic replacement and file synchronization persist the pending operation **before** dispatch. A filesystem lock serializes operations across tabs, duplicate files, and processes sharing the same auth directory. An unreadable journal fails closed.
+The journal lives in `<startup-auth-dir>/.banked-resets/`. It contains request IDs, provider identity bindings, selected grant/scope, timestamps, outcomes and receipt observations; no OAuth tokens. Filenames hash the Codex account or Claude organization identity. Unix directories/files use `0700`/`0600`. Atomic replacement and file synchronization persist the pending operation **before** dispatch, and receipt observations before sending a new-reset notification. A filesystem lock serializes operations across tabs, duplicate files, and processes sharing the same auth directory. An unreadable journal fails closed.
 
 Keep this directory in auth-volume backups and through binary rollbacks. Do not delete or restore an old journal while requests may be unresolved. Separate installations without a shared auth directory, direct provider clients, and other management tools cannot participate in this locking. The journal retains settled IDs to prevent stale replay; after 10,000 operations or a 16 MiB journal, an operator must review storage rather than having history silently discarded.
 

@@ -39,6 +39,9 @@ impl Operation {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Journal {
     pub operations: BTreeMap<String, Operation>,
+    /// Per subscription, not credential file: duplicate files share receipt history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) observations: BTreeMap<String, super::notices::Observation>,
 }
 impl Journal {
     pub fn unresolved(&self) -> Option<&Operation> {

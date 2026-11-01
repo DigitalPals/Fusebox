@@ -282,7 +282,7 @@ pub struct Notifications {
     /// A named client's key used from an address it wasn't used from before, or refused
     /// at one its address list doesn't allow.
     pub client_new_address: bool,
-    /// A banked reset used automatically, one that needs review, or one that expired unused.
+    /// A new banked reset, one used automatically, needing review, or expired unused.
     pub banked_resets: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
@@ -539,7 +539,7 @@ usage:
 #   account-used-up: false     # one account used up its 5-hour or weekly limit
 #   account-errors: false      # account errors and runs of failed requests
 #   client-new-address: true   # a named client's key used from a new address, or refused at one
-#   banked-resets: true        # a banked reset used automatically, needing review, or expired unused
+#   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 

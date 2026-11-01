@@ -14,6 +14,10 @@ pub struct Grant {
     pub id: String,
     pub label: String,
     pub remaining: u64,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub granted_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub starts_at: Option<DateTime<Utc>>,
     pub clears: Vec<String>,
@@ -63,7 +67,7 @@ pub fn codex(usage: &Value, details: &Value, now: DateTime<Utc>) -> Result<Inven
     let applicable = count(&counts["applicable_available_count"])?.or(count(&details["applicable_available_count"])?);
     let mut grants = Vec::new();
     let mut seen = HashSet::new();
-    if let Some(credits) = details.get("credits") {
+    if let Some(credits) = details.get("credits").filter(|v| !v.is_null()) {
         for credit in credits.as_array().filter(|v| v.len() <= 1000).ok_or_else(|| anyhow!("Invalid reset grants"))? {
             if credit["reset_type"] != "codex_rate_limits" || credit["status"] != "available" {
                 continue;
@@ -76,6 +80,9 @@ pub fn codex(usage: &Value, details: &Value, now: DateTime<Utc>) -> Result<Inven
                 id: id.into(),
                 label: "Codex reset".into(),
                 remaining: 1,
+                total: 1,
+                // Receipt metadata must not disable otherwise valid redemption.
+                granted_at: timestamp(&credit["granted_at"]).ok().flatten(),
                 expires_at: expires,
                 starts_at: None,
                 clears: vec!["subscription limits".into()],
@@ -195,6 +202,8 @@ pub fn claude(v: &Value, now: DateTime<Utc>) -> Result<Inventory> {
             id: id.into(),
             label,
             remaining,
+            total,
+            granted_at: None,
             expires_at: expires,
             starts_at: starts,
             clears,

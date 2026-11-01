@@ -1,6 +1,8 @@
 //! Banked reset redemption. Tokens and upstream identities never leave the server.
 mod automation;
 pub(crate) mod ledger;
+#[cfg(test)]
+mod notice_tests;
 mod notices;
 mod provider;
 #[cfg(test)]
@@ -125,9 +127,10 @@ fn check_current(app: &App, acct: &Arc<Account>, id: &str, spending: bool) -> Re
 fn scope(provider: Provider, organization: &str) -> String {
     format!("{}:{organization}", provider.as_str())
 }
-fn store(app: &Arc<App>, acct: &Account, account: &str, view: &View) {
+fn store(app: &Arc<App>, acct: &Account, account: &str, ledger: &mut Ledger, view: &View) {
     // Only a good read can tell that a reset expired unused.
     let watch = view.inventory.as_ref().filter(|_| view.error.is_none()).map(|inv| {
+        notices::received(app, acct, account, ledger, inv, view.checked_at);
         let gone = notices::expired_unused(&acct.state.lock().reset_watch, inv, view.checked_at);
         notices::expired(app, acct, view, &gone);
         notices::watch_list(inv, view.checked_at)
@@ -194,14 +197,14 @@ pub async fn refresh(app: &Arc<App>, acct: &Arc<Account>) -> Result<View> {
 async fn refresh_inner(app: &Arc<App>, acct: &Arc<Account>) -> Result<View> {
     let api = api(app, acct).await?;
     let organization = api.identity().await?;
-    let ledger = Ledger::open(&app.startup_config.auth_dir(), &scope(acct.provider, &organization))?;
+    let mut ledger = Ledger::open(&app.startup_config.auth_dir(), &scope(acct.provider, &organization))?;
     let epoch = acct.quota_epoch();
     let (inventory, usage) = match api.read().await {
         Ok(read) => read,
         Err(e) => {
             let mut view = view(&ledger, None, Some(e.to_string()), None);
             view.retryable &= acct.provider == Provider::Claude;
-            store(app, acct, &api.account_id, &view);
+            store(app, acct, &api.account_id, &mut ledger, &view);
             return Ok(view);
         }
     };
@@ -235,7 +238,7 @@ async fn refresh_inner(app: &Arc<App>, acct: &Arc<Account>) -> Result<View> {
     let view = view(&ledger, Some(inventory), None, quote);
     let mut view = view;
     view.retryable &= acct.provider == Provider::Claude;
-    store(app, acct, &api.account_id, &view);
+    store(app, acct, &api.account_id, &mut ledger, &view);
     Ok(view)
 }
 
@@ -290,7 +293,7 @@ async fn execute<P: Api + Sync>(
                 view.operation = Some(OperationView::from(operation));
             }
             view.retryable &= acct.provider == Provider::Claude;
-            store(app, acct, account, &view);
+            store(app, acct, account, ledger, &view);
             return Ok(view);
         }
     }
@@ -315,6 +318,9 @@ async fn execute<P: Api + Sync>(
         );
         ensure!(ledger.journal.operations.len() < 10000, "Reset journal is full; operator review required");
         let (inventory, usage) = api.read().await?;
+        check_current(app, acct, account, false)?;
+        // Observe before spending, including a grant that automatic use spends at once.
+        notices::received(app, acct, account, ledger, &inventory, Utc::now());
         let auto_credit = if automatic {
             check_current(app, acct, account, true)?;
             let cfg = app.cfg();
@@ -394,7 +400,7 @@ async fn execute<P: Api + Sync>(
         ledger.save()?;
         let mut pending = view(ledger, None, None, None);
         pending.retryable = false;
-        store(app, acct, account, &pending);
+        store(app, acct, account, ledger, &pending);
         let guard = QuotaGuard::new(app, acct, account);
         let outcome =
             api.redeem(organization, &operation.grant_id, &operation.request_id).await.unwrap_or(Outcome::Unknown);
@@ -440,7 +446,7 @@ async fn execute<P: Api + Sync>(
         };
         let mut view = view(ledger, inventory, error, None);
         view.retryable &= acct.provider == Provider::Claude;
-        store(app, acct, account, &view);
+        store(app, acct, account, ledger, &view);
         return Ok(view);
     }
     operation.updated_at = Utc::now();
@@ -458,7 +464,7 @@ async fn execute<P: Api + Sync>(
     };
     let mut view = view(ledger, inventory, error, None);
     view.retryable &= acct.provider == Provider::Claude;
-    store(app, acct, account, &view);
+    store(app, acct, account, ledger, &view);
     Ok(view)
 }
 fn reconcile(app: &App, acct: &Account, account: &str, usage: &Value) {

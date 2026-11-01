@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 impl Temp {
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!("banked-reset-test-{}", uuid::Uuid::new_v4()));
@@ -18,7 +18,7 @@ impl Drop for Temp {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn fixture(provider: Provider, copies: usize) -> (Temp, Arc<App>, Arc<Account>) {
+pub(super) fn fixture(provider: Provider, copies: usize) -> (Temp, Arc<App>, Arc<Account>) {
     let temp = Temp::new();
     for i in 0..copies {
         std::fs::write(temp.0.join(format!("account-{i}.json")), json!({"type":provider.as_str(),"account_id":"account-1", "access_token":"test-only", "expired":"2099-01-01T00:00:00Z"}).to_string()).unwrap();
@@ -29,7 +29,7 @@ fn fixture(provider: Provider, copies: usize) -> (Temp, Arc<App>, Arc<Account>) 
     let acct = app.pool.all()[0].clone();
     (temp, app, acct)
 }
-fn claude_usage() -> Value {
+pub(super) fn claude_usage() -> Value {
     json!({"five_hour":{"utilization":100,"resets_at":"2099-01-01T00:00:00Z"}, "seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}, "cedar_ember":{"eligible":true,"at_limit":true,"grants":[{"id":"grant-1","label":"Demo grant","resets_total":2,"resets_left":2,"usable_now":true,"clears":["five_hour"],"ends_at":"2099-01-01T00:00:00Z"}]}})
 }
 struct Mock {
@@ -102,7 +102,7 @@ fn expiring_usage(weekly: f64, short: f64, hours: i64) -> Value {
     })
 }
 
-fn reset_view(inventory: Inventory) -> View {
+pub(super) fn reset_view(inventory: Inventory) -> View {
     View {
         checked_at: Utc::now(),
         inventory: Some(inventory),
@@ -1393,19 +1393,20 @@ async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
     let mut ledger = Ledger::open(&temp.0, "codex:account-1").unwrap();
 
     // The first good read watches the credit; spending it here forgets it.
-    store(&app, &acct, "account-1", &reset_view(mock.inventory.clone()));
+    store(&app, &acct, "account-1", &mut ledger, &reset_view(mock.inventory.clone()));
     assert_eq!(acct.state.lock().reset_watch.len(), 1);
     execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
     let used = wait("Codex reset used").await.expect("a used-reset notification");
     assert_eq!((used["event"].as_str(), used["level"].as_str()), (Some("banked_reset"), Some("ok")));
     assert!(used["text"].as_str().unwrap().contains("was about to expire, so Fusebox used it"), "{used}");
     mock.inventory = codex_inventory(&[]);
-    store(&app, &acct, "account-1", &reset_view(mock.inventory.clone()));
+    store(&app, &acct, "account-1", &mut ledger, &reset_view(mock.inventory.clone()));
     assert!(acct.state.lock().reset_watch.is_empty());
 
     // An unclear answer asks for review.
     mock.inventory = codex_inventory(&[("next", now + chrono::Duration::minutes(20))]);
     execute(&app, &acct, &mock, "account-1", "account-1", &mut ledger, Request::Automatic).await.unwrap();
+    assert!(wait("New Codex banked reset").await.is_some());
     assert!(wait("Codex reset needs review").await.is_some());
 
     // A watched credit gone after its expiry is reported once, with the last refusal.
@@ -1421,7 +1422,7 @@ async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
         retry_until: now,
         automatic: true,
     });
-    store(&app, &acct, "account-1", &view);
+    store(&app, &acct, "account-1", &mut ledger, &view);
     let expired = wait("Codex reset expired unused").await.expect("an expiry notification");
     assert!(
         expired["text"]
@@ -1430,7 +1431,7 @@ async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
             .contains("The last automatic try was refused: Codex reports nothing to reset right now."),
         "{expired}"
     );
-    store(&app, &acct, "account-1", &view);
+    store(&app, &acct, "account-1", &mut ledger, &view);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let count = |text: &str| hooks.lock().iter().filter(|h| h["text"].as_str().unwrap().contains(text)).count();
     assert_eq!(count("expired unused"), 1, "noticed once");
@@ -1439,10 +1440,10 @@ async fn automatic_spends_and_expiries_notify_once_and_can_be_turned_off() {
     cfg.notifications.banked_resets = false;
     app.set_config(cfg);
     acct.state.lock().reset_watch = vec![("off".into(), expired_at, 1)];
-    store(&app, &acct, "account-1", &view);
+    store(&app, &acct, "account-1", &mut ledger, &view);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(count("expired unused"), 1);
-    assert_eq!(hooks.lock().len(), 3);
+    assert_eq!(hooks.lock().len(), 4);
     server.abort();
 }
 
