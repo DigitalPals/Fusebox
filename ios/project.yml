@@ -1,0 +1,149 @@
+name: Fusebox
+options:
+  bundleIdPrefix: com.digitalpals
+  deploymentTarget:
+    iOS: "27.0"
+  xcodeVersion: "27.1"
+  createIntermediateGroups: true
+  developmentLanguage: en
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: 4R8P9MTF9T
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 1
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+
+targets:
+  Fusebox:
+    type: application
+    platform: iOS
+    sources:
+      - path: Fusebox
+      - path: Shared
+    info:
+      path: Fusebox/Info.plist
+      properties:
+        CFBundleDisplayName: Fusebox
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSSupportsLiveActivities: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: com.digitalpals.fusebox
+            CFBundleURLSchemes: [fusebox]
+        FuseboxKeychainGroup: $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    entitlements:
+      path: Fusebox/Fusebox.entitlements
+      properties:
+        aps-environment: development
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox
+        PRODUCT_NAME: Fusebox
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_UIUserInterfaceStyle: ""
+    dependencies:
+      - target: FuseboxWidgets
+        embed: true
+
+  FuseboxWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: FuseboxWidgets
+      - path: Shared
+      - path: Fusebox/Assets.xcassets
+    info:
+      path: FuseboxWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Fusebox
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        FuseboxKeychainGroup: $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    entitlements:
+      path: FuseboxWidgets/FuseboxWidgets.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.digitalpals.fusebox.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox.widgets
+        PRODUCT_NAME: FuseboxWidgets
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  FuseboxTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: FuseboxTests
+        excludes: [Fixtures]
+      - path: FuseboxTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: Fusebox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  FuseboxUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: FuseboxUITests
+    dependencies:
+      - target: Fusebox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.digitalpals.fusebox.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Fusebox
+
+schemes:
+  Fusebox:
+    build:
+      targets:
+        Fusebox: all
+        FuseboxWidgets: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FuseboxTests
+    archive:
+      config: Release
+  FuseboxUITests:
+    build:
+      targets:
+        Fusebox: all
+        FuseboxUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - FuseboxUITests

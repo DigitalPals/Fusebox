@@ -8,3 +8,9 @@
 /usage.sqlite3-shm
 
 __pycache__/
+
+# iOS app (ios/): the Xcode project is generated from ios/project.yml by XcodeGen
+/ios/Fusebox.xcodeproj/
+/ios/build/
+/ios/DerivedData/
+*.xcuserstate

@@ -1,0 +1,1919 @@
+[
+ {
+  "id": 440,
+  "ts": "2026-11-01T08:57:29.430677297Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 1989,
+  "ttft_ms": 683,
+  "input_tokens": 266,
+  "output_tokens": 191,
+  "cache_tokens": 236437,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 439,
+  "ts": "2026-11-01T08:57:26.114820597Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2233,
+  "ttft_ms": 813,
+  "input_tokens": 752,
+  "output_tokens": 190,
+  "cache_tokens": 235687,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 438,
+  "ts": "2026-11-01T08:57:22.578236828Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3069,
+  "ttft_ms": 870,
+  "input_tokens": 2421,
+  "output_tokens": 279,
+  "cache_tokens": 233268,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 437,
+  "ts": "2026-11-01T08:57:02.397982103Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 20105,
+  "ttft_ms": 2204,
+  "input_tokens": 7996,
+  "output_tokens": 2357,
+  "cache_tokens": 225274,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 436,
+  "ts": "2026-11-01T08:56:07.653874352Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 54610,
+  "ttft_ms": 3010,
+  "input_tokens": 1527,
+  "output_tokens": 4864,
+  "cache_tokens": 223749,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 435,
+  "ts": "2026-11-01T08:56:00.305804740Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 7107,
+  "ttft_ms": 3316,
+  "input_tokens": 2542,
+  "output_tokens": 707,
+  "cache_tokens": 221209,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 434,
+  "ts": "2026-11-01T08:55:56.570488564Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3570,
+  "ttft_ms": 2832,
+  "input_tokens": 5700,
+  "output_tokens": 328,
+  "cache_tokens": 215511,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 433,
+  "ts": "2026-11-01T08:54:58.980679377Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 57460,
+  "ttft_ms": 3243,
+  "input_tokens": 1994,
+  "output_tokens": 5068,
+  "cache_tokens": 213519,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 432,
+  "ts": "2026-11-01T08:54:53.338167549Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5250,
+  "ttft_ms": 5239,
+  "input_tokens": 1138,
+  "output_tokens": 372,
+  "cache_tokens": 212383,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 431,
+  "ts": "2026-11-01T08:54:49.773766455Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3310,
+  "ttft_ms": 2952,
+  "input_tokens": 2710,
+  "output_tokens": 269,
+  "cache_tokens": 209675,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 430,
+  "ts": "2026-11-01T08:54:47.085174198Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2326,
+  "ttft_ms": 792,
+  "input_tokens": 348,
+  "output_tokens": 190,
+  "cache_tokens": 209329,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 429,
+  "ts": "2026-11-01T08:54:45.044400055Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 1788,
+  "ttft_ms": 745,
+  "input_tokens": 723,
+  "output_tokens": 159,
+  "cache_tokens": 208608,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 428,
+  "ts": "2026-11-01T08:54:38.168188879Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 6809,
+  "ttft_ms": 1107,
+  "input_tokens": 1670,
+  "output_tokens": 135,
+  "cache_tokens": 206940,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 427,
+  "ts": "2026-11-01T08:54:35.101011524Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2822,
+  "ttft_ms": 2522,
+  "input_tokens": 1450,
+  "output_tokens": 248,
+  "cache_tokens": 205492,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 426,
+  "ts": "2026-11-01T08:54:32.646331647Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2277,
+  "ttft_ms": 693,
+  "input_tokens": 293,
+  "output_tokens": 229,
+  "cache_tokens": 205201,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 425,
+  "ts": "2026-11-01T08:54:29.825362560Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2649,
+  "ttft_ms": 897,
+  "input_tokens": 704,
+  "output_tokens": 232,
+  "cache_tokens": 204499,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 424,
+  "ts": "2026-11-01T08:54:27.852315584Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 1796,
+  "ttft_ms": 744,
+  "input_tokens": 499,
+  "output_tokens": 163,
+  "cache_tokens": 204002,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 423,
+  "ts": "2026-11-01T08:54:21.534373400Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 6190,
+  "ttft_ms": 3933,
+  "input_tokens": 603,
+  "output_tokens": 435,
+  "cache_tokens": 203401,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 422,
+  "ts": "2026-11-01T08:54:18.486775552Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2862,
+  "ttft_ms": 825,
+  "input_tokens": 390,
+  "output_tokens": 269,
+  "cache_tokens": 203013,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 421,
+  "ts": "2026-11-01T08:54:15.184798966Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3146,
+  "ttft_ms": 1118,
+  "input_tokens": 1034,
+  "output_tokens": 242,
+  "cache_tokens": 201981,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 420,
+  "ts": "2026-11-01T08:53:59.843934086Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 15246,
+  "ttft_ms": 4083,
+  "input_tokens": 7603,
+  "output_tokens": 975,
+  "cache_tokens": 194380,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 419,
+  "ts": "2026-11-01T08:53:57.310903999Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2283,
+  "ttft_ms": 1508,
+  "input_tokens": 1066,
+  "output_tokens": 127,
+  "cache_tokens": 193316,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 418,
+  "ts": "2026-11-01T08:53:51.626133490Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "proxy_protocol"
+  },
+  "key": "client-key-4",
+  "key_label": "Device 2",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "76380fdfb4f0955d7ae63602a8f9299d34b66ac508c515564b1ad2b56264a9e9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5669,
+  "ttft_ms": 3205,
+  "input_tokens": 478,
+  "output_tokens": 348,
+  "cache_tokens": 273063,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 417,
+  "ts": "2026-11-01T08:53:46.350018484Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5672,
+  "ttft_ms": 4874,
+  "input_tokens": 358,
+  "output_tokens": 372,
+  "cache_tokens": 192960,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 416,
+  "ts": "2026-11-01T08:53:45.022439031Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "proxy_protocol"
+  },
+  "key": "client-key-4",
+  "key_label": "Device 2",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "76380fdfb4f0955d7ae63602a8f9299d34b66ac508c515564b1ad2b56264a9e9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5504,
+  "ttft_ms": 3579,
+  "input_tokens": 803,
+  "output_tokens": 371,
+  "cache_tokens": 272262,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 415,
+  "ts": "2026-11-01T08:53:39.334657473Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5668,
+  "ttft_ms": 1447,
+  "input_tokens": 324,
+  "output_tokens": 341,
+  "cache_tokens": 192638,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 414,
+  "ts": "2026-11-01T08:53:37.827398104Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "proxy_protocol"
+  },
+  "key": "client-key-4",
+  "key_label": "Device 2",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "76380fdfb4f0955d7ae63602a8f9299d34b66ac508c515564b1ad2b56264a9e9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 7173,
+  "ttft_ms": 1905,
+  "input_tokens": 421,
+  "output_tokens": 323,
+  "cache_tokens": 271845,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 413,
+  "ts": "2026-11-01T08:53:34.879772581Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 4300,
+  "ttft_ms": 3419,
+  "input_tokens": 308,
+  "output_tokens": 301,
+  "cache_tokens": 192332,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 412,
+  "ts": "2026-11-01T08:53:30.917381900Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3819,
+  "ttft_ms": 2351,
+  "input_tokens": 327,
+  "output_tokens": 188,
+  "cache_tokens": 192007,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 411,
+  "ts": "2026-11-01T08:53:28.051415143Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2744,
+  "ttft_ms": 1537,
+  "input_tokens": 257,
+  "output_tokens": 166,
+  "cache_tokens": 191752,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 410,
+  "ts": "2026-11-01T08:53:24.648772513Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3239,
+  "ttft_ms": 1542,
+  "input_tokens": 540,
+  "output_tokens": 204,
+  "cache_tokens": 191214,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 409,
+  "ts": "2026-11-01T08:53:18.727642561Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5749,
+  "ttft_ms": 5736,
+  "input_tokens": 1075,
+  "output_tokens": 356,
+  "cache_tokens": 190141,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 408,
+  "ts": "2026-11-01T08:53:15.529220857Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 2934,
+  "ttft_ms": 1690,
+  "input_tokens": 2537,
+  "output_tokens": 134,
+  "cache_tokens": 187606,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 407,
+  "ts": "2026-11-01T08:53:08.467309520Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 6497,
+  "ttft_ms": 6497,
+  "input_tokens": 1830,
+  "output_tokens": 267,
+  "cache_tokens": 185778,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 406,
+  "ts": "2026-11-01T08:53:00.642481976Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 7710,
+  "ttft_ms": 3926,
+  "input_tokens": 495,
+  "output_tokens": 649,
+  "cache_tokens": 185285,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 405,
+  "ts": "2026-11-01T08:52:56.769540111Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 3747,
+  "ttft_ms": 1697,
+  "input_tokens": 514,
+  "output_tokens": 274,
+  "cache_tokens": 184773,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 404,
+  "ts": "2026-11-01T08:52:50.233242119Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 5729,
+  "ttft_ms": 4726,
+  "input_tokens": 112,
+  "output_tokens": 430,
+  "cache_tokens": 184663,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 403,
+  "ts": "2026-11-01T08:52:48.511117079Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 1677,
+  "ttft_ms": 1582,
+  "input_tokens": 1358,
+  "output_tokens": 35,
+  "cache_tokens": 183309,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 402,
+  "ts": "2026-11-01T08:52:38.833941770Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 9638,
+  "ttft_ms": 4211,
+  "input_tokens": 2850,
+  "output_tokens": 712,
+  "cache_tokens": 180461,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ },
+ {
+  "id": 401,
+  "ts": "2026-11-01T08:52:34.345053357Z",
+  "client": "claude",
+  "client_app": "Claude Code",
+  "source": {
+   "ip": "100.64.0.1",
+   "via": "forwarded",
+   "login": "tailnet-user@example.com"
+  },
+  "key": "client-key-3",
+  "key_label": "Device 1",
+  "provider": "claude",
+  "model": "claude-opus-5-5",
+  "account": "user5@example.com",
+  "account_id": "file:user1@example.com",
+  "session_id": "af8e9f2a9a611fc8072b5c5c01bccbbc04ca456fb1fb62d4f0f6b9c2bdabfed9",
+  "session_source": "x-claude-code-session-id",
+  "routing_strategy": "smart-quota",
+  "routing_reason": "session_reused",
+  "routing_warning": null,
+  "routing_attempts": [
+   {
+    "account_id": "file:user1@example.com",
+    "account": "user5@example.com",
+    "reason": "session_reused",
+    "previous_account": null
+   }
+  ],
+  "cache_policy": {
+   "requested": "explicit",
+   "applied": "explicit",
+   "key_scope": "not_sent"
+  },
+  "status": 200,
+  "latency_ms": 4353,
+  "ttft_ms": 3749,
+  "input_tokens": 6745,
+  "output_tokens": 287,
+  "cache_tokens": 173718,
+  "usage_completeness": "complete",
+  "failure_kind": null,
+  "stream": true,
+  "transport": "http",
+  "attempts": 1,
+  "chunks": 0,
+  "error": null
+ }
+]

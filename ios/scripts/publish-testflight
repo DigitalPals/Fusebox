@@ -1,0 +1,305 @@
+#!/usr/bin/env node
+// Archives a Release build of the Fusebox iOS app, signs it, uploads it to App Store Connect,
+// waits until it has been processed and makes sure the internal TestFlight group “Fusebox”
+// (every user of the team, access to all builds) has it. Runs unattended, over SSH too.
+//
+//   ios/scripts/publish-testflight                  archive, upload, wait, assign
+//   ios/scripts/publish-testflight --check          archive and sign only; uploads nothing
+//   ios/scripts/publish-testflight --setup          only the signing keychain, the group and its testers
+//   ios/scripts/publish-testflight --build-number N use N instead of the latest uploaded build + 1
+//   ios/scripts/publish-testflight --assign N       only wait for build N to be processed and in the group
+//
+// Signing (see ios/README.md, “Publishing”): Xcode makes the profiles and signs for the App
+// Store in Apple's cloud with an App Store Connect API key with Admin access. The key is the
+// one Whombat's pipeline uses, read in place from ~/.config/whombat/ios/ (asc.json {keyId,
+// issuerId} and AuthKey_<keyId>.p8; FUSEBOX_ASC_DIR overrides) and never copied. The archive
+// is signed with an Apple Development identity in Fusebox's own keychain (fusebox-build), made
+// through the API and renewed a month before it expires. That keychain is in the user's
+// keychain search list only while the archive is signed, so other SSH sessions' builds
+// (Whombat's) keep choosing their own identity.
+import { spawnSync } from 'node:child_process';
+import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, sign, X509Certificate } from 'node:crypto';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+
+const ios = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2);
+const flag = (name) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const setup = args.includes('--setup');
+const check = args.includes('--check');
+
+const TEAM = '4R8P9MTF9T';
+const BUNDLE = 'com.digitalpals.fusebox';
+const APP_ID = '6829404456';
+const GROUP = 'Fusebox';
+// macOS's LibreSSL: `security import` can't read a .p12 from Homebrew's OpenSSL 3.
+const OPENSSL = '/usr/bin/openssl';
+const XCODEGEN = existsSync('/opt/homebrew/bin/xcodegen') ? '/opt/homebrew/bin/xcodegen' : 'xcodegen';
+const ASC = process.env.FUSEBOX_ASC_DIR || join(homedir(), '.config/whombat/ios');
+const STATE = join(homedir(), '.config/fusebox-ios'); // keychain password and identity state
+const OUT = join(homedir(), 'fusebox-ios-build/testflight');
+
+const log = (...a) => console.log(...a);
+
+function run(cmd, argv, opts = {}) {
+  const result = spawnSync(cmd, argv, { stdio: 'inherit', ...opts });
+  if (result.status !== 0) throw new Error(`${cmd} ${argv[0] ?? ''} failed (${result.status ?? result.signal})`);
+  return result;
+}
+const output = (cmd, argv) => run(cmd, argv, { stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' }).stdout;
+
+if (process.platform !== 'darwin') throw new Error('publish-testflight runs on the Mac that has Xcode');
+// Two publishes (this one or Whombat's) would fight over the keychain search list.
+for (const other of ['[p]ublish-ios.mjs', '[p]ublish-testflight']) {
+  const busy = spawnSync('pgrep', ['-f', other], { encoding: 'utf8' });
+  const pids = (busy.stdout || '').split('\n').map((s) => s.trim()).filter((p) => p && Number(p) !== process.pid && Number(p) !== process.ppid);
+  if (pids.length) throw new Error(`another publish is running (${other.replace(/[[\]]/g, '')}, pid ${pids.join(', ')}); try again when it has finished`);
+}
+
+await main();
+
+async function main() {
+  if (!existsSync(join(ASC, 'asc.json'))) throw new Error(`no App Store Connect API key in ${ASC} (asc.json {keyId, issuerId}, AuthKey_<keyId>.p8)`);
+  const { keyId, issuerId } = JSON.parse(readFileSync(join(ASC, 'asc.json'), 'utf8'));
+  const keyPath = join(ASC, `AuthKey_${keyId}.p8`);
+  const api = client(keyId, issuerId, readFileSync(keyPath));
+  mkdirSync(STATE, { recursive: true, mode: 0o700 });
+
+  const app = (await api('GET', `/v1/apps?filter[bundleId]=${BUNDLE}`)).data.find((a) => a.attributes.bundleId === BUNDLE);
+  if (!app) throw new Error(`App Store Connect has no app ${BUNDLE}`);
+  if (app.id !== APP_ID) log(`note: the app record is ${app.id}, not ${APP_ID}`);
+
+  const group = await testers(api, app);
+  if (flag('assign')) {
+    const version = /MARKETING_VERSION:\s*([\d.]+)/.exec(readFileSync(join(ios, 'project.yml'), 'utf8'))?.[1];
+    return waitAndAssign(api, app, group, version, flag('assign'));
+  }
+  const keychain = await identity(api);
+  if (setup) return log('Signing keychain, TestFlight group and testers are ready');
+
+  const version = /MARKETING_VERSION:\s*([\d.]+)/.exec(readFileSync(join(ios, 'project.yml'), 'utf8'))?.[1];
+  if (!version) throw new Error('no MARKETING_VERSION in ios/project.yml');
+  const build = flag('build-number') || String((await latestBuild(api, app)) + 1);
+  if (!/^\d+$/.test(build)) throw new Error(`build number ${build} isn't a whole number`);
+  const rev = spawnSync('git', ['-C', ios, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout?.trim() || '';
+  const dirty = spawnSync('git', ['-C', ios, 'status', '--porcelain', '--', '.'], { encoding: 'utf8' }).stdout?.trim();
+  log(`Building Fusebox ${version} (${build}) from ${rev}${dirty ? ' with uncommitted changes' : ''}`);
+
+  run(XCODEGEN, ['generate', '--quiet'], { cwd: ios });
+  rmSync(join(OUT, 'Fusebox.xcarchive'), { recursive: true, force: true });
+  rmSync(join(OUT, 'export'), { recursive: true, force: true });
+  mkdirSync(OUT, { recursive: true });
+  const auth = ['-allowProvisioningUpdates', '-authenticationKeyPath', keyPath, '-authenticationKeyID', keyId, '-authenticationKeyIssuerID', issuerId];
+  listed(keychain, () =>
+    xcodebuild(join(OUT, 'archive.log'), [
+      '-project', 'Fusebox.xcodeproj', '-scheme', 'Fusebox', '-configuration', 'Release',
+      '-destination', 'generic/platform=iOS', '-archivePath', join(OUT, 'Fusebox.xcarchive'),
+      '-derivedDataPath', join(OUT, 'dd'), ...auth,
+      `DEVELOPMENT_TEAM=${TEAM}`, `CURRENT_PROJECT_VERSION=${build}`, `MARKETING_VERSION=${version}`,
+      'archive',
+    ]),
+  );
+  if (check) return log(`Fusebox ${version} (${build}) archived and signed; --check uploads nothing`);
+
+  writeFileSync(join(OUT, 'export.plist'), plist({
+    method: 'app-store-connect', destination: 'upload', teamID: TEAM, signingStyle: 'automatic',
+    manageAppVersionAndBuildNumber: false, uploadSymbols: true,
+  }));
+  xcodebuild(join(OUT, 'export.log'), [
+    '-exportArchive', '-archivePath', join(OUT, 'Fusebox.xcarchive'), '-exportPath', join(OUT, 'export'),
+    '-exportOptionsPlist', join(OUT, 'export.plist'), ...auth,
+  ]);
+  log(`Uploaded Fusebox ${version} (${build}); waiting for App Store Connect to process it`);
+  await waitAndAssign(api, app, group, version, build);
+}
+
+async function waitAndAssign(api, app, group, version, build) {
+  // Processing takes a few minutes, sometimes half an hour or more.
+  const deadline = Date.now() + 90 * 60_000;
+  let last = '';
+  for (;;) {
+    const found = (await api('GET', `/v1/builds?filter[app]=${app.id}&filter[version]=${build}&filter[preReleaseVersion.version]=${version}&limit=1`)).data[0];
+    const state = found?.attributes.processingState ?? 'not listed yet';
+    if (state !== last) { log(`  ${new Date().toISOString().slice(11, 19)} ${state}`); last = state; }
+    if (state === 'VALID') { await assign(api, group, found, version, build); return; }
+    if (state === 'FAILED' || state === 'INVALID') throw new Error(`App Store Connect refused the build: ${state}`);
+    if (Date.now() > deadline) throw new Error(`still ${state} after 90 minutes; look in App Store Connect, then run again with --build-number ${Number(build) + 1}`);
+    await sleep(60_000);
+  }
+}
+
+/// The highest build number uploaded for the app so far (0 when none).
+async function latestBuild(api, app) {
+  const builds = await api('GET', `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=200&fields[builds]=version`);
+  return builds.data.reduce((max, b) => Math.max(max, Number(b.attributes.version) || 0), 0);
+}
+
+/// An internal group with access to all builds gets every build by itself; this makes sure.
+async function assign(api, group, build, version, number) {
+  // Apple lets a build's groups be added and removed but not read: read the group's builds.
+  const inGroup = async () => (await api('GET', `/v1/betaGroups/${group.id}/builds?limit=200&fields[builds]=version`)).data.some((b) => b.id === build.id);
+  if (!(await inGroup())) {
+    await api('POST', `/v1/betaGroups/${group.id}/relationships/builds`, { data: [{ type: 'builds', id: build.id }] })
+      .catch((e) => log(`  (adding the build to the group by hand: ${e.message.slice(0, 200)})`));
+  }
+  let listed = false;
+  for (let i = 0; i < 10 && !(listed = await inGroup()); i++) await sleep(15_000);
+  const detail = (await api('GET', `/v1/builds/${build.id}/buildBetaDetail`)).data.attributes;
+  log(`Fusebox ${version} (${number}) is VALID on TestFlight${listed ? ` and in the “${GROUP}” group` : `, but not yet listed in the “${GROUP}” group`} ` +
+    `(internal state ${detail.internalBuildState}); testers with automatic updates get it by themselves`);
+  if (!listed) process.exitCode = 2;
+}
+
+// Xcode takes the signing identity from the keychain search list; while this keychain is listed,
+// other SSH sessions would choose its identity too and find it locked. So: listed only while signing.
+function listed(keychain, build) {
+  const others = () => output('security', ['list-keychains', '-d', 'user']).split('\n')
+    .map((l) => l.trim().replace(/^"|"$/g, '')).filter((k) => k && k !== keychain);
+  const hold = () => {};
+  for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.on(signal, hold);
+  run('security', ['list-keychains', '-d', 'user', '-s', ...others(), keychain]);
+  try {
+    build();
+  } finally {
+    run('security', ['list-keychains', '-d', 'user', '-s', ...others()]);
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.off(signal, hold);
+  }
+}
+
+function xcodebuild(logFile, argv) {
+  const fd = openSync(logFile, 'w');
+  const result = spawnSync('xcodebuild', argv, { cwd: ios, stdio: ['ignore', fd, fd] });
+  closeSync(fd);
+  if (result.status === 0) return;
+  const lines = readFileSync(logFile, 'utf8').split('\n');
+  console.error([...new Set(lines.filter((l) => /error:|\*\* .* FAILED/.test(l)))].slice(0, 30).join('\n'));
+  throw new Error(`xcodebuild failed (${result.status}); the whole log is ${logFile}`);
+}
+
+// The internal group, with every user of the team in it.
+async function testers(api, app) {
+  const groups = await api('GET', `/v1/apps/${app.id}/betaGroups?limit=200`);
+  let group = groups.data.find((g) => g.attributes.name === GROUP);
+  if (!group) {
+    group = (await api('POST', '/v1/betaGroups', {
+      data: {
+        type: 'betaGroups',
+        attributes: { name: GROUP, isInternalGroup: true, hasAccessToAllBuilds: true },
+        relationships: { app: { data: { type: 'apps', id: app.id } } },
+      },
+    })).data;
+    log(`Made the internal TestFlight group “${GROUP}”`);
+  } else if (!group.attributes.hasAccessToAllBuilds) {
+    await api('PATCH', `/v1/betaGroups/${group.id}`, { data: { type: 'betaGroups', id: group.id, attributes: { hasAccessToAllBuilds: true } } });
+  }
+  const inGroup = await api('GET', `/v1/betaGroups/${group.id}/betaTesters?limit=200`);
+  const emails = new Set(inGroup.data.map((t) => t.attributes.email?.toLowerCase()));
+  for (const user of (await api('GET', '/v1/users?limit=200')).data) {
+    const { username: email, firstName, lastName } = user.attributes;
+    if (!email || emails.has(email.toLowerCase())) continue;
+    await api('POST', '/v1/betaTesters', {
+      data: {
+        type: 'betaTesters', attributes: { email, firstName, lastName },
+        relationships: { betaGroups: { data: [{ type: 'betaGroups', id: group.id }] } },
+      },
+    });
+    log(`Added ${email} to “${GROUP}”`);
+  }
+  return group;
+}
+
+// Fusebox's own build keychain and Apple Development identity, made again a month before the
+// certificate runs out. Only this script's own certificate is ever revoked.
+async function identity(api) {
+  const keychain = join(homedir(), 'Library/Keychains/fusebox-build.keychain-db');
+  const passFile = join(STATE, 'keychain.pass');
+  const stateFile = join(STATE, 'identity.json');
+  const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : null;
+  const valid = () => existsSync(keychain) && output('security', ['find-identity', '-v', '-p', 'codesigning', keychain]);
+  const unlock = (pass) => {
+    run('security', ['unlock-keychain', '-p', pass, keychain]);
+    run('security', ['set-keychain-settings', '-lut', '7200', keychain]); // locks again after two idle hours
+  };
+  if (state && existsSync(passFile) && Date.parse(state.expirationDate) - Date.now() > 30 * 86_400_000 && valid()?.includes(state.sha1)) {
+    unlock(readFileSync(passFile, 'utf8').trim());
+    return keychain;
+  }
+
+  const pass = randomBytes(24).toString('hex');
+  if (existsSync(keychain)) run('security', ['delete-keychain', keychain]);
+  writeFileSync(passFile, `${pass}\n`, { mode: 0o600 });
+  run('security', ['create-keychain', '-p', pass, keychain]);
+  unlock(pass);
+
+  const work = mkdtempSync(join(STATE, 'identity-'));
+  try {
+    const key = join(work, 'key.pem');
+    const csr = join(work, 'csr.pem');
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    writeFileSync(key, privateKey.export({ type: 'pkcs1', format: 'pem' }), { mode: 0o600 });
+    run(OPENSSL, ['req', '-new', '-key', key, '-out', csr, '-subj', '/CN=Fusebox build']);
+    const made = await api('POST', '/v1/certificates', {
+      data: { type: 'certificates', attributes: { certificateType: 'DEVELOPMENT', csrContent: readFileSync(csr, 'utf8') } },
+    });
+    try {
+      const der = Buffer.from(made.data.attributes.certificateContent, 'base64');
+      writeFileSync(join(work, 'cert.pem'), new X509Certificate(der).toString());
+      const p12 = join(work, 'id.p12');
+      const p12Pass = randomBytes(12).toString('hex');
+      run(OPENSSL, ['pkcs12', '-export', '-inkey', key, '-in', join(work, 'cert.pem'), '-out', p12, '-passout', `pass:${p12Pass}`]);
+      run('security', ['import', p12, '-k', keychain, '-P', p12Pass, '-T', '/usr/bin/codesign']);
+      run('security', ['set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', pass, keychain], { stdio: ['ignore', 'ignore', 'inherit'] });
+      const sha1 = createHash('sha1').update(der).digest('hex').toUpperCase();
+      if (!valid()?.includes(sha1)) throw new Error(`the new identity ${sha1} isn't valid in ${keychain}`);
+      const { expirationDate } = made.data.attributes;
+      writeFileSync(stateFile, `${JSON.stringify({ certificateId: made.data.id, sha1, expirationDate }, null, 2)}\n`);
+      log(`Made the signing identity ${sha1} (until ${expirationDate.slice(0, 10)})`);
+    } catch (error) {
+      await api('DELETE', `/v1/certificates/${made.data.id}`).catch((e) => console.error(e.message));
+      throw error;
+    }
+    if (state?.certificateId) await api('DELETE', `/v1/certificates/${state.certificateId}`).catch((e) => console.error(e.message));
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+  return keychain;
+}
+
+function client(keyId, issuerId, pem) {
+  const key = createPrivateKey(pem);
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return async (method, path, body) => {
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${b64({ alg: 'ES256', kid: keyId, typ: 'JWT' })}.${b64({ iss: issuerId, iat: now, exp: now + 600, aud: 'appstoreconnect-v1' })}`;
+    const signature = sign('sha256', Buffer.from(unsigned), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+    const request = () => fetch(`https://api.appstoreconnect.apple.com${path}`, {
+      method, headers: { authorization: `Bearer ${unsigned}.${signature}`, 'content-type': 'application/json' },
+      body: body && JSON.stringify(body),
+    });
+    // After a long build the kept-alive connection can be gone: a read asks again, a write doesn't.
+    const res = await request().catch(async (error) => {
+      if (method !== 'GET') throw error;
+      await sleep(5_000);
+      return request();
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`App Store Connect ${method} ${path.split('?')[0]}: ${res.status} ${text.slice(0, 500)}`);
+    return text ? JSON.parse(text) : null;
+  };
+}
+
+function plist(values) {
+  const entries = Object.entries(values).map(([k, v]) => `  <key>${k}</key>${typeof v === 'boolean' ? `<${v}/>` : `<string>${v}</string>`}`);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+${entries.join('\n')}
+</dict></plist>
+`;
+}

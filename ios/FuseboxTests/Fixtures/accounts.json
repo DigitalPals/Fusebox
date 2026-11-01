@@ -1,0 +1,1212 @@
+[
+ {
+  "id": "file:user1@example.com",
+  "provider": "claude",
+  "label": "user5@example.com",
+  "email": "user5@example.com",
+  "kind": "oauth",
+  "group": null,
+  "file": "user1@example.com",
+  "disabled": false,
+  "cooldowns": {},
+  "cooldown_kinds": {},
+  "quota_reset_unknown": false,
+  "last_error": null,
+  "last_error_id": null,
+  "last_error_until": null,
+  "last_used": "2026-11-01T08:57:31.420206300+00:00",
+  "expires_at": "2026-11-01T14:10:42.582138219+00:00",
+  "counters": {
+   "requests": 430,
+   "failures": 0,
+   "cancelled": 0,
+   "usage_missing": 0,
+   "usage_partial": 0,
+   "input_tokens": 2510859,
+   "output_tokens": 228643,
+   "cache_tokens": 57490003
+  },
+  "priority": 0,
+  "quota": {
+   "windows": [
+    {
+     "name": "week",
+     "used": 26,
+     "resets_at": "2026-11-04T16:00:00Z"
+    },
+    {
+     "name": "week fable",
+     "used": 0,
+     "resets_at": "2026-11-01T08:54:22.842634554Z",
+     "model": "fable"
+    }
+   ],
+   "limits": [
+    {
+     "id": "extra_usage",
+     "name": "Monthly extra usage",
+     "scope": {
+      "kind": "overage"
+     },
+     "used_percent": null,
+     "used": null,
+     "limit": null,
+     "remaining": null,
+     "unit": "USD cents",
+     "unlimited": null,
+     "enabled": false,
+     "resets_at": null
+    }
+   ],
+   "updated_at": "2026-11-01T08:57:32.256268030Z",
+   "refreshed_at": "2026-11-01T08:54:22.842834458Z",
+   "plan": "max_20x",
+   "plan_name": "Ultra",
+   "no_five_hour_limit": true
+  },
+  "banked_resets": {
+   "checked_at": "2026-11-01T08:54:22.842837985Z",
+   "inventory": {
+    "available": 0,
+    "applicable": 0,
+    "eligible": false,
+    "grants": [],
+    "reason": "Account is not eligible",
+    "selected_grant": null
+   },
+   "error": null,
+   "quote": null,
+   "operation": null,
+   "retryable": false
+  },
+  "window_starter": {
+   "status": "not_needed",
+   "message": "This account has no five-hour limit, so there is no window to start",
+   "checked_at": "2026-11-01T07:59:10.610734443Z",
+   "attempted_at": null,
+   "resets_at": null,
+   "next_check_at": "2026-11-01T08:59:10.610734443Z",
+   "retry_after": null,
+   "automatic": false
+  },
+  "models": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "claude-haiku-5-5",
+   "claude-opus-5",
+   "claude-sonnet-5",
+   "claude-opus-4-8",
+   "claude-opus-4-7",
+   "claude-opus-4-6",
+   "claude-sonnet-4-6",
+   "claude-haiku-4-5-20251001",
+   "claude-fable-5",
+   "claude-opus-4-5-20251101",
+   "claude-sonnet-4-5-20250929"
+  ],
+  "banked_reset_plan": null,
+  "quota_attribution": {
+   "basis": "estimate",
+   "current": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-04T15:59:59.625371Z",
+     "since": "2026-10-31T06:40:17.713577020Z",
+     "used": 27,
+     "before": 4,
+     "attributed": 22.999999999999975,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [
+      {
+       "id": "client-1",
+       "label": "Client 1",
+       "points": 19.845964850014916
+      },
+      {
+       "id": "client-2",
+       "label": "Client 2",
+       "points": 2.4066859608155964
+      },
+      {
+       "id": "client-3",
+       "label": "Client 3",
+       "points": 0.6094692913370038
+      },
+      {
+       "id": "client-4",
+       "label": "Client 4",
+       "points": 0.13787989783245758
+      }
+     ],
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "label": "claude-opus-5-5",
+       "points": 22.994724562706946
+      },
+      {
+       "id": "claude-sonnet-5-5",
+       "label": "claude-sonnet-5-5",
+       "points": 0.004603402013665894
+      },
+      {
+       "id": "claude-haiku-5-5",
+       "label": "claude-haiku-5-5",
+       "points": 0.00067203527939124
+      }
+     ],
+     "sessions": 52
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:54:22.842634554Z",
+     "since": "2026-11-01T08:54:22.842638080Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ],
+   "previous": [
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:21:17.165632603Z",
+     "since": "2026-11-01T08:21:17.165652450Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T07:59:10.610700770Z",
+     "since": "2026-11-01T07:59:10.610713714Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T07:48:52.923365407Z",
+     "since": "2026-11-01T07:48:52.923370567Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T07:19:48.219802046Z",
+     "since": "2026-11-01T07:19:48.219829017Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ]
+  },
+  "window_starter_supported": true,
+  "window_starter_selected": true
+ },
+ {
+  "id": "file:user2@example.com",
+  "provider": "claude",
+  "label": "user6@example.com",
+  "email": "user6@example.com",
+  "kind": "oauth",
+  "group": null,
+  "file": "user2@example.com",
+  "disabled": false,
+  "cooldowns": {},
+  "cooldown_kinds": {},
+  "quota_reset_unknown": false,
+  "last_error": null,
+  "last_error_id": null,
+  "last_error_until": null,
+  "last_used": null,
+  "expires_at": "2026-11-01T15:00:42.935020960+00:00",
+  "counters": {
+   "requests": 0,
+   "failures": 0,
+   "cancelled": 0,
+   "usage_missing": 0,
+   "usage_partial": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "cache_tokens": 0
+  },
+  "priority": 0,
+  "quota": {
+   "windows": [
+    {
+     "name": "week",
+     "used": 2,
+     "resets_at": "2026-11-06T15:00:00.410084Z"
+    },
+    {
+     "name": "week fable",
+     "used": 0,
+     "resets_at": "2026-11-01T08:55:10.484840866Z",
+     "model": "fable"
+    }
+   ],
+   "limits": [
+    {
+     "id": "extra_usage",
+     "name": "Monthly extra usage",
+     "scope": {
+      "kind": "overage"
+     },
+     "used_percent": 0,
+     "used": 0,
+     "limit": 10000,
+     "remaining": null,
+     "unit": "USD cents",
+     "unlimited": null,
+     "enabled": false,
+     "resets_at": null
+    }
+   ],
+   "updated_at": "2026-11-01T08:55:10.484872415Z",
+   "refreshed_at": "2026-11-01T08:55:10.484872415Z",
+   "plan": "max_20x",
+   "plan_name": "Ultra",
+   "no_five_hour_limit": true
+  },
+  "banked_resets": {
+   "checked_at": "2026-11-01T08:54:22.964869991Z",
+   "inventory": {
+    "available": 0,
+    "applicable": 0,
+    "eligible": false,
+    "grants": [],
+    "reason": "Account is not eligible",
+    "selected_grant": null
+   },
+   "error": null,
+   "quote": null,
+   "operation": {
+    "request_id": "00000000-0000-4000-8000-da3c0da8b7e6",
+    "grant_id": "opus55-launch-promax-20260921",
+    "created_at": "2026-10-19T17:34:18.951321519Z",
+    "status": "applied",
+    "message": "One banked reset applied",
+    "retry_until": "2026-10-19T17:44:18.951321519Z",
+    "automatic": true
+   },
+   "retryable": false
+  },
+  "window_starter": {
+   "status": "not_needed",
+   "message": "This account has no five-hour limit, so there is no window to start",
+   "checked_at": "2026-11-01T08:55:10.484880159Z",
+   "attempted_at": null,
+   "resets_at": null,
+   "next_check_at": "2026-11-01T09:55:10.484880159Z",
+   "retry_after": null,
+   "automatic": false
+  },
+  "models": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "claude-haiku-5-5",
+   "claude-opus-5",
+   "claude-sonnet-5",
+   "claude-opus-4-8",
+   "claude-opus-4-7",
+   "claude-opus-4-6",
+   "claude-sonnet-4-6",
+   "claude-haiku-4-5-20251001",
+   "claude-fable-5",
+   "claude-opus-4-5-20251101",
+   "claude-sonnet-4-5-20250929"
+  ],
+  "banked_reset_plan": null,
+  "quota_attribution": {
+   "basis": "estimate",
+   "current": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-06T15:00:00Z",
+     "since": "2026-10-30T15:00:07.575281433Z",
+     "used": 2,
+     "before": 0,
+     "attributed": 1,
+     "outside": 1,
+     "by_tokens": 0,
+     "clients": [
+      {
+       "id": "client-5",
+       "label": "Client 5",
+       "points": 1
+      }
+     ],
+     "models": [
+      {
+       "id": "claude-haiku-4-5-20251001",
+       "label": "claude-haiku-4-5-20251001",
+       "points": 1
+      }
+     ],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:54:22.964849943Z",
+     "since": "2026-11-01T08:54:22.964851997Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ],
+   "previous": [
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:44:21.057102643Z",
+     "since": "2026-11-01T08:44:21.057120557Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:34:19.313482131Z",
+     "since": "2026-11-01T08:34:19.313502650Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:24:17.635501061Z",
+     "since": "2026-11-01T08:24:17.635504327Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:14:16.160109151Z",
+     "since": "2026-11-01T08:14:16.160128648Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ]
+  },
+  "window_starter_supported": true,
+  "window_starter_selected": true
+ },
+ {
+  "id": "file:user3@example.com",
+  "provider": "claude",
+  "label": "user7@example.com",
+  "email": "user7@example.com",
+  "kind": "oauth",
+  "group": null,
+  "file": "user3@example.com",
+  "disabled": false,
+  "cooldowns": {},
+  "cooldown_kinds": {},
+  "quota_reset_unknown": false,
+  "last_error": null,
+  "last_error_id": null,
+  "last_error_until": null,
+  "last_used": null,
+  "expires_at": "2026-11-01T15:27:43.244321014+00:00",
+  "counters": {
+   "requests": 0,
+   "failures": 0,
+   "cancelled": 0,
+   "usage_missing": 0,
+   "usage_partial": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "cache_tokens": 0
+  },
+  "priority": 0,
+  "quota": {
+   "windows": [
+    {
+     "name": "week",
+     "used": 0,
+     "resets_at": "2026-11-05T13:59:59.789936Z"
+    },
+    {
+     "name": "week fable",
+     "used": 0,
+     "resets_at": "2026-11-01T08:55:10.860703545Z",
+     "model": "fable"
+    }
+   ],
+   "limits": [
+    {
+     "id": "extra_usage",
+     "name": "Monthly extra usage",
+     "scope": {
+      "kind": "overage"
+     },
+     "used_percent": null,
+     "used": null,
+     "limit": null,
+     "remaining": null,
+     "unit": "USD cents",
+     "unlimited": null,
+     "enabled": false,
+     "resets_at": null
+    }
+   ],
+   "updated_at": "2026-11-01T08:55:10.860725196Z",
+   "refreshed_at": "2026-11-01T08:55:10.860725196Z",
+   "plan": "max_20x",
+   "plan_name": "Ultra",
+   "no_five_hour_limit": true
+  },
+  "banked_resets": {
+   "checked_at": "2026-11-01T08:54:22.967718365Z",
+   "inventory": {
+    "available": 0,
+    "applicable": 0,
+    "eligible": false,
+    "grants": [],
+    "reason": "Account is not eligible",
+    "selected_grant": null
+   },
+   "error": null,
+   "quote": null,
+   "operation": null,
+   "retryable": false
+  },
+  "window_starter": {
+   "status": "not_needed",
+   "message": "This account has no five-hour limit, so there is no window to start",
+   "checked_at": "2026-11-01T08:55:10.860731577Z",
+   "attempted_at": null,
+   "resets_at": null,
+   "next_check_at": "2026-11-01T09:55:10.860731577Z",
+   "retry_after": null,
+   "automatic": false
+  },
+  "models": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "claude-haiku-5-5",
+   "claude-opus-5",
+   "claude-sonnet-5",
+   "claude-opus-4-8",
+   "claude-opus-4-7",
+   "claude-opus-4-6",
+   "claude-sonnet-4-6",
+   "claude-haiku-4-5-20251001",
+   "claude-fable-5",
+   "claude-opus-4-5-20251101",
+   "claude-sonnet-4-5-20250929"
+  ],
+  "banked_reset_plan": null,
+  "quota_attribution": {
+   "basis": "estimate",
+   "current": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-05T14:00:00Z",
+     "since": "2026-10-29T14:00:26.583765851Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:49:21.786507567Z",
+     "since": "2026-11-01T08:49:21.786516504Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ],
+   "previous": [
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:39:20.181575738Z",
+     "since": "2026-11-01T08:39:20.181583903Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:29:18.916626563Z",
+     "since": "2026-11-01T08:29:18.916639257Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:19:16.620354371Z",
+     "since": "2026-11-01T08:19:16.620370181Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:09:15.573608186Z",
+     "since": "2026-11-01T08:09:15.573617673Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ]
+  },
+  "window_starter_supported": true,
+  "window_starter_selected": true
+ },
+ {
+  "id": "file:user4@example.com",
+  "provider": "claude",
+  "label": "user8@example.com",
+  "email": "user8@example.com",
+  "kind": "oauth",
+  "group": null,
+  "file": "user4@example.com",
+  "disabled": false,
+  "cooldowns": {
+   "*": "2026-11-02T13:00:00.283852+00:00"
+  },
+  "cooldown_kinds": {
+   "*": "quota"
+  },
+  "quota_reset_unknown": false,
+  "last_error": null,
+  "last_error_id": null,
+  "last_error_until": null,
+  "last_used": null,
+  "expires_at": "2026-11-01T09:38:41.957074030+00:00",
+  "counters": {
+   "requests": 0,
+   "failures": 0,
+   "cancelled": 0,
+   "usage_missing": 0,
+   "usage_partial": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "cache_tokens": 0
+  },
+  "priority": 0,
+  "quota": {
+   "windows": [
+    {
+     "name": "week",
+     "used": 100,
+     "resets_at": "2026-11-02T13:00:00.283852Z"
+    },
+    {
+     "name": "week fable",
+     "used": 0,
+     "resets_at": "2026-11-01T08:55:11.375471330Z",
+     "model": "fable"
+    }
+   ],
+   "limits": [
+    {
+     "id": "extra_usage",
+     "name": "Monthly extra usage",
+     "scope": {
+      "kind": "overage"
+     },
+     "used_percent": null,
+     "used": null,
+     "limit": null,
+     "remaining": null,
+     "unit": "USD cents",
+     "unlimited": null,
+     "enabled": false,
+     "resets_at": null
+    }
+   ],
+   "updated_at": "2026-11-01T08:55:11.375484384Z",
+   "refreshed_at": "2026-11-01T08:55:11.375484384Z",
+   "plan": "max_20x",
+   "plan_name": "Ultra",
+   "no_five_hour_limit": true
+  },
+  "banked_resets": {
+   "checked_at": "2026-11-01T08:54:22.952184073Z",
+   "inventory": {
+    "available": 0,
+    "applicable": 0,
+    "eligible": false,
+    "grants": [],
+    "reason": "Account is not eligible",
+    "selected_grant": null
+   },
+   "error": null,
+   "quote": null,
+   "operation": null,
+   "retryable": false
+  },
+  "window_starter": {
+   "status": "not_needed",
+   "message": "This account has no five-hour limit, so there is no window to start",
+   "checked_at": "2026-11-01T08:55:11.375487510Z",
+   "attempted_at": null,
+   "resets_at": null,
+   "next_check_at": "2026-11-01T09:55:11.375487510Z",
+   "retry_after": null,
+   "automatic": false
+  },
+  "models": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "claude-haiku-5-5",
+   "claude-opus-5",
+   "claude-sonnet-5",
+   "claude-opus-4-8",
+   "claude-opus-4-7",
+   "claude-opus-4-6",
+   "claude-sonnet-4-6",
+   "claude-haiku-4-5-20251001",
+   "claude-fable-5",
+   "claude-opus-4-5-20251101"
+  ],
+  "banked_reset_plan": null,
+  "quota_attribution": {
+   "basis": "estimate",
+   "current": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-02T13:00:00Z",
+     "since": "2026-10-26T13:00:56.461425511Z",
+     "used": 100,
+     "before": 0,
+     "attributed": 99.99999999999963,
+     "outside": 0,
+     "by_tokens": 4,
+     "clients": [
+      {
+       "id": "client-1",
+       "label": "Client 1",
+       "points": 93.1149534366874
+      },
+      {
+       "id": "client-2",
+       "label": "Client 2",
+       "points": 6.072842882267176
+      },
+      {
+       "id": "client-3",
+       "label": "Client 3",
+       "points": 0.8121326564740202
+      },
+      {
+       "id": "client-5",
+       "label": "Client 5",
+       "points": 0.00007102457102639462
+      }
+     ],
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "label": "claude-opus-5-5",
+       "points": 99.97436650241885
+      },
+      {
+       "id": "claude-sonnet-5-5",
+       "label": "claude-sonnet-5-5",
+       "points": 0.01829060086452682
+      },
+      {
+       "id": "claude-haiku-5-5",
+       "label": "claude-haiku-5-5",
+       "points": 0.007271872145330456
+      },
+      {
+       "id": "claude-haiku-4-5-20251001",
+       "label": "claude-haiku-4-5-20251001",
+       "points": 0.00007102457102639462
+      }
+     ],
+     "sessions": 184
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:54:22.952171069Z",
+     "since": "2026-11-01T08:54:22.952173874Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ],
+   "previous": [
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:44:21.096361195Z",
+     "since": "2026-11-01T08:44:21.096373127Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:34:19.347726021Z",
+     "since": "2026-11-01T08:34:19.347740779Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:24:17.733295955Z",
+     "since": "2026-11-01T08:24:17.733299432Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    },
+    {
+     "key": "client-key-2",
+     "name": "week fable",
+     "model": "fable",
+     "resets_at": "2026-11-01T08:14:16.198807293Z",
+     "since": "2026-11-01T08:14:16.198818143Z",
+     "used": 0,
+     "before": 0,
+     "attributed": 0,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [],
+     "models": [],
+     "sessions": 0
+    }
+   ]
+  },
+  "window_starter_supported": true,
+  "window_starter_selected": true
+ },
+ {
+  "id": "file:user9@example.com",
+  "provider": "codex",
+  "label": "user6@example.com",
+  "email": "user6@example.com",
+  "kind": "oauth",
+  "group": null,
+  "file": "user9@example.com",
+  "disabled": false,
+  "cooldowns": {},
+  "cooldown_kinds": {},
+  "quota_reset_unknown": false,
+  "last_error": null,
+  "last_error_id": null,
+  "last_error_until": null,
+  "last_used": "2026-11-01T08:35:27.697519590+00:00",
+  "expires_at": "2026-11-06T11:53:58.094349844+00:00",
+  "counters": {
+   "requests": 10,
+   "failures": 0,
+   "cancelled": 0,
+   "usage_missing": 0,
+   "usage_partial": 0,
+   "input_tokens": 101962,
+   "output_tokens": 4948,
+   "cache_tokens": 658944
+  },
+  "priority": 0,
+  "quota": {
+   "windows": [
+    {
+     "name": "week",
+     "used": 23,
+     "resets_at": "2026-11-05T18:04:27Z"
+    }
+   ],
+   "limits": [
+    {
+     "id": "codex:gate",
+     "name": "Account allowance",
+     "scope": {
+      "kind": "account"
+     },
+     "used_percent": 0,
+     "used": null,
+     "limit": null,
+     "remaining": null,
+     "unit": null,
+     "unlimited": null,
+     "enabled": null,
+     "resets_at": null
+    },
+    {
+     "id": "credits",
+     "name": "Account credits",
+     "scope": {
+      "kind": "credits"
+     },
+     "used_percent": null,
+     "used": null,
+     "limit": null,
+     "remaining": 61840.908605,
+     "unit": null,
+     "unlimited": false,
+     "enabled": null,
+     "resets_at": null
+    }
+   ],
+   "updated_at": "2026-11-01T08:54:23.827137818Z",
+   "refreshed_at": "2026-11-01T08:54:23.827137818Z",
+   "plan": "pro",
+   "no_five_hour_limit": true,
+   "subscription_plan": "chatgptpro"
+  },
+  "banked_resets": {
+   "checked_at": "2026-11-01T08:54:23.827176180Z",
+   "inventory": {
+    "available": 2,
+    "applicable": 0,
+    "eligible": true,
+    "grants": [
+     {
+      "id": "RateLimitResetCredit_849320deed9481919fc9daa9994582b9",
+      "label": "Codex reset",
+      "remaining": 1,
+      "total": 1,
+      "granted_at": "2026-10-07T23:31:00.281622Z",
+      "expires_at": "2026-11-06T23:31:00.281622Z",
+      "starts_at": null,
+      "clears": [
+       "subscription limits"
+      ],
+      "usable": true,
+      "reason": null
+     },
+     {
+      "id": "RateLimitResetCredit_08c987569bf08191a8989a3af3c04d7a",
+      "label": "Codex reset",
+      "remaining": 1,
+      "total": 1,
+      "granted_at": "2026-10-31T20:12:55.900421Z",
+      "expires_at": "2026-11-30T20:12:55.900421Z",
+      "starts_at": null,
+      "clears": [
+       "subscription limits"
+      ],
+      "usable": true,
+      "reason": null
+     }
+    ],
+    "reason": null,
+    "selected_grant": "RateLimitResetCredit_849320deed9481919fc9daa9994582b9"
+   },
+   "error": null,
+   "quote": "00000000-0000-4000-8000-1242bff28ab4",
+   "operation": {
+    "request_id": "00000000-0000-4000-8000-ff40498e7df6",
+    "grant_id": "RateLimitResetCredit_9836bd01eb888191b368b691bc2f0d84",
+    "created_at": "2026-10-29T18:04:06.430029508Z",
+    "status": "applied",
+    "message": "One banked reset applied",
+    "retry_until": "2026-10-29T18:14:06.430029508Z",
+    "automatic": true
+   },
+   "retryable": false
+  },
+  "window_starter": null,
+  "models": [
+   "gpt-6-astra",
+   "gpt-6.1-sol",
+   "gpt-6.1-terra",
+   "gpt-6-sol",
+   "gpt-6-luna",
+   "gpt-5.6-sol",
+   "gpt-5.6-terra",
+   "gpt-5.6-luna",
+   "gpt-5.5",
+   "gpt-image-2",
+   "gpt-image-2.5-flare",
+   "gpt-image-2.5-sunburst"
+  ],
+  "banked_reset_plan": {
+   "expires_at": "2026-11-06T23:31:00.281622Z",
+   "expiry_redeem_at": "2026-11-06T22:31:00.281622Z",
+   "prioritized": true,
+   "auto_redeem": true,
+   "due": false,
+   "message": "Automatic reset at 95% weekly use, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies."
+  },
+  "quota_attribution": {
+   "basis": "estimate",
+   "current": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-05T18:04:09Z",
+     "since": "2026-10-29T18:04:09.896035762Z",
+     "used": 23,
+     "before": 0,
+     "attributed": 22.999999999999975,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [
+      {
+       "id": "client-1",
+       "label": "Client 1",
+       "points": 22.975879976310093
+      },
+      {
+       "id": "client-6",
+       "label": "Client 6",
+       "points": 0.024120023689882735
+      }
+     ],
+     "models": [
+      {
+       "id": "gpt-6.1-sol",
+       "label": "gpt-6.1-sol",
+       "points": 22.981663760487805
+      },
+      {
+       "id": "gpt-6-luna",
+       "label": "gpt-6-luna",
+       "points": 0.01833623951216877
+      }
+     ],
+     "sessions": 129
+    }
+   ],
+   "previous": [
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-04T06:37:52Z",
+     "since": "2026-10-28T06:37:52.990112867Z",
+     "used": 77,
+     "before": 0,
+     "attributed": 77.00000000000009,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [
+      {
+       "id": "client-1",
+       "label": "Client 1",
+       "points": 76.90020197555637
+      },
+      {
+       "id": "client-6",
+       "label": "Client 6",
+       "points": 0.09979802444370904
+      }
+     ],
+     "models": [
+      {
+       "id": "gpt-6-astra",
+       "label": "gpt-6-astra",
+       "points": 49.16806749416305
+      },
+      {
+       "id": "gpt-6.1-sol",
+       "label": "gpt-6.1-sol",
+       "points": 27.82099511246365
+      },
+      {
+       "id": "gpt-6-luna",
+       "label": "gpt-6-luna",
+       "points": 0.010937393373330544
+      }
+     ],
+     "sessions": 152
+    },
+    {
+     "key": "client-key-1",
+     "name": "week",
+     "model": null,
+     "resets_at": "2026-11-02T06:20:01Z",
+     "since": "2026-10-27T11:54:19.666518800Z",
+     "used": 30,
+     "before": 25,
+     "attributed": 5.000000000000002,
+     "outside": 0,
+     "by_tokens": 0,
+     "clients": [
+      {
+       "id": "client-1",
+       "label": "Client 1",
+       "points": 4.98718304062485
+      },
+      {
+       "id": "client-2",
+       "label": "Client 2",
+       "points": 0.012815588108135037
+      },
+      {
+       "id": "client-7",
+       "label": "Client 7",
+       "points": 0.0000013712670162831471
+      }
+     ],
+     "models": [
+      {
+       "id": "gpt-6.1-sol",
+       "label": "gpt-6.1-sol",
+       "points": 4.978155318397286
+      },
+      {
+       "id": "gpt-6-luna",
+       "label": "gpt-6-luna",
+       "points": 0.021844681602714577
+      }
+     ],
+     "sessions": 31
+    }
+   ]
+  },
+  "window_starter_supported": false,
+  "window_starter_selected": false
+ }
+]

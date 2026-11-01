@@ -1,0 +1,3413 @@
+{
+ "range": {
+  "start": 1792969200000,
+  "end": 1793574000000,
+  "timezone": "Europe/Amsterdam"
+ },
+ "combined": {
+  "basis": "One entry per provider response. Imported entries that share a response ID with a proxy entry are excluded.",
+  "totals": {
+   "observations": 71016,
+   "estimated_cost_nanos": 6449857506010,
+   "known_cost_nanos": 6449857506010,
+   "aggregation_overflow": false,
+   "aggregation_overflow_fields": [],
+   "unpriced": 1051,
+   "unpriced_reasons": {
+    "missing_usage": 1051
+   },
+   "partial": 30,
+   "missing_usage": 1051,
+   "pricing_partial": 14071,
+   "tokens": {
+    "input": 73973982,
+    "cache_read": 16687025032,
+    "cache_write": 377590343,
+    "write_5m": 377590343,
+    "write_1h": 0,
+    "output": 54481223,
+    "reasoning": 22790927,
+    "write_30m": null,
+    "write_12h": null
+   },
+   "missing_token_counts": {
+    "input": 1051,
+    "cache_read": 1051,
+    "cache_write": 1051,
+    "output": 1051,
+    "reasoning": 1118
+   },
+   "matched": 0,
+   "history_only": 0,
+   "weak_identity": 0
+  },
+  "proxy_first_event_at_ms": 1789198598967,
+  "stack": "provider",
+  "trend": [
+   {
+    "observations": 4022,
+    "estimated_cost_nanos": 429527586710,
+    "known_cost_nanos": 429527586710,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 4,
+    "unpriced_reasons": {
+     "missing_usage": 4
+    },
+    "partial": 1,
+    "missing_usage": 4,
+    "pricing_partial": 5,
+    "tokens": {
+     "input": 1493141,
+     "cache_read": 1106163193,
+     "cache_write": 27939551,
+     "write_5m": 27939551,
+     "write_1h": 0,
+     "output": 3221005,
+     "reasoning": 1346305,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 4,
+     "cache_read": 4,
+     "cache_write": 4,
+     "output": 4,
+     "reasoning": 11
+    },
+    "date": "2026-10-26",
+    "group": "anthropic"
+   },
+   {
+    "observations": 2946,
+    "estimated_cost_nanos": 106718000300,
+    "known_cost_nanos": 106718000300,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 25,
+    "unpriced_reasons": {
+     "missing_usage": 25
+    },
+    "partial": 0,
+    "missing_usage": 25,
+    "pricing_partial": 2946,
+    "tokens": {
+     "input": 12613363,
+     "cache_read": 397084288,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 2005525,
+     "reasoning": 831075,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 25,
+     "cache_read": 25,
+     "cache_write": 25,
+     "output": 25,
+     "reasoning": 25
+    },
+    "date": "2026-10-26",
+    "group": "openai"
+   },
+   {
+    "observations": 8985,
+    "estimated_cost_nanos": 916200873920,
+    "known_cost_nanos": 916200873920,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 4,
+    "unpriced_reasons": {
+     "missing_usage": 4
+    },
+    "partial": 3,
+    "missing_usage": 4,
+    "pricing_partial": 7,
+    "tokens": {
+     "input": 2959989,
+     "cache_read": 2540558396,
+     "cache_write": 50724473,
+     "write_5m": 50724473,
+     "write_1h": 0,
+     "output": 7205153,
+     "reasoning": 2583760,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 4,
+     "cache_read": 4,
+     "cache_write": 4,
+     "output": 4,
+     "reasoning": 12
+    },
+    "date": "2026-10-27",
+    "group": "anthropic"
+   },
+   {
+    "observations": 1686,
+    "estimated_cost_nanos": 37621046660,
+    "known_cost_nanos": 37621046660,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 8,
+    "unpriced_reasons": {
+     "missing_usage": 8
+    },
+    "partial": 0,
+    "missing_usage": 8,
+    "pricing_partial": 1686,
+    "tokens": {
+     "input": 4485463,
+     "cache_read": 211882240,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 816670,
+     "reasoning": 367015,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 8,
+     "cache_read": 8,
+     "cache_write": 8,
+     "output": 8,
+     "reasoning": 8
+    },
+    "date": "2026-10-27",
+    "group": "openai"
+   },
+   {
+    "observations": 7401,
+    "estimated_cost_nanos": 743352211175,
+    "known_cost_nanos": 743352211175,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 2,
+    "unpriced_reasons": {
+     "missing_usage": 2
+    },
+    "partial": 6,
+    "missing_usage": 2,
+    "pricing_partial": 8,
+    "tokens": {
+     "input": 1538788,
+     "cache_read": 1885391593,
+     "cache_write": 49640018,
+     "write_5m": 49640018,
+     "write_1h": 0,
+     "output": 5572628,
+     "reasoning": 2258134,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 2,
+     "cache_read": 2,
+     "cache_write": 2,
+     "output": 2,
+     "reasoning": 11
+    },
+    "date": "2026-10-28",
+    "group": "anthropic"
+   },
+   {
+    "observations": 4318,
+    "estimated_cost_nanos": 87350360180,
+    "known_cost_nanos": 87350360180,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 425,
+    "unpriced_reasons": {
+     "missing_usage": 425
+    },
+    "partial": 0,
+    "missing_usage": 425,
+    "pricing_partial": 4318,
+    "tokens": {
+     "input": 8549450,
+     "cache_read": 518421632,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 1892392,
+     "reasoning": 719618,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 425,
+     "cache_read": 425,
+     "cache_write": 425,
+     "output": 425,
+     "reasoning": 425
+    },
+    "date": "2026-10-28",
+    "group": "openai"
+   },
+   {
+    "observations": 6759,
+    "estimated_cost_nanos": 869865925000,
+    "known_cost_nanos": 869865925000,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 3,
+    "unpriced_reasons": {
+     "missing_usage": 3
+    },
+    "partial": 7,
+    "missing_usage": 3,
+    "pricing_partial": 10,
+    "tokens": {
+     "input": 3351505,
+     "cache_read": 1829910312,
+     "cache_write": 65556663,
+     "write_5m": 65556663,
+     "write_1h": 0,
+     "output": 8176551,
+     "reasoning": 3844169,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 3,
+     "cache_read": 3,
+     "cache_write": 3,
+     "output": 3,
+     "reasoning": 20
+    },
+    "date": "2026-10-29",
+    "group": "anthropic"
+   },
+   {
+    "observations": 3951,
+    "estimated_cost_nanos": 333903446000,
+    "known_cost_nanos": 333903446000,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 202,
+    "unpriced_reasons": {
+     "missing_usage": 202
+    },
+    "partial": 0,
+    "missing_usage": 202,
+    "pricing_partial": 3951,
+    "tokens": {
+     "input": 16150672,
+     "cache_read": 458408832,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 2024050,
+     "reasoning": 801629,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 202,
+     "cache_read": 202,
+     "cache_write": 202,
+     "output": 202,
+     "reasoning": 202
+    },
+    "date": "2026-10-29",
+    "group": "openai"
+   },
+   {
+    "observations": 13045,
+    "estimated_cost_nanos": 1330651778560,
+    "known_cost_nanos": 1330651778560,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 7,
+    "unpriced_reasons": {
+     "missing_usage": 7
+    },
+    "partial": 9,
+    "missing_usage": 7,
+    "pricing_partial": 16,
+    "tokens": {
+     "input": 3384136,
+     "cache_read": 3643831661,
+     "cache_write": 75757462,
+     "write_5m": 75757462,
+     "write_1h": 0,
+     "output": 10555187,
+     "reasoning": 4383667,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 7,
+     "cache_read": 7,
+     "cache_write": 7,
+     "output": 7,
+     "reasoning": 25
+    },
+    "date": "2026-10-30",
+    "group": "anthropic"
+   },
+   {
+    "observations": 3054,
+    "estimated_cost_nanos": 117333532420,
+    "known_cost_nanos": 117333532420,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 14,
+    "unpriced_reasons": {
+     "missing_usage": 14
+    },
+    "partial": 0,
+    "missing_usage": 14,
+    "pricing_partial": 763,
+    "tokens": {
+     "input": 9576193,
+     "cache_read": 396233856,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 2171580,
+     "reasoning": 1058620,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 14,
+     "cache_read": 14,
+     "cache_write": 14,
+     "output": 14,
+     "reasoning": 14
+    },
+    "date": "2026-10-30",
+    "group": "openai"
+   },
+   {
+    "observations": 9807,
+    "estimated_cost_nanos": 1155787008750,
+    "known_cost_nanos": 1155787008750,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 1,
+    "unpriced_reasons": {
+     "missing_usage": 1
+    },
+    "partial": 4,
+    "missing_usage": 1,
+    "pricing_partial": 5,
+    "tokens": {
+     "input": 1310431,
+     "cache_read": 2789235117,
+     "cache_write": 86851808,
+     "write_5m": 86851808,
+     "write_1h": 0,
+     "output": 7959866,
+     "reasoning": 3399440,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 1,
+     "cache_read": 1,
+     "cache_write": 1,
+     "output": 1,
+     "reasoning": 9
+    },
+    "date": "2026-10-31",
+    "group": "anthropic"
+   },
+   {
+    "observations": 2871,
+    "estimated_cost_nanos": 67388617200,
+    "known_cost_nanos": 67388617200,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 356,
+    "unpriced_reasons": {
+     "missing_usage": 356
+    },
+    "partial": 0,
+    "missing_usage": 356,
+    "pricing_partial": 356,
+    "tokens": {
+     "input": 7449746,
+     "cache_read": 334193920,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 1365045,
+     "reasoning": 597839,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 356,
+     "cache_read": 356,
+     "cache_write": 356,
+     "output": 356,
+     "reasoning": 356
+    },
+    "date": "2026-10-31",
+    "group": "openai"
+   },
+   {
+    "observations": 2070,
+    "estimated_cost_nanos": 248652203975,
+    "known_cost_nanos": 248652203975,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 0,
+    "unpriced_reasons": {},
+    "partial": 0,
+    "missing_usage": 0,
+    "pricing_partial": 0,
+    "tokens": {
+     "input": 463009,
+     "cache_read": 565716264,
+     "cache_write": 21120368,
+     "write_5m": 21120368,
+     "write_1h": 0,
+     "output": 1423773,
+     "reasoning": 553006,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 0,
+     "cache_read": 0,
+     "cache_write": 0,
+     "output": 0,
+     "reasoning": 0
+    },
+    "date": "2026-11-01",
+    "group": "anthropic"
+   },
+   {
+    "observations": 101,
+    "estimated_cost_nanos": 5504915160,
+    "known_cost_nanos": 5504915160,
+    "aggregation_overflow": false,
+    "aggregation_overflow_fields": [],
+    "unpriced": 0,
+    "unpriced_reasons": {},
+    "partial": 0,
+    "missing_usage": 0,
+    "pricing_partial": 0,
+    "tokens": {
+     "input": 648096,
+     "cache_read": 9993728,
+     "cache_write": 0,
+     "write_5m": null,
+     "write_1h": null,
+     "output": 91798,
+     "reasoning": 46650,
+     "write_30m": null,
+     "write_12h": null
+    },
+    "missing_token_counts": {
+     "input": 0,
+     "cache_read": 0,
+     "cache_write": 0,
+     "output": 0,
+     "reasoning": 0
+    },
+    "date": "2026-11-01",
+    "group": "openai"
+   }
+  ],
+  "trends": {
+   "provider": [
+    {
+     "observations": 4022,
+     "estimated_cost_nanos": 429527586710,
+     "known_cost_nanos": 429527586710,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 4,
+     "unpriced_reasons": {
+      "missing_usage": 4
+     },
+     "partial": 1,
+     "missing_usage": 4,
+     "pricing_partial": 5,
+     "tokens": {
+      "input": 1493141,
+      "cache_read": 1106163193,
+      "cache_write": 27939551,
+      "write_5m": 27939551,
+      "write_1h": 0,
+      "output": 3221005,
+      "reasoning": 1346305,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 4,
+      "cache_read": 4,
+      "cache_write": 4,
+      "output": 4,
+      "reasoning": 11
+     },
+     "date": "2026-10-26",
+     "group": "anthropic"
+    },
+    {
+     "observations": 2946,
+     "estimated_cost_nanos": 106718000300,
+     "known_cost_nanos": 106718000300,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 25,
+     "unpriced_reasons": {
+      "missing_usage": 25
+     },
+     "partial": 0,
+     "missing_usage": 25,
+     "pricing_partial": 2946,
+     "tokens": {
+      "input": 12613363,
+      "cache_read": 397084288,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 2005525,
+      "reasoning": 831075,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 25,
+      "cache_read": 25,
+      "cache_write": 25,
+      "output": 25,
+      "reasoning": 25
+     },
+     "date": "2026-10-26",
+     "group": "openai"
+    },
+    {
+     "observations": 8985,
+     "estimated_cost_nanos": 916200873920,
+     "known_cost_nanos": 916200873920,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 4,
+     "unpriced_reasons": {
+      "missing_usage": 4
+     },
+     "partial": 3,
+     "missing_usage": 4,
+     "pricing_partial": 7,
+     "tokens": {
+      "input": 2959989,
+      "cache_read": 2540558396,
+      "cache_write": 50724473,
+      "write_5m": 50724473,
+      "write_1h": 0,
+      "output": 7205153,
+      "reasoning": 2583760,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 4,
+      "cache_read": 4,
+      "cache_write": 4,
+      "output": 4,
+      "reasoning": 12
+     },
+     "date": "2026-10-27",
+     "group": "anthropic"
+    },
+    {
+     "observations": 1686,
+     "estimated_cost_nanos": 37621046660,
+     "known_cost_nanos": 37621046660,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 8,
+     "unpriced_reasons": {
+      "missing_usage": 8
+     },
+     "partial": 0,
+     "missing_usage": 8,
+     "pricing_partial": 1686,
+     "tokens": {
+      "input": 4485463,
+      "cache_read": 211882240,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 816670,
+      "reasoning": 367015,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 8,
+      "cache_read": 8,
+      "cache_write": 8,
+      "output": 8,
+      "reasoning": 8
+     },
+     "date": "2026-10-27",
+     "group": "openai"
+    },
+    {
+     "observations": 7401,
+     "estimated_cost_nanos": 743352211175,
+     "known_cost_nanos": 743352211175,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 2,
+     "unpriced_reasons": {
+      "missing_usage": 2
+     },
+     "partial": 6,
+     "missing_usage": 2,
+     "pricing_partial": 8,
+     "tokens": {
+      "input": 1538788,
+      "cache_read": 1885391593,
+      "cache_write": 49640018,
+      "write_5m": 49640018,
+      "write_1h": 0,
+      "output": 5572628,
+      "reasoning": 2258134,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 2,
+      "cache_read": 2,
+      "cache_write": 2,
+      "output": 2,
+      "reasoning": 11
+     },
+     "date": "2026-10-28",
+     "group": "anthropic"
+    },
+    {
+     "observations": 4318,
+     "estimated_cost_nanos": 87350360180,
+     "known_cost_nanos": 87350360180,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 425,
+     "unpriced_reasons": {
+      "missing_usage": 425
+     },
+     "partial": 0,
+     "missing_usage": 425,
+     "pricing_partial": 4318,
+     "tokens": {
+      "input": 8549450,
+      "cache_read": 518421632,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1892392,
+      "reasoning": 719618,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 425,
+      "cache_read": 425,
+      "cache_write": 425,
+      "output": 425,
+      "reasoning": 425
+     },
+     "date": "2026-10-28",
+     "group": "openai"
+    },
+    {
+     "observations": 6759,
+     "estimated_cost_nanos": 869865925000,
+     "known_cost_nanos": 869865925000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 3,
+     "unpriced_reasons": {
+      "missing_usage": 3
+     },
+     "partial": 7,
+     "missing_usage": 3,
+     "pricing_partial": 10,
+     "tokens": {
+      "input": 3351505,
+      "cache_read": 1829910312,
+      "cache_write": 65556663,
+      "write_5m": 65556663,
+      "write_1h": 0,
+      "output": 8176551,
+      "reasoning": 3844169,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 3,
+      "cache_read": 3,
+      "cache_write": 3,
+      "output": 3,
+      "reasoning": 20
+     },
+     "date": "2026-10-29",
+     "group": "anthropic"
+    },
+    {
+     "observations": 3951,
+     "estimated_cost_nanos": 333903446000,
+     "known_cost_nanos": 333903446000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 202,
+     "unpriced_reasons": {
+      "missing_usage": 202
+     },
+     "partial": 0,
+     "missing_usage": 202,
+     "pricing_partial": 3951,
+     "tokens": {
+      "input": 16150672,
+      "cache_read": 458408832,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 2024050,
+      "reasoning": 801629,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 202,
+      "cache_read": 202,
+      "cache_write": 202,
+      "output": 202,
+      "reasoning": 202
+     },
+     "date": "2026-10-29",
+     "group": "openai"
+    },
+    {
+     "observations": 13045,
+     "estimated_cost_nanos": 1330651778560,
+     "known_cost_nanos": 1330651778560,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 7,
+     "unpriced_reasons": {
+      "missing_usage": 7
+     },
+     "partial": 9,
+     "missing_usage": 7,
+     "pricing_partial": 16,
+     "tokens": {
+      "input": 3384136,
+      "cache_read": 3643831661,
+      "cache_write": 75757462,
+      "write_5m": 75757462,
+      "write_1h": 0,
+      "output": 10555187,
+      "reasoning": 4383667,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 7,
+      "cache_read": 7,
+      "cache_write": 7,
+      "output": 7,
+      "reasoning": 25
+     },
+     "date": "2026-10-30",
+     "group": "anthropic"
+    },
+    {
+     "observations": 3054,
+     "estimated_cost_nanos": 117333532420,
+     "known_cost_nanos": 117333532420,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 14,
+     "unpriced_reasons": {
+      "missing_usage": 14
+     },
+     "partial": 0,
+     "missing_usage": 14,
+     "pricing_partial": 763,
+     "tokens": {
+      "input": 9576193,
+      "cache_read": 396233856,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 2171580,
+      "reasoning": 1058620,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 14,
+      "cache_read": 14,
+      "cache_write": 14,
+      "output": 14,
+      "reasoning": 14
+     },
+     "date": "2026-10-30",
+     "group": "openai"
+    },
+    {
+     "observations": 9807,
+     "estimated_cost_nanos": 1155787008750,
+     "known_cost_nanos": 1155787008750,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 4,
+     "missing_usage": 1,
+     "pricing_partial": 5,
+     "tokens": {
+      "input": 1310431,
+      "cache_read": 2789235117,
+      "cache_write": 86851808,
+      "write_5m": 86851808,
+      "write_1h": 0,
+      "output": 7959866,
+      "reasoning": 3399440,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 9
+     },
+     "date": "2026-10-31",
+     "group": "anthropic"
+    },
+    {
+     "observations": 2871,
+     "estimated_cost_nanos": 67388617200,
+     "known_cost_nanos": 67388617200,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 356,
+     "unpriced_reasons": {
+      "missing_usage": 356
+     },
+     "partial": 0,
+     "missing_usage": 356,
+     "pricing_partial": 356,
+     "tokens": {
+      "input": 7449746,
+      "cache_read": 334193920,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1365045,
+      "reasoning": 597839,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 356,
+      "cache_read": 356,
+      "cache_write": 356,
+      "output": 356,
+      "reasoning": 356
+     },
+     "date": "2026-10-31",
+     "group": "openai"
+    },
+    {
+     "observations": 2070,
+     "estimated_cost_nanos": 248652203975,
+     "known_cost_nanos": 248652203975,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 463009,
+      "cache_read": 565716264,
+      "cache_write": 21120368,
+      "write_5m": 21120368,
+      "write_1h": 0,
+      "output": 1423773,
+      "reasoning": 553006,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "anthropic"
+    },
+    {
+     "observations": 101,
+     "estimated_cost_nanos": 5504915160,
+     "known_cost_nanos": 5504915160,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 648096,
+      "cache_read": 9993728,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 91798,
+      "reasoning": 46650,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "openai"
+    }
+   ],
+   "model": [
+    {
+     "observations": 6,
+     "estimated_cost_nanos": 294000,
+     "known_cost_nanos": 294000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 144,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 30,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 6
+     },
+     "date": "2026-10-26",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 127,
+     "estimated_cost_nanos": 46790310,
+     "known_cost_nanos": 46790310,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 254,
+      "cache_read": 151166,
+      "cache_write": 230174,
+      "write_5m": 230174,
+      "write_1h": 0,
+      "output": 32963,
+      "reasoning": 22308,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-26",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 3889,
+     "estimated_cost_nanos": 429480502400,
+     "known_cost_nanos": 429480502400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 4,
+     "unpriced_reasons": {
+      "missing_usage": 4
+     },
+     "partial": 1,
+     "missing_usage": 4,
+     "pricing_partial": 5,
+     "tokens": {
+      "input": 1492743,
+      "cache_read": 1106012027,
+      "cache_write": 27709377,
+      "write_5m": 27709377,
+      "write_1h": 0,
+      "output": 3188012,
+      "reasoning": 1323997,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 4,
+      "cache_read": 4,
+      "cache_write": 4,
+      "output": 4,
+      "reasoning": 5
+     },
+     "date": "2026-10-26",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 107,
+     "estimated_cost_nanos": 26267000000,
+     "known_cost_nanos": 26267000000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 107,
+     "tokens": {
+      "input": 701113,
+      "cache_read": 13838720,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 108343,
+      "reasoning": 51758,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-26",
+     "group": "gpt-6-astra"
+    },
+    {
+     "observations": 42,
+     "estimated_cost_nanos": 37321500,
+     "known_cost_nanos": 37321500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 42,
+     "tokens": {
+      "input": 324658,
+      "cache_read": 392320,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1865,
+      "reasoning": 74,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-26",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 2,
+     "estimated_cost_nanos": 101176000,
+     "known_cost_nanos": 101176000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 2,
+     "tokens": {
+      "input": 50328,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 52,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-26",
+     "group": "gpt-6-sol"
+    },
+    {
+     "observations": 2795,
+     "estimated_cost_nanos": 80312502800,
+     "known_cost_nanos": 80312502800,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 25,
+     "unpriced_reasons": {
+      "missing_usage": 25
+     },
+     "partial": 0,
+     "missing_usage": 25,
+     "pricing_partial": 2795,
+     "tokens": {
+      "input": 11537264,
+      "cache_read": 382853248,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1895265,
+      "reasoning": 779243,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 25,
+      "cache_read": 25,
+      "cache_write": 25,
+      "output": 25,
+      "reasoning": 25
+     },
+     "date": "2026-10-26",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 5,
+     "estimated_cost_nanos": 245000,
+     "known_cost_nanos": 245000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 120,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 25,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 5
+     },
+     "date": "2026-10-27",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 100,
+     "estimated_cost_nanos": 38277120,
+     "known_cost_nanos": 38277120,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 0,
+     "missing_usage": 1,
+     "pricing_partial": 1,
+     "tokens": {
+      "input": 198,
+      "cache_read": 86782,
+      "cache_write": 202108,
+      "write_5m": 202108,
+      "write_1h": 0,
+      "output": 24252,
+      "reasoning": 17354,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 1
+     },
+     "date": "2026-10-27",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 8880,
+     "estimated_cost_nanos": 916162351800,
+     "known_cost_nanos": 916162351800,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 3,
+     "unpriced_reasons": {
+      "missing_usage": 3
+     },
+     "partial": 3,
+     "missing_usage": 3,
+     "pricing_partial": 6,
+     "tokens": {
+      "input": 2959671,
+      "cache_read": 2540471614,
+      "cache_write": 50522365,
+      "write_5m": 50522365,
+      "write_1h": 0,
+      "output": 7180876,
+      "reasoning": 2566406,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 3,
+      "cache_read": 3,
+      "cache_write": 3,
+      "output": 3,
+      "reasoning": 6
+     },
+     "date": "2026-10-27",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 42,
+     "estimated_cost_nanos": 38504260,
+     "known_cost_nanos": 38504260,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 0,
+     "missing_usage": 1,
+     "pricing_partial": 42,
+     "tokens": {
+      "input": 352055,
+      "cache_read": 267776,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1242,
+      "reasoning": 24,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 1
+     },
+     "date": "2026-10-27",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 1644,
+     "estimated_cost_nanos": 37582542400,
+     "known_cost_nanos": 37582542400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 7,
+     "unpriced_reasons": {
+      "missing_usage": 7
+     },
+     "partial": 0,
+     "missing_usage": 7,
+     "pricing_partial": 1644,
+     "tokens": {
+      "input": 4133408,
+      "cache_read": 211614464,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 815428,
+      "reasoning": 366991,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 7,
+      "cache_read": 7,
+      "cache_write": 7,
+      "output": 7,
+      "reasoning": 7
+     },
+     "date": "2026-10-27",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 26,
+     "estimated_cost_nanos": 3337871500,
+     "known_cost_nanos": 3337871500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 4929,
+      "cache_read": 1861226,
+      "cache_write": 108502,
+      "write_5m": 108502,
+      "write_1h": 0,
+      "output": 29340,
+      "reasoning": 16643,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-28",
+     "group": "claude-fable-5-1"
+    },
+    {
+     "observations": 3,
+     "estimated_cost_nanos": 147000,
+     "known_cost_nanos": 147000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 72,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 15,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 3
+     },
+     "date": "2026-10-28",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 76,
+     "estimated_cost_nanos": 29876775,
+     "known_cost_nanos": 29876775,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 152,
+      "cache_read": 57120,
+      "cache_write": 163283,
+      "write_5m": 163283,
+      "write_1h": 0,
+      "output": 17760,
+      "reasoning": 12526,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-28",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 7290,
+     "estimated_cost_nanos": 739788017400,
+     "known_cost_nanos": 739788017400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 2,
+     "unpriced_reasons": {
+      "missing_usage": 2
+     },
+     "partial": 6,
+     "missing_usage": 2,
+     "pricing_partial": 8,
+     "tokens": {
+      "input": 1520417,
+      "cache_read": 1883473247,
+      "cache_write": 49306088,
+      "write_5m": 49306088,
+      "write_1h": 0,
+      "output": 5524063,
+      "reasoning": 2228965,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 2,
+      "cache_read": 2,
+      "cache_write": 2,
+      "output": 2,
+      "reasoning": 8
+     },
+     "date": "2026-10-28",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 6,
+     "estimated_cost_nanos": 196298500,
+     "known_cost_nanos": 196298500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 13218,
+      "cache_read": 0,
+      "cache_write": 62145,
+      "write_5m": 62145,
+      "write_1h": 0,
+      "output": 1450,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-28",
+     "group": "claude-sonnet-5-5"
+    },
+    {
+     "observations": 38,
+     "estimated_cost_nanos": 28847780,
+     "known_cost_nanos": 28847780,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 38,
+     "tokens": {
+      "input": 249843,
+      "cache_read": 334848,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1030,
+      "reasoning": 32,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-28",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 4280,
+     "estimated_cost_nanos": 87321512400,
+     "known_cost_nanos": 87321512400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 425,
+     "unpriced_reasons": {
+      "missing_usage": 425
+     },
+     "partial": 0,
+     "missing_usage": 425,
+     "pricing_partial": 4280,
+     "tokens": {
+      "input": 8299607,
+      "cache_read": 518086784,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1891362,
+      "reasoning": 719586,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 425,
+      "cache_read": 425,
+      "cache_write": 425,
+      "output": 425,
+      "reasoning": 425
+     },
+     "date": "2026-10-28",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 8,
+     "estimated_cost_nanos": 392000,
+     "known_cost_nanos": 392000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 192,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 40,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 8
+     },
+     "date": "2026-10-29",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 54,
+     "estimated_cost_nanos": 21491600,
+     "known_cost_nanos": 21491600,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 108,
+      "cache_read": 14280,
+      "cache_write": 139860,
+      "write_5m": 139860,
+      "write_1h": 0,
+      "output": 7711,
+      "reasoning": 4969,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-29",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 6697,
+     "estimated_cost_nanos": 869844041400,
+     "known_cost_nanos": 869844041400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 3,
+     "unpriced_reasons": {
+      "missing_usage": 3
+     },
+     "partial": 7,
+     "missing_usage": 3,
+     "pricing_partial": 10,
+     "tokens": {
+      "input": 3351205,
+      "cache_read": 1829896032,
+      "cache_write": 65416803,
+      "write_5m": 65416803,
+      "write_1h": 0,
+      "output": 8168800,
+      "reasoning": 3839200,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 3,
+      "cache_read": 3,
+      "cache_write": 3,
+      "output": 3,
+      "reasoning": 12
+     },
+     "date": "2026-10-29",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 1583,
+     "estimated_cost_nanos": 272201472000,
+     "known_cost_nanos": 272201472000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 110,
+     "unpriced_reasons": {
+      "missing_usage": 110
+     },
+     "partial": 0,
+     "missing_usage": 110,
+     "pricing_partial": 1583,
+     "tokens": {
+      "input": 5507449,
+      "cache_read": 182037632,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 701787,
+      "reasoning": 260827,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 110,
+      "cache_read": 110,
+      "cache_write": 110,
+      "output": 110,
+      "reasoning": 110
+     },
+     "date": "2026-10-29",
+     "group": "gpt-6-astra"
+    },
+    {
+     "observations": 37,
+     "estimated_cost_nanos": 24906000,
+     "known_cost_nanos": 24906000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 37,
+     "tokens": {
+      "input": 215293,
+      "cache_read": 289920,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 955,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-29",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 2331,
+     "estimated_cost_nanos": 61677068000,
+     "known_cost_nanos": 61677068000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 92,
+     "unpriced_reasons": {
+      "missing_usage": 92
+     },
+     "partial": 0,
+     "missing_usage": 92,
+     "pricing_partial": 2331,
+     "tokens": {
+      "input": 10427930,
+      "cache_read": 276081280,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1321308,
+      "reasoning": 540802,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 92,
+      "cache_read": 92,
+      "cache_write": 92,
+      "output": 92,
+      "reasoning": 92
+     },
+     "date": "2026-10-29",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 9,
+     "estimated_cost_nanos": 441000,
+     "known_cost_nanos": 441000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 216,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 45,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 9
+     },
+     "date": "2026-10-30",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 89,
+     "estimated_cost_nanos": 40817560,
+     "known_cost_nanos": 40817560,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 0,
+     "missing_usage": 1,
+     "pricing_partial": 1,
+     "tokens": {
+      "input": 6223,
+      "cache_read": 255301,
+      "cache_write": 250070,
+      "write_5m": 250070,
+      "write_1h": 0,
+      "output": 12767,
+      "reasoning": 7577,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 1
+     },
+     "date": "2026-10-30",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 12947,
+     "estimated_cost_nanos": 1330610520000,
+     "known_cost_nanos": 1330610520000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 6,
+     "unpriced_reasons": {
+      "missing_usage": 6
+     },
+     "partial": 9,
+     "missing_usage": 6,
+     "pricing_partial": 15,
+     "tokens": {
+      "input": 3377697,
+      "cache_read": 3643576360,
+      "cache_write": 75507392,
+      "write_5m": 75507392,
+      "write_1h": 0,
+      "output": 10542375,
+      "reasoning": 4376090,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 6,
+      "cache_read": 6,
+      "cache_write": 6,
+      "output": 6,
+      "reasoning": 15
+     },
+     "date": "2026-10-30",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 53,
+     "estimated_cost_nanos": 65445620,
+     "known_cost_nanos": 65445620,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 16,
+     "tokens": {
+      "input": 332384,
+      "cache_read": 459776,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1635,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-30",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 3001,
+     "estimated_cost_nanos": 117268086800,
+     "known_cost_nanos": 117268086800,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 14,
+     "unpriced_reasons": {
+      "missing_usage": 14
+     },
+     "partial": 0,
+     "missing_usage": 14,
+     "pricing_partial": 747,
+     "tokens": {
+      "input": 9243809,
+      "cache_read": 395774080,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 2169945,
+      "reasoning": 1058620,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 14,
+      "cache_read": 14,
+      "cache_write": 14,
+      "output": 14,
+      "reasoning": 14
+     },
+     "date": "2026-10-30",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 4,
+     "estimated_cost_nanos": 196000,
+     "known_cost_nanos": 196000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 96,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 20,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 4
+     },
+     "date": "2026-10-31",
+     "group": "claude-haiku-4-5-20251001"
+    },
+    {
+     "observations": 48,
+     "estimated_cost_nanos": 19423350,
+     "known_cost_nanos": 19423350,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 96,
+      "cache_read": 0,
+      "cache_write": 137242,
+      "write_5m": 137242,
+      "write_1h": 0,
+      "output": 4517,
+      "reasoning": 1988,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-31",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 9755,
+     "estimated_cost_nanos": 1155767389400,
+     "known_cost_nanos": 1155767389400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 4,
+     "missing_usage": 1,
+     "pricing_partial": 5,
+     "tokens": {
+      "input": 1310239,
+      "cache_read": 2789235117,
+      "cache_write": 86714566,
+      "write_5m": 86714566,
+      "write_1h": 0,
+      "output": 7955329,
+      "reasoning": 3397452,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 5
+     },
+     "date": "2026-10-31",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 46,
+     "estimated_cost_nanos": 74362000,
+     "known_cost_nanos": 74362000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 323164,
+      "cache_read": 402560,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1678,
+      "reasoning": 71,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-10-31",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 2825,
+     "estimated_cost_nanos": 67314255200,
+     "known_cost_nanos": 67314255200,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 356,
+     "unpriced_reasons": {
+      "missing_usage": 356
+     },
+     "partial": 0,
+     "missing_usage": 356,
+     "pricing_partial": 356,
+     "tokens": {
+      "input": 7126582,
+      "cache_read": 333791360,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 1363367,
+      "reasoning": 597768,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 356,
+      "cache_read": 356,
+      "cache_write": 356,
+      "output": 356,
+      "reasoning": 356
+     },
+     "date": "2026-10-31",
+     "group": "gpt-6.1-sol"
+    },
+    {
+     "observations": 20,
+     "estimated_cost_nanos": 8347675,
+     "known_cost_nanos": 8347675,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 40,
+      "cache_read": 2380,
+      "cache_write": 54783,
+      "write_5m": 54783,
+      "write_1h": 0,
+      "output": 2944,
+      "reasoning": 1915,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "claude-haiku-5-5"
+    },
+    {
+     "observations": 2047,
+     "estimated_cost_nanos": 248548554800,
+     "known_cost_nanos": 248548554800,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 461782,
+      "cache_read": 565713884,
+      "cache_write": 21028510,
+      "write_5m": 21028510,
+      "write_1h": 0,
+      "output": 1420805,
+      "reasoning": 551091,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "claude-opus-5-5"
+    },
+    {
+     "observations": 3,
+     "estimated_cost_nanos": 95301500,
+     "known_cost_nanos": 95301500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 1187,
+      "cache_read": 0,
+      "cache_write": 37075,
+      "write_5m": 37075,
+      "write_1h": 0,
+      "output": 24,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "claude-sonnet-5-5"
+    },
+    {
+     "observations": 7,
+     "estimated_cost_nanos": 13025960,
+     "known_cost_nanos": 13025960,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 58971,
+      "cache_read": 50688,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 218,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "gpt-6-luna"
+    },
+    {
+     "observations": 94,
+     "estimated_cost_nanos": 5491889200,
+     "known_cost_nanos": 5491889200,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 589125,
+      "cache_read": 9943040,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 91580,
+      "reasoning": 46650,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "date": "2026-11-01",
+     "group": "gpt-6.1-sol"
+    }
+   ]
+  },
+  "breakdowns": {
+   "provider": [
+    {
+     "observations": 52089,
+     "estimated_cost_nanos": 5694037588090,
+     "known_cost_nanos": 5694037588090,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 21,
+     "unpriced_reasons": {
+      "missing_usage": 21
+     },
+     "partial": 30,
+     "missing_usage": 21,
+     "pricing_partial": 51,
+     "tokens": {
+      "input": 14500999,
+      "cache_read": 14360806536,
+      "cache_write": 377590343,
+      "write_5m": 377590343,
+      "write_1h": 0,
+      "output": 44114163,
+      "reasoning": 18368481,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 21,
+      "cache_read": 21,
+      "cache_write": 21,
+      "output": 21,
+      "reasoning": 88
+     },
+     "id": "anthropic",
+     "accounts": 5,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 18927,
+     "estimated_cost_nanos": 755819917920,
+     "known_cost_nanos": 755819917920,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1030,
+     "unpriced_reasons": {
+      "missing_usage": 1030
+     },
+     "partial": 0,
+     "missing_usage": 1030,
+     "pricing_partial": 14020,
+     "tokens": {
+      "input": 59472983,
+      "cache_read": 2326218496,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 10367060,
+      "reasoning": 4422446,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1030,
+      "cache_read": 1030,
+      "cache_write": 1030,
+      "output": 1030,
+      "reasoning": 1030
+     },
+     "id": "openai",
+     "accounts": 2,
+     "provider": "openai"
+    }
+   ],
+   "model": [
+    {
+     "observations": 51505,
+     "estimated_cost_nanos": 5690201377200,
+     "known_cost_nanos": 5690201377200,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 19,
+     "unpriced_reasons": {
+      "missing_usage": 19
+     },
+     "partial": 30,
+     "missing_usage": 19,
+     "pricing_partial": 49,
+     "tokens": {
+      "input": 14473754,
+      "cache_read": 14358378281,
+      "cache_write": 376205101,
+      "write_5m": 376205101,
+      "write_1h": 0,
+      "output": 43980260,
+      "reasoning": 18283201,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 19,
+      "cache_read": 19,
+      "cache_write": 19,
+      "output": 19,
+      "reasoning": 51
+     },
+     "id": "claude-opus-5-5",
+     "accounts": 5,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 16970,
+     "estimated_cost_nanos": 456967856800,
+     "known_cost_nanos": 456967856800,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 919,
+     "unpriced_reasons": {
+      "missing_usage": 919
+     },
+     "partial": 0,
+     "missing_usage": 919,
+     "pricing_partial": 12153,
+     "tokens": {
+      "input": 51357725,
+      "cache_read": 2128144256,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 9548255,
+      "reasoning": 4109660,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 919,
+      "cache_read": 919,
+      "cache_write": 919,
+      "output": 919,
+      "reasoning": 919
+     },
+     "id": "gpt-6.1-sol",
+     "accounts": 2,
+     "provider": "openai"
+    },
+    {
+     "observations": 1690,
+     "estimated_cost_nanos": 298468472000,
+     "known_cost_nanos": 298468472000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 110,
+     "unpriced_reasons": {
+      "missing_usage": 110
+     },
+     "partial": 0,
+     "missing_usage": 110,
+     "pricing_partial": 1690,
+     "tokens": {
+      "input": 6208562,
+      "cache_read": 195876352,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 810130,
+      "reasoning": 312585,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 110,
+      "cache_read": 110,
+      "cache_write": 110,
+      "output": 110,
+      "reasoning": 110
+     },
+     "id": "gpt-6-astra",
+     "accounts": 2,
+     "provider": "openai"
+    },
+    {
+     "observations": 26,
+     "estimated_cost_nanos": 3337871500,
+     "known_cost_nanos": 3337871500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 4929,
+      "cache_read": 1861226,
+      "cache_write": 108502,
+      "write_5m": 108502,
+      "write_1h": 0,
+      "output": 29340,
+      "reasoning": 16643,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "id": "claude-fable-5-1",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 9,
+     "estimated_cost_nanos": 291600000,
+     "known_cost_nanos": 291600000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 14405,
+      "cache_read": 0,
+      "cache_write": 99220,
+      "write_5m": 99220,
+      "write_1h": 0,
+      "output": 1474,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "id": "claude-sonnet-5-5",
+     "accounts": 2,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 265,
+     "estimated_cost_nanos": 282413120,
+     "known_cost_nanos": 282413120,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 0,
+     "missing_usage": 1,
+     "pricing_partial": 175,
+     "tokens": {
+      "input": 1856368,
+      "cache_read": 2197888,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 8623,
+      "reasoning": 201,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 1
+     },
+     "id": "gpt-6-luna",
+     "accounts": 2,
+     "provider": "openai"
+    },
+    {
+     "observations": 514,
+     "estimated_cost_nanos": 205024390,
+     "known_cost_nanos": 205024390,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 2,
+     "unpriced_reasons": {
+      "missing_usage": 2
+     },
+     "partial": 0,
+     "missing_usage": 2,
+     "pricing_partial": 2,
+     "tokens": {
+      "input": 7071,
+      "cache_read": 567029,
+      "cache_write": 1177520,
+      "write_5m": 1177520,
+      "write_1h": 0,
+      "output": 102914,
+      "reasoning": 68637,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 2,
+      "cache_read": 2,
+      "cache_write": 2,
+      "output": 2,
+      "reasoning": 2
+     },
+     "id": "claude-haiku-5-5",
+     "accounts": 5,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 2,
+     "estimated_cost_nanos": 101176000,
+     "known_cost_nanos": 101176000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 2,
+     "tokens": {
+      "input": 50328,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 52,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "id": "gpt-6-sol",
+     "accounts": 1,
+     "provider": "openai"
+    },
+    {
+     "observations": 35,
+     "estimated_cost_nanos": 1715000,
+     "known_cost_nanos": 1715000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 840,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 175,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 35
+     },
+     "id": "claude-haiku-4-5-20251001",
+     "accounts": 4,
+     "provider": "anthropic"
+    }
+   ],
+   "account": [
+    {
+     "observations": 17680,
+     "estimated_cost_nanos": 2177071076890,
+     "known_cost_nanos": 2177071076890,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 8,
+     "unpriced_reasons": {
+      "missing_usage": 8
+     },
+     "partial": 16,
+     "missing_usage": 8,
+     "pricing_partial": 24,
+     "tokens": {
+      "input": 5074223,
+      "cache_read": 5565454346,
+      "cache_write": 151504395,
+      "write_5m": 151504395,
+      "write_1h": 0,
+      "output": 14421438,
+      "reasoning": 5979454,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 8,
+      "cache_read": 8,
+      "cache_write": 8,
+      "output": 8,
+      "reasoning": 35
+     },
+     "id": "file:user4@example.com",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 20787,
+     "estimated_cost_nanos": 2151831062545,
+     "known_cost_nanos": 2151831062545,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 6,
+     "unpriced_reasons": {
+      "missing_usage": 6
+     },
+     "partial": 14,
+     "missing_usage": 6,
+     "pricing_partial": 20,
+     "tokens": {
+      "input": 7041491,
+      "cache_read": 5238461778,
+      "cache_write": 138122182,
+      "write_5m": 138122182,
+      "write_1h": 0,
+      "output": 19340858,
+      "reasoning": 8289805,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 6,
+      "cache_read": 6,
+      "cache_write": 6,
+      "output": 6,
+      "reasoning": 32
+     },
+     "id": "file:user2@example.com",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 8251,
+     "estimated_cost_nanos": 793463769060,
+     "known_cost_nanos": 793463769060,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 6,
+     "unpriced_reasons": {
+      "missing_usage": 6
+     },
+     "partial": 0,
+     "missing_usage": 6,
+     "pricing_partial": 6,
+     "tokens": {
+      "input": 1854144,
+      "cache_read": 2207390587,
+      "cache_write": 43630734,
+      "write_5m": 43630734,
+      "write_1h": 0,
+      "output": 6409674,
+      "reasoning": 2425828,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 6,
+      "cache_read": 6,
+      "cache_write": 6,
+      "output": 6,
+      "reasoning": 12
+     },
+     "id": "file:user3@example.com",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 15158,
+     "estimated_cost_nanos": 632808993180,
+     "known_cost_nanos": 632808993180,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1002,
+     "unpriced_reasons": {
+      "missing_usage": 1002
+     },
+     "partial": 0,
+     "missing_usage": 1002,
+     "pricing_partial": 10251,
+     "tokens": {
+      "input": 45292930,
+      "cache_read": 1827134080,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 8036895,
+      "reasoning": 3424710,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1002,
+      "cache_read": 1002,
+      "cache_write": 1002,
+      "output": 1002,
+      "reasoning": 1002
+     },
+     "id": "file:user9@example.com",
+     "accounts": 1,
+     "provider": "openai"
+    },
+    {
+     "observations": 4718,
+     "estimated_cost_nanos": 481972085150,
+     "known_cost_nanos": 481972085150,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 479799,
+      "cache_read": 1156463612,
+      "cache_write": 36672647,
+      "write_5m": 36672647,
+      "write_1h": 0,
+      "output": 3299133,
+      "reasoning": 1376672,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "id": "file:user1@example.com",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 3769,
+     "estimated_cost_nanos": 123010924740,
+     "known_cost_nanos": 123010924740,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 28,
+     "unpriced_reasons": {
+      "missing_usage": 28
+     },
+     "partial": 0,
+     "missing_usage": 28,
+     "pricing_partial": 3769,
+     "tokens": {
+      "input": 14180053,
+      "cache_read": 499084416,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 2330165,
+      "reasoning": 997736,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 28,
+      "cache_read": 28,
+      "cache_write": 28,
+      "output": 28,
+      "reasoning": 28
+     },
+     "id": "file:user10@example.com",
+     "accounts": 1,
+     "provider": "openai"
+    },
+    {
+     "observations": 653,
+     "estimated_cost_nanos": 89699594445,
+     "known_cost_nanos": 89699594445,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1,
+     "unpriced_reasons": {
+      "missing_usage": 1
+     },
+     "partial": 0,
+     "missing_usage": 1,
+     "pricing_partial": 1,
+     "tokens": {
+      "input": 51342,
+      "cache_read": 193036213,
+      "cache_write": 7660385,
+      "write_5m": 7660385,
+      "write_1h": 0,
+      "output": 643060,
+      "reasoning": 296722,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1,
+      "cache_read": 1,
+      "cache_write": 1,
+      "output": 1,
+      "reasoning": 9
+     },
+     "id": "file:user11@example.com",
+     "accounts": 1,
+     "provider": "anthropic"
+    }
+   ],
+   "client": [
+    {
+     "observations": 68022,
+     "estimated_cost_nanos": 5857495397910,
+     "known_cost_nanos": 5857495397910,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 1032,
+     "unpriced_reasons": {
+      "missing_usage": 1032
+     },
+     "partial": 28,
+     "missing_usage": 1032,
+     "pricing_partial": 13932,
+     "tokens": {
+      "input": 72780583,
+      "cache_read": 16472709312,
+      "cache_write": 271483508,
+      "write_5m": 271483508,
+      "write_1h": 0,
+      "output": 53297643,
+      "reasoning": 22369488,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 1032,
+      "cache_read": 1032,
+      "cache_write": 1032,
+      "output": 1032,
+      "reasoning": 1062
+     },
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "observations": 49177,
+       "unpriced": 16,
+       "unpriced_reasons": {
+        "missing_usage": 16
+       },
+       "estimated_cost_nanos": 5100124433200
+      },
+      {
+       "id": "gpt-6.1-sol",
+       "observations": 16841,
+       "unpriced": 905,
+       "unpriced_reasons": {
+        "missing_usage": 905
+       },
+       "estimated_cost_nanos": 455071964800
+      },
+      {
+       "id": "gpt-6-astra",
+       "observations": 1690,
+       "unpriced": 110,
+       "unpriced_reasons": {
+        "missing_usage": 110
+       },
+       "estimated_cost_nanos": 298468472000
+      },
+      {
+       "id": "claude-fable-5-1",
+       "observations": 26,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 3337871500
+      },
+      {
+       "id": "gpt-6-luna",
+       "observations": 264,
+       "unpriced": 1,
+       "unpriced_reasons": {
+        "missing_usage": 1
+       },
+       "estimated_cost_nanos": 282407920
+      },
+      {
+       "id": "claude-sonnet-5-5",
+       "observations": 6,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 196298500
+      },
+      {
+       "id": "claude-haiku-5-5",
+       "observations": 18,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 13949990
+      }
+     ],
+     "id": "client-1",
+     "accounts": 7,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 1283,
+     "estimated_cost_nanos": 493324649400,
+     "known_cost_nanos": 493324649400,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 2,
+     "unpriced_reasons": {
+      "missing_usage": 2
+     },
+     "partial": 1,
+     "missing_usage": 2,
+     "pricing_partial": 11,
+     "tokens": {
+      "input": 730503,
+      "cache_read": 50074825,
+      "cache_write": 95783824,
+      "write_5m": 95783824,
+      "write_1h": 0,
+      "output": 445200,
+      "reasoning": 177192,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 2,
+      "cache_read": 2,
+      "cache_write": 2,
+      "output": 2,
+      "reasoning": 3
+     },
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "observations": 779,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 493080817000
+      },
+      {
+       "id": "claude-haiku-5-5",
+       "observations": 496,
+       "unpriced": 2,
+       "unpriced_reasons": {
+        "missing_usage": 2
+       },
+       "estimated_cost_nanos": 191074400
+      },
+      {
+       "id": "gpt-6.1-sol",
+       "observations": 8,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 52758000
+      }
+     ],
+     "id": "client-2",
+     "accounts": 6,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 1476,
+     "estimated_cost_nanos": 93068358000,
+     "known_cost_nanos": 93068358000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 3,
+     "unpriced_reasons": {
+      "missing_usage": 3
+     },
+     "partial": 1,
+     "missing_usage": 3,
+     "pricing_partial": 6,
+     "tokens": {
+      "input": 66846,
+      "cache_read": 145630900,
+      "cache_write": 10061566,
+      "write_5m": 10061566,
+      "write_1h": 0,
+      "output": 673407,
+      "reasoning": 220511,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 3,
+      "cache_read": 3,
+      "cache_write": 3,
+      "output": 3,
+      "reasoning": 4
+     },
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "observations": 1474,
+       "unpriced": 3,
+       "unpriced_reasons": {
+        "missing_usage": 3
+       },
+       "estimated_cost_nanos": 92967182000
+      },
+      {
+       "id": "gpt-6-sol",
+       "observations": 2,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 101176000
+      }
+     ],
+     "id": "client-3",
+     "accounts": 6,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 78,
+     "estimated_cost_nanos": 4124246500,
+     "known_cost_nanos": 4124246500,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 6819,
+      "cache_read": 11193035,
+      "cache_write": 261445,
+      "write_5m": 261445,
+      "write_1h": 0,
+      "output": 32322,
+      "reasoning": 15247,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "models": [
+      {
+       "id": "claude-opus-5-5",
+       "observations": 75,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 4028945000
+      },
+      {
+       "id": "claude-sonnet-5-5",
+       "observations": 3,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 95301500
+      }
+     ],
+     "id": "client-4",
+     "accounts": 1,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 121,
+     "estimated_cost_nanos": 1843134000,
+     "known_cost_nanos": 1843134000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 14,
+     "unpriced_reasons": {
+      "missing_usage": 14
+     },
+     "partial": 0,
+     "missing_usage": 14,
+     "pricing_partial": 121,
+     "tokens": {
+      "input": 388379,
+      "cache_read": 7416960,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 32468,
+      "reasoning": 8489,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 14,
+      "cache_read": 14,
+      "cache_write": 14,
+      "output": 14,
+      "reasoning": 14
+     },
+     "models": [
+      {
+       "id": "gpt-6.1-sol",
+       "observations": 121,
+       "unpriced": 14,
+       "unpriced_reasons": {
+        "missing_usage": 14
+       },
+       "estimated_cost_nanos": 1843134000
+      }
+     ],
+     "id": "client-6",
+     "accounts": 2,
+     "provider": "openai"
+    },
+    {
+     "observations": 35,
+     "estimated_cost_nanos": 1715000,
+     "known_cost_nanos": 1715000,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 0,
+     "tokens": {
+      "input": 840,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": 0,
+      "write_1h": 0,
+      "output": 175,
+      "reasoning": null,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 35
+     },
+     "models": [
+      {
+       "id": "claude-haiku-4-5-20251001",
+       "observations": 35,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 1715000
+      }
+     ],
+     "id": "client-5",
+     "accounts": 4,
+     "provider": "anthropic"
+    },
+    {
+     "observations": 1,
+     "estimated_cost_nanos": 5200,
+     "known_cost_nanos": 5200,
+     "aggregation_overflow": false,
+     "aggregation_overflow_fields": [],
+     "unpriced": 0,
+     "unpriced_reasons": {},
+     "partial": 0,
+     "missing_usage": 0,
+     "pricing_partial": 1,
+     "tokens": {
+      "input": 12,
+      "cache_read": 0,
+      "cache_write": 0,
+      "write_5m": null,
+      "write_1h": null,
+      "output": 8,
+      "reasoning": 0,
+      "write_30m": null,
+      "write_12h": null
+     },
+     "missing_token_counts": {
+      "input": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 0,
+      "reasoning": 0
+     },
+     "models": [
+      {
+       "id": "gpt-6-luna",
+       "observations": 1,
+       "unpriced": 0,
+       "unpriced_reasons": {},
+       "estimated_cost_nanos": 5200
+      }
+     ],
+     "id": "client-7",
+     "accounts": 1,
+     "provider": "openai"
+    }
+   ]
+  }
+ },
+ "facets": {
+  "providers": [
+   "anthropic",
+   "openai"
+  ],
+  "models": [
+   "claude-fable-5-1",
+   "claude-haiku-4-5-20251001",
+   "claude-haiku-5-5",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "gpt-6-astra",
+   "gpt-6-luna",
+   "gpt-6-sol",
+   "gpt-6.1-sol"
+  ],
+  "accounts": [
+   {
+    "id": "file:user11@example.com",
+    "label": "file:user11@example.com"
+   },
+   {
+    "id": "file:user1@example.com",
+    "label": "user5@example.com"
+   },
+   {
+    "id": "file:user2@example.com",
+    "label": "user6@example.com"
+   },
+   {
+    "id": "file:user3@example.com",
+    "label": "user7@example.com"
+   },
+   {
+    "id": "file:user4@example.com",
+    "label": "user8@example.com"
+   },
+   {
+    "id": "file:user10@example.com",
+    "label": "file:user10@example.com"
+   },
+   {
+    "id": "file:user9@example.com",
+    "label": "user6@example.com"
+   }
+  ],
+  "clients": [
+   {
+    "id": "client-7",
+    "label": "Client 7"
+   },
+   {
+    "id": "client-6",
+    "label": "Client 6"
+   },
+   {
+    "id": "client-4",
+    "label": "Client 4"
+   },
+   {
+    "id": "client-5",
+    "label": "Client 5"
+   },
+   {
+    "id": "client-1",
+    "label": "Client 1"
+   },
+   {
+    "id": "client-2",
+    "label": "Client 2"
+   },
+   {
+    "id": "client-3",
+    "label": "Client 3"
+   }
+  ],
+  "sources": [
+   "proxy"
+  ]
+ },
+ "pricing": {
+  "version": "t3-2026-10-30.1",
+  "verified_at": "2026-10-29",
+  "calculation": "t3",
+  "basis": "T3 Code category-rate equivalent using requested Codex speed and reported Claude speed; no context, region or cache-lifetime premiums; never subscription bill"
+ }
+}

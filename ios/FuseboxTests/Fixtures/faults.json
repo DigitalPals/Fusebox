@@ -1,0 +1,16 @@
+[
+ {
+  "key": "quota:file:user4@example.com",
+  "kind": "quota",
+  "level": "warn",
+  "provider": "claude",
+  "provider_name": "Claude",
+  "account_id": "file:user4@example.com",
+  "label": "user8@example.com",
+  "title": "Weekly limit used up",
+  "detail": null,
+  "until": "2026-11-02T13:00:00.283852+00:00",
+  "path": "#/accounts/file%3Auser4%40example.com",
+  "badge": true
+ }
+]

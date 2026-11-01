@@ -1,0 +1,38 @@
+#!/bin/sh
+# Runs the UI tour against a real Fusebox on a simulator and saves screenshots.
+#
+#   ios/scripts/ui-screenshots <simulator id> <name prefix> [test] [display]
+#
+#   test     ScreenshotTests method (default testTour; also testPushRegistrationAndTestNotification,
+#            testNotificationTapOpensAccount, testOutageLiveActivity)
+#   display  for a foldable, the panel to capture (the iPhone Duo's inner panel is 3): the test asks,
+#            this script answers with `simctl io screenshot --display`, as XCUIScreen only sees the main one
+#
+# Environment: FUSEBOX_KEY_FILE (default ~/.config/fusebox-ios/management-key; only its path reaches
+# the app, Debug builds read it once into the Keychain), SHOTS (default /tmp/fusebox-shots),
+# REGIONS=1 outlines the reserved regions, OUTAGE=<provider> adds a synthetic provider outage.
+set -eu
+SIM=$1; PREFIX=$2; TEST=${3:-testTour}; DISPLAY_ID=${4:-}
+SHOTS=${SHOTS:-/tmp/fusebox-shots}
+cd "$(dirname "$0")/.."
+mkdir -p "$SHOTS"
+[ -d Fusebox.xcodeproj ] || /opt/homebrew/bin/xcodegen generate --quiet
+WATCH=
+if [ -n "$DISPLAY_ID" ]; then
+  ( while :; do
+      for r in "$SHOTS"/request-*; do
+        [ -e "$r" ] || continue
+        xcrun simctl io "$SIM" screenshot --display="$DISPLAY_ID" "$SHOTS/$(basename "$r" | sed 's/^request-//')" >/dev/null 2>&1
+        rm -f "$r"
+      done
+      sleep 0.3
+    done ) & WATCH=$!
+  trap 'kill $WATCH 2>/dev/null' EXIT
+fi
+TEST_RUNNER_FUSEBOX_KEY_FILE=${FUSEBOX_KEY_FILE:-$HOME/.config/fusebox-ios/management-key} \
+TEST_RUNNER_FUSEBOX_SHOTS=$SHOTS TEST_RUNNER_FUSEBOX_SHOT_PREFIX=$PREFIX \
+TEST_RUNNER_FUSEBOX_HOST_SHOTS=$([ -n "$DISPLAY_ID" ] && echo 1 || echo 0) \
+TEST_RUNNER_FUSEBOX_REGIONS=${REGIONS:-0} TEST_RUNNER_FUSEBOX_OUTAGE=${OUTAGE:-} \
+xcodebuild -project Fusebox.xcodeproj -scheme FuseboxUITests -destination "platform=iOS Simulator,id=$SIM" \
+  -derivedDataPath build/dd test -only-testing:"FuseboxUITests/ScreenshotTests/$TEST" | grep -E "error:|TEST (SUCCEEDED|FAILED)" | grep -v IDESchemeAction
+ls "$SHOTS" | grep "^$PREFIX-"
