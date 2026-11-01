@@ -663,6 +663,8 @@ mod tests {
 
         server.abort();
         apple.abort();
-        std::fs::remove_dir_all(&dir).unwrap();
+        drop(relay);
+        // Windows keeps the database open until the aborted server lets go of it.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
