@@ -433,6 +433,8 @@ With `balance: true`, new sessions start on different models instead of always t
 
 Every account has a priority, 0 unless set. New sessions go to the highest priority with an account ready; the routing strategy chooses among those, and lower priorities only take over when none of them can. Set it on the account's page (**First**, **Normal** or **Last**), as `priority` on an API key in `config.yaml`, or as `"priority"` in a sign-in's credential file, as CLIProxyAPI does. Sessions already on an account stay there.
 
+The account's **Enabled** switch survives configuration reloads and restarts. Sign-ins keep it in their credential file; API-key accounts (including individual compatible keys and keyless endpoints) keep account IDs in `.disabled-api-keys.state` in `auth-dir`. That file contains no API keys. Keep it with the credentials when moving an installation.
+
 ### When a request fails
 
 A request tries up to `request-retry` account/model choices and at most ten attempts, including temporary retries on the same account. These limits and the two-minute retry budget cover every model in a model group together. A connection that never opened gets one more try on the same account; one that broke after the request went out moves to the next account, so the same account never runs it twice. An upstream HTTP 504 is answered, including in a model group, because the provider may still be working on it.

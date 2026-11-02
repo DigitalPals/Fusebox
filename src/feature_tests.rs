@@ -211,6 +211,17 @@ async fn serve(router: axum::Router) -> Server {
     Server { url, task }
 }
 
+async fn media(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let account = key(&headers);
+    let model = body["model"].as_str().unwrap().to_string();
+    mock.calls.lock().push((account.clone(), model.clone()));
+    if mock.acts.lock().get(&(account, model)) == Some(&Act::GatewayTimeout) {
+        return (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"message":"generation still running"}})))
+            .into_response();
+    }
+    Json(json!({"data":[{"b64_json":"synthetic"}],"output":[]})).into_response()
+}
+
 struct Setup {
     app: Arc<App>,
     proxy: Server,
@@ -231,6 +242,9 @@ async fn setup(edit: impl FnOnce(&mut Config, &str)) -> Setup {
     let provider = serve(
         axum::Router::new()
             .route("/v1/responses", post(responses))
+            .route("/v1/images/generations", post(media))
+            .route("/v1/images/edits", post(media))
+            .route("/v1/responses/compact", post(media))
             .route("/v1/embeddings", post(embeddings))
             .route("/v1beta/models/{*path}", post(google_embeddings))
             .route("/v1/publishers/google/models/{*path}", post(google_embeddings))
@@ -289,6 +303,26 @@ async fn higher_priority_accounts_answer_first() {
     let b = s.app.pool.all().into_iter().find(|a| a.label == "b").unwrap();
     b.cool(None, chrono::Utc::now() + chrono::Duration::minutes(5), "429");
     assert_eq!(ask(&s, "client", "gpt-up", &[]).await, (200, "a:gpt-up".into()));
+}
+
+#[tokio::test]
+async fn media_gateway_timeouts_do_not_repeat_work_on_another_account() {
+    for (path, model) in
+        [("images/generations", "gpt-image-2"), ("images/edits", "gpt-image-2"), ("responses/compact", "gpt-up")]
+    {
+        let s = setup(|cfg, _| cfg.codex_api_key[0].priority = 10).await;
+        s.mock.acts.lock().insert(("a".into(), model.into()), Act::GatewayTimeout);
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/{path}", s.proxy.url))
+            .bearer_auth("client")
+            .json(&json!({"model":model,"prompt":"synthetic test","image":"data:image/png;base64,AA"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT, "{path}");
+        assert_eq!(response.json::<Value>().await.unwrap()["error"]["message"], "generation still running");
+        assert_eq!(*s.mock.calls.lock(), [("a".into(), model.into())], "{path} repeated an ambiguous generation");
+    }
 }
 
 #[tokio::test]

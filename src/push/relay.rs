@@ -251,6 +251,27 @@ impl Relay {
         let before = Utc::now().timestamp() - UNUSED_DAYS * 86400;
         self.db.lock().execute("DELETE FROM devices WHERE used_at < ?1", [before]).unwrap_or(0)
     }
+
+    fn store_device(&self, handle: &str, device: &apns::Device, now: i64) -> rusqlite::Result<()> {
+        let environment = match device.environment {
+            apns::Environment::Production => "production",
+            apns::Environment::Development => "development",
+        };
+        let mut db = self.db.lock();
+        let tx = db.transaction()?;
+        tx.execute(
+            "INSERT INTO devices (handle_hash, token, environment, created_at, used_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![hash(handle), device.token, environment, now],
+        )?;
+        // Timestamps have second resolution: newest insertion wins ties so the
+        // handle returned by registration cannot already have been evicted.
+        tx.execute(
+            "DELETE FROM devices WHERE token = ?1 AND handle_hash NOT IN
+                 (SELECT handle_hash FROM devices WHERE token = ?1 ORDER BY used_at DESC, created_at DESC, rowid DESC LIMIT ?2)",
+            rusqlite::params![device.token, HANDLES_PER_TOKEN as i64],
+        )?;
+        tx.commit()
+    }
 }
 
 fn router(relay: Arc<Relay>) -> Router {
@@ -352,27 +373,7 @@ async fn register(
         return error(StatusCode::INTERNAL_SERVER_ERROR, "no randomness");
     }
     let handle = URL_SAFE_NO_PAD.encode(bytes);
-    let environment = match device.environment {
-        apns::Environment::Production => "production",
-        apns::Environment::Development => "development",
-    };
-    let now = Utc::now().timestamp();
-    let db = relay.db.lock();
-    let saved = db
-        .execute(
-            "INSERT INTO devices (handle_hash, token, environment, created_at, used_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-            rusqlite::params![hash(&handle), device.token, environment, now],
-        )
-        .and_then(|_| {
-            // One handle per Fusebox: past the limit, the least recently used go.
-            db.execute(
-                "DELETE FROM devices WHERE token = ?1 AND handle_hash NOT IN
-                     (SELECT handle_hash FROM devices WHERE token = ?1 ORDER BY used_at DESC, created_at DESC LIMIT ?2)",
-                rusqlite::params![device.token, HANDLES_PER_TOKEN as i64],
-            )
-        });
-    drop(db);
-    match saved {
+    match relay.store_device(&handle, &device, Utc::now().timestamp()) {
         Ok(_) => (StatusCode::CREATED, Json(json!({ "handle": handle }))).into_response(),
         Err(e) => {
             tracing::warn!("could not save a relay device: {e}");
@@ -543,6 +544,27 @@ mod tests {
         assert!(!limits.allow("a".into(), 3, HOUR));
         assert!(limits.allow("b".into(), 3, HOUR));
         assert!(limits.allow("a".into(), 3, Duration::ZERO), "a new window starts over");
+    }
+
+    #[tokio::test]
+    async fn registering_at_the_handle_cap_keeps_the_new_handle_when_timestamps_tie() {
+        let relay = Relay::new(
+            open_db(std::path::Path::new(":memory:")).unwrap(),
+            Apns { team_id: "test".into(), key_id: "test".into(), key_file: "unused".into(), topic: "test".into() },
+            (String::new(), String::new()),
+        );
+        let device = apns::Device::new(&"c3".repeat(32), apns::Environment::Production).unwrap();
+        let handles: Vec<_> =
+            (0..=HANDLES_PER_TOKEN).map(|i| URL_SAFE_NO_PAD.encode([i as u8; HANDLE_BYTES])).collect();
+        // Registration timestamps have second resolution. Rapid registrations can tie.
+        for handle in &handles {
+            relay.store_device(handle, &device, 1_700_000_000).unwrap();
+        }
+        let count: i64 = relay.db.lock().query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, HANDLES_PER_TOKEN as i64);
+        let newest = handles.last().unwrap().clone();
+        assert_eq!(touch(State(relay.clone()), UrlPath(newest)).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(touch(State(relay), UrlPath(handles[0].clone())).await.status(), StatusCode::GONE);
     }
 
     struct Seen {

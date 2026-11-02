@@ -797,6 +797,46 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keeps_removed_account_settings_removed() {
+        let directory = Directory::new();
+        let path = directory.0.join("account.json");
+        std::fs::write(
+            &path,
+            json!({"type":"codex", "access_token":"old", "refresh_token":"old-refresh", "account_id":"workspace",
+                "disabled":true, "priority":10, "operator_note":"removed", "retained":"keep"})
+            .to_string(),
+        )
+        .unwrap();
+        let app = App::new(
+            Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() },
+            directory.0.join("config.yaml"),
+        );
+        let account = app.pool.all()[0].clone();
+        let Credential::OAuth(mut credential) = account.cred.read().clone() else { unreachable!() };
+        // The dashboard enables the account, or an operator removes settings while
+        // this allocation still holds the old credential metadata.
+        crate::accounts::set_file_disabled(&path, false).unwrap();
+        crate::accounts::set_file_field(&path, "priority", None).unwrap();
+        crate::accounts::set_file_field(&path, "operator_note", None).unwrap();
+        crate::accounts::set_file_field(&path, "added", Some(json!("new"))).unwrap();
+        credential.access_token = "rotated".into();
+        credential.refresh_token = "rotated-refresh".into();
+        assert!(publish_refreshed(&account, credential, vec![("id_token", json!("rotated-id"))]));
+        let disk: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for removed in ["disabled", "priority", "operator_note"] {
+            assert!(disk.get(removed).is_none(), "refresh resurrected {removed}");
+        }
+        assert_eq!(disk["retained"], "keep");
+        assert_eq!(disk["added"], "new");
+        assert_eq!(disk["access_token"], "rotated");
+        assert_eq!(disk["refresh_token"], "rotated-refresh");
+        assert_eq!(disk["id_token"], "rotated-id");
+        app.reload_accounts();
+        assert!(!app.pool.all()[0].state.lock().disabled);
+        assert_eq!(app.pool.all()[0].priority, 0);
+    }
+
+    #[test]
     fn publishing_rotation_updates_identity_only_when_the_owner_changes() {
         let directory = Directory::new();
         std::fs::write(

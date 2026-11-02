@@ -328,26 +328,33 @@ async function loadAll() {
   overviewAt = Date.now();
 }
 
+// The newest snapshot wins, whether it was requested by navigation or reconnect.
+let requestsRead = 0;
+function readRequests(full) {
+  const read = ++requestsRead;
+  const before = new Set(S.requests);
+  return api(requestsPath(full)).then((list) => {
+    if (read !== requestsRead) return;
+    const seen = new Set(list.map((r) => r.id));
+    // The live socket can deliver newer rows while this snapshot is in flight.
+    // Keep only those arrivals, so a server restart still replaces the old log.
+    const arrived = S.requests.filter((r) => !before.has(r) && !seen.has(r.id));
+    S.requests = [...arrived, ...list].slice(0, 300);
+    S.requestsFull = wholeLog(list, full);
+    requestsArrived();
+  });
+}
+
 // The whole request log, merged with what arrived live while it was on its way.
 let requestsLoading = null;
 function loadRequests() {
   if (S.requestsFull || requestsLoading || S.locked) return;
-  requestsLoading = api('/requests').then((list) => {
-    const seen = new Set(list.map((r) => r.id));
-    S.requests = [...S.requests.filter((r) => !seen.has(r.id)), ...list].slice(0, 300);
-    S.requestsFull = true;
-    requestsArrived();
-  }).catch(() => {}).finally(() => { requestsLoading = null; });
+  requestsLoading = readRequests(true).catch(() => {}).finally(() => { requestsLoading = null; });
 }
 
 // After time away: the log again, as much of it as this page has had.
 function reloadRequests() {
-  const full = S.requestsFull || needsLog();
-  api(requestsPath(full)).then((list) => {
-    S.requests = list;
-    S.requestsFull = wholeLog(list, full);
-    requestsArrived();
-  }).catch(() => {});
+  readRequests(S.requestsFull || needsLog()).catch(() => {});
 }
 
 // Repaints what reads the request log once more of it is here.

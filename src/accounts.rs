@@ -1,7 +1,7 @@
 //! Accounts: OAuth credential files + API keys from config, with selection,
 //! cooldowns and usage counters.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -949,12 +949,12 @@ pub fn read_oauth_file(path: &Path) -> Option<(Provider, OAuth, bool, Map<String
 
 /// Writes refreshed tokens back into the credential file, keeping unknown fields.
 pub fn write_oauth_file(path: &Path, provider: Provider, o: &OAuth, extra: &[(&str, Value)]) -> std::io::Result<()> {
-    let mut map = o.raw.clone();
-    if let Some(disk) =
-        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok())
-    {
-        map.extend(disk);
-    }
+    // The file owns operator settings, including their removal. Overlaying it on
+    // stale raw metadata would resurrect fields such as `disabled` or `priority`.
+    let mut map = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok())
+        .unwrap_or_else(|| o.raw.clone());
     map.insert("type".into(), provider.as_str().into());
     map.insert("access_token".into(), o.access_token.clone().into());
     map.insert("refresh_token".into(), o.refresh_token.clone().into());
@@ -1223,8 +1223,35 @@ fn collect(cfg: &Config) -> Vec<Spec> {
 pub struct Pool {
     accounts: RwLock<Vec<Arc<Account>>>,
     cursor: Mutex<HashMap<String, usize>>,
+    /// Serializes reloads and API-key switches; these have no credential file in
+    /// which to store their disabled flag. Only account IDs go to disk, never keys.
+    disabled_keys: Mutex<Option<DisabledKeys>>,
     /// `force-model-prefix`: unprefixed names skip accounts that have a prefix.
     force_prefix: std::sync::atomic::AtomicBool,
+}
+
+const DISABLED_KEYS_FILE: &str = ".disabled-api-keys.state";
+
+struct DisabledKeys {
+    path: PathBuf,
+    ids: BTreeSet<String>,
+}
+
+impl DisabledKeys {
+    fn load(path: PathBuf) -> Self {
+        let ids = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                tracing::warn!("could not read disabled API-key accounts: {e}");
+                BTreeSet::new()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(e) => {
+                tracing::warn!("could not read disabled API-key accounts: {e}");
+                BTreeSet::new()
+            }
+        };
+        Self { path, ids }
+    }
 }
 
 /// Restricts a request to some accounts (`provider/model` or `prefix/model`).
@@ -1262,6 +1289,22 @@ impl SmartQuotaScore {
 }
 
 impl Pool {
+    pub fn set_key_disabled(&self, id: &str, disabled: bool) -> std::io::Result<()> {
+        let mut saved = self.disabled_keys.lock();
+        let saved = saved.as_mut().ok_or_else(|| std::io::Error::other("account state is not loaded"))?;
+        let account = self.get(id).ok_or_else(|| std::io::Error::other("unknown account"))?;
+        let mut ids = saved.ids.clone();
+        if disabled {
+            ids.insert(id.to_string());
+        } else {
+            ids.remove(id);
+        }
+        crate::files::write_private(&saved.path, &serde_json::to_vec(&ids)?).map_err(std::io::Error::other)?;
+        saved.ids = ids;
+        account.state.lock().disabled = disabled;
+        Ok(())
+    }
+
     /// Resolve a pinned account without replacing it with a different provider.
     pub fn resolve_account(&self, a: &Account, model: &str, only: Option<&Only>) -> Option<String> {
         let allowed = match only {
@@ -1272,6 +1315,14 @@ impl Pool {
         allowed.then(|| a.resolve_with(model, matches!(only, Some(Only::Provider(_))))).flatten()
     }
     pub fn reload(&self, cfg: &Config) {
+        // Hold through publication so a switch cannot be overwritten by a reload
+        // that collected an older disabled flag. Concurrent reloads serialize too.
+        let mut disabled_keys = self.disabled_keys.lock();
+        let path = cfg.auth_dir().join(DISABLED_KEYS_FILE);
+        if disabled_keys.as_ref().is_none_or(|saved| saved.path != path) {
+            *disabled_keys = Some(DisabledKeys::load(path));
+        }
+        let disabled_keys = disabled_keys.as_ref().unwrap();
         self.force_prefix.store(cfg.force_model_prefix, std::sync::atomic::Ordering::Relaxed);
         let specs = collect(cfg);
         for s in &specs {
@@ -1287,6 +1338,9 @@ impl Pool {
             self.accounts.read().iter().map(|a| (a.id.clone(), a.clone())).collect();
         let mut next = Vec::with_capacity(specs.len());
         for mut s in specs {
+            if s.path.is_none() {
+                s.disabled |= disabled_keys.ids.contains(&s.id);
+            }
             let mut identity_changed = false;
             if let Some(prev) = old.get(&s.id) {
                 // Never replace a successfully rotated token with its older disk
@@ -1296,9 +1350,14 @@ impl Pool {
                 let pending = prev.pending_oauth_save.lock();
                 if let Some(path) = &s.path {
                     // Collection happened before taking the refresh lock; reread
-                    // here in case a refresh completed while files were scanned.
-                    if let Some((_, oauth, _, _)) = read_oauth_file(path) {
+                    // here in case a refresh or management edit completed while
+                    // files were scanned. A deleted file must not be republished,
+                    // which would also revalidate its stale request allocations.
+                    if let Some((_, oauth, disabled, _)) = read_oauth_file(path) {
                         s.cred = Credential::OAuth(oauth);
+                        s.disabled = disabled;
+                    } else if !path.exists() {
+                        continue;
                     }
                 }
                 let current = prev.cred.read().clone();
@@ -1981,6 +2040,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn reload_during_account_file_edit(removed: bool) {
+        let directory = AuthDirectory::new();
+        directory.write("owner", "access", None);
+        let sentinel = directory.0.join("a-sentinel.json");
+        std::fs::write(&sentinel, r#"{"type":"codex","access_token":"sentinel"}"#).unwrap();
+        let cfg = Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() };
+        let pool = Arc::new(Pool::default());
+        pool.reload(&cfg);
+        let original = pool.get("file:same-filename.json").unwrap();
+        let first = pool.get("file:a-sentinel.json").unwrap();
+        let pending = original.pending_oauth_save.lock();
+        set_file_disabled(&sentinel, true).unwrap();
+        let reloading = std::thread::spawn({
+            let pool = pool.clone();
+            move || pool.reload(&cfg)
+        });
+        // Applying the first account proves collection has finished. The reload
+        // then waits for this account's file writer before publishing its snapshot.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !first.state.lock().disabled && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let collected = first.state.lock().disabled;
+        let path = original.path.as_ref().unwrap();
+        if removed {
+            std::fs::remove_file(path).unwrap();
+            let mut state = original.state.lock();
+            state.disabled = true;
+            state.update_identity(String::new());
+        } else {
+            set_file_disabled(path, true).unwrap();
+            original.state.lock().disabled = true;
+        }
+        drop(pending);
+        reloading.join().unwrap();
+        assert!(collected, "reload must have collected the old file before its edit");
+        if removed {
+            assert!(pool.get(&original.id).is_none(), "a collected file that was deleted must not return");
+            let Credential::OAuth(credential) = original.cred.read().clone() else { unreachable!() };
+            assert!(!crate::oauth::publish_refreshed(&original, credential, vec![]));
+            assert!(!path.exists(), "a delayed reload must not revalidate the removed allocation");
+        } else {
+            assert!(pool.get(&original.id).unwrap().state.lock().disabled, "reload must keep the newer switch setting");
+        }
+    }
+
+    #[test]
+    fn a_delayed_reload_does_not_restore_a_deleted_account() {
+        reload_during_account_file_edit(true);
+    }
+
+    #[test]
+    fn a_delayed_reload_does_not_undo_a_file_account_switch() {
+        reload_during_account_file_edit(false);
     }
 
     #[test]

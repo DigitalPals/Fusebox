@@ -501,7 +501,9 @@ where
                 match status {
                     429 => acct.rate_limit(&model, Utc::now() + Duration::seconds(60), &format!("429: {msg}")),
                     401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
-                    400 | 404 | 413 | 422 => {
+                    // A gateway timeout can leave a generation running upstream.
+                    // Answer it without starting the same work on another account.
+                    400 | 404 | 413 | 422 | 504 => {
                         tracker.finish(status, &Usage::default(), Some(msg));
                         return Err((status, body));
                     }

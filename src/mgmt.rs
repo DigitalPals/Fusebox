@@ -181,19 +181,25 @@ async fn save_sign_in(
         Some(a) => Some(a.refresh_lock.clone().lock_owned().await),
         None => None,
     };
+    // Deferred saves can retry without the refresh lock. Keep one writer from
+    // replacing the new grant with the old grant's tokens, or sharing its temp file.
+    let mut pending = existing.as_ref().map(|a| a.pending_oauth_save.lock());
     write_oauth_file(&path, provider, cred, extra)?;
     if let Some(a) = &existing
         && let Some((_, saved, _, _)) = crate::accounts::read_oauth_file(&path)
         && Credential::OAuth(saved.clone()).identity(provider) == a.cred.read().identity(provider)
     {
         // A refresh save still pending holds the old grant's tokens.
-        *a.pending_oauth_save.lock() = None;
+        if let Some(save) = pending.as_deref_mut() {
+            *save = None;
+        }
         *a.cred.write() = Credential::OAuth(saved);
         let mut st = a.state.lock();
         if st.last_error(chrono::Utc::now()).is_some_and(crate::push::signin_error) {
             st.clear_error();
         }
     }
+    drop(pending);
     drop(guard);
     app.reload_accounts();
     Ok(path)
@@ -942,12 +948,15 @@ struct ToggleBody {
 
 async fn toggle_account(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<ToggleBody>) -> Response {
     let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
-    if let Some(path) = &acct.path
-        && let Err(e) = set_file_disabled(path, b.disabled)
-    {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    if let Some(path) = &acct.path {
+        let _save = acct.pending_oauth_save.lock();
+        if let Err(e) = set_file_disabled(path, b.disabled) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        acct.state.lock().disabled = b.disabled;
+    } else if let Err(e) = app.pool.set_key_disabled(&id, b.disabled) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the account switch: {e}"));
     }
-    acct.state.lock().disabled = b.disabled;
     app.broadcast("accounts", Value::Null);
     ok()
 }
@@ -1077,9 +1086,22 @@ async fn refresh_quota(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
 async fn delete_account(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
     if let Some(path) = &acct.path {
+        // A submitted refresh may rotate and save tokens after its caller leaves.
+        // Let it finish before deleting, then invalidate old request allocations so
+        // a later save cannot recreate the removed credential file.
+        let refreshing = acct.refresh_lock.lock().await;
+        let mut pending = acct.pending_oauth_save.lock();
         if let Err(e) = std::fs::remove_file(path) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
+        *pending = None;
+        {
+            let mut state = acct.state.lock();
+            state.disabled = true;
+            state.update_identity(String::new());
+        }
+        drop(pending);
+        drop(refreshing);
         app.reload_accounts();
         return ok();
     }
@@ -1472,9 +1494,11 @@ async fn set_priority(State(app): State<Arc<App>>, Path(id): Path<String>, Json(
     if let Some(path) = &acct.path {
         app.suppress_reload();
         let value = (b.priority != 0).then(|| json!(b.priority));
+        let saving = acct.pending_oauth_save.lock();
         if let Err(e) = crate::accounts::set_file_field(path, "priority", value) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the priority: {e}"));
         }
+        drop(saving);
         app.reload_accounts();
         return ok();
     }
@@ -1611,6 +1635,150 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn removing_a_sign_in_waits_for_refresh_and_invalidates_old_saves() {
+        let dir = std::env::temp_dir().join(format!("fusebox-remove-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("account.json");
+        std::fs::write(
+            &path,
+            json!({"type":"codex", "access_token":"old", "refresh_token":"refresh", "account_id":"workspace"})
+                .to_string(),
+        )
+        .unwrap();
+        let app =
+            App::new(Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() }, dir.join("config.yaml"));
+        let account = app.pool.all()[0].clone();
+        let refreshing = account.refresh_lock.clone().lock_owned().await;
+        let mut deleting = tokio::spawn({
+            let app = app.clone();
+            let id = account.id.clone();
+            async move { delete_account(State(app), Path(id)).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut deleting).await.is_err(),
+            "deletion must wait until a rotating token has been saved"
+        );
+        let Credential::OAuth(mut credential) = account.cred.read().clone() else { unreachable!() };
+        credential.access_token = "rotated".into();
+        assert!(oauth::publish_refreshed(&account, credential.clone(), vec![]));
+        drop(refreshing);
+        assert_eq!(deleting.await.unwrap().status(), StatusCode::OK);
+        assert!(!path.exists());
+        assert!(app.pool.get(&account.id).is_none());
+        // Work that selected the old allocation before deletion cannot recreate it.
+        assert!(!oauth::publish_refreshed(&account, credential, vec![]));
+        assert!(!path.exists());
+        app.reload_accounts();
+        assert!(app.pool.all().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn api_key_switches_survive_reload_and_restart() {
+        let dir = std::env::temp_dir().join(format!("fusebox-key-switches-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config {
+            auth_dir: dir.to_string_lossy().into(),
+            claude_api_key: vec![crate::config::KeyEntry {
+                api_key: "synthetic-claude-key".into(),
+                ..Default::default()
+            }],
+            openai_compatibility: vec![
+                crate::config::CompatEntry {
+                    name: "compatible".into(),
+                    base_url: "http://127.0.0.1:1/v1".into(),
+                    api_keys: vec!["synthetic-compat-a".into(), "synthetic-compat-b".into()],
+                    ..Default::default()
+                },
+                crate::config::CompatEntry {
+                    name: "keyless".into(),
+                    base_url: "http://127.0.0.1:2/v1".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let app = App::new(cfg.clone(), dir.join("config.yaml"));
+        let ids: Vec<_> = app.pool.all().iter().map(|a| a.id.clone()).collect();
+        assert_eq!(ids.len(), 4);
+        for id in &ids {
+            assert_eq!(
+                toggle_account(State(app.clone()), Path(id.clone()), Json(ToggleBody { disabled: true }))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            app.reload_accounts();
+            assert!(app.pool.get(id).unwrap().state.lock().disabled, "reload re-enabled {id}");
+        }
+        // A changed configuration may replace Account allocations too.
+        cfg.claude_api_key[0].priority = 10;
+        cfg.openai_compatibility[0].priority = 10;
+        app.set_config(cfg.clone());
+        let restarted = App::new(cfg.clone(), dir.join("config.yaml"));
+        for id in &ids {
+            assert!(app.pool.get(id).unwrap().state.lock().disabled);
+            assert!(restarted.pool.get(id).unwrap().state.lock().disabled, "restart re-enabled {id}");
+        }
+        // Enabling one compatible key leaves its sibling disabled.
+        assert_eq!(
+            toggle_account(State(restarted), Path(ids[1].clone()), Json(ToggleBody { disabled: false })).await.status(),
+            StatusCode::OK
+        );
+        let restarted = App::new(cfg, dir.join("config.yaml"));
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(restarted.pool.get(id).unwrap().state.lock().disabled, i != 1);
+        }
+        let saved = std::fs::read_to_string(dir.join(".disabled-api-keys.state")).unwrap();
+        assert!(!saved.contains("synthetic-"), "the switch state must not contain API keys");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.join(".disabled-api-keys.state")).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_unsaved_key_switch_returns_an_error_and_keeps_the_previous_state() {
+        let dir = std::env::temp_dir().join(format!("fusebox-key-switch-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = App::new(
+            Config {
+                auth_dir: dir.to_string_lossy().into(),
+                codex_api_key: vec![crate::config::KeyEntry { api_key: "synthetic".into(), ..Default::default() }],
+                ..Default::default()
+            },
+            dir.join("config.yaml"),
+        );
+        let account = app.pool.all()[0].clone();
+        let state_path = dir.join(".disabled-api-keys.state");
+        // A directory at the destination reliably rejects replacement on every OS.
+        std::fs::create_dir(&state_path).unwrap();
+        assert_eq!(
+            toggle_account(State(app.clone()), Path(account.id.clone()), Json(ToggleBody { disabled: true }))
+                .await
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!account.state.lock().disabled);
+        app.reload_accounts();
+        assert!(!app.pool.get(&account.id).unwrap().state.lock().disabled);
+        std::fs::remove_dir(&state_path).unwrap();
+        assert_eq!(
+            toggle_account(State(app.clone()), Path(account.id.clone()), Json(ToggleBody { disabled: true }))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert!(account.state.lock().disabled);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn a_new_sign_in_replaces_the_revoked_tokens_even_while_they_refresh() {
         let dir = std::env::temp_dir().join(format!("fusebox-sign-in-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1657,6 +1825,62 @@ mod tests {
         save_sign_in(&app, Provider::Claude, &again, "claude-x@example.test.json", &[]).await.unwrap();
         assert_eq!(app.pool.all()[0].state.lock().last_error(chrono::Utc::now()), Some("500: upstream exploded"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_in_again_waits_for_pending_credential_writes() {
+        let dir = std::env::temp_dir().join(format!("fusebox-sign-in-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("account.json");
+        std::fs::write(
+            &path,
+            json!({"type":"codex", "access_token":"old", "refresh_token":"old-refresh", "account_id":"workspace"})
+                .to_string(),
+        )
+        .unwrap();
+        let app =
+            App::new(Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() }, dir.join("config.yaml"));
+        let account = app.pool.all()[0].clone();
+        let Credential::OAuth(old) = account.cred.read().clone() else { unreachable!() };
+        // A failed disk write leaves the old grant's rotated tokens to save later.
+        let obstacle = path.with_extension("json.tmp");
+        std::fs::create_dir(&obstacle).unwrap();
+        assert!(oauth::publish_refreshed(
+            &account,
+            crate::accounts::OAuth {
+                access_token: "rotated".into(),
+                refresh_token: "rotated-refresh".into(),
+                ..old.clone()
+            },
+            vec![],
+        ));
+        std::fs::remove_dir(obstacle).unwrap();
+        let mut pending = account.pending_oauth_save.lock();
+        assert!(pending.is_some());
+        let fresh =
+            crate::accounts::OAuth { access_token: "signed-in".into(), refresh_token: "fresh-grant".into(), ..old };
+        let (started, start) = std::sync::mpsc::channel();
+        let (finished, finish) = std::sync::mpsc::channel();
+        let saving = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            started.send(()).unwrap();
+            let result = runtime.block_on(save_sign_in(&app, Provider::Codex, &fresh, "account.json", &[]));
+            let _ = finished.send(());
+            result
+        });
+        start.recv().unwrap();
+        assert!(finish.recv_timeout(Duration::from_millis(50)).is_err(), "the pending writer still owns the file");
+        // Complete the deferred write under its normal lock. The new grant must
+        // be written afterwards, or this retry restores the superseded tokens.
+        let deferred = pending.as_ref().unwrap();
+        write_oauth_file(&path, Provider::Codex, &deferred.credential, &[]).unwrap();
+        *pending = None;
+        drop(pending);
+        saving.join().unwrap().unwrap();
+        let disk: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(disk["access_token"], "signed-in");
+        assert_eq!(disk["refresh_token"], "fresh-grant");
     }
 
     #[test]
