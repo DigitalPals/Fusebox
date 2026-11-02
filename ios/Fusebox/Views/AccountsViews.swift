@@ -334,6 +334,10 @@ struct AccountDetail: View {
                 Hairline()
                 KeyValueRow(key: "Plan", value: "\(account.providerName) \(plan)")
             }
+            if let renewal = account.renewalRow() {
+                Hairline()
+                KeyValueRow(key: renewal.key, value: renewal.value)
+            }
             if let token {
                 Hairline()
                 KeyValueRow(key: "Token", value: token, valueColor: token == "expired" ? Palette.err : Palette.fg)

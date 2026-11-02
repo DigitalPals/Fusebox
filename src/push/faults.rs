@@ -23,6 +23,9 @@ pub enum Event {
     /// A new banked reset, one used automatically, needing review, or expired unused.
     /// Sent when observed, independently of the fault check.
     BankedReset,
+    /// A subscription charges again, or ends, within two days. Sent by its own check,
+    /// once for each date, and never listed as a fault.
+    Renewal,
     /// Counted for the app badge, never sent (rate limits come and go too often).
     #[default]
     Quiet,
@@ -155,6 +158,8 @@ pub struct AccountView {
     /// Per current window (name, model scope): the points of it each client used, by the
     /// client's name (from quota attribution).
     pub clients: Vec<(String, Option<String>, BTreeMap<String, f64>)>,
+    /// When the subscription next charges, or ends.
+    pub renewal: Option<crate::quota::NextRenewal>,
 }
 
 impl AccountView {

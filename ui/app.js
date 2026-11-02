@@ -256,6 +256,7 @@ const clock = (iso) => UsageTools.localTimeText(iso, 'clock');
 const hm = (iso) => UsageTools.localTimeText(iso, 'hourMinute');
 const weekday = (iso) => UsageTools.localTimeText(iso, 'weekdayName');
 const fullResetTime = (iso) => UsageTools.localTimeText(iso, 'reset');
+const dayDate = (iso) => UsageTools.localTimeText(iso, 'dayDate');
 function syncLocalTime() {
   if (UsageTools.refreshLocalTimezone()) minuteLabels.clear();
 }
@@ -2469,10 +2470,24 @@ async function setPriority(id, priority) {
   } catch (e) { toast(e.message); }
 }
 
+// When the subscription charges next: ChatGPT gives the date, Claude's is a month on from
+// when the subscription started (src/quota/renewal.rs). A cancelled one ends instead.
+function renewalRow(a) {
+  const r = a.quota?.renewal;
+  if (!(Date.parse(r?.at) > Date.now())) return null;
+  if (r.ends) return ['Ends', `${dayDate(r.at)} · in ${left(r.at)} · cancelled`];
+  const parts = [r.estimated ? `about ${dayDate(r.at)}` : `${dayDate(r.at)}, ${hm(r.at)}`, `in ${left(r.at)}`];
+  if (r.estimated) parts.push('estimated from the start date');
+  else if (r.period) parts.push(r.period);
+  return ['Renews', parts.join(' · ')];
+}
+
 function detSigninHTML(a) {
   const pad = mob() ? '12px 14px 4px' : '18px 20px 8px';
   const rows = [['Method', authName(a)]];
   if (planName(a)) rows.push(['Plan', `${provName(a)} ${planName(a)}`]);
+  const renewal = renewalRow(a);
+  if (renewal) rows.push(renewal);
   if (a.kind === 'oauth' && a.expires_at) {
     const secs = (Date.parse(a.expires_at) - Date.now()) / 1000;
     rows.push(['Token', secs > 0 ? `valid ${span(secs)} · refreshes on its own` : 'expired · refreshes on its own']);

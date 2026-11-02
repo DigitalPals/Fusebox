@@ -115,6 +115,7 @@ fn event_name(e: Event) -> &'static str {
         Event::AccountErrors => "account_errors",
         Event::ClientAddress => "client_new_address",
         Event::BankedReset => "banked_reset",
+        Event::Renewal => "subscription_renewal",
         Event::Quiet => "quiet",
     }
 }

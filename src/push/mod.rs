@@ -11,6 +11,7 @@ mod apns;
 mod crypto;
 mod faults;
 pub mod relay;
+mod renewals;
 mod webhooks;
 
 pub(crate) use faults::signin_error;
@@ -71,6 +72,9 @@ struct Stored {
     /// hidden until it clears, or until a warning turns into an error.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     dismissed: BTreeMap<String, String>,
+    /// Renewal reminders sent, by key, with the date each was for; kept until a day after.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    renewals: BTreeMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +339,7 @@ fn enabled(settings: &Notifications, event: Event) -> bool {
         Event::AccountErrors => settings.account_errors,
         Event::ClientAddress => settings.client_new_address,
         Event::BankedReset => settings.banked_resets,
+        Event::Renewal => settings.renewals,
         Event::Quiet => false,
     }
 }
@@ -372,7 +377,10 @@ async fn check(app: &App) {
         app.push.seed(&current);
         return;
     }
-    let send = app.push.track(&current, &accounts, &cfg.notifications);
+    let mut send = app.push.track(&current, &accounts, &cfg.notifications);
+    if enabled(&cfg.notifications, Event::Renewal) {
+        send.extend(app.push.renewals(&accounts, Utc::now()));
+    }
     for fault in send {
         notify(app, &fault, faults::badge(&shown)).await;
         webhooks::deliver_all(app, hooks, &fault).await;
@@ -590,6 +598,7 @@ fn views(app: &App) -> Vec<AccountView> {
                         (s.name.clone(), s.model.clone(), points)
                     })
                     .collect(),
+                renewal: st.quota.renewal.as_ref().and_then(|r| r.next(now)),
             }
         })
         .collect()

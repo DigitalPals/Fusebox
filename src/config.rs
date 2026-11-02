@@ -291,6 +291,8 @@ pub struct Notifications {
     pub client_new_address: bool,
     /// A new banked reset, one used automatically, needing review, or expired unused.
     pub banked_resets: bool,
+    /// Two days before a Claude or ChatGPT subscription charges again, or ends.
+    pub renewals: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -306,6 +308,7 @@ impl Default for Notifications {
             account_errors: false,
             client_new_address: true,
             banked_resets: true,
+            renewals: true,
             webhooks: vec![],
         }
     }
@@ -570,6 +573,7 @@ usage:
 #   account-errors: false      # account errors and runs of failed requests
 #   client-new-address: true   # a named client's key used from a new address, or refused at one
 #   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
+#   renewals: true             # two days before a subscription charges again, or ends
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 
@@ -1092,6 +1096,8 @@ mod tests {
         let saved = Config::parse(r#"notifications: {"sign-in-expired":true,"account-errors":true}"#).unwrap();
         assert!(defaults.notifications.banked_resets && saved.notifications.banked_resets);
         assert!(!Config::parse("notifications:\n  banked-resets: false\n").unwrap().notifications.banked_resets);
+        assert!(defaults.notifications.renewals && saved.notifications.renewals);
+        assert!(!Config::parse("notifications:\n  renewals: false\n").unwrap().notifications.renewals);
         for (text, problem) in [
             ("trusted-proxies: [example.com]\n", "trusted-proxies"),
             ("trusted-proxies: [10.0.0.0/40]\n", "trusted-proxies"),

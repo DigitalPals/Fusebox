@@ -90,6 +90,7 @@ const UsageTools = (() => {
     hourMinute: ['en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }],
     weekdayName: ['en-GB', { weekday: 'short' }],
     monthDay: ['en-US', { month: 'short', day: 'numeric' }],
+    dayDate: ['en-GB', { weekday: 'short', day: 'numeric', month: 'short' }],
     reset: ['en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZoneName: 'short' }],
   };
   const timeFormats = new Map();

@@ -124,6 +124,25 @@ struct RulesTests {
         #expect(a.subtitle == "Claude · Ultra · no 5h limit")
     }
 
+    @Test func renewalRow() throws {
+        let json = #"{"renewal":{"at":"2026-11-06T09:53:56Z","estimated":false,"ends":false,"period":"monthly"}}"#
+        var a = Account(id: "a", provider: "codex", label: "u", quota: try JSONDecoder.fusebox.decode(Quota.self, from: Data(json.utf8)))
+        let at = try #require(a.quota?.renewal?.at)
+        let before = at.addingTimeInterval(-(3 * 86400 + 21 * 3600))
+        let row = try #require(a.renewalRow(now: before))
+        #expect(row.key == "Renews")
+        #expect(row.value.hasSuffix(", \(Fmt.hm(at)) · in 3d 21h · monthly"), "\(row.value)")
+        a.quota?.renewal?.estimated = true
+        #expect(a.renewalRow(now: before)?.value.hasPrefix("about ") == true)
+        #expect(a.renewalRow(now: before)?.value.hasSuffix(" · in 3d 21h · estimated from the start date") == true)
+        a.quota?.renewal?.ends = true
+        #expect(a.renewalRow(now: before)?.key == "Ends")
+        #expect(a.renewalRow(now: before)?.value.hasSuffix(" · in 3d 21h · cancelled") == true)
+        #expect(a.renewalRow(now: at) == nil, "a date that has passed is no row")
+        let ended = try JSONDecoder.fusebox.decode(Quota.self, from: Data(#"{"renewal":null}"#.utf8))
+        #expect(Account(id: "a", provider: "codex", label: "u", quota: ended).renewalRow(now: before) == nil)
+    }
+
     @Test func routingSentence() throws {
         let r = try decode([RequestLog].self, "requests")
         let reused = try #require(r.first { $0.routingReason == "session_reused" })

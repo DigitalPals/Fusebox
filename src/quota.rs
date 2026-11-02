@@ -15,6 +15,9 @@ use crate::accounts::{Account, Credential, Provider};
 use crate::state::App;
 
 mod readings;
+mod renewal;
+
+pub use renewal::{Next as NextRenewal, Renewal};
 
 pub use readings::{FiveHour, claude_five_hour};
 
@@ -122,6 +125,10 @@ pub struct Quota {
     /// The active ChatGPT subscription SKU; `plan` alone does not distinguish Pro tiers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plan: Option<String>,
+    /// When the subscription next charges, or ends when cancelled: ChatGPT's date, or
+    /// Claude's estimated from when the subscription started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renewal: Option<Renewal>,
     /// Usage-endpoint checks in a row that brought no data, and when the last one ran.
     #[serde(skip)]
     pub(crate) check_failures: u32,
@@ -145,9 +152,10 @@ pub fn same_plan(a: &str, b: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
-    /// The plan identifier and the provider's display name.
-    Claude(Option<String>, Option<String>),
-    Codex(Option<String>),
+    /// The plan identifier, the provider's display name and the estimated renewal.
+    Claude(Option<String>, Option<String>, Option<Renewal>),
+    /// The subscription SKU and the renewal.
+    Codex(Option<String>, Option<Renewal>),
 }
 
 impl Quota {
@@ -276,13 +284,17 @@ impl Quota {
         match details {
             Some(details) => {
                 match details {
-                    PlanDetails::Claude(plan, name) => {
+                    PlanDetails::Claude(plan, name, renewal) => {
                         self.plan = plan;
                         self.plan_name = name;
+                        self.renewal = renewal;
                     }
                     // Usage remains the source of the broad Codex plan. The web
                     // subscription API can use different names for the same tier.
-                    PlanDetails::Codex(plan) => self.subscription_plan = plan,
+                    PlanDetails::Codex(plan, renewal) => {
+                        self.subscription_plan = plan;
+                        self.renewal = renewal;
+                    }
                 }
                 self.plan_failures = 0;
             }
@@ -310,6 +322,7 @@ impl Quota {
                 // A usage response can reveal a downgrade before the next plan check.
                 self.subscription_plan = None;
                 self.plan_name = None;
+                self.renewal = None;
                 self.plan_checked_at = None;
                 self.plan_failures = 0;
             }
@@ -511,7 +524,7 @@ fn codex_plan(value: &Value) -> anyhow::Result<PlanDetails> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
-    Ok(PlanDetails::Codex(subscription_plan))
+    Ok(PlanDetails::Codex(subscription_plan, Renewal::from_codex(value)))
 }
 
 /// Reads Claude plan names and ChatGPT subscription SKUs without using model tokens.
@@ -527,7 +540,11 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let http = app.http.control_for_account(acct);
     let details = match acct.provider {
         Provider::Claude => crate::oauth::claude_profile(&http, &token).await.map(|profile| {
-            PlanDetails::Claude(crate::oauth::claude_plan(&profile), crate::oauth::claude_plan_name(&profile))
+            PlanDetails::Claude(
+                crate::oauth::claude_plan(&profile),
+                crate::oauth::claude_plan_name(&profile),
+                Renewal::from_claude(&profile),
+            )
         }),
         Provider::Codex => {
             async {
@@ -1201,12 +1218,12 @@ mod tests {
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         assert!(q.plan_due(now + secs(PLAN_EVERY)));
         // A good read ends the backoff, and its plan replaces the last one, even with none.
-        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()))));
+        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()), None)));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref(), q.plan_failures), (Some("max_20x"), Some("Ultra"), 0));
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         q.plan_read(now, None);
         assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
-        q.plan_read(now, Some(PlanDetails::Claude(None, None)));
+        q.plan_read(now, Some(PlanDetails::Claude(None, None, None)));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref()), (None, None));
         // Usage readings without a plan (Claude's) leave it alone.
         q.plan = Some("max_5x".into());
@@ -1233,16 +1250,16 @@ mod tests {
                 },
                 "last_active_subscription": { "subscription_plan": "chatgptprolite" }
             });
-            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(Some(sku.into())));
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(Some(sku.into()), None));
             value["entitlement"]["has_active_subscription"] = false.into();
-            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None));
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None, None));
         }
         for value in [
             json!({ "plan_type": "free" }),
             json!({ "plan_type": "pro", "entitlement": { "subscription_plan": "chatgptpro" } }),
             json!({ "plan_type": "pro", "entitlement": { "has_active_subscription": true, "subscription_plan": " " } }),
         ] {
-            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None));
+            assert_eq!(codex_plan(&value).unwrap(), PlanDetails::Codex(None, None));
         }
         assert!(codex_plan(&json!({})).is_err());
         assert!(codex_plan(&json!({ "plan_type": " " })).is_err());
@@ -1277,6 +1294,36 @@ mod tests {
         assert_eq!(q.subscription_plan, None);
         assert_eq!(q.windows, vec![window], "plan reads do not change quota windows");
         assert!(serde_json::to_value(&q).unwrap().get("subscription_plan").is_none());
+    }
+
+    #[test]
+    fn plan_reads_keep_the_renewal_until_a_good_read_or_a_plan_change() {
+        let now = Utc::now();
+        let soon = now + chrono::Duration::days(4);
+        let mut q = Quota::default();
+        let details = codex_plan(&json!({
+            "plan_type": "pro",
+            "entitlement": {
+                "has_active_subscription": true, "subscription_plan": "chatgptpro",
+                "renews_at": soon.to_rfc3339(), "billing_period": "monthly"
+            }
+        }))
+        .unwrap();
+        q.plan_read(now, Some(details));
+        let shown = serde_json::to_value(&q).unwrap()["renewal"].clone();
+        assert_eq!(DateTime::parse_from_rfc3339(shown["at"].as_str().unwrap()).unwrap(), soon);
+        assert_eq!((shown["estimated"].clone(), shown["ends"].clone()), (json!(false), json!(false)));
+        q.plan_read(now, None);
+        assert!(q.renewal.is_some(), "a failed read keeps the date");
+        q.set(vec![], Some("pro".into()));
+        q.set(vec![], Some("plus".into()));
+        assert_eq!(q.renewal, None, "a changed plan drops the date until the next read");
+        q.renewal = Renewal::from_claude(&json!({ "organization": {
+            "subscription_status": "active", "subscription_created_at": "2026-09-04T05:42:21Z"
+        } }));
+        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), None, None)));
+        assert_eq!(q.renewal, None, "a good read without a subscription clears it");
+        assert!(serde_json::to_value(&q).unwrap().get("renewal").is_none());
     }
 
     #[test]

@@ -173,17 +173,33 @@ public struct Quota: Codable, Sendable, Equatable {
     public var planName: String?
     public var noFiveHourLimit: Bool?
     public var subscriptionPlan: String?
+    /// When the subscription charges next, or ends when cancelled.
+    public var renewal: Renewal?
 
     enum CodingKeys: String, CodingKey {
-        case windows, limits, plan
+        case windows, limits, plan, renewal
         case updatedAt = "updated_at", planName = "plan_name", noFiveHourLimit = "no_five_hour_limit"
         case subscriptionPlan = "subscription_plan"
     }
 
     public init(windows: [QuotaWindow]? = nil, limits: [QuotaLimit]? = nil, plan: String? = nil, planName: String? = nil,
-                noFiveHourLimit: Bool? = nil, subscriptionPlan: String? = nil) {
+                noFiveHourLimit: Bool? = nil, subscriptionPlan: String? = nil, renewal: Renewal? = nil) {
         self.windows = windows; self.limits = limits; self.plan = plan; self.planName = planName
-        self.noFiveHourLimit = noFiveHourLimit; self.subscriptionPlan = subscriptionPlan
+        self.noFiveHourLimit = noFiveHourLimit; self.subscriptionPlan = subscriptionPlan; self.renewal = renewal
+    }
+}
+
+/// ChatGPT gives the date; Claude's is a month on from when the subscription started
+/// (`estimated`). A cancelled subscription `ends` then instead.
+public struct Renewal: Codable, Sendable, Equatable {
+    public var at: Date
+    public var estimated: Bool?
+    public var ends: Bool?
+    /// "monthly", "yearly"; Claude doesn't say.
+    public var period: String?
+
+    public init(at: Date, estimated: Bool? = nil, ends: Bool? = nil, period: String? = nil) {
+        self.at = at; self.estimated = estimated; self.ends = ends; self.period = period
     }
 }
 
