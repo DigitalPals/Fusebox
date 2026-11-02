@@ -16,10 +16,12 @@ use crate::state::App;
 
 mod readings;
 mod renewal;
+mod saved;
 
 pub use renewal::{Next as NextRenewal, Renewal};
 
 pub use readings::{FiveHour, claude_five_hour};
+pub use saved::{FILE as SAVED_FILE, Saved};
 
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -35,6 +37,10 @@ const RESET_POLL_EVERY: i64 = 30 * 60;
 /// Subscription plans change only with an upgrade or a downgrade.
 const PLAN_EVERY: i64 = 6 * 3600;
 const POLL_CONCURRENCY: usize = 4;
+/// After a usage endpoint answers 429, every caller of it waits at least this long, or
+/// what its Retry-After asks for, up to the longest wait.
+const USAGE_WAIT_MIN: i64 = 60;
+const USAGE_WAIT_MAX: i64 = 30 * 60;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Window {
@@ -139,6 +145,47 @@ pub struct Quota {
     pub(crate) plan_failures: u32,
     #[serde(skip)]
     pub(crate) plan_checked_at: Option<DateTime<Utc>>,
+    /// The usage endpoint answered 429: the quota poll, banked resets and the window
+    /// starter all leave it alone until then, so their retries don't keep it limited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_wait_until: Option<DateTime<Utc>>,
+}
+
+/// A usage-endpoint call skipped because the provider asked to wait.
+#[derive(Debug)]
+pub struct UsageWait(pub DateTime<Utc>);
+
+impl std::fmt::Display for UsageWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Provider usage is rate limited (HTTP 429); next check after {} UTC", self.0.format("%H:%M"))
+    }
+}
+
+impl std::error::Error for UsageWait {}
+
+/// Seconds a response's Retry-After asks for, as delta seconds or an HTTP date.
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<i64> {
+    let v = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    v.parse::<i64>()
+        .ok()
+        .or_else(|| DateTime::parse_from_rfc2822(v).ok().map(|at| (at.with_timezone(&Utc) - now).num_seconds()))
+}
+
+/// Fails without a request while the account's usage endpoint asked to wait.
+pub(crate) fn usage_gate(acct: &Account) -> anyhow::Result<()> {
+    match acct.state.lock().quota.usage_wait(Utc::now()) {
+        Some(until) => Err(UsageWait(until).into()),
+        None => Ok(()),
+    }
+}
+
+/// Notes a usage-endpoint answer: a 429 makes every caller wait.
+pub(crate) fn usage_answered(acct: &Account, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let now = Utc::now();
+        let until = acct.state.lock().quota.usage_limited(now, retry_after_seconds(headers, now));
+        tracing::info!(account = %acct.label, until = %until, "usage endpoint rate limited; waiting");
+    }
 }
 
 /// Whether two plan identifiers name the same plan: Claude's Ultra may one day be
@@ -236,8 +283,24 @@ impl Quota {
         Some(100.0 - used.clamp(0.0, 100.0))
     }
 
+    /// When the usage endpoint's 429 wait ends, if it hasn't yet.
+    pub fn usage_wait(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.usage_wait_until.filter(|t| *t > now)
+    }
+
+    /// A 429 from the usage endpoint; returns when callers may ask again.
+    pub(crate) fn usage_limited(&mut self, now: DateTime<Utc>, retry_after: Option<i64>) -> DateTime<Utc> {
+        let until = now + chrono::Duration::seconds(retry_after.unwrap_or(0).clamp(USAGE_WAIT_MIN, USAGE_WAIT_MAX));
+        let until = self.usage_wait(now).map_or(until, |t| t.max(until));
+        self.usage_wait_until = Some(until);
+        until
+    }
+
     /// `pauses`: when the account's quota pauses end.
     fn needs_refresh(&self, now: DateTime<Utc>, pauses: impl IntoIterator<Item = DateTime<Utc>>) -> bool {
+        if self.usage_wait(now).is_some() {
+            return false;
+        }
         // A check that brought no data waits 2, 4, 8 ... up to 30 minutes before the next.
         if self.check_failures > 0
             && let Some(at) = self.checked_at
@@ -455,19 +518,24 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
         _ => return Ok(()),
     };
     let http = app.http.control_for_account(acct);
+    if matches!(acct.provider, Provider::Claude | Provider::Codex) {
+        usage_gate(acct)?;
+    }
+    let answered = |resp: reqwest::Response| {
+        usage_answered(acct, resp.status(), resp.headers());
+        resp.error_for_status()
+    };
     let reading = match acct.provider {
         Provider::Claude => {
-            let v: Value = http
+            let resp = http
                 .get(CLAUDE_USAGE)
                 .bearer_auth(&token)
                 .header("anthropic-beta", "oauth-2025-04-20")
                 .header("user-agent", crate::clients::claude_user_agent())
                 .timeout(Duration::from_secs(15))
                 .send()
-                .await?
-                .error_for_status()?
-                .json()
                 .await?;
+            let v: Value = answered(resp)?.json().await?;
             readings::claude(&v)
         }
         Provider::Codex => {
@@ -480,7 +548,7 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
             if let Some(id) = &account_id {
                 rb = rb.header("chatgpt-account-id", id);
             }
-            let v: Value = rb.send().await?.error_for_status()?.json().await?;
+            let v: Value = answered(rb.send().await?)?.json().await?;
             readings::codex(&v)
         }
         Provider::Antigravity => {
@@ -684,6 +752,7 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     let reset_stale = acct.provider != Provider::Antigravity && app.cfg().banked_resets && {
         let st = acct.state.lock();
         !st.disabled
+            && st.quota.usage_wait(Utc::now()).is_none()
             && st.banked_resets.as_ref().is_none_or(|v| {
                 (Utc::now() - v.checked_at).num_seconds() >= RESET_POLL_EVERY
                     || crate::banked_resets::expiry_passed(v, Utc::now())
@@ -1424,5 +1493,33 @@ mod tests {
         assert_eq!(q.pressure("claude-opus-5-5"), Some(100.0));
         assert_eq!(q.exhausted_until("claude-opus-5-5"), Some(future));
         assert_eq!(q.exhausted_until("claude-sonnet-5-5"), None);
+    }
+
+    #[test]
+    fn a_rate_limited_usage_endpoint_waits_for_its_retry_after_within_bounds() {
+        let now = Utc::now();
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after_seconds(&headers, now), None);
+        headers.insert("retry-after", "318".parse().unwrap());
+        assert_eq!(retry_after_seconds(&headers, now), Some(318));
+        let date = (now + chrono::Duration::seconds(600)).to_rfc2822();
+        headers.insert("retry-after", date.parse().unwrap());
+        assert!(retry_after_seconds(&headers, now).is_some_and(|s| (599..=600).contains(&s)));
+
+        let mut q = Quota { refreshed_at: Some(now - chrono::Duration::hours(1)), ..Default::default() };
+        assert!(q.needs_refresh(now, []));
+        let until = q.usage_limited(now, Some(318));
+        assert_eq!(until, now + chrono::Duration::seconds(318));
+        assert_eq!(q.usage_wait(now), Some(until));
+        assert!(!q.needs_refresh(now, []), "no poll while the provider asked to wait");
+        // A shorter answer does not cut a longer wait short; a missing one waits a minute.
+        assert_eq!(q.usage_limited(now, None), until);
+        assert_eq!(Quota::default().usage_limited(now, None), now + chrono::Duration::seconds(USAGE_WAIT_MIN));
+        assert_eq!(Quota::default().usage_limited(now, Some(86_400)), now + chrono::Duration::seconds(USAGE_WAIT_MAX));
+        let later = until + chrono::Duration::seconds(1);
+        assert_eq!(q.usage_wait(later), None);
+        assert!(q.needs_refresh(later, []));
+        assert_eq!(serde_json::to_value(&q).unwrap()["usage_wait_until"], serde_json::json!(until));
+        assert!(serde_json::to_value(Quota::default()).unwrap().get("usage_wait_until").is_none());
     }
 }

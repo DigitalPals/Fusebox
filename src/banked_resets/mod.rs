@@ -111,6 +111,7 @@ async fn api(app: &App, acct: &Arc<Account>) -> Result<HttpProvider> {
         client: app.http.reset_for_account(acct),
         token,
         account_id: id,
+        acct: Some(acct.clone()),
         #[cfg(test)]
         origin: app.reset_test_origin.lock().clone(),
     })

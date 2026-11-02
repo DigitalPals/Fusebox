@@ -64,6 +64,7 @@ impl App {
             &cfg.auth_dir().join(crate::accounts::COOLDOWNS_FILE),
         ));
         pool.restore_attributions(crate::attribution::Saved::load(&cfg.auth_dir().join(crate::attribution::FILE)));
+        crate::quota::Saved::load(&cfg.auth_dir().join(crate::quota::SAVED_FILE)).restore(&pool);
         let (live, _) = broadcast::channel(512);
         let sessions = Arc::new(crate::affinity::Sessions::load(&cfg.auth_dir(), cfg.session_affinity_idle_seconds));
         let push = crate::push::Push::load(&cfg.auth_dir());

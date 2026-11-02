@@ -428,6 +428,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     app.refresh_tasks.shutdown().await;
     app.sessions.save_async().await;
     save_cooldowns(&app);
+    save_quota(&app);
     save_attribution(&app, true);
     app.addresses.save(&app.cfg().named_clients, true);
     if let Some(store) = &app.usage
@@ -495,6 +496,22 @@ fn save_attribution(app: &App, force: bool) {
     }
 }
 
+/// Keeps confirmed quota facts (no 5-hour limit) across restarts; written only when they changed.
+fn save_quota(app: &App) {
+    static LAST: parking_lot::Mutex<Option<quota::Saved>> = parking_lot::Mutex::new(None);
+    let now = quota::Saved::of(&app.pool);
+    let mut last = LAST.lock();
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    let path = app.cfg().auth_dir().join(quota::SAVED_FILE);
+    if let Err(e) = now.save(&path) {
+        tracing::warn!("could not save quota state: {e:#}");
+        return;
+    }
+    *last = Some(now);
+}
+
 /// Keeps cooldowns across restarts; written only when they changed.
 fn save_cooldowns(app: &App) {
     static LAST: parking_lot::Mutex<Option<accounts::Cooldowns>> = parking_lot::Mutex::new(None);
@@ -550,6 +567,7 @@ async fn watch(app: Arc<App>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
         app.sessions.flush(app.cfg().session_affinity_idle_seconds);
         save_cooldowns(&app);
+        save_quota(&app);
         save_attribution(&app, false);
         app.addresses.save(&app.cfg().named_clients, false);
         let t = mtime(&app.cfg_path);

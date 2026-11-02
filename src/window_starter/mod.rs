@@ -297,6 +297,7 @@ struct Api {
     http: reqwest::Client,
     token: String,
     origin: String,
+    acct: Arc<Account>,
 }
 
 impl Api {
@@ -311,7 +312,7 @@ impl Api {
         let origin = crate::upstream::CLAUDE_API.to_string();
         #[cfg(test)]
         let origin = app.window_starter_test_origin.lock().clone().unwrap_or(origin);
-        Ok(Self { http: app.http.reset_for_account(acct), token, origin })
+        Ok(Self { http: app.http.reset_for_account(acct), token, origin, acct: acct.clone() })
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -325,6 +326,9 @@ impl Api {
             .send()
             .await
             .map_err(|_| anyhow!("Could not read Claude window status"))?;
+        if path.starts_with("/api/oauth/usage") {
+            crate::quota::usage_answered(&self.acct, response.status(), response.headers());
+        }
         ensure!(response.status().is_success(), "Claude window status unavailable (HTTP {})", response.status());
         json_body(response).await
     }
@@ -342,6 +346,8 @@ impl Api {
 
     async fn usage(&self, app: &App, acct: &Arc<Account>, id: &str) -> Result<Value> {
         let epoch = acct.state.lock().identity_epoch;
+        // The quota poll and banked resets read this endpoint too; after a 429 all wait.
+        crate::quota::usage_gate(acct)?;
         let usage = self.get("/api/oauth/usage").await?;
         ensure!(native_id(acct)? == id && acct.state.lock().identity_epoch == epoch, "Claude account changed");
         // The general quota merger deliberately retains omitted windows. An
@@ -388,7 +394,11 @@ pub async fn start(app: Arc<App>, acct: Arc<Account>, action: Action, automatic:
             Ok(view)
         }
         Err(e) => {
-            let view = View::new("unavailable", e.to_string(), Utc::now());
+            let mut view = View::new("unavailable", e.to_string(), Utc::now());
+            // A rate-limited usage endpoint: check again once its wait is over.
+            if let Some(until) = acct.state.lock().quota.usage_wait(Utc::now()) {
+                view.next_check_at = view.next_check_at.max(until);
+            }
             store(&app, &id, &view);
             Err(e)
         }
@@ -404,6 +414,8 @@ async fn run(app: &Arc<App>, acct: &Arc<Account>, id: &str, action: Action, auto
     if !action.check_only && busy(app, id, &policy.model, now) {
         return Ok(View::new("skipped", "Real work, a cooldown or a quota operation is already active", now));
     }
+    // Nothing to learn while the usage endpoint asked to wait; skip the profile read too.
+    crate::quota::usage_gate(acct)?;
     let api = Api::new(app, acct).await?;
     let organization = api.identity(id).await?;
     current(app, acct, id, &root, automatic)?;

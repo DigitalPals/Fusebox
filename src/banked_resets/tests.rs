@@ -944,6 +944,7 @@ async fn provider_http_payloads_headers_and_refusals() {
         client: app.http.for_reset(Some("direct")),
         token: "mock-token".into(),
         account_id: "account-1".into(),
+        acct: None,
         origin: Some(origin),
     };
     let org = "11111111-1111-4111-8111-111111111111";
@@ -1472,4 +1473,36 @@ async fn a_short_only_reset_is_not_spent_once_the_short_limit_is_gone() {
     acct.state.lock().banked_resets = Some(reset_view(mock.inventory.clone()));
     let _ = execute(&app, &acct, &mock, "organization-1", "account-1", &mut ledger, Request::Automatic).await;
     assert_eq!(mock.calls.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn a_rate_limited_usage_read_waits_with_the_other_callers() {
+    use axum::{
+        Router, body::Body, extract::State, http::Request as HttpRequest, response::IntoResponse, routing::any,
+    };
+    async fn backend(State(reads): State<Arc<AtomicUsize>>, req: HttpRequest<Body>) -> axum::response::Response {
+        if req.uri().path() == "/api/oauth/profile" {
+            return axum::Json(
+                json!({"account":{"uuid":"account-1"},"organization":{"uuid":"11111111-1111-4111-8111-111111111111"}}),
+            )
+            .into_response();
+        }
+        reads.fetch_add(1, Ordering::SeqCst);
+        (axum::http::StatusCode::TOO_MANY_REQUESTS, [("retry-after", "120")], axum::Json(json!({}))).into_response()
+    }
+    let (_temp, app, acct) = fixture(Provider::Claude, 1);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    *app.reset_test_origin.lock() = Some(format!("http://{}", listener.local_addr().unwrap()));
+    let server = tokio::spawn(
+        axum::serve(listener, Router::new().fallback(any(backend)).with_state(reads.clone())).into_future(),
+    );
+    let view = refresh(&app, &acct).await.unwrap();
+    assert_eq!(view.error.as_deref(), Some("Provider reset status unavailable (HTTP 429)"));
+    let until = acct.state.lock().quota.usage_wait(Utc::now()).expect("the 429 starts a wait");
+    assert!(until > Utc::now() + chrono::Duration::seconds(100));
+    let view = refresh(&app, &acct).await.unwrap();
+    assert!(view.error.as_deref().is_some_and(|e| e.contains("rate limited")), "{:?}", view.error);
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "no second read while the provider asked to wait");
+    server.abort();
 }

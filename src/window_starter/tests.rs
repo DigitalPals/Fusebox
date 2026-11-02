@@ -32,6 +32,9 @@ struct Mock {
     redirect: Mutex<bool>,
     profile_account: Mutex<String>,
     before_usage: Mutex<Option<Box<dyn Fn() + Send>>>,
+    usage_status: Mutex<axum::http::StatusCode>,
+    usage_calls: AtomicUsize,
+    profile_calls: AtomicUsize,
 }
 
 impl Default for Mock {
@@ -45,6 +48,9 @@ impl Default for Mock {
             redirect: Mutex::new(false),
             profile_account: Mutex::new(ACCOUNT.into()),
             before_usage: Mutex::new(None),
+            usage_status: Mutex::new(axum::http::StatusCode::OK),
+            usage_calls: Default::default(),
+            profile_calls: Default::default(),
         }
     }
 }
@@ -78,11 +84,13 @@ async fn fixture(copies: usize, analytics: bool) -> (Temp, Arc<App>, Arc<Mock>, 
     let message = mock.clone();
     let routes = Router::new()
         .route("/api/oauth/profile", get(move || { let m = profile.clone(); async move {
+            m.profile_calls.fetch_add(1, Ordering::SeqCst);
             Json(json!({"account":{"uuid":*m.profile_account.lock()},"organization":{"uuid":ORG}}))
         }}))
         .route("/api/oauth/usage", get(move || { let m = usage.clone(); async move {
             if let Some(f) = m.before_usage.lock().take() { f(); }
-            Json(m.usage.lock().clone())
+            m.usage_calls.fetch_add(1, Ordering::SeqCst);
+            (*m.usage_status.lock(), [("retry-after", "318")], Json(m.usage.lock().clone()))
         }}))
         .route("/v1/messages", post(move |Json(body): Json<Value>| { let m = message.clone(); async move {
             m.posts.fetch_add(1, Ordering::SeqCst);
@@ -653,4 +661,40 @@ async fn explicit_inactive_windows_replace_old_quota_but_missing_windows_never_s
     assert_eq!(run(&app, true).await.unwrap().status, "started");
     assert_eq!(mock.posts.load(Ordering::SeqCst), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn a_rate_limited_usage_endpoint_makes_every_caller_wait_it_out() {
+    let (_temp, app, mock, task) = fixture(1, false).await;
+    let acct = app.pool.all()[0].clone();
+    *mock.usage_status.lock() = axum::http::StatusCode::TOO_MANY_REQUESTS;
+    let before = Utc::now();
+    assert!(run(&app, true).await.is_err());
+    assert_eq!(mock.usage_calls.load(Ordering::SeqCst), 1);
+    let until = acct.state.lock().quota.usage_wait(Utc::now()).expect("the 429 starts a wait");
+    assert!(until >= before + chrono::Duration::seconds(318) && until <= Utc::now() + chrono::Duration::seconds(318));
+    {
+        let st = acct.state.lock();
+        let view = st.window_starter.as_ref().unwrap();
+        assert_eq!(view.status, "unavailable");
+        assert_eq!(view.next_check_at, until, "the starter's next check waits for the provider");
+        assert!(!due(&st, Utc::now()));
+    }
+    // No caller asks again while the wait lasts: not the starter (nor its profile read),
+    // not the quota poll, not the dashboard's manual refresh.
+    let profiles = mock.profile_calls.load(Ordering::SeqCst);
+    let e = run(&app, false).await.unwrap_err();
+    assert!(e.downcast_ref::<crate::quota::UsageWait>().is_some(), "{e:#}");
+    assert!(e.to_string().contains("rate limited"), "{e}");
+    let e = crate::quota::poll(&app, &acct).await.unwrap_err();
+    assert!(e.downcast_ref::<crate::quota::UsageWait>().is_some(), "{e:#}");
+    assert_eq!(mock.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.profile_calls.load(Ordering::SeqCst), profiles);
+    // Once it is over, the next check reads usage again.
+    *mock.usage_status.lock() = axum::http::StatusCode::OK;
+    acct.state.lock().quota.usage_wait_until = Some(Utc::now() - chrono::Duration::seconds(1));
+    run(&app, false).await.unwrap();
+    assert!(mock.usage_calls.load(Ordering::SeqCst) > 1);
+    assert!(acct.state.lock().quota.usage_wait(Utc::now()).is_none());
+    task.abort();
 }

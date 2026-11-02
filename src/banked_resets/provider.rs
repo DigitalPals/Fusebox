@@ -247,6 +247,8 @@ pub struct HttpProvider {
     pub client: reqwest::Client,
     pub token: String,
     pub account_id: String,
+    /// The account whose usage endpoint this reads, to share its 429 wait.
+    pub acct: Option<std::sync::Arc<crate::accounts::Account>>,
     #[cfg(test)]
     pub origin: Option<String>,
 }
@@ -304,6 +306,23 @@ impl HttpProvider {
         ensure!(resp.status().is_success(), "Provider reset status unavailable (HTTP {})", resp.status().as_u16());
         json_body(resp).await
     }
+    /// The usage endpoint, which the quota poll and the window starter read too: wait
+    /// with them after a 429.
+    async fn usage(&self, path: &str) -> Result<Value> {
+        if let Some(acct) = &self.acct {
+            crate::quota::usage_gate(acct)?;
+        }
+        let resp = self
+            .request(reqwest::Method::GET, path)
+            .send()
+            .await
+            .map_err(|_| anyhow!("Could not read provider reset status"))?;
+        if let Some(acct) = &self.acct {
+            crate::quota::usage_answered(acct, resp.status(), resp.headers());
+        }
+        ensure!(resp.status().is_success(), "Provider reset status unavailable (HTTP {})", resp.status().as_u16());
+        json_body(resp).await
+    }
 }
 
 async fn json_body(mut response: reqwest::Response) -> Result<Value> {
@@ -319,12 +338,12 @@ impl Api for HttpProvider {
     async fn read(&self) -> Result<(Inventory, Value)> {
         match self.provider {
             Provider::Codex => {
-                let usage = self.get("/backend-api/wham/usage").await?;
+                let usage = self.usage("/backend-api/wham/usage").await?;
                 let details = self.get("/backend-api/wham/rate-limit-reset-credits").await?;
                 Ok((codex(&usage, &details, Utc::now())?, usage))
             }
             Provider::Claude => {
-                let usage = self.get("/api/oauth/usage?cedar_ember=1&skip_spend=1").await?;
+                let usage = self.usage("/api/oauth/usage?cedar_ember=1&skip_spend=1").await?;
                 Ok((claude(&usage, Utc::now())?, usage))
             }
             _ => Err(anyhow!("Banked resets are not supported by this provider")),

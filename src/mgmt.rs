@@ -1069,7 +1069,10 @@ async fn refresh_quota(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
     }
     // Quota can still refresh if this subscription does not offer banked resets.
     acct.state.lock().quota_epoch += 1;
-    if crate::quota::poll(&app, &acct).await.is_err() {
+    if let Err(e) = crate::quota::poll(&app, &acct).await {
+        if e.downcast_ref::<crate::quota::UsageWait>().is_some() {
+            return err(StatusCode::TOO_MANY_REQUESTS, e.to_string());
+        }
         return err(StatusCode::BAD_GATEWAY, "Could not refresh provider usage");
     }
     let _ = crate::quota::poll_plan(&app, &acct).await;
