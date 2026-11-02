@@ -12,7 +12,8 @@ fn notice() -> Span {
 
 impl Push {
     /// The reminders due now: subscriptions that charge or end within `notice()` and
-    /// whose day wasn't reminded of yet. Each is remembered until a day after its date.
+    /// whose day wasn't reminded of yet. Only dates the provider gave: a passed date moved
+    /// on by a month (no read since) is no reason to remind. Each is remembered until a day after its date.
     pub(super) fn renewals(&self, accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
         let mut stored = self.stored.lock();
         let before = stored.renewals.len();
@@ -20,7 +21,9 @@ impl Push {
         let mut changed = stored.renewals.len() != before;
         let mut due = Vec::new();
         for a in accounts {
-            let Some(next) = a.renewal.filter(|n| n.at > now && n.at - now <= notice()) else { continue };
+            let Some(next) = a.renewal.filter(|n| !n.estimated && n.at > now && n.at - now <= notice()) else {
+                continue;
+            };
             let key = format!("renewal:{}:{}", a.id, next.at.with_timezone(&Local).date_naive());
             if stored.renewals.contains_key(&key) {
                 continue;
@@ -36,7 +39,7 @@ impl Push {
     }
 }
 
-/// "Claude subscription renews tomorrow", with the day, and how sure the date is.
+/// "Codex subscription renews tomorrow", or "ends" when cancelled, with the day.
 fn reminder(a: &AccountView, next: crate::quota::NextRenewal, key: String, now: DateTime<Utc>) -> Fault {
     let at = next.at.with_timezone(&Local);
     let when = match (at.date_naive() - now.with_timezone(&Local).date_naive()).num_days() {
@@ -45,20 +48,11 @@ fn reminder(a: &AccountView, next: crate::quota::NextRenewal, key: String, now: 
         _ => format!("on {}", at.format("%A")),
     };
     let day = at.format("%A %-d %B");
-    let provider = &a.group_name;
     let (verb, summary, detail) = if next.ends {
         (
             "ends",
             format!("Ends {day}"),
             format!("The subscription was cancelled and ends {day} at {}.", at.format("%H:%M")),
-        )
-    } else if next.estimated {
-        (
-            "renews",
-            format!("Renews around {day}"),
-            format!(
-                "Expected to charge again around {day}: a month on from the day the subscription started. {provider} doesn't give the date, so it is an estimate."
-            ),
         )
     } else {
         ("renews", format!("Renews {day}"), format!("Charges again {day} at {}.", at.format("%H:%M")))
@@ -68,7 +62,7 @@ fn reminder(a: &AccountView, next: crate::quota::NextRenewal, key: String, now: 
         event: Event::Renewal,
         provider: a.provider.clone(),
         provider_name: a.provider_name.clone(),
-        title: format!("{provider} subscription {verb} {when}"),
+        title: format!("{} subscription {verb} {when}", a.group_name),
         body: format!("{}: {detail}", a.label),
         summary,
         detail: Some(detail),
@@ -141,27 +135,20 @@ mod tests {
     }
 
     #[test]
-    fn estimates_and_endings_say_so() {
+    fn endings_say_so_and_estimates_are_not_reminded() {
         let temp = temp();
         let push = Push::load(&temp.0);
         let now = Utc::now();
         let at = now + Span::hours(20);
         let accounts = [
-            AccountView {
-                provider: "claude".into(),
-                provider_name: "Claude".into(),
-                group_name: "Claude".into(),
-                ..account("claude", Some(NextRenewal { at, estimated: true, ends: false }))
-            },
+            account("moved-on", Some(NextRenewal { at, estimated: true, ends: false })),
             account("cancelled", Some(NextRenewal { at, estimated: false, ends: true })),
         ];
         let sent = push.renewals(&accounts, now);
-        assert!(sent[0].title.starts_with("Claude subscription renews "), "{}", sent[0].title);
-        assert!(sent[0].body.contains("Claude doesn't give the date, so it is an estimate"), "{}", sent[0].body);
-        assert!(sent[0].summary.starts_with("Renews around "));
-        assert!(sent[1].title.starts_with("Codex subscription ends "), "{}", sent[1].title);
-        assert!(sent[1].body.contains("was cancelled and ends"), "{}", sent[1].body);
-        assert_eq!(sent[1].until, Some(at));
+        assert_eq!(sent.len(), 1, "a date moved on without a read is no reminder");
+        assert!(sent[0].title.starts_with("Codex subscription ends "), "{}", sent[0].title);
+        assert!(sent[0].body.contains("was cancelled and ends"), "{}", sent[0].body);
+        assert_eq!(sent[0].until, Some(at));
     }
 
     #[test]

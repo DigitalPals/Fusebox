@@ -1,7 +1,7 @@
-//! When a subscription next charges, or when a cancelled one ends. ChatGPT's subscription
-//! response gives the date; Claude's profile only says when the subscription started, and
-//! a monthly plan charges again on that day of each month (Stripe keeps the day, and takes
-//! the last day of shorter months).
+//! When a ChatGPT subscription next charges, or when a cancelled one ends, as its
+//! subscription response gives it. Claude has none: its profile only says when the
+//! subscription started, and plan changes move the billing day (an account started on
+//! 4 September renewed on the 23rd), while the billing endpoints refuse OAuth tokens.
 
 use chrono::{DateTime, Months, Utc};
 use serde::Serialize;
@@ -13,14 +13,12 @@ const MAX_STEPS: u32 = 1200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Renewal {
-    /// The date the provider gave, or the day the subscription started (`estimated`).
+    /// The date the provider gave.
     anchor: DateTime<Utc>,
     /// Months between charges, to move a passed date on to the next charge.
     months: u32,
-    /// The billing period as the provider names it ("monthly"); Claude doesn't say.
+    /// The billing period as the provider names it ("monthly").
     period: Option<String>,
-    /// Worked out from the subscription's start: the provider gives no date.
-    estimated: bool,
     /// Cancelled: the subscription ends at `anchor` and charges no more.
     ends: bool,
 }
@@ -43,27 +41,6 @@ fn text(v: &Value) -> Option<String> {
 }
 
 impl Renewal {
-    /// From a Claude profile: monthly from `subscription_created_at`, while the
-    /// subscription is active. Claude doesn't say whether a plan is billed yearly, nor
-    /// whether a cancelled one still counts as active until its period ends.
-    pub fn from_claude(profile: &Value) -> Option<Self> {
-        let org = &profile["organization"];
-        if text(&org["subscription_status"]).as_deref() != Some("active") {
-            return None;
-        }
-        // Invoiced organizations (Team, Enterprise) are not charged by the month.
-        if text(&org["billing_type"]).is_some_and(|t| !t.contains("subscription")) {
-            return None;
-        }
-        Some(Self {
-            anchor: time(&org["subscription_created_at"])?,
-            months: 1,
-            period: None,
-            estimated: true,
-            ends: false,
-        })
-    }
-
     /// From ChatGPT's subscription response: its active entitlement's `renews_at`, or
     /// `cancels_at` (or the paid-up date) when it won't renew. Free and gratis
     /// subscriptions charge nothing.
@@ -84,7 +61,7 @@ impl Renewal {
             Some(at) => (at, true),
             None => (time(&ent["renews_at"]).or_else(|| time(&value["active_until"]))?, false),
         };
-        Some(Self { anchor, months, period, estimated: false, ends })
+        Some(Self { anchor, months, period, ends })
     }
 
     /// The next charge after `now`, or the end of a cancelled subscription. A charge
@@ -92,9 +69,9 @@ impl Renewal {
     /// read confirms it); an end that has passed is no date at all.
     pub fn next(&self, now: DateTime<Utc>) -> Option<Next> {
         if self.ends {
-            return (self.anchor > now).then_some(Next { at: self.anchor, estimated: self.estimated, ends: true });
+            return (self.anchor > now).then_some(Next { at: self.anchor, estimated: false, ends: true });
         }
-        if self.anchor > now && !self.estimated {
+        if self.anchor > now {
             return Some(Next { at: self.anchor, estimated: false, ends: false });
         }
         // Always from the anchor: stepping from a clamped date (31 Jan, 28 Feb) would
@@ -129,52 +106,20 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    /// The fields production's profile returned on 2026-11-02 (identities left out).
-    fn claude(org: Value) -> Value {
-        let mut base = json!({
-            "organization_type": "claude_max",
-            "billing_type": "stripe_subscription",
-            "rate_limit_tier": "default_claude_max_20x",
-            "subscription_status": "active",
-            "subscription_created_at": "2026-09-04T05:42:21.385091Z",
+    #[test]
+    fn a_passed_date_moves_on_and_month_ends_keep_their_day() {
+        let v = json!({
+            "entitlement": { "has_active_subscription": true, "renews_at": "2024-01-31T15:34:42Z" },
+            "billing_period": "monthly",
         });
-        base.as_object_mut().unwrap().extend(org.as_object().unwrap().clone());
-        json!({ "account": { "has_claude_max": true }, "organization": base })
-    }
-
-    #[test]
-    fn claude_estimates_monthly_from_the_subscription_start() {
-        let r = Renewal::from_claude(&claude(json!({}))).unwrap();
-        let next = r.next(at("2026-11-02T12:00:00Z")).unwrap();
-        assert_eq!(next, Next { at: at("2026-11-04T05:42:21.385091Z"), estimated: true, ends: false });
-        // Just after a charge, the next one is a month on.
-        assert_eq!(r.next(at("2026-11-04T06:00:00Z")).unwrap().at, at("2026-12-04T05:42:21.385091Z"));
-        // Before the first charge.
-        assert_eq!(r.next(at("2026-09-04T06:00:00Z")).unwrap().at, at("2026-10-04T05:42:21.385091Z"));
-    }
-
-    #[test]
-    fn month_ends_keep_their_day() {
-        let r = Renewal::from_claude(&claude(json!({ "subscription_created_at": "2024-01-31T15:34:42Z" }))).unwrap();
-        assert_eq!(r.next(at("2024-02-10T00:00:00Z")).unwrap().at, at("2024-02-29T15:34:42Z"));
-        assert_eq!(r.next(at("2024-03-01T00:00:00Z")).unwrap().at, at("2024-03-31T15:34:42Z"));
-        assert_eq!(r.next(at("2026-11-02T00:00:00Z")).unwrap().at, at("2026-11-30T15:34:42Z"));
-    }
-
-    #[test]
-    fn claude_without_an_active_subscription_has_no_date() {
-        for org in [
-            json!({ "subscription_status": "canceled" }),
-            json!({ "subscription_status": null }),
-            json!({ "subscription_created_at": null }),
-            json!({ "subscription_created_at": "soon" }),
-            json!({ "billing_type": "invoice" }),
-        ] {
-            assert_eq!(Renewal::from_claude(&claude(org.clone())), None, "{org}");
-        }
-        assert_eq!(Renewal::from_claude(&json!({})), None);
-        // Older profiles without a billing type still count.
-        assert!(Renewal::from_claude(&claude(json!({ "billing_type": null }))).is_some());
+        let r = Renewal::from_codex(&v).unwrap();
+        let rolled = |now: &str| r.next(at(now)).unwrap();
+        assert_eq!(
+            rolled("2024-02-10T00:00:00Z"),
+            Next { at: at("2024-02-29T15:34:42Z"), estimated: true, ends: false }
+        );
+        assert_eq!(rolled("2024-03-01T00:00:00Z").at, at("2024-03-31T15:34:42Z"));
+        assert_eq!(rolled("2026-11-02T00:00:00Z").at, at("2026-11-30T15:34:42Z"));
     }
 
     /// The shape production's subscription response had on 2026-11-02.

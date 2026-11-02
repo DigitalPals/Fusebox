@@ -125,8 +125,8 @@ pub struct Quota {
     /// The active ChatGPT subscription SKU; `plan` alone does not distinguish Pro tiers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plan: Option<String>,
-    /// When the subscription next charges, or ends when cancelled: ChatGPT's date, or
-    /// Claude's estimated from when the subscription started.
+    /// When a ChatGPT subscription next charges, or ends when cancelled. Claude gives no
+    /// date (see `renewal`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renewal: Option<Renewal>,
     /// Usage-endpoint checks in a row that brought no data, and when the last one ran.
@@ -152,8 +152,8 @@ pub fn same_plan(a: &str, b: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
-    /// The plan identifier, the provider's display name and the estimated renewal.
-    Claude(Option<String>, Option<String>, Option<Renewal>),
+    /// The plan identifier and the provider's display name.
+    Claude(Option<String>, Option<String>),
     /// The subscription SKU and the renewal.
     Codex(Option<String>, Option<Renewal>),
 }
@@ -284,10 +284,9 @@ impl Quota {
         match details {
             Some(details) => {
                 match details {
-                    PlanDetails::Claude(plan, name, renewal) => {
+                    PlanDetails::Claude(plan, name) => {
                         self.plan = plan;
                         self.plan_name = name;
-                        self.renewal = renewal;
                     }
                     // Usage remains the source of the broad Codex plan. The web
                     // subscription API can use different names for the same tier.
@@ -540,11 +539,7 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let http = app.http.control_for_account(acct);
     let details = match acct.provider {
         Provider::Claude => crate::oauth::claude_profile(&http, &token).await.map(|profile| {
-            PlanDetails::Claude(
-                crate::oauth::claude_plan(&profile),
-                crate::oauth::claude_plan_name(&profile),
-                Renewal::from_claude(&profile),
-            )
+            PlanDetails::Claude(crate::oauth::claude_plan(&profile), crate::oauth::claude_plan_name(&profile))
         }),
         Provider::Codex => {
             async {
@@ -1218,12 +1213,12 @@ mod tests {
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         assert!(q.plan_due(now + secs(PLAN_EVERY)));
         // A good read ends the backoff, and its plan replaces the last one, even with none.
-        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()), None)));
+        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()))));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref(), q.plan_failures), (Some("max_20x"), Some("Ultra"), 0));
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         q.plan_read(now, None);
         assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
-        q.plan_read(now, Some(PlanDetails::Claude(None, None, None)));
+        q.plan_read(now, Some(PlanDetails::Claude(None, None)));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref()), (None, None));
         // Usage readings without a plan (Claude's) leave it alone.
         q.plan = Some("max_5x".into());
@@ -1318,11 +1313,8 @@ mod tests {
         q.set(vec![], Some("pro".into()));
         q.set(vec![], Some("plus".into()));
         assert_eq!(q.renewal, None, "a changed plan drops the date until the next read");
-        q.renewal = Renewal::from_claude(&json!({ "organization": {
-            "subscription_status": "active", "subscription_created_at": "2026-09-04T05:42:21Z"
-        } }));
-        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), None, None)));
-        assert_eq!(q.renewal, None, "a good read without a subscription clears it");
+        q.plan_read(now, Some(codex_plan(&json!({ "plan_type": "pro" })).unwrap()));
+        assert_eq!(q.renewal, None, "a good read without an active subscription clears it");
         assert!(serde_json::to_value(&q).unwrap().get("renewal").is_none());
     }
 

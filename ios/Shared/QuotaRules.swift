@@ -206,14 +206,14 @@ extension Account {
     }
 
     /// The sign-in card's row for the next charge: ("Renews", "Fri 6 Nov, 10:53 · in 3d 21h ·
-    /// monthly"), ("Renews", "about Wed 4 Nov · in 1d 17h · estimated from the start date") or
+    /// monthly"), ("Renews", "about Fri 6 Dec · in 1d 17h · estimated": passed before the next read) or
     /// ("Ends", "Fri 6 Nov · in 3d 21h · cancelled"), as the dashboard writes it.
     public func renewalRow(now: Date = .now) -> (key: String, value: String)? {
         guard let r = quota?.renewal, r.at > now else { return nil }
         let day = r.at.formatted(Date.FormatStyle(locale: Locale(identifier: "en_GB")).weekday(.abbreviated).day().month(.abbreviated))
         let left = "in \(Fmt.left(r.at, now: now))"
         if r.ends == true { return ("Ends", "\(day) · \(left) · cancelled") }
-        if r.estimated == true { return ("Renews", "about \(day) · \(left) · estimated from the start date") }
+        if r.estimated == true { return ("Renews", "about \(day) · \(left) · estimated") }
         return ("Renews", ["\(day), \(Fmt.hm(r.at))", left, r.period].compactMap { $0 }.joined(separator: " · "))
     }
 

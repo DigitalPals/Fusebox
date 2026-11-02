@@ -22,7 +22,7 @@ notifications:
   account-used-up: false     # one account used up its 5-hour or weekly limit
   account-errors: false      # account errors, and three or more failed requests in an hour
   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
-  renewals: true             # two days before a subscription charges again, or ends
+  renewals: true             # two days before a ChatGPT subscription charges again, or ends
 ```
 
 ## What is sent, and when
@@ -35,7 +35,7 @@ Fusebox checks every 30 seconds, using the rules behind the dashboard's faults b
 - **Account errors:** the account's error, or "3 failed requests" in the last hour.
 - **Banked resets:** sent when observed, independently of the 30-second check. "New Claude banked reset" or "New Codex banked reset" when an account receives resets, with the number received, total banked and any reported expiry. "Codex reset used" when automatic use spends one; "Codex reset needs review" when an automatic spend got no clear answer; "Codex reset expired unused" within about a minute of a reset expiring, with the provider's last refusal if there was one. A refusal alone isn't sent: during a reset's final hour automatic use retries every five minutes. Resets you use yourself aren't sent either. Opens the account's page.
 
-- **Subscription renewals:** sent by the 30-second check, two days before a Claude or ChatGPT subscription charges again: "Codex subscription renews on Friday", with the date and time. ChatGPT gives the date. Claude only says when the subscription started, so its date is a month on from that day (Stripe keeps the day, and takes the last day of shorter months); the message says it is an estimate, and is wrong for yearly plans. A cancelled ChatGPT subscription sends "Codex subscription ends tomorrow" instead. Each date is sent once, also across restarts, and also for disabled accounts, which are still charged. Opens the account's page, whose sign-in card shows the next date as **Renews** (or **Ends**).
+- **Subscription renewals:** sent by the 30-second check, two days before a ChatGPT subscription charges again: "Codex subscription renews on Friday", with the date and time ChatGPT gives. A cancelled subscription sends "Codex subscription ends tomorrow" instead. Each date is sent once, also across restarts, and also for disabled accounts, which are still charged. Opens the account's page, whose sign-in card shows the next date as **Renews** (or **Ends**). Claude accounts get none: Claude's profile only says when the subscription started, plan changes move the billing day, and its billing endpoints don't accept the sign-in's token.
 
 New-reset detection requires **Banked resets** under Config, Connections. It uses the existing inventory checks every 30 minutes and manual refreshes, so a new reset normally notifies within about 30 minutes while the provider is reachable. The first successful inventory read for a subscription establishes a quiet baseline. Receipt history is saved with the reset journal, shared by duplicate credential files and preserved across restarts. Failed reads and changes in whether a reset is usable do not create receipt notifications. Observations continue while the notification switch is off or no device/webhook is listening, so turning notifications on does not announce resets already observed.
 

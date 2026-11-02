@@ -2470,14 +2470,15 @@ async function setPriority(id, priority) {
   } catch (e) { toast(e.message); }
 }
 
-// When the subscription charges next: ChatGPT gives the date, Claude's is a month on from
-// when the subscription started (src/quota/renewal.rs). A cancelled one ends instead.
+// When a ChatGPT subscription charges next, or ends when cancelled (src/quota/renewal.rs).
+// Claude gives no billing date. A date that passed before the next read is moved on a
+// month and marked estimated.
 function renewalRow(a) {
   const r = a.quota?.renewal;
   if (!(Date.parse(r?.at) > Date.now())) return null;
   if (r.ends) return ['Ends', `${dayDate(r.at)} · in ${left(r.at)} · cancelled`];
   const parts = [r.estimated ? `about ${dayDate(r.at)}` : `${dayDate(r.at)}, ${hm(r.at)}`, `in ${left(r.at)}`];
-  if (r.estimated) parts.push('estimated from the start date');
+  if (r.estimated) parts.push('estimated');
   else if (r.period) parts.push(r.period);
   return ['Renews', parts.join(' · ')];
 }

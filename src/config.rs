@@ -291,7 +291,7 @@ pub struct Notifications {
     pub client_new_address: bool,
     /// A new banked reset, one used automatically, needing review, or expired unused.
     pub banked_resets: bool,
-    /// Two days before a Claude or ChatGPT subscription charges again, or ends.
+    /// Two days before a ChatGPT subscription charges again, or ends. Claude gives no date.
     pub renewals: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
@@ -573,7 +573,7 @@ usage:
 #   account-errors: false      # account errors and runs of failed requests
 #   client-new-address: true   # a named client's key used from a new address, or refused at one
 #   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
-#   renewals: true             # two days before a subscription charges again, or ends
+#   renewals: true             # two days before a ChatGPT subscription charges again, or ends
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 

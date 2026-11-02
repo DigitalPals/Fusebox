@@ -134,7 +134,7 @@ struct RulesTests {
         #expect(row.value.hasSuffix(", \(Fmt.hm(at)) · in 3d 21h · monthly"), "\(row.value)")
         a.quota?.renewal?.estimated = true
         #expect(a.renewalRow(now: before)?.value.hasPrefix("about ") == true)
-        #expect(a.renewalRow(now: before)?.value.hasSuffix(" · in 3d 21h · estimated from the start date") == true)
+        #expect(a.renewalRow(now: before)?.value.hasSuffix(" · in 3d 21h · estimated") == true)
         a.quota?.renewal?.ends = true
         #expect(a.renewalRow(now: before)?.key == "Ends")
         #expect(a.renewalRow(now: before)?.value.hasSuffix(" · in 3d 21h · cancelled") == true)
