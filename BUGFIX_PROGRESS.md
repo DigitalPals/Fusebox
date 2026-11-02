@@ -126,3 +126,25 @@
 - No temporary services retained. Validation logs remain at the path above;
   normal Cargo build artifacts remain in `target/`.
 - No provider credentials, production changes, publishing, pushing or deployments.
+
+
+## Subsequent authorized production deployment (2026-11-02)
+
+- User explicitly requested live production application and forced deployment.
+  Pinned clean commit `b8ac02702bbcb0597098dfaca0b2049365a41924`; deployed `0.12.1+gui.fec831f0eb2f`
+  through the existing durable updater, forced drain, stopped-writer backups
+  and recovery hook. Transaction `45b45d323c094079ae39784cb66c2ed5` committed;
+  admission reopened and no network hold/pending release remains.
+- Exact-package qualification passed formatting, Clippy, 15 wrapper tests,
+  startup/assets, database restart/rollback and all 20 synthetic acceptance checks.
+  The unchanged implementation source retains the final test evidence above.
+- Production health/readiness/TLS/assets passed. All five accounts, 150 captured
+  routing assignments, config, notifications and three push devices preserved.
+  Usage schema 5 unchanged, quick checks passed, writer healthy, zero automatic
+  restarts. Four of five accounts ready before and after deployment.
+- Previous `0.12.1+gui.8aec89d5895c` and stopped-writer backups retained
+  under the established production operator. Managed qualification lease closed
+  without remaining resources; CI capacity reservation released. No provider
+  inference, explicit refresh or account-control test mutations were made.
+- Full evidence and retention paths: `docs/bugfix-production-2026-11-02.md` and
+  `docs/bugfix-production-2026-11-02.json`. No additional push or public release.

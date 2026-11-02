@@ -1,0 +1,448 @@
+{
+  "recorded_at": "2026-11-02T07:37:22.082960+00:00",
+  "authorization": "User explicitly requested: Apply live on production, force deploy.",
+  "deployment": {
+    "backup_sha256": "84a7e49d5d27e521832f63f172fec84f56253feaf40e2d76705c2ee0c84ee211",
+    "billing_calls": 0,
+    "forced": true,
+    "gate_released": true,
+    "outcome": "deployed",
+    "rollback_version": "0.12.1+gui.8aec89d5895c",
+    "transaction": "45b45d323c094079ae39784cb66c2ed5",
+    "version": "0.12.1+gui.fec831f0eb2f"
+  },
+  "source": {
+    "source_commit": "b8ac02702bbcb0597098dfaca0b2049365a41924",
+    "source_working_tree": false,
+    "source_sha256": "fec831f0eb2fc64e53b6fd08650d34891f9566c521d0e1b08695b092d228d9a6",
+    "version": "0.12.1+gui.fec831f0eb2f",
+    "origin": "local-gui",
+    "previous_version": "0.12.1+gui.8aec89d5895c",
+    "previous_binary_sha256": "b60b8d0e7b7d656b643a1bbacc7baae0a8fbccadb717041c1c37c6cba03dd012",
+    "config_sha256": "e92893c06e7ab49332d70234a136467b366b09c61c4317dc41114a3e702c26a3",
+    "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+    "binary_bytes": 19824040,
+    "assets": {
+      "/ui/app.js": "d303da11efc5c4065d1cd89234f9bff63211cf138f2f3417735f0ffa28764f9f",
+      "/ui/usage.js": "4e16c88670cc2eea7b756cc4a35f5374eb6adaccaeeafd454fe1c75779780880",
+      "/ui/config.js": "40f1f1304bcf8c38f357ad2750b38bdeff71bd3aec96e00bc5297228657ea5ae",
+      "/ui/i18n-zh.js": "8c22cd33f8961515dabb76a129825998e99be4c5e2423c4df286749d89160473",
+      "/ui/i18n.js": "044e3cf2b2f382d6916ca7a320776c4c080a126171264128445875371df4eb75",
+      "/ui/style.css": "6d33182e155849fd8cee3a2857e3c3b4db216e8b1f9e9cdd93b3cc77ddbaab5a",
+      "/ui/icon.svg": "7b521316e3c8fe9d2e8642ddaa943bc3bd3508021846236be70acbb5785e6319",
+      "/manifest.webmanifest": "4586fddb01bd452a62e18fdf0710a501838f45ef51cfa9a9f31d9098310e3015",
+      "/sw.js": "7b0256c8acc215d0be7dd2efbd0325e47a53a97877b0c85ee03284aa13b8d809",
+      "/ui/index.html": "36a70e7a3fe98b4bc93a54ccd4d8d94018f452c4ad38c5282cf8d4fca75ed854"
+    },
+    "archive": "cliproxyapi-rust-v0.12.1+gui.fec831f0eb2f-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "e29474c3bec6173082c607f4d10dfdc1d15622531869294e8f1d407ba81c1fdd",
+    "maintenance_run_id": "92aabbe2f20c45218bdd84900a7b30f5"
+  },
+  "qualification": [
+    {
+      "name": "implementation-tests",
+      "exit_code": 0,
+      "source_commit": "b8ac02702bbcb0597098dfaca0b2049365a41924",
+      "evidence": "implementation-validation.json",
+      "source_fingerprints_verified": 472,
+      "rust": {
+        "passed": 824,
+        "failed": 0,
+        "ignored": 7
+      },
+      "node": {
+        "passed": 167,
+        "failed": 0
+      },
+      "python": {
+        "passed": 46,
+        "failed": 0
+      },
+      "format": true,
+      "clippy_all_targets_warnings_denied": true,
+      "format_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "clippy_log_sha256": "0046d40c643dbecd4dbaa1a0e42dc0ce43a5a5f9bc83f41fc197a3ac77681b7b"
+    },
+    {
+      "name": "build",
+      "exit_code": 0,
+      "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+      "release_log_sha256": "011b9a046004356535da65d2f0b1d7727a0756a9ad8922c4ea4d90c87a2b88e7"
+    },
+    {
+      "name": "rollout",
+      "exit_code": 0,
+      "wrapper_tests_passed": 15,
+      "log_sha256": "90c673b326bc0848e520c65a3ac4bd1effacce717e30c94c8e1c4d4bb619702e"
+    },
+    {
+      "name": "candidate",
+      "exit_code": 0,
+      "log": "candidate-check.log",
+      "log_sha256": "34989ed8d5da144958172ca46be49880448e12976640397dce320009b017678e",
+      "provider_calls": 0
+    },
+    {
+      "name": "dev-smoke",
+      "exit_code": 0,
+      "log": "dev-smoke.json",
+      "log_sha256": "03d96f3e73e13361d03f8efb7c93d611df22caa0736fa6554a8510d9be73f10d",
+      "provider_calls": 0
+    },
+    {
+      "name": "usage-e2e",
+      "exit_code": 0,
+      "log": "usage-e2e.json",
+      "log_sha256": "260483dfcabfa9e961f34ab1d651f0bf018e5577455c22a92f962cdfbc988fb3",
+      "provider_calls": 0
+    }
+  ],
+  "candidate_schema": {
+    "ok": true,
+    "version": "0.12.1+gui.fec831f0eb2f",
+    "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+    "previous_binary_sha256": "b60b8d0e7b7d656b643a1bbacc7baae0a8fbccadb717041c1c37c6cba03dd012",
+    "schema_version": 5,
+    "added_entries": [],
+    "removed_entries": [],
+    "previous_reopened": true
+  },
+  "candidate_smoke": {
+    "ok": true,
+    "version": "0.12.1+gui.fec831f0eb2f",
+    "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+    "assets": {
+      "/ui/app.js": {
+        "identity": 252154,
+        "gzip": 74095
+      },
+      "/ui/usage.js": {
+        "identity": 63365,
+        "gzip": 18484
+      },
+      "/ui/config.js": {
+        "identity": 110263,
+        "gzip": 30808
+      },
+      "/ui/i18n-zh.js": {
+        "identity": 98096,
+        "gzip": 32821
+      },
+      "/ui/i18n.js": {
+        "identity": 6730,
+        "gzip": 2677
+      },
+      "/ui/style.css": {
+        "identity": 98063,
+        "gzip": 18011
+      },
+      "/ui/icon.svg": {
+        "identity": 314,
+        "gzip": 251
+      },
+      "/manifest.webmanifest": {
+        "identity": 1254,
+        "gzip": 468
+      },
+      "/sw.js": {
+        "identity": 4119,
+        "gzip": 2064
+      },
+      "/": {
+        "identity": 45485,
+        "gzip": 16161
+      }
+    },
+    "existing_settings_preserved": true,
+    "new_settings": [],
+    "model_check": {
+      "asked": 0,
+      "in_progress": 0,
+      "new": []
+    },
+    "proxy_protocol_port": {
+      "healthz_through_proxy_header": true,
+      "bare_request_closed": true
+    },
+    "schema": 5,
+    "previous_reopened": true,
+    "provider_calls": 0
+  },
+  "exact_package_integrations": {
+    "dev_smoke": {
+      "passed": 8,
+      "checks": [
+        "rebuilt service is live and ready with a loopback-only provider",
+        "native request returns expected response and token accounting",
+        "translated request returns expected response and token accounting",
+        "gzip request body decompresses and completes",
+        "current app/usage source is embedded, versioned, gzip-negotiated and conditionally cached",
+        "shared UsageTools loads before app consumers",
+        "rebuilt service exposes management metrics",
+        "mock-backed service exits gracefully"
+      ],
+      "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+      "mock_only": true,
+      "tokio_worker_threads": 4
+    },
+    "collector_acceptance": {
+      "passed": 12,
+      "checks": [
+        "two isolated collector identities/processes durably synchronized without inventing proxy requests",
+        "collector identity filtering, breakdown and friendly label",
+        "replay does not inflate combined imported totals",
+        "offline outbox survives separate process restart and reconnect",
+        "copied histories across collectors deduplicate using message evidence",
+        "retired summary returns 410 without query work and remains management authenticated",
+        "management/inference separation, wrong credential and oversized batch rejection",
+        "revocation rejects upload and retains offline data",
+        "credential rotation and local re-enrollment preserve idempotency",
+        "imported history from 10 days ago is priced on its local date in the combined trend",
+        "usage reprice CLI is idempotent on an already priced database",
+        "marker transcript/tool/project content absent from databases, exports and logs"
+      ]
+    }
+  },
+  "verification": {
+    "accounts": 5,
+    "analytics_health": "healthy",
+    "assets": {
+      "/": {
+        "gzip": 16161,
+        "identity": 45485
+      },
+      "/manifest.webmanifest": {
+        "gzip": 468,
+        "identity": 1254
+      },
+      "/sw.js": {
+        "gzip": 2064,
+        "identity": 4119
+      },
+      "/ui/app.js": {
+        "gzip": 74095,
+        "identity": 252154
+      },
+      "/ui/config.js": {
+        "gzip": 30808,
+        "identity": 110263
+      },
+      "/ui/i18n-zh.js": {
+        "gzip": 32821,
+        "identity": 98096
+      },
+      "/ui/i18n.js": {
+        "gzip": 2677,
+        "identity": 6730
+      },
+      "/ui/icon.svg": {
+        "gzip": 251,
+        "identity": 314
+      },
+      "/ui/style.css": {
+        "gzip": 18011,
+        "identity": 98063
+      },
+      "/ui/usage.js": {
+        "gzip": 18484,
+        "identity": 63365
+      }
+    },
+    "billing_calls": 0,
+    "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+    "client_identity_inspection": true,
+    "collectors_enrolled": 0,
+    "config_and_routing_verified": true,
+    "configured_imports": 0,
+    "gate_unchanged": true,
+    "legacy_summary_retired": true,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "sessions": {
+      "current_assignments": 150,
+      "expired_assignments": 0,
+      "preserved_assignments": 150,
+      "snapshot_assignments": 150
+    },
+    "usage_backup_bytes": 1964707840,
+    "usage_backup_sha256": "d15497b65033ad92e5bec2962c1b048f6505bcfb0ac00d52d515f38cee52e4cf",
+    "version": "0.12.1+gui.fec831f0eb2f"
+  },
+  "postflight": {
+    "account_count": 5,
+    "automatic_restarts": 0,
+    "backup_sha256": "84a7e49d5d27e521832f63f172fec84f56253feaf40e2d76705c2ee0c84ee211",
+    "billing_calls": 0,
+    "binary_sha256": "0d9822c39ab25dfc9cecef8df4f33d3085a27c61f2665bac97a22da2db37f335",
+    "client_identity_inspection": true,
+    "configuration_unchanged": true,
+    "database": {
+      "bytes": 1964724352,
+      "bytes_per_observation": 3805,
+      "compressing": false,
+      "disk_free_bytes": 12343967744,
+      "free_bytes": 0,
+      "growth_bytes_per_day": 42014266,
+      "incremental_vacuum": true,
+      "live_bytes": 1964707840,
+      "observations": 516333,
+      "uncompressed_rows": 0,
+      "updated_at_ms": 1793604857143
+    },
+    "gate_held": false,
+    "models_listed": 26,
+    "ok": true,
+    "provider_session_idle_seconds": 1800,
+    "proxy_protocol_port_ready": true,
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "rollback_version": "0.12.1+gui.8aec89d5895c",
+    "schema_additions": [],
+    "service_active": true,
+    "usage_after": {
+      "observations": 516346,
+      "quick_check": "ok",
+      "schema_sha256": "c76dad8d7a181f7b94e4906e49ad3a6352b381ee58a40f8fe98147e0dc0ba230",
+      "schema_version": 5
+    },
+    "usage_backup_sha256": "d15497b65033ad92e5bec2962c1b048f6505bcfb0ac00d52d515f38cee52e4cf",
+    "usage_before": {
+      "observations": 516333,
+      "quick_check": "ok",
+      "schema_sha256": "c76dad8d7a181f7b94e4906e49ad3a6352b381ee58a40f8fe98147e0dc0ba230",
+      "schema_version": 5
+    },
+    "usage_health": {
+      "accepted": 12,
+      "dropped": 0,
+      "prior_unclosed_sessions": 0,
+      "queue_depth": 0,
+      "rejected": 0,
+      "state": "healthy",
+      "writer_errors": 0,
+      "written": 12
+    },
+    "version": "0.12.1+gui.fec831f0eb2f"
+  },
+  "feature_postflight": {
+    "account_control_mutations": 0,
+    "account_controls_preserved": true,
+    "account_count": 5,
+    "apns_configured": false,
+    "bounded_request_log_readable": true,
+    "explicit_provider_refreshes": 0,
+    "inference_calls": 0,
+    "management_boundary_preserved": true,
+    "notification_settings_preserved": true,
+    "ok": true,
+    "push_devices_preserved": 3,
+    "request_snapshot_fixes_served": true,
+    "test_notifications": 0,
+    "version": "0.12.1+gui.fec831f0eb2f"
+  },
+  "public_https": {
+    "ok": true,
+    "url": "https://10.10.0.235:8317/",
+    "version": "0.12.1+gui.fec831f0eb2f",
+    "tls_verified": true,
+    "health": "ok",
+    "readiness": {
+      "status": "ready",
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "usage": "healthy"
+    },
+    "verified_assets": 10,
+    "representations": [
+      "identity",
+      "gzip"
+    ],
+    "inference_calls": 0
+  },
+  "forced_drain": [
+    {
+      "active_before": 7,
+      "attempt": 0,
+      "drained": true,
+      "drained_after_ms": 72,
+      "hold_lifted_by_cleanup_after_ms": null,
+      "phase": "committed"
+    }
+  ],
+  "predeployment_readiness": {
+    "status": "ready",
+    "accounts": {
+      "ready": 4,
+      "total": 5
+    },
+    "usage": "healthy"
+  },
+  "final_service_check": {
+    "gate_held": false,
+    "gate_unchanged": true,
+    "network_hold_present": false,
+    "ok": true,
+    "readiness": {
+      "accounts": {
+        "ready": 4,
+        "total": 5
+      },
+      "status": "ready",
+      "usage": "healthy"
+    },
+    "release_pending": false,
+    "rollout_unit_enabled": "static",
+    "rollout_unit_inactive_successful": true,
+    "unit": {
+      "ActiveState": "active",
+      "ExecMainStartTimestampMonotonic": "6030358189610",
+      "MainPID": "144564",
+      "NRestarts": "0"
+    },
+    "updater_phase": "committed",
+    "version": "0.12.1+gui.fec831f0eb2f"
+  },
+  "cleanup": {
+    "qualification": {
+      "lease": "841d4011ec174848a7efab737c808f9d",
+      "status": "closed",
+      "remaining": [],
+      "preserved_volumes": [],
+      "errors": []
+    },
+    "ci_capacity_reservation": "ci-job-3739dd4d4d4c459897e5d2a808c984f4",
+    "ci_capacity_reservation_released": true
+  },
+  "retention": {
+    "owner": "John Pals / established Fusebox production operator",
+    "incoming_directory": "/opt/cli-proxy-api-rust/incoming/fusebox-bugfix-20261102",
+    "backup_directory": "/var/lib/cliproxy-rust-update/backups/45b45d323c094079ae39784cb66c2ed5",
+    "rollback_version": "0.12.1+gui.8aec89d5895c",
+    "rollout_unit": "fusebox-bugfix-20261102.service",
+    "rollout_unit_state": "static, inactive, successful",
+    "local_private_artifacts": "target/bugfix-production-20261102/",
+    "purpose": "Retain exact source/package, previous release, stopped-writer backups, verification receipts and recovery tooling for rollback. Rollback preserves current usage and banked reset journals."
+  },
+  "receipt_sha256": {
+    "receipts/baseline.json": "f3917e3347d91bacc27d829543528182633d06841db61083f8e4286dc6d84c30",
+    "receipts/deployment-result.json": "63b190907b7bf3ae3c90d85329f54ba5f16d59a5ed1e20c1b889f1fa6cae7139",
+    "receipts/deployment.json": "89c569312f9cf11c034421d113df72c6dab184a2177a4d680ca3c49ed9d5a654",
+    "receipts/feature-postflight.json": "b3e9b5c647af9618a91b918b47b2e20d56991bf17c545742be0b437d2c53a50b",
+    "receipts/final-service-check.json": "14ad9092893fc6c6cfe60302c639d457b2eb5b88fe7d210c332d7515aa947240",
+    "receipts/force-observation.json": "416df83dbdec018e916794492f539282d777cfd23106dc22d6fb1acda03a22bc",
+    "receipts/postflight.json": "11d31b7b009bc7f2dca934147de0cd6823c7cd5b39e76f51d1fc5e8e4bb80237",
+    "receipts/verification.json": "11f3c3848592708532e33fb176204e3c4eed4c23f2e4abef5d8d0616e9de31ad"
+  },
+  "limitations": [
+    "Qualification used synthetic providers. Production verification made no inference calls, explicit provider refreshes, account control mutations or test notifications.",
+    "Readiness remained four of five accounts, matching preflight. No browser rendering or iOS runtime checks."
+  ]
+}
