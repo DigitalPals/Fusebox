@@ -21,6 +21,20 @@ use crate::usage::{store::Store, types::Observation};
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
 const MAX_AGE: Duration = Duration::from_secs(90);
 
+/// Each named client's tokens today and spend this month, from the proxy's records. The
+/// time index is named because without `ANALYZE` statistics SQLite prefers the `source`
+/// equality: it then reads every proxy row ever recorded to keep this month's, which took
+/// 5 s on production (2 GB, 522k rows) and held the writer and the spend lock with it.
+const RECONCILE_TOTALS: &str = "SELECT client_id,
+       SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
+       SUM(COALESCE(cost_nanos,0)),
+       SUM(CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
+           AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END),
+       SUM(CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END)
+     FROM usage_observations INDEXED BY usage_event_time
+     WHERE source = 'proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2
+     GROUP BY client_id";
+
 #[derive(Clone, Default)]
 pub struct Clients {
     /// Requests in the current minute (UTC minute number, count).
@@ -276,7 +290,8 @@ impl Clients {
         self.spend.lock().available = false;
     }
 
-    /// Runs on the database worker. The lock covers both queries and replacement;
+    /// Runs on the database worker, so it must stay quick: the lock covers both queries and
+    /// replacement, and named-client requests wait for it;
     /// record-before-enqueue prevents concurrent completions from being lost or doubled.
     fn reconcile(&self, conn: &mut rusqlite::Connection) -> anyhow::Result<()> {
         let mut s = self.spend.lock();
@@ -284,17 +299,7 @@ impl Clients {
         let (day_ms, month_ms) = period_starts(now);
         let tx = conn.transaction()?;
         let mut totals = {
-            let mut stmt = tx.prepare(
-                "SELECT client_id,
-                   SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
-                   SUM(COALESCE(cost_nanos,0)),
-                   SUM(CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
-                       AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END)
-                 FROM usage_observations
-                 WHERE source = 'proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2
-                 GROUP BY client_id",
-            )?;
+            let mut stmt = tx.prepare(RECONCILE_TOTALS)?;
             let rows = stmt.query_map([day_ms, month_ms], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -544,6 +549,24 @@ mod tests {
             assert_eq!(clients.spend("laptop"), both);
         }
         assert!(clients.spend.lock().pending.is_empty());
+        store.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_reads_this_month_through_the_time_index() {
+        let dir = std::env::temp_dir().join(format!("fusebox-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("usage.sqlite3"), 64, 90, None).unwrap();
+        let plan = store
+            .call(|conn| {
+                let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {RECONCILE_TOTALS}"))?;
+                let rows = stmt.query_map([0i64, 0], |r| r.get::<_, String>(3))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.join("; "))
+            })
+            .await
+            .unwrap();
+        assert!(plan.contains("USING INDEX usage_event_time (event_at_ms>?)"), "{plan}");
         store.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
