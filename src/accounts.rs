@@ -1597,12 +1597,15 @@ impl Pool {
                     // here in case a refresh or management edit completed while
                     // files were scanned. A deleted file must not be republished,
                     // which would also revalidate its stale request allocations.
-                    // Only NotFound means deleted: `exists()` is also false when the
-                    // directory can't be read.
+                    // Only a file missing from a directory that is still there was
+                    // deleted: `exists()` is also false when the directory can't be read,
+                    // and Windows reports NotFound when the directory is gone or isn't one.
                     if let Some((_, oauth, disabled, _)) = read_oauth_file(path) {
                         s.cred = Credential::OAuth(oauth);
                         s.disabled = disabled;
-                    } else if std::fs::metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                    } else if std::fs::metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                        && path.parent().is_some_and(|dir| std::fs::metadata(dir).is_ok_and(|m| m.is_dir()))
+                    {
                         continue;
                     }
                 }
