@@ -16,6 +16,19 @@ pub const CLIENT_HEADER: &str = "x-fusebox-usage-client";
 pub fn client_id(h: &axum::http::HeaderMap) -> Option<&str> {
     h.get(CLIENT_HEADER).and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
 }
+/// The entrypoint Claude Code names in its User-Agent, the second field in
+/// `claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)`: `cli` in a terminal,
+/// `sdk-ts` or `sdk-cli` through the Agent SDK or `claude -p`, or whatever
+/// `CLAUDE_CODE_ENTRYPOINT` says. Anything that doesn't look like one is ignored.
+pub fn claude_code_entrypoint(h: &axum::http::HeaderMap) -> Option<String> {
+    let agent = h.get(axum::http::header::USER_AGENT)?.to_str().ok()?;
+    let (_, details) = agent.strip_prefix("claude-cli/")?.split_once(" (")?;
+    let entrypoint = details.split([',', ')']).nth(1)?.trim();
+    (!entrypoint.is_empty()
+        && entrypoint.len() <= 64
+        && entrypoint.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+    .then(|| entrypoint.to_ascii_lowercase())
+}
 struct Captured {
     observation: Observation,
     failure: Option<crate::diagnostics::Failure>,
@@ -79,6 +92,8 @@ pub struct RequestUsage {
     requested_model: Option<String>,
     requested_speed: Option<u64>,
     client: Option<String>,
+    /// The Claude Code entrypoint from the User-Agent, for Claude attempts.
+    entrypoint: Option<String>,
     session: Option<String>,
     current: Option<Capture>,
     clients: Option<crate::policy::Clients>,
@@ -96,6 +111,7 @@ impl RequestUsage {
             requested_model: self.requested_model.clone(),
             requested_speed: self.requested_speed,
             client: self.client.clone(),
+            entrypoint: self.entrypoint.clone(),
             session: self.session.clone(),
             current: None,
             clients: self.clients.clone(),
@@ -110,6 +126,7 @@ impl RequestUsage {
             requested_model: safe(model),
             requested_speed: None,
             client: None,
+            entrypoint: None,
             session: None,
             current: None,
             clients: None,
@@ -128,6 +145,7 @@ impl RequestUsage {
     }
     pub fn client(&mut self, h: &axum::http::HeaderMap) {
         self.client = client_id(h).and_then(safe);
+        self.entrypoint = claude_code_entrypoint(h);
         if let Some(id) = h.get(REQUEST_HEADER).and_then(|v| v.to_str().ok()).and_then(safe) {
             self.logical_id = id;
         }
@@ -156,6 +174,9 @@ impl RequestUsage {
         o.logical_request_id = Some(self.logical_id.clone());
         o.attempt_id = Some(id);
         o.client_id = self.client.clone();
+        if provider == "anthropic" {
+            o.entrypoint = self.entrypoint.clone();
+        }
         o.session_id = self.session.clone();
         o.account_id = Some(acct.id.clone());
         o.auth_type = Some(if acct.is_oauth() { "subscription" } else { "api_key" }.into());

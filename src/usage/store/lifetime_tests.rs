@@ -197,11 +197,11 @@ fn schema_four_migration_preserves_original_documents_without_guessing() {
         })
         .unwrap();
     // Restore the exact column shape before lifetime accounting existed.
-    for trigger in rollup::TRIGGERS {
+    for trigger in rollup::TRIGGERS.into_iter().chain(rollup::ENTRYPOINT_TRIGGERS) {
         c.execute_batch(&format!("DROP TRIGGER {trigger}")).unwrap();
     }
     c.execute_batch(
-        "DROP TABLE usage_rollup; DROP TABLE usage_facets;
+        "DROP TABLE usage_rollup; DROP TABLE usage_facets; DROP TABLE usage_entrypoint_rollup; DROP TABLE usage_entrypoints;
         CREATE TABLE usage_rollup(old_layout INTEGER); CREATE TABLE usage_facets(old_layout INTEGER);
         ALTER TABLE usage_observations DROP COLUMN write_30m; ALTER TABLE usage_observations DROP COLUMN write_12h;
         ALTER TABLE usage_entries DROP COLUMN write_30m; ALTER TABLE usage_entries DROP COLUMN write_12h;

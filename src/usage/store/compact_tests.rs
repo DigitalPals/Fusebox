@@ -91,6 +91,10 @@ fn journal(seed: u64, count: usize) -> Vec<Observation> {
             }
             _ => {}
         }
+        // Claude Code clients name an entrypoint; other proxy calls and imports have none.
+        if source == "proxy" && provider == "anthropic" {
+            o.entrypoint = [None, Some("sdk-ts"), Some("cli"), Some("t3-code")][i % 4].map(Into::into);
+        }
         out.push(o);
     }
     out
@@ -115,6 +119,16 @@ fn queries() -> Vec<Query> {
                 timezone: Some(zone.into()),
                 ..Default::default()
             });
+            // Partial buckets at both ends read entries for one entrypoint only.
+            if zone == "Asia/Kathmandu" {
+                out.push(Query {
+                    start: start.map(Into::into),
+                    end: end.map(Into::into),
+                    timezone: Some(zone.into()),
+                    entrypoint: Some("sdk-ts".into()),
+                    ..Default::default()
+                });
+            }
         }
     }
     let base = Query {
@@ -128,6 +142,15 @@ fn queries() -> Vec<Query> {
         |q: &mut Query| q.model = Some("claude-sonnet-4-6".into()),
         |q: &mut Query| q.account = Some("account-1".into()),
         |q: &mut Query| q.client = Some("client-0".into()),
+        |q: &mut Query| q.entrypoint = Some("sdk-ts".into()),
+        |q: &mut Query| {
+            q.entrypoint = Some("cli".into());
+            q.account = Some("account-1".into());
+        },
+        |q: &mut Query| {
+            q.entrypoint = Some("t3-code".into());
+            q.source = Some("codex".into());
+        },
         |q: &mut Query| q.client = Some("collector:laptop".into()),
         |q: &mut Query| q.source = Some("proxy".into()),
         |q: &mut Query| q.source = Some("codex".into()),
@@ -148,30 +171,37 @@ async fn assert_rollups_match(store: &Store) {
         let fast = store.dashboard(q.clone()).await.unwrap();
         let scan = store.dashboard_scan(q.clone()).await.unwrap();
         assert_eq!(fast, scan, "rollup summary differs for {q:?}");
+        let fast = store.entrypoints(q.clone()).await.unwrap();
+        assert_eq!(fast, store.entrypoints_scan(q.clone()).await.unwrap(), "entrypoints differ for {q:?}");
     }
     // The triggers must leave exactly what a rebuild from scratch produces.
     store
         .call(|c| {
-            let dump = |c: &Connection| -> Result<(Vec<String>, Vec<String>)> {
+            let dump = |c: &Connection| -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
                 let rows = |sql: &str| -> Result<Vec<String>> {
                     Ok(c.prepare(sql)?.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?)
                 };
-                let sums = (0..8).map(|i| format!("k{i},s{i}")).collect::<Vec<_>>().join(",");
+                let sums = (0..rollup::AMOUNTS.len()).map(|i| format!("k{i},s{i}")).collect::<Vec<_>>().join(",");
                 Ok((
                     rows(&format!(
                         "SELECT json_array(bucket,dims,provider,model,account_id,client,observations,partial,missing,pricing_partial,{sums}) FROM usage_rollup ORDER BY bucket,dims"
                     ))?,
                     rows("SELECT json_array(bucket,dims,source,observations) FROM usage_facets ORDER BY bucket,dims")?,
+                    rows(&format!(
+                        "SELECT json_array(bucket,dims,provider,model,account_id,client,entrypoint,observations,partial,missing,pricing_partial,{sums}) FROM usage_entrypoint_rollup ORDER BY bucket,dims"
+                    ))?,
                 ))
             };
             let live = dump(c)?;
             let tx = c.transaction()?;
-            tx.execute_batch("DELETE FROM usage_rollup; DELETE FROM usage_facets;")?;
+            tx.execute_batch("DELETE FROM usage_rollup; DELETE FROM usage_facets; DELETE FROM usage_entrypoint_rollup;")?;
             rollup::backfill(&tx)?;
+            rollup::backfill_entrypoints(&tx)?;
             let rebuilt = dump(&tx)?;
             tx.rollback()?;
             assert_eq!(live, rebuilt, "rollups drifted from the journal");
             assert!(!live.0.is_empty());
+            assert!(!live.2.is_empty(), "the journal has calls with an entrypoint");
             Ok(())
         })
         .await

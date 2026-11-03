@@ -405,11 +405,13 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     }
     tx.execute("INSERT OR REPLACE INTO usage_meta(key,value) VALUES('catalogue_before_downgrade',?1)", [&catalogue])?;
     tx.execute("UPDATE usage_meta SET value=?1 WHERE key='catalogue'", [serde_json::to_string(&legacy)?])?;
-    for trigger in rollup::TRIGGERS {
+    for trigger in rollup::TRIGGERS.into_iter().chain(rollup::ENTRYPOINT_TRIGGERS) {
         tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
     }
     tx.execute_batch(&format!(
-        "DROP TABLE usage_rollup;
+        "DROP TABLE IF EXISTS usage_entrypoint_rollup;
+         DROP TABLE IF EXISTS usage_entrypoints;
+         DROP TABLE usage_rollup;
          DROP TABLE usage_facets;
          DROP TABLE usage_dictionaries;
          DROP INDEX usage_entries_imported;

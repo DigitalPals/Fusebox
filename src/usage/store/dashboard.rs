@@ -229,10 +229,11 @@ impl Summary {
     /// Adds whole rollup buckets. False when a bucket can't be used exactly (a sum
     /// left the 64-bit range, or the bucket crosses a local midnight in this
     /// timezone); the caller then recomputes everything from entries.
-    fn rollups(&mut self, conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<bool> {
+    /// `table` is `usage_rollup`, or `usage_entrypoint_rollup` for one entrypoint's calls.
+    fn rollups(&mut self, conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<bool> {
         let mut statement = conn.prepare_cached(&format!(
             "SELECT bucket,provider,model,account_id,client,observations,partial,missing,pricing_partial,
-               k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9 FROM usage_rollup WHERE {where_sql}"
+               k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9 FROM {table} WHERE {where_sql}"
         ))?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         while let Some(row) = rows.next()? {
@@ -285,10 +286,14 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     // Rollups hold proxy entries only; a filter for another source reads entries.
     let buckets = rollup::whole_buckets(r.start, r.end)
         .filter(|_| use_rollups && q.source.as_deref().is_none_or(|s| s == "proxy"));
+    // One entrypoint's calls are all in its own rollup, which has the same columns.
+    // Without that filter the read is exactly what it was before entrypoints existed.
+    let filtered = q.entrypoint.is_some();
+    let table = if filtered { "usage_entrypoint_rollup" } else { "usage_rollup" };
     let complete = match buckets {
         Some(buckets) => {
-            let (rollup_sql, rollup_values) = rollup::filter(q, buckets, false);
-            summary.rollups(conn, &rollup_sql, &rollup_values)?
+            let (rollup_sql, rollup_values) = rollup::filter(q, buckets, false, filtered);
+            summary.rollups(conn, table, &rollup_sql, &rollup_values)?
         }
         None => false,
     };
@@ -302,8 +307,8 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
             }
         }
         // Imported entries are never rolled up: whether one counts depends on proxy
-        // evidence anywhere in the journal.
-        if q.source.as_deref().is_none_or(|s| s != "proxy") {
+        // evidence anywhere in the journal. None of them has an entrypoint.
+        if q.source.as_deref().is_none_or(|s| s != "proxy") && !filtered {
             summary.scan(
                 conn,
                 "usage_entries o INDEXED BY usage_entries_imported",
@@ -314,8 +319,10 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     } else {
         summary = Summary::new(r.tz);
         if q.source.as_deref().is_some_and(|s| s != "proxy") {
-            let sql = format!("{where_sql} AND o.source<>'proxy'");
-            summary.scan(conn, "usage_entries o INDEXED BY usage_entries_imported", &sql, &values)?;
+            if !filtered {
+                let sql = format!("{where_sql} AND o.source<>'proxy'");
+                summary.scan(conn, "usage_entries o INDEXED BY usage_entries_imported", &sql, &values)?;
+            }
         } else {
             summary.scan(conn, everything, &where_sql, &values)?;
         }
@@ -349,7 +356,12 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |row| row.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let stack = q.stack.as_deref().unwrap_or("provider");
-    let facets = facets(conn, q, &r, use_rollups)?;
+    // The filter menus offer every value; the facets rollup has no entrypoint.
+    let facets = if filtered {
+        facets(conn, &Query { entrypoint: None, ..q.clone() }, &r, use_rollups)?
+    } else {
+        facets(conn, q, &r, use_rollups)?
+    };
     read::check()?;
     Ok(json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},
         "combined":{"basis":"One entry per provider response. Imported entries that share a response ID with a proxy entry are excluded.",
@@ -358,6 +370,178 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
         "facets":facets,
         "pricing":{"version":catalogue.version,"verified_at":catalogue.verified_at,
             "calculation":catalogue.calculation,"basis":catalogue.basis()}}))
+}
+
+/// What the entrypoint card and tab show for a group of calls.
+#[derive(Default)]
+struct Calls {
+    observations: i64,
+    partial: i64,
+    missing: i64,
+    pricing_partial: i64,
+    /// Cost, input and output: how many calls reported each, and their sum.
+    known: [i64; 3],
+    sums: [i128; 3],
+}
+impl Calls {
+    fn value(&self) -> Value {
+        let sum = |i: usize| (self.known[i] > 0).then(|| i64::try_from(self.sums[i]).ok()).flatten();
+        json!({"observations":self.observations,"unpriced":self.observations-self.known[0],"partial":self.partial,
+            "missing_usage":self.missing,"pricing_partial":self.pricing_partial,"estimated_cost_nanos":sum(0),
+            "tokens":{"input":sum(1),"output":sum(2)}})
+    }
+}
+
+/// Claude Code entrypoints for the Usage page: per entrypoint, and per entrypoint and
+/// local day, the proxy calls whose client named one. A read of its own, so the
+/// summary does no extra work: SQLite sums the entrypoint rollup by bucket, and only
+/// the partial buckets at either end read entries.
+pub(super) fn entrypoints(conn: &Connection, q: &Query) -> Result<Value> {
+    entrypoints_with(conn, q, true)
+}
+
+/// The same entrypoint read made only from entries.
+#[cfg(test)]
+pub(super) fn entrypoints_scan(conn: &Connection, q: &Query) -> Result<Value> {
+    entrypoints_with(conn, q, false)
+}
+
+fn entrypoints_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value> {
+    let r = range(q)?;
+    let mut groups: BTreeMap<String, Calls> = BTreeMap::new();
+    let mut days: BTreeMap<(NaiveDate, String), Calls> = BTreeMap::new();
+    let date = |ms: i64| -> Result<NaiveDate> {
+        Ok(DateTime::from_timestamp_millis(ms)
+            .context("usage timestamp out of bounds")?
+            .with_timezone(&r.tz)
+            .date_naive())
+    };
+    // Imports never name an entrypoint.
+    if q.source.as_deref().is_none_or(|s| s == "proxy") {
+        let (where_sql, values) = filter(q, &r, "o");
+        let entries = |groups: &mut BTreeMap<String, Calls>,
+                       days: &mut BTreeMap<(NaiveDate, String), Calls>,
+                       sql: &str,
+                       values: &[SqlValue]|
+         -> Result<()> {
+            let mut statement = conn.prepare_cached(&format!(
+                "SELECT o.event_at_ms,e.entrypoint,o.completeness,COALESCE(o.pricing_partial,0)=1,o.cost_nanos,o.input,o.output
+                 FROM usage_entries o INDEXED BY usage_entries_event_time JOIN usage_entrypoints e ON e.id=o.id
+                 WHERE {sql} AND o.source='proxy'"
+            ))?;
+            let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+            while let Some(row) = rows.next()? {
+                read::check()?;
+                let entrypoint: String = row.get(1)?;
+                let completeness = row.get_ref(2)?.as_str()?;
+                let pricing_partial: bool = row.get(3)?;
+                let amounts: [Option<i64>; 3] = [row.get(4)?, row.get(5)?, row.get(6)?];
+                let add = |c: &mut Calls| {
+                    c.observations += 1;
+                    c.partial += i64::from(completeness == "partial");
+                    c.missing += i64::from(completeness == "missing");
+                    c.pricing_partial += i64::from(pricing_partial);
+                    for (i, amount) in amounts.iter().enumerate() {
+                        if let Some(amount) = amount {
+                            c.known[i] += 1;
+                            c.sums[i] += i128::from(*amount);
+                        }
+                    }
+                };
+                add(days.entry((date(row.get(0)?)?, entrypoint.clone())).or_default());
+                add(groups.entry(entrypoint).or_default());
+            }
+            Ok(())
+        };
+        let buckets = rollup::whole_buckets(r.start, r.end).filter(|_| use_rollups);
+        let mut complete = false;
+        if let Some((first, last)) = buckets {
+            let (sql, values) = rollup::filter(q, (first, last), false, true);
+            // Summing in SQLite fails on a total past 64 bits; then the entries are read instead.
+            let mut statement = conn.prepare_cached(&format!(
+                "SELECT bucket,entrypoint,SUM(observations),SUM(partial),SUM(missing),SUM(pricing_partial),
+                   SUM(k0),SUM(s0),SUM(k1),SUM(s1),SUM(k6),SUM(s6)
+                 FROM usage_entrypoint_rollup WHERE {sql} GROUP BY bucket,entrypoint"
+            ))?;
+            let read = (|| -> Result<bool> {
+                let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+                while let Some(row) = rows.next()? {
+                    read::check()?;
+                    let first = row.get::<_, i64>(0)? * rollup::BUCKET_MS;
+                    let day = date(first)?;
+                    if date(first + rollup::BUCKET_MS - 1)? != day {
+                        return Ok(false);
+                    }
+                    let mut numbers = [0_i64; 10];
+                    for (i, number) in numbers.iter_mut().enumerate() {
+                        match row.get_ref(2 + i)? {
+                            rusqlite::types::ValueRef::Integer(n) => *number = n,
+                            _ => return Ok(false),
+                        }
+                    }
+                    let entrypoint: String = row.get(1)?;
+                    let add = |c: &mut Calls| {
+                        c.observations += numbers[0];
+                        c.partial += numbers[1];
+                        c.missing += numbers[2];
+                        c.pricing_partial += numbers[3];
+                        for i in 0..3 {
+                            c.known[i] += numbers[4 + 2 * i];
+                            c.sums[i] += i128::from(numbers[5 + 2 * i]);
+                        }
+                    };
+                    add(days.entry((day, entrypoint.clone())).or_default());
+                    add(groups.entry(entrypoint).or_default());
+                }
+                Ok(true)
+            })();
+            complete = match read {
+                Ok(complete) => complete,
+                Err(e)
+                    if e.downcast_ref::<rusqlite::Error>()
+                        .is_some_and(|e| e.to_string().contains("integer overflow")) =>
+                {
+                    false
+                }
+                Err(e) => return Err(e),
+            };
+            if complete {
+                for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
+                    if low < high {
+                        let (edge_sql, edge_values) = filter(q, &Range { start: low, end: high, tz: r.tz }, "o");
+                        entries(&mut groups, &mut days, &edge_sql, &edge_values)?;
+                    }
+                }
+            }
+        }
+        if !complete {
+            groups.clear();
+            days.clear();
+            entries(&mut groups, &mut days, &where_sql, &values)?;
+        }
+    }
+    read::check()?;
+    let mut breakdown: Vec<_> = groups.into_iter().collect();
+    breakdown.sort_by(|a, b| {
+        b.1.sums[0].cmp(&a.1.sums[0]).then(b.1.observations.cmp(&a.1.observations)).then(a.0.cmp(&b.0))
+    });
+    let breakdown: Vec<Value> = breakdown
+        .into_iter()
+        .take(500)
+        .map(|(id, calls)| {
+            let mut value = calls.value();
+            value["id"] = json!(id);
+            value
+        })
+        .collect();
+    let trend: Vec<Value> = days
+        .into_iter()
+        .map(|((day, id), calls)| {
+            json!({"date":day.to_string(),"group":id,"observations":calls.observations,
+                "unpriced":calls.observations-calls.known[0],"estimated_cost_nanos":calls.value()["estimated_cost_nanos"]})
+        })
+        .collect();
+    Ok(json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},"breakdown":breakdown,"trend":trend}))
 }
 
 /// Select bounded output before expanding aggregates into nested JSON. Large
@@ -446,7 +630,7 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
     };
     match rollup::whole_buckets(r.start, r.end).filter(|_| use_rollups) {
         Some((first, last)) => {
-            let (sql, values) = rollup::filter(q, (first, last), true);
+            let (sql, values) = rollup::filter(q, (first, last), true, false);
             collect_facets(
                 conn,
                 &format!("SELECT DISTINCT provider,model,account_id,client,source FROM usage_facets WHERE {sql}"),

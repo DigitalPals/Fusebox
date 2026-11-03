@@ -224,6 +224,204 @@ pub(super) fn backfill(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+// Claude Code entrypoints. `usage_entrypoints` keeps the label a proxy observation's
+// client reported, by observation id; `usage_entrypoint_rollup` sums the proxy entries
+// that have one, like `usage_rollup` with the entrypoint as a fifth dimension. Both sit
+// beside the schema-5 layout instead of changing it: releases that don't know them
+// keep reading and writing the database, and their entry triggers keep this rollup
+// exact (a release that doesn't record entrypoints only adds entries without one).
+// Entries without an entrypoint cost the triggers one primary-key probe.
+
+/// Trigger names, for a downgrade to drop.
+pub(super) const ENTRYPOINT_TRIGGERS: [&str; 4] = [
+    "usage_entrypoint_rollup_insert",
+    "usage_entrypoint_rollup_delete",
+    "usage_entrypoint_rollup_update_old",
+    "usage_entrypoint_rollup_update_new",
+];
+
+/// The SQL for an entry's recorded entrypoint; NULL when it has none.
+pub(super) fn entrypoint_of(alias: &str) -> String {
+    format!("(SELECT entrypoint FROM usage_entrypoints WHERE id={alias}.id)")
+}
+
+fn has_entrypoint(alias: &str) -> String {
+    format!("{alias}.source='proxy' AND EXISTS(SELECT 1 FROM usage_entrypoints WHERE id={alias}.id)")
+}
+
+fn entrypoint_dims(alias: &str, entrypoint: &str) -> String {
+    format!("json_array({alias}.provider,{alias}.model,{alias}.account_id,{},{entrypoint})", client(alias))
+}
+
+fn add_entrypoint_entry(alias: &str) -> String {
+    let known: Vec<_> = AMOUNTS.iter().map(|c| format!("{alias}.{c} IS NOT NULL")).collect();
+    let sums: Vec<_> = AMOUNTS.iter().map(|c| format!("COALESCE({alias}.{c},0)")).collect();
+    let updates: Vec<_> = ["observations", "partial", "missing", "pricing_partial"]
+        .into_iter()
+        .map(|c| format!("{c}={c}+excluded.{c}"))
+        .chain(
+            (0..AMOUNTS.len()).flat_map(|i| [format!("k{i}=k{i}+excluded.k{i}"), format!("s{i}=s{i}+excluded.s{i}")]),
+        )
+        .collect();
+    // The WHERE clause also keeps SQLite from reading ON CONFLICT as a join constraint.
+    format!(
+        "INSERT INTO usage_entrypoint_rollup(bucket,dims,provider,model,account_id,client,entrypoint,observations,partial,missing,pricing_partial,{},{})
+         SELECT {alias}.event_at_ms/{BUCKET_MS},{},{alias}.provider,{alias}.model,{alias}.account_id,{},e.entrypoint,1,
+           {alias}.completeness='partial',{alias}.completeness='missing',COALESCE({alias}.pricing_partial,0)=1,{},{}
+         FROM usage_entrypoints e WHERE e.id={alias}.id
+         ON CONFLICT(bucket,dims) DO UPDATE SET {};",
+        known_columns(),
+        sum_columns(),
+        entrypoint_dims(alias, "e.entrypoint"),
+        client(alias),
+        known.join(","),
+        sums.join(","),
+        updates.join(",")
+    )
+}
+
+fn remove_entrypoint_entry(alias: &str) -> String {
+    let changes: Vec<_> = [
+        "observations=observations-1".to_string(),
+        format!("partial=partial-({alias}.completeness='partial')"),
+        format!("missing=missing-({alias}.completeness='missing')"),
+        format!("pricing_partial=pricing_partial-(COALESCE({alias}.pricing_partial,0)=1)"),
+    ]
+    .into_iter()
+    .chain(AMOUNTS.iter().enumerate().flat_map(|(i, c)| {
+        [format!("k{i}=k{i}-({alias}.{c} IS NOT NULL)"), format!("s{i}=s{i}-COALESCE({alias}.{c},0)")]
+    }))
+    .collect();
+    let key =
+        format!("bucket={alias}.event_at_ms/{BUCKET_MS} AND dims={}", entrypoint_dims(alias, &entrypoint_of(alias)));
+    format!(
+        "UPDATE usage_entrypoint_rollup SET {} WHERE {key};
+         DELETE FROM usage_entrypoint_rollup WHERE {key} AND observations<=0;",
+        changes.join(",")
+    )
+}
+
+/// Creates the entrypoint tables and triggers when a database lacks them. Every
+/// usage database gets them, so readers never check; an existing one is left as is.
+pub(super) fn ensure_entrypoints(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM sqlite_master WHERE (type='table' AND name IN ('usage_entrypoints','usage_entrypoint_rollup'))
+               OR (type='trigger' AND name IN ({}))",
+            ENTRYPOINT_TRIGGERS.map(|t| format!("'{t}'")).join(",")
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 2 + ENTRYPOINT_TRIGGERS.len() as i64 {
+        return Ok(());
+    }
+    let numbers: Vec<_> =
+        (0..AMOUNTS.len()).flat_map(|i| [format!("k{i} INTEGER NOT NULL"), format!("s{i} INTEGER NOT NULL")]).collect();
+    conn.execute_batch(&format!(
+        "SAVEPOINT usage_entrypoints;
+         CREATE TABLE IF NOT EXISTS usage_entrypoints(id INTEGER PRIMARY KEY,entrypoint TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS usage_entrypoint_rollup(bucket INTEGER NOT NULL,dims TEXT NOT NULL,provider TEXT,model TEXT,
+           account_id TEXT,client TEXT,entrypoint TEXT NOT NULL,observations INTEGER NOT NULL,partial INTEGER NOT NULL,
+           missing INTEGER NOT NULL,pricing_partial INTEGER NOT NULL,{},PRIMARY KEY(bucket,dims)) WITHOUT ROWID;
+         DROP TRIGGER IF EXISTS usage_entrypoint_rollup_insert;
+         DROP TRIGGER IF EXISTS usage_entrypoint_rollup_delete;
+         DROP TRIGGER IF EXISTS usage_entrypoint_rollup_update_old;
+         DROP TRIGGER IF EXISTS usage_entrypoint_rollup_update_new;
+         CREATE TRIGGER usage_entrypoint_rollup_insert AFTER INSERT ON usage_entries WHEN {} BEGIN {} END;
+         CREATE TRIGGER usage_entrypoint_rollup_delete AFTER DELETE ON usage_entries WHEN {} BEGIN {} END;
+         CREATE TRIGGER usage_entrypoint_rollup_update_old AFTER UPDATE ON usage_entries WHEN {} BEGIN {} END;
+         CREATE TRIGGER usage_entrypoint_rollup_update_new AFTER UPDATE ON usage_entries WHEN {} BEGIN {} END;
+         DELETE FROM usage_entrypoint_rollup;",
+        numbers.join(","),
+        has_entrypoint("NEW"),
+        add_entrypoint_entry("NEW"),
+        has_entrypoint("OLD"),
+        remove_entrypoint_entry("OLD"),
+        has_entrypoint("OLD"),
+        remove_entrypoint_entry("OLD"),
+        has_entrypoint("NEW"),
+        add_entrypoint_entry("NEW"),
+    ))?;
+    // A database that never had the table has nothing to fill in.
+    let result = (|| {
+        let labelled: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM usage_entrypoints)", [], |r| r.get(0))?;
+        if labelled { backfill_entrypoints(conn) } else { Ok(()) }
+    })();
+    conn.execute_batch(if result.is_ok() {
+        "RELEASE usage_entrypoints;"
+    } else {
+        "ROLLBACK TO usage_entrypoints; RELEASE usage_entrypoints;"
+    })?;
+    result
+}
+
+/// Fills `usage_entrypoint_rollup` from the entries, as the triggers would have.
+pub(super) fn backfill_entrypoints(conn: &Connection) -> Result<()> {
+    let mut groups: BTreeMap<(i64, String), (Sums, String)> = BTreeMap::new();
+    {
+        let mut statement = conn.prepare(&format!(
+            "SELECT o.event_at_ms/{BUCKET_MS},{},o.provider,o.model,o.account_id,{},o.completeness='partial',o.completeness='missing',
+               COALESCE(o.pricing_partial,0)=1,{},e.entrypoint FROM usage_entries o JOIN usage_entrypoints e ON e.id=o.id
+             WHERE o.source='proxy'",
+            entrypoint_dims("o", "e.entrypoint"),
+            client("o"),
+            AMOUNTS.map(|c| format!("o.{c}")).join(",")
+        ))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let (group, _) = groups.entry((row.get(0)?, row.get(1)?)).or_insert_with(|| {
+                (
+                    Sums {
+                        provider: row.get::<_, Option<String>>(2).ok().flatten(),
+                        model: row.get::<_, Option<String>>(3).ok().flatten(),
+                        account: row.get::<_, Option<String>>(4).ok().flatten(),
+                        client: row.get::<_, Option<String>>(5).ok().flatten(),
+                        ..Default::default()
+                    },
+                    row.get::<_, String>(9 + AMOUNTS.len()).unwrap_or_default(),
+                )
+            });
+            group.counts[0] += 1;
+            for i in 0..3 {
+                group.counts[i + 1] += i64::from(row.get::<_, bool>(6 + i)?);
+            }
+            for i in 0..AMOUNTS.len() {
+                if let Some(amount) = row.get::<_, Option<i64>>(9 + i)? {
+                    group.known[i] += 1;
+                    group.sums[i] += i128::from(amount);
+                }
+            }
+        }
+    }
+    let mut insert = conn.prepare(&format!(
+        "INSERT INTO usage_entrypoint_rollup(bucket,dims,provider,model,account_id,client,entrypoint,observations,partial,missing,pricing_partial,{},{})
+         VALUES({})",
+        known_columns(),
+        sum_columns(),
+        (1..=11 + 2 * AMOUNTS.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+    ))?;
+    for ((bucket, dims), (g, entrypoint)) in groups {
+        let mut values: Vec<SqlValue> = vec![
+            bucket.into(),
+            dims.into(),
+            g.provider.into(),
+            g.model.into(),
+            g.account.into(),
+            g.client.into(),
+            entrypoint.into(),
+        ];
+        values.extend(g.counts.iter().map(|n| SqlValue::from(*n)));
+        values.extend(g.known.iter().map(|n| SqlValue::from(*n)));
+        values.extend(g.sums.iter().map(|n| match i64::try_from(*n) {
+            Ok(n) => SqlValue::Integer(n),
+            Err(_) => SqlValue::Real(*n as f64),
+        }));
+        insert.execute(rusqlite::params_from_iter(values))?;
+    }
+    Ok(())
+}
+
 /// The part of a query range made of whole buckets, as bucket numbers [first, end).
 pub(super) fn whole_buckets(start: i64, end: i64) -> Option<(i64, i64)> {
     let first = start.div_euclid(BUCKET_MS) + i64::from(start.rem_euclid(BUCKET_MS) != 0);
@@ -232,13 +430,22 @@ pub(super) fn whole_buckets(start: i64, end: i64) -> Option<(i64, i64)> {
 }
 
 /// Filters for a rollup table, matching `filter` on entries and observations.
-pub(super) fn filter(q: &Query, buckets: (i64, i64), with_source: bool) -> (String, Vec<SqlValue>) {
+/// `with_entrypoint` only for `usage_entrypoint_rollup`; the others have no such column.
+pub(super) fn filter(
+    q: &Query,
+    buckets: (i64, i64),
+    with_source: bool,
+    with_entrypoint: bool,
+) -> (String, Vec<SqlValue>) {
     let mut sql = "bucket>=? AND bucket<?".to_string();
     let mut values: Vec<SqlValue> = vec![buckets.0.into(), buckets.1.into()];
     let mut columns =
         vec![("provider", &q.provider), ("model", &q.model), ("account_id", &q.account), ("client", &q.client)];
     if with_source {
         columns.push(("source", &q.source));
+    }
+    if with_entrypoint {
+        columns.push(("entrypoint", &q.entrypoint));
     }
     for (column, value) in columns {
         if let Some(value) = value {

@@ -26,7 +26,7 @@ const UsageTools = (() => {
     shift(r.start, 0); shift(r.end, 0);
     if (r.start >= r.end) throw new Error('The end date must be on or after the start date.');
     const q = new URLSearchParams({ start: r.start, end: r.end, timezone });
-    for (const k of ['provider', 'model', 'account', 'client']) if (filters[k]) q.set(k, filters[k]);
+    for (const k of ['provider', 'model', 'account', 'client', 'entrypoint']) if (filters[k]) q.set(k, filters[k]);
     return q.toString();
   };
   const privateLabel = (value, hidden) => hidden && value != null && value !== '' ? '••••••' : String(value ?? 'Unknown');
@@ -140,10 +140,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools
 
 const Usage = {
   preset: '7', range: UsageTools.range(7), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  filters: { provider: '', model: '', account: '', client: '' },
+  filters: { provider: '', model: '', account: '', client: '', entrypoint: '' },
   stack: 'provider', metric: 'cost', hoverDay: null, dim: 'model', showAll: false, clientsAll: false,
   drawerOpen: false, customError: '',
-  summary: null, status: null,
+  summary: null, status: null, entrypoints: null,
   loading: false, loaded: false, error: '', actionError: '', busy: false,
   sequence: 0, credential: null, confirm: null, roots: {}, collectorDraft: '', rows: [],
 };
@@ -181,6 +181,7 @@ const USAGE_PARTS = {
   head: () => usageHeadHTML(),
   notices: () => usageNoticesHTML(),
   cost: () => (Usage.summary ? usageCostHTML() : !Usage.loading && !Usage.error ? '<div class="card pad"><h2 class="h-sec">No usage loaded</h2><p class="meta">Refresh to read persisted metadata.</p></div>' : ''),
+  entrypoints: () => (Usage.summary && Usage.entrypoints ? usageEntrypointsHTML() : ''),
   breakdown: () => (Usage.summary ? usageBreakdownHTML() : ''),
   clients: () => (Usage.summary ? usageClientsHTML() : ''),
   drawer: () => (Usage.drawerOpen ? usageDrawerHTML() : ''),
@@ -197,7 +198,7 @@ function usageHTML() {
   return `<div class="usage-page">
     ${usagePart('head')}
     ${usagePart('notices')}
-    <div id="usage-results" class="usage-results" aria-busy="${Usage.loading}">${usagePart('cost')}${usagePart('breakdown')}
+    <div id="usage-results" class="usage-results" aria-busy="${Usage.loading}">${usagePart('cost')}${usagePart('entrypoints')}${usagePart('breakdown')}
     ${usagePart('clients')}</div>
     ${usagePart('drawer')}
   </div>`;
@@ -232,7 +233,7 @@ function usageHeadHTML() {
   const refresh = `<button class="icon-btn row" type="button" data-usage-act="refresh" title="Refresh · updates every minute" aria-label="Refresh usage"${u.loading ? ' disabled' : ''}><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M11.5 7a4.5 4.5 0 1 1-1.3-3.2"/><path d="M11.5 1.8v2.6H8.9"/></svg></button>`;
   const today = usageToday(), min = UsageTools.shift(today, -365);
   const custom = u.preset === 'custom' ? `<form id="usage-range" class="u-custom"><label class="u-field"><span>From</span><input type="date" name="start" value="${ux(u.range.start)}" min="${min}" max="${today}" required></label><label class="u-field"><span>Through</span><input type="date" name="through" value="${ux(u.range.through)}" min="${min}" max="${today}" required></label><button class="btn" type="submit">Apply dates</button>${u.customError ? `<span class="u-custom-err" role="alert">${ux(u.customError)}</span>` : ''}</form>` : '';
-  const labels = { model: 'Model', account: 'Account', provider: 'Provider', client: 'Client' };
+  const labels = { model: 'Model', account: 'Account', provider: 'Provider', client: 'Client', entrypoint: 'Entrypoint' };
   const pills = Object.keys(labels).filter((k) => u.filters[k]).map((k) => {
     const v = u.filters[k];
     const value = k === 'account' ? usageAccountName(v) : k === 'client' ? usageSensitive(usageClientLabel(v)) : k === 'provider' ? ux(usageProvName(v)) : ux(v);
@@ -357,8 +358,83 @@ function usageReadoutHTML(c, hover) {
   return `<span class="${hover >= 0 ? '' : 'dim'}">${ux(title)}</span><span class="mono">${ux(usageDayCost(d))}</span><span class="fg2">${usageCount(d.calls)} call${d.calls === 1 ? '' : 's'}</span>${parts}${before ? '<span class="dim">Before the proxy was set up · history only</span>' : ''}`;
 }
 
-const USAGE_DIMS = [['model', 'Model'], ['account', 'Account'], ['provider', 'Provider'], ['client', 'Client / origin']];
+// Claude Code names its entrypoint in the User-Agent. The Agent SDK labels (sdk-ts,
+// sdk-py, sdk-cli for `claude -p`) are reported to use the 5-hour window faster.
+const USAGE_ENTRYPOINTS = {
+  cli: 'Claude Code in a terminal', 'sdk-ts': 'Agent SDK · TypeScript', 'sdk-py': 'Agent SDK · Python', 'sdk-cli': 'claude -p',
+  'claude-vscode': 'VS Code extension', 't3-code': 'T3 Code', 'claude-desktop': 'Claude desktop app', mcp: 'MCP server',
+  'claude-code-github-action': 'GitHub Action', remote: 'Claude Code on the web',
+};
+const usageSdkEntrypoint = (id) => typeof id === 'string' && id.startsWith('sdk-');
+const USAGE_SDK_NOTE = 'Reported to use the 5-hour window about 1.8× faster than the terminal';
+function usageEntrypointData() {
+  const trend = Usage.entrypoints?.trend || [];
+  if (!trend.length) return null;
+  const days = UsageTools.dates(Usage.range), index = new Map(days.map((d, i) => [d, i]));
+  const series = days.map((date) => ({ date, sdk: 0, other: 0 }));
+  let sdk = 0, other = 0;
+  for (const r of trend) {
+    const n = Number(r.observations || 0), day = series[index.get(r.date)];
+    if (usageSdkEntrypoint(r.group)) { sdk += n; if (day) day.sdk += n; } else { other += n; if (day) day.other += n; }
+  }
+  const latest = [...series].reverse().find((d) => d.sdk + d.other > 0);
+  return { series, sdk, other, latest, max: Math.max(0, ...series.map((d) => d.sdk + d.other)) };
+}
+const usageShare = (part, whole) => (whole > 0 ? `${Math.round(part / whole * 100)}%` : '—');
+// Which entrypoints Claude Code calls named, by day: the SDK labels against the rest.
+function usageEntrypointsHTML() {
+  const c = usageEntrypointData();
+  if (!c) return '';
+  const phone = usagePhone(), days = c.series.map((d) => d.date), today = usageToday();
+  const all = c.sdk + c.other;
+  const legend = `<div class="u-legend"><span><i class="u-ep-sdk"></i>SDK labels</span><span><i class="u-ep-other"></i>Other labels</span></div>`;
+  const latest = c.latest && days.length > 1
+    ? `<div class="u-ep-fig"><b>${ux(usageShare(c.latest.sdk, c.latest.sdk + c.latest.other))}</b><span>${c.latest.date === today ? 'today so far' : ux(`on ${UsageTools.dayLabel(c.latest.date)}`)}</span></div>` : '';
+  const bars = days.length > 1 ? c.series.map((d, i) => {
+    const total = d.sdk + d.other, h = c.max > 0 ? Math.max(total > 0 ? 1.5 : 0, total / c.max * 100) : 0;
+    const text = `${UsageTools.dayLabel(d.date)}: ${usageCount(d.sdk)} with an SDK label, ${usageCount(d.other)} with another${total ? `, ${usageShare(d.sdk, total)} SDK` : ''}`;
+    const edge = i < 2 ? ' lft' : i > days.length - 3 ? ' rgt' : '';
+    const tip = total ? `<span class="u-ep-tip${edge}" aria-hidden="true"><b>${ux(UsageTools.dayLabel(d.date))}</b><span><i class="u-ep-sdk"></i>SDK labels <span class="mono">${usageCount(d.sdk)}</span></span><span><i class="u-ep-other"></i>Other labels <span class="mono">${usageCount(d.other)}</span></span><span class="dim">SDK share ${ux(usageShare(d.sdk, total))}</span></span>` : '';
+    const segs = `${d.sdk ? `<i class="u-ep-sdk" style="flex:${d.sdk} 1 0px"></i>` : ''}${d.other ? `<i class="u-ep-other" style="flex:${d.other} 1 0px"></i>` : ''}`;
+    return `<span class="u-bar u-ep-bar" tabindex="0" role="img" aria-label="${ux(text)}"><span class="u-bar-s" style="height:${h.toFixed(2)}%">${segs}</span>${tip}</span>`;
+  }).join('') : '';
+  const labels = days.length > 1 ? c.series.map((d) => {
+    const p = UsageTools.parts(d.date);
+    const text = days.length <= 10 ? (phone ? p.w.slice(0, 2) : `${p.w} ${p.d}`) : p.monday ? `${p.m} ${p.d}` : '';
+    return `<span${d.date === today ? ' class="today"' : ''}>${ux(text)}</span>`;
+  }).join('') : '';
+  return `<section class="card u-ep" aria-labelledby="usage-ep-label">
+    <div class="u-chart-head"><span class="label" id="usage-ep-label">CLAUDE CODE ENTRYPOINTS · ${ux(usageRangeLabel().toUpperCase())}</span><span class="grow"></span>${legend}</div>
+    <div class="u-ep-figs"><div class="u-ep-fig"><b>${ux(usageShare(c.sdk, all))}</b><span>of ${ux(usageCount(all))} calls had an SDK label</span></div>${latest}</div>
+    ${bars ? `<div class="u-bars u-ep-bars${days.length > 20 ? ' dense' : ''}">${bars}</div><div class="u-days${days.length > 20 ? ' dense' : ''}" aria-hidden="true">${labels}</div>` : ''}
+    <p class="u-ep-note">Claude Code names its entrypoint in the User-Agent; Fusebox records it and passes it on unchanged. The Agent SDK labels (sdk-ts, sdk-cli) are reported to use the 5-hour window about 1.8× faster than cli (anthropics/claude-code#97074). Only calls that named one are counted.</p>
+  </section>`;
+}
+
+const USAGE_DIMS = [['model', 'Model'], ['account', 'Account'], ['provider', 'Provider'], ['client', 'Client / origin'], ['entrypoint', 'Entrypoint']];
+// The Entrypoint tab appears once a Claude Code call has named one.
+// The entrypoints read lists calls that named one; the rest of the summary's calls
+// make the "No entrypoint" row. Both reads use the same range and filters.
+function usageEntrypointRows() {
+  const rows = Usage.entrypoints?.breakdown;
+  if (!rows) return [];
+  const t = usageCombined().totals || {}, sum = (f) => rows.reduce((n, r) => n + Number(f(r) || 0), 0);
+  const rest = (total, f) => (total == null ? null : Math.max(0, Number(total) - sum(f)));
+  const observations = rest(t.observations ?? 0, (r) => r.observations);
+  if (!observations) return rows;
+  return rows.concat([{ id: null, observations, estimated_cost_nanos: rest(t.estimated_cost_nanos, (r) => r.estimated_cost_nanos),
+    unpriced: rest(t.unpriced ?? 0, (r) => r.unpriced), partial: rest(t.partial ?? 0, (r) => r.partial), missing_usage: rest(t.missing_usage ?? 0, (r) => r.missing_usage),
+    tokens: { input: rest(t.tokens?.input, (r) => r.tokens?.input), output: rest(t.tokens?.output, (r) => r.tokens?.output) } }]);
+}
+const usageBreakdowns = () => ({ ...(usageCombined().breakdowns || {}), entrypoint: usageEntrypointRows() });
+const usageDims = (b) => USAGE_DIMS.filter(([k]) => k !== 'entrypoint' || Usage.filters.entrypoint || (b.entrypoint || []).some((r) => r.id != null));
 function usageBreakdownRow(dim, r) {
+  if (dim === 'entrypoint') {
+    const sdk = usageSdkEntrypoint(r.id);
+    return { name: r.id ?? 'No entrypoint', mono: r.id != null, sub: r.id == null ? 'Other clients, imported history and earlier calls' : USAGE_ENTRYPOINTS[r.id] || 'Claude Code',
+      icon: `<span class="u-sq" aria-hidden="true"><i class="${r.id == null ? '' : sdk ? 'u-ep-sdk' : 'u-ep-other'}"></i></span>`,
+      tag: sdk ? `<span class="u-ep-tag" title="${ux(USAGE_SDK_NOTE)}">SDK</span>` : '' };
+  }
   if (dim === 'model') return { name: r.id || 'Unknown model', mono: true, sub: usageProvName(r.provider), logo: usageLogo(r.provider) };
   if (dim === 'provider') return { name: usageProvName(r.id), sub: r.accounts ? `${r.accounts} account${r.accounts === 1 ? '' : 's'}` : 'No account reported', logo: usageLogo(r.id) };
   if (dim === 'account') {
@@ -390,24 +466,26 @@ function usageCostShare(r, total) {
   return [share, total > 0 && r.estimated_cost_nanos ? (share * 100 < 1 ? '<1%' : `${Math.round(share * 100)}%`) : '—'];
 }
 function usageBreakdownHTML() {
-  const u = Usage, b = usageCombined().breakdowns || {}, phone = usagePhone();
+  const u = Usage, b = usageBreakdowns(), phone = usagePhone();
+  // A range without entrypoints has no Entrypoint tab to stay on.
+  if (!usageDims(b).some(([k]) => k === u.dim)) u.dim = 'model';
   const rows = b[u.dim] || [], total = Number(usageCombined().totals?.estimated_cost_nanos || 0);
   const rowLimit = u.dim === 'model' ? 20 : 8;
   const shown = u.showAll ? rows : rows.slice(0, rowLimit);
   u.rows = shown.map((r) => r.id);
-  const tabs = `<div class="u-tabs" role="tablist" aria-label="Breakdown">${USAGE_DIMS.map(([k, l]) => `<button type="button" role="tab" data-usage-act="dim" data-value="${k}" aria-selected="${u.dim === k}">${l} <span class="mono dim">${(b[k] || []).length}</span></button>`).join('')}</div>`;
+  const tabs = `<div class="u-tabs" role="tablist" aria-label="Breakdown">${usageDims(b).map(([k, l]) => `<button type="button" role="tab" data-usage-act="dim" data-value="${k}" aria-selected="${u.dim === k}">${l} <span class="mono dim">${(b[k] || []).length}</span></button>`).join('')}</div>`;
   const body = shown.map((r, i) => {
     const x = usageBreakdownRow(u.dim, r), selected = r.id != null && u.filters[u.dim] === r.id;
     const [share, pct] = usageCostShare(r, total);
     const [cov, covCls] = usageCoverage(r);
     const coverageTitle = ux(usageCoverageLine(r));
     const name = x.sensitive ? usageSensitive(x.name) : ux(x.name);
-    const icon = x.square ? '<span class="u-sq" aria-hidden="true"><i></i></span>' : x.logo || '<span class="u-sq" aria-hidden="true"><i></i></span>';
+    const icon = x.icon || (x.square ? '<span class="u-sq" aria-hidden="true"><i></i></span>' : x.logo || '<span class="u-sq" aria-hidden="true"><i></i></span>');
     const cost = r.estimated_cost_nanos != null ? UsageTools.dollars(r.estimated_cost_nanos) : 'Unpriced';
     const attrs = r.id != null ? `data-usage-act="filter-row" data-index="${i}" aria-pressed="${selected}"` : 'disabled';
     const bar = `<span class="u-share-bar"><i style="width:${(share * 100).toFixed(1)}%"></i></span>`;
-    if (phone) return `<button type="button" class="u-bd-item${selected ? ' on' : ''}" ${attrs}><span class="u-bd-l1">${icon}<span class="u-bd-name${x.mono ? ' mono' : ''}">${name}</span><span class="u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span></span><span class="u-bd-l2">${bar}<span class="dim">${ux(pct)} · ${usageCount(r.observations)} calls</span>${cov !== 'Full' ? `<span class="${covCls}" title="${coverageTitle}">${ux(cov)}</span>` : ''}</span></button>`;
-    return `<button type="button" class="u-bd-row${selected ? ' on' : ''}" ${attrs}><span class="u-bd-who">${icon}<span class="cell2"><span class="${x.mono ? 'mono' : ''}">${name}</span>${x.sub ? `<span class="dim">${ux(x.sub)}</span>` : ''}</span></span><span class="u-share">${bar}<span class="fg2">${ux(pct)}</span></span><span class="r">${usageCount(r.observations)}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(r.tokens?.input))}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(r.tokens?.output))}</span><span class="r u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span><span class="r ${covCls}" title="${coverageTitle}">${ux(cov)}</span></button>`;
+    if (phone) return `<button type="button" class="u-bd-item${selected ? ' on' : ''}" ${attrs}><span class="u-bd-l1">${icon}<span class="u-bd-name${x.mono ? ' mono' : ''}">${name}</span>${x.tag || ''}<span class="u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span></span><span class="u-bd-l2">${bar}<span class="dim">${ux(pct)} · ${usageCount(r.observations)} calls</span>${cov !== 'Full' ? `<span class="${covCls}" title="${coverageTitle}">${ux(cov)}</span>` : ''}</span></button>`;
+    return `<button type="button" class="u-bd-row${selected ? ' on' : ''}" ${attrs}><span class="u-bd-who">${icon}<span class="cell2">${x.tag ? `<span class="u-ep-name"><span class="${x.mono ? 'mono' : ''}">${name}</span>${x.tag}</span>` : `<span class="${x.mono ? 'mono' : ''}">${name}</span>`}${x.sub ? `<span class="dim">${ux(x.sub)}</span>` : ''}</span></span><span class="u-share">${bar}<span class="fg2">${ux(pct)}</span></span><span class="r">${usageCount(r.observations)}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(r.tokens?.input))}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(r.tokens?.output))}</span><span class="r u-bd-cost${cost === 'Unpriced' ? ' dim' : ''}">${ux(cost)}</span><span class="r ${covCls}" title="${coverageTitle}">${ux(cov)}</span></button>`;
   }).join('');
   const more = rows.length > rowLimit ? `<button type="button" class="u-more" data-usage-act="show-all">${u.showAll ? `Show top ${rowLimit}` : `Show all ${rows.length}`}</button>` : '';
   const empty = rows.length ? '' : '<p class="u-empty">No records match these filters.</p>';
@@ -593,10 +671,11 @@ function usageAccountsChanged() {
 }
 // What each read feeds.
 const USAGE_READ_PARTS = {
-  summary: ['head', 'notices', 'cost', 'breakdown', 'clients'],
+  summary: ['head', 'notices', 'cost', 'entrypoints', 'breakdown', 'clients'],
   status: ['head', 'notices', 'cost', 'drawer'],
+  entrypoints: ['entrypoints', 'breakdown'],
 };
-const USAGE_LOAD_PARTS = ['head', 'notices', 'cost', 'breakdown', 'clients'];
+const USAGE_LOAD_PARTS = ['head', 'notices', 'cost', 'entrypoints', 'breakdown', 'clients'];
 const usageQuery = () => UsageTools.query(Usage.range, Usage.filters, Usage.timezone);
 function usageSelectStack(summary) {
   const combined = summary?.combined;
@@ -632,7 +711,8 @@ async function usageRead(field, path, sequence) {
   } catch (e) {
     if (current() && e.name !== 'AbortError') {
       if (field !== 'status') Usage[field] = null;
-      Usage.error = e.message === 'locked' ? 'Management authentication required.' : e.message;
+      // Without entrypoints the page only lacks their card and tab.
+      if (field !== 'entrypoints') Usage.error = e.message === 'locked' ? 'Management authentication required.' : e.message;
     }
   } finally {
     const active = current();
@@ -650,6 +730,7 @@ async function usageLoad() {
     // Each section renders as soon as its own read completes.
     await Promise.allSettled([
       usageRead('summary', `/usage/dashboard?${query}&stack=${u.stack}`, sequence),
+      usageRead('entrypoints', `/usage/entrypoints?${query}`, sequence),
       usageRead('status', '/usage/status', sequence),
     ]);
   } catch (e) { if (sequence === u.sequence) u.error = e.message === 'locked' ? 'Management authentication required.' : e.message; }
@@ -660,7 +741,7 @@ function usageLoadStack() {
   usageSelectStack(Usage.summary); usageRenderChart();
 }
 // Range and filter changes read everything again.
-function usageReload() { Usage.hoverDay = null; Usage.summary = null; return usageLoad(); }
+function usageReload() { Usage.hoverDay = null; Usage.summary = null; Usage.entrypoints = null; return usageLoad(); }
 async function usageMutate(path, body, after) {
   Usage.busy = true; Usage.actionError = ''; usageRender();
   try {

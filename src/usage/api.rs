@@ -20,6 +20,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/usage/summary", get(retired_summary))
         .route("/usage/dashboard", get(dashboard))
+        .route("/usage/entrypoints", get(entrypoints))
         .route("/usage/observations", get(observations))
         .route("/usage/status", get(status))
         .route("/usage/export", get(export))
@@ -114,6 +115,13 @@ async fn dashboard(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> 
             Json(v).into_response()
         }
         Err(e) => result(Err(e)),
+    }
+}
+/// Claude Code entrypoints: no client names or ids, only the labels clients sent.
+async fn entrypoints(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> Response {
+    match store(&app) {
+        Ok(s) => result(s.entrypoints(q).await),
+        Err(r) => *r,
     }
 }
 async fn observations(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> Response {

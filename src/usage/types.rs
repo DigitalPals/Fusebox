@@ -95,6 +95,12 @@ pub struct Observation {
     pub logical_success: Option<bool>,
     #[serde(default)]
     pub numeric_metadata: BTreeMap<String, u64>,
+    /// The entrypoint a Claude Code client named in its User-Agent (`cli`, `sdk-ts`, …),
+    /// for proxy observations only. Kept beside the record in `usage_entrypoints`, never
+    /// in the stored document or the collector wire format, so older releases and
+    /// collectors read every record unchanged.
+    #[serde(skip)]
+    pub entrypoint: Option<String>,
 }
 impl Observation {
     pub fn new(source: &str, id: String, provider: &str, event_at_ms: i64) -> Self {
@@ -124,6 +130,7 @@ impl Observation {
             status: None,
             logical_success: None,
             numeric_metadata: BTreeMap::new(),
+            entrypoint: None,
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -159,6 +166,7 @@ impl Observation {
             &self.session_id,
             &self.service_tier,
             &self.inference_geo,
+            &self.entrypoint,
         ]
         .into_iter()
         .flatten()

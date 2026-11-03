@@ -466,25 +466,26 @@ test('full refresh and filter changes abort superseded reads without exposing ca
   const pending = pendingApi();
   const d = dashboard({ api: pending.api });
   const first = d.run('usageLoad()');
-  assert.deepEqual(pending.calls.map((call) => call.endpoint.split('?')[0]), ['/usage/dashboard', '/usage/status'], 'no records are read');
+  assert.deepEqual(pending.calls.map((call) => call.endpoint.split('?')[0]), ['/usage/dashboard', '/usage/entrypoints', '/usage/status'], 'no records are read');
   const refresh = d.run('usageLoad()');
-  assert.ok(pending.calls.slice(0, 2).every((call) => call.signal.aborted));
-  assert.ok(pending.calls.slice(2).every((call) => !call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 3).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(3).every((call) => !call.signal.aborted));
   await first;
   assert.equal(d.run('Usage.loading'), true);
   assert.equal(d.run('Usage.error'), '');
   d.run('Usage.filters.model = "new-model"');
   const filtered = d.run('usageReload()');
-  assert.ok(pending.calls.slice(0, 4).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 6).every((call) => call.signal.aborted));
   await refresh;
   assert.equal(d.run('Usage.loading'), true);
   assert.equal(d.run('Usage.error'), '');
-  const active = pending.calls.slice(4);
-  assert.equal(active.length, 2);
+  const active = pending.calls.slice(6);
+  assert.equal(active.length, 3);
   assert.match(active[0].endpoint, /model=new-model/);
+  assert.match(active[1].endpoint, /^\/usage\/entrypoints\?.*model=new-model/, 'entrypoints use the same filters');
   active.forEach((call) => call.resolve({ marker: 'filtered' }));
   await filtered;
-  for (const field of ['summary', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
+  for (const field of ['summary', 'entrypoints', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
   assert.equal(d.run('Usage.loading'), false);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('usageReads.size'), 0);
@@ -524,20 +525,20 @@ test('route exit and pagehide cancel reads, and re-entry and restored pages resu
   assert.equal(d.run('Usage.loaded'), false);
   d.context.location.hash = '#/usage';
   d.run('bindUsage()');
-  assert.equal(pending.calls.length, 4);
-  pending.calls.slice(0, 2).forEach((call) => call.resolve({ marker: 'stale-route' }));
+  assert.equal(pending.calls.length, 6);
+  pending.calls.slice(0, 3).forEach((call) => call.resolve({ marker: 'stale-route' }));
   await first;
   assert.equal(d.run('Usage.summary'), null);
   assert.equal(d.run('Usage.loading'), true);
   listeners.get('pagehide')();
   assert.ok(pending.calls.every((call) => call.signal.aborted));
   listeners.get('pageshow')({ persisted: true });
-  assert.equal(pending.calls.length, 6);
-  pending.calls.slice(2, 4).forEach((call) => call.reject(new Error('late failure')));
+  assert.equal(pending.calls.length, 9);
+  pending.calls.slice(3, 6).forEach((call) => call.reject(new Error('late failure')));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('Usage.loading'), true);
-  pending.calls.slice(4).forEach((call) => call.resolve({ marker: 'restored' }));
+  pending.calls.slice(6).forEach((call) => call.resolve({ marker: 'restored' }));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.summary.marker'), 'restored');
   assert.equal(d.run('Usage.status.marker'), 'restored');
@@ -587,7 +588,7 @@ test('chart stacking uses the loaded snapshot without another request, including
   assert.equal(d.run('Usage.summary.combined.stack'), 'model');
   d.run('Usage.stack = "provider"; usageLoadStack()');
   assert.equal(d.run('Usage.summary.combined.trend[0].marker'), 'provider');
-  assert.equal(calls, 2);
+  assert.equal(calls, 3, 'dashboard, entrypoints and status, once each');
 });
 
 test('the page is drawn once; a read or an account change repaints only the sections that changed', () => {
@@ -637,4 +638,59 @@ test('cache write lifetimes are independent subsets and unknown history stays ex
   const html = d.run('usageCostHTML()');
   assert.match(html, /Cache write lifetimes: 100 \(30 min\), 200 \(12 hr\)/);
   assert.doesNotMatch(html, /5 min|1 hr/);
+});
+
+test('Claude Code entrypoints: SDK share by day, an Entrypoint tab once one is named, and a filter', () => {
+  const d = dashboard();
+  const trend = [
+    { date: '2026-10-28', group: 'sdk-ts', observations: 60 }, { date: '2026-10-28', group: 'cli', observations: 40 },
+    { date: '2026-10-30', group: 't3-code', observations: 95 }, { date: '2026-10-30', group: 'sdk-cli', observations: 5 },
+  ];
+  const breakdown = [
+    { id: 'sdk-ts', observations: 60, estimated_cost_nanos: 6e9, tokens: { input: 100, output: 10 } },
+    { id: 't3-code', observations: 95, estimated_cost_nanos: 5e9, tokens: { input: 200, output: 20 } },
+  ];
+  d.seed({ loaded: true, preset: 'custom', range: { start: '2026-10-28', end: '2026-10-31', through: '2026-10-30' },
+    summary: { combined: { totals: { observations: 167, estimated_cost_nanos: 12e9, tokens: { input: 1000, output: 50 } }, trend: [], breakdowns: { model: [] } } },
+    entrypoints: { breakdown, trend } });
+  let html = d.run('usageEntrypointsHTML()');
+  assert.match(html, /CLAUDE CODE ENTRYPOINTS/);
+  assert.match(html, /<b>33%<\/b><span>of 200 calls had an SDK label/, '65 of 200 calls');
+  assert.match(html, /<b>5%<\/b><span>on Fri Oct 30/, 'the latest day with calls');
+  assert.equal((html.match(/class="u-bar u-ep-bar"/g) || []).length, 3, 'one bar a day, empty days included');
+  assert.match(html, /Wed Oct 28: 60 with an SDK label, 40 with another, 60% SDK/);
+  assert.match(html, /SDK share 5%/);
+  html = d.run('Usage.dim = "entrypoint"; usageBreakdownHTML()');
+  assert.match(html, /Entrypoint <span class="mono dim">3<\/span>/);
+  assert.match(html, /sdk-ts<\/span><span class="u-ep-tag"/);
+  assert.match(html, /Agent SDK · TypeScript/);
+  assert.match(html, /T3 Code/);
+  assert.match(html, /No entrypoint/);
+  assert.equal((html.match(/u-ep-tag/g) || []).length, 1, 'only SDK labels carry the tag');
+  const rest = d.run('usageEntrypointRows()').find((r) => r.id === null);
+  assert.deepEqual([rest.observations, rest.estimated_cost_nanos, rest.tokens.input, rest.tokens.output], [12, 1e9, 700, 20], 'the rest of the summary');
+  const q = new URLSearchParams(helpers.query({ start: '2026-10-28', end: '2026-10-31' }, { entrypoint: 'sdk-ts' }, 'UTC'));
+  assert.equal(q.get('entrypoint'), 'sdk-ts');
+  d.run('Usage.filters.entrypoint = "sdk-ts"');
+  assert.match(d.run('usageHeadHTML()'), /Entrypoint<\/span><span class="mono">sdk-ts/);
+  // Nothing named an entrypoint: no card, no tab, and the breakdown falls back to models.
+  d.seed({ filters: { provider: '', model: '', account: '', client: '', entrypoint: '' }, dim: 'entrypoint',
+    summary: { combined: { totals: { observations: 4 }, trend: [], breakdowns: { model: [] } } }, entrypoints: { breakdown: [], trend: [] } });
+  assert.equal(d.run('usageEntrypointsHTML()'), '');
+  html = d.run('usageBreakdownHTML()');
+  assert.doesNotMatch(html, />Entrypoint </);
+  assert.equal(d.run('Usage.dim'), 'model');
+});
+
+test('a failed entrypoints read only leaves out their card and tab', async () => {
+  const d = dashboard({ api: (endpoint) => (endpoint.startsWith('/usage/entrypoints')
+    ? Promise.reject(new Error('Usage analytics is busy; retry shortly'))
+    : Promise.resolve(endpoint.startsWith('/usage/dashboard') ? { combined: { totals: { observations: 3 }, trend: [], breakdowns: { model: [] } } } : { health: {} })) });
+  d.run('usageRender = () => {}');
+  await d.run('usageLoad()');
+  assert.equal(d.run('Usage.error'), '');
+  assert.equal(d.run('Usage.entrypoints'), null);
+  assert.equal(d.run('Usage.summary.combined.totals.observations'), 3);
+  assert.equal(d.run('USAGE_PARTS.entrypoints()'), '');
+  assert.doesNotMatch(d.run('usageBreakdownHTML()'), />Entrypoint </);
 });
