@@ -1100,7 +1100,7 @@ async fn a_claude_key_out_of_credit_sits_out_and_its_refusal_is_repeated() {
     })
     .await;
     let mut cfg = fixture.cfg.clone();
-    cfg.claude_api_key = cfg.codex_api_key.drain(..).collect();
+    cfg.claude_api_key = std::mem::take(&mut cfg.codex_api_key);
     for key in &mut cfg.claude_api_key {
         key.base_url = Some(provider.url.clone());
     }
