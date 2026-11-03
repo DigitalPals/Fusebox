@@ -1,4 +1,5 @@
-//! Keep valid thinking configuration across tool turns and unsupported disable requests.
+//! Keep valid thinking configuration across tool turns and unsupported disable requests,
+//! and the translated request shape that Claude accepts.
 
 use super::*;
 use crate::config::{Config, KeyEntry};
@@ -149,6 +150,7 @@ struct Fixture {
     _provider: Server,
     calls: Arc<Mutex<Vec<Value>>>,
     directory: std::path::PathBuf,
+    app: Arc<App>,
 }
 
 impl Drop for Fixture {
@@ -198,8 +200,8 @@ impl Fixture {
             ..Default::default()
         };
         let app = App::new(cfg, directory.join("config.yaml"));
-        let proxy = serve(crate::server::router(app)).await;
-        Self { proxy, _provider: provider, calls, directory }
+        let proxy = serve(crate::server::router(app.clone())).await;
+        Self { proxy, _provider: provider, calls, directory, app }
     }
 
     async fn request(&self, path: &str, body: Value) -> Value {
@@ -277,4 +279,98 @@ async fn http_explicit_disable_and_native_suffix_use_supported_modes() {
             .await;
         assert_ne!(out["thinking"]["type"], "disabled");
     }
+}
+
+#[tokio::test]
+async fn http_prefill_is_dropped_only_from_translated_requests_that_reject_it() {
+    let fixture = Fixture::new().await;
+    let user = json!({"role":"user","content":[{"type":"text","text":"Name a colour."}]});
+    let messages = json!([user, {"role":"assistant","content":[{"type":"text","text":"The colour is"}]}]);
+    let native =
+        fixture.request("/v1/messages", json!({"model":"claude-opus-5-5","max_tokens":64,"messages":messages})).await;
+    assert_eq!(native["messages"], messages, "native requests keep the caller's messages");
+    let chat = |model: &str| {
+        json!({"model":model,"messages":[
+            {"role":"user","content":"Name a colour."},{"role":"assistant","content":"The colour is"}]})
+    };
+    let translated = fixture.request("/v1/chat/completions", chat("claude-opus-5-5")).await;
+    assert_eq!(translated["messages"], json!([user]));
+    let haiku = fixture.request("/v1/chat/completions", chat("claude-haiku-4-5")).await;
+    assert_eq!(haiku["messages"].as_array().unwrap().len(), 2, "Haiku 4.5 still accepts prefill");
+    let logs = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let mut logs: Vec<_> = fixture.app.stats.recent.lock().iter().cloned().collect();
+            if logs.len() >= 3 {
+                logs.sort_by_key(|log| log.id);
+                return logs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("request diagnostics were not recorded");
+    let downgrades: Vec<_> = logs.iter().map(|log| log.control_downgrades.clone()).collect();
+    assert_eq!(downgrades, [vec![], vec!["prefill_unsupported"], vec![]]);
+}
+
+#[tokio::test]
+async fn http_long_mid_conversation_tool_names_are_shortened_and_restored() {
+    let long = format!("mcp__{}__deliver_final_subagent_handback_report", "very_long_server_name".repeat(3));
+    assert!(long.len() > 64);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let captured = calls.clone();
+    let provider = serve(axum::Router::new().route(
+        "/v1/responses",
+        post(move |Json(body): Json<Value>| {
+            let calls = captured.clone();
+            async move {
+                calls.lock().push(body.clone());
+                let name = body["tools"].as_array().and_then(|t| t.last()).map(|t| t["name"].clone());
+                let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":name,"arguments":"{}"});
+                let events = [
+                    json!({"type":"response.created","response":{"id":"resp_1","model":body["model"]}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":call}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":call}),
+                    json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[call],
+                        "usage":{"input_tokens":3,"output_tokens":1}}}),
+                ];
+                let data: String = events.iter().map(|v| format!("data: {v}\n\n")).collect();
+                Response::builder().header(header::CONTENT_TYPE, "text/event-stream").body(Body::from(data)).unwrap()
+            }
+        }),
+    ))
+    .await;
+    let directory = std::env::temp_dir().join(format!("fusebox-claude-tool-addition-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let cfg = Config {
+        auth_dir: directory.to_string_lossy().into(),
+        codex_api_key: vec![KeyEntry {
+            api_key: "mock-only".into(),
+            base_url: Some(format!("{}/v1", provider.url)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let app = App::new(cfg, directory.join("config.yaml"));
+    let proxy = serve(crate::server::router(app)).await;
+    let body = json!({"model":"gpt-6.1-sol","max_tokens":64,
+    "tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],
+    "messages":[
+        {"role":"user","content":"Hand back when done."},
+        {"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{
+            "name":long,"description":"Long MCP handback tool","input_schema":{"type":"object","properties":{}}}}}]},
+        {"role":"user","content":"Done."}
+    ]});
+    let response = reqwest::Client::new().post(format!("{}/v1/messages", proxy.url)).json(&body).send().await.unwrap();
+    let status = response.status();
+    let reply: Value = response.json().await.unwrap();
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let sent = calls.lock().last().unwrap().clone();
+    let names: Vec<_> = sent["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names.len(), 2, "{sent}");
+    assert_eq!(names[0], "Read");
+    assert!(names[1].len() <= 64 && names[1] != long, "{}", names[1]);
+    let tool_use = reply["content"].as_array().unwrap().iter().find(|b| b["type"] == "tool_use").unwrap();
+    assert_eq!(tool_use["name"], long.as_str());
 }

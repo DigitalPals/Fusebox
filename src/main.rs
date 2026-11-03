@@ -546,23 +546,29 @@ fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-fn auth_signature(dir: &Path) -> Vec<(String, Option<SystemTime>)> {
-    let mut v: Vec<_> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .map(|e| (e.file_name().to_string_lossy().to_string(), mtime(&e.path())))
-                .collect()
-        })
-        .unwrap_or_default();
+/// The credential files and their times. A missing directory has none; one that exists
+/// but can't be read is an error, which says nothing about its files.
+fn auth_signature(dir: &Path) -> std::io::Result<Vec<(String, Option<SystemTime>)>> {
+    // As in the account scan: an error part-way through the listing is no complete answer.
+    let mut v: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .map(|e| (e.file_name().to_string_lossy().to_string(), mtime(&e.path())))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(e),
+    };
     v.sort();
-    v
+    Ok(v)
 }
 
 /// Hot-reloads the config file and the auth directory.
 async fn watch(app: Arc<App>) {
     let mut cfg_time = mtime(&app.cfg_path);
-    let mut auth = auth_signature(&app.cfg().auth_dir());
+    let mut auth = auth_signature(&app.cfg().auth_dir()).unwrap_or_default();
+    let mut unreadable = false;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         app.sessions.flush(app.cfg().session_affinity_idle_seconds);
@@ -582,13 +588,23 @@ async fn watch(app: Arc<App>) {
                 Err(e) => tracing::error!("config not reloaded: {e:#}"),
             }
         }
-        let sig = auth_signature(&app.cfg().auth_dir());
-        if sig != auth {
-            auth = sig;
-            if !app.reload_suppressed() {
-                tracing::info!("auth directory changed, reloading accounts");
-                app.reload_accounts();
+        // While the directory can't be read, its accounts and the last signature stay.
+        match auth_signature(&app.cfg().auth_dir()) {
+            Ok(sig) => {
+                unreadable = false;
+                if sig != auth {
+                    auth = sig;
+                    if !app.reload_suppressed() {
+                        tracing::info!("auth directory changed, reloading accounts");
+                        app.reload_accounts();
+                    }
+                }
             }
+            Err(e) if !unreadable => {
+                unreadable = true;
+                tracing::warn!("cannot read the auth directory, so its accounts stay as they were: {e}");
+            }
+            Err(_) => {}
         }
     }
 }
@@ -758,6 +774,19 @@ mod tests {
         assert!(ok && enabled(&t, "anything", Level::INFO));
         let (t, ok) = log_filter(Some("fusebox[span{field=1}]=debug"), false);
         assert!(!ok && enabled(&t, "fusebox", Level::INFO) && !enabled(&t, "fusebox", Level::DEBUG));
+    }
+
+    #[test]
+    fn an_unreadable_auth_directory_is_an_error_and_a_missing_one_is_empty() {
+        let dir = std::env::temp_dir().join(format!("fusebox-auth-signature-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.json"), "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        assert_eq!(auth_signature(&dir).unwrap().len(), 1);
+        // A file where the directory should be: ENOTDIR says nothing about the accounts.
+        assert!(auth_signature(&dir.join("a.json")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(auth_signature(&dir).unwrap().is_empty());
     }
 
     #[test]

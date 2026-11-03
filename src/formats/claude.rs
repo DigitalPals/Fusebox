@@ -72,6 +72,7 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
     };
 
     let messages = v["messages"].as_array().ok_or("`messages` must be an array")?;
+    let mut added = Vec::new();
     for m in messages {
         let role = match m["role"].as_str() {
             Some("assistant") => Role::Assistant,
@@ -80,23 +81,19 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
                 if !t.is_empty() {
                     req.system.push(t);
                 }
+                added.extend(tool_additions(&m["content"]));
                 continue;
             }
             _ => Role::User,
         };
         req.messages.push(Message { role, parts: blocks_to_parts(&m["content"]) });
     }
-    for t in v["tools"].as_array().into_iter().flatten() {
-        // Anthropic-defined server/client tools (web_search_*, bash_*, ...) have no schema.
-        let Some(name) = t["name"].as_str() else { continue };
-        if t.get("input_schema").is_none() {
-            continue;
+    req.tools.extend(v["tools"].as_array().into_iter().flatten().filter_map(tool_of));
+    // Tools added mid-conversation follow the top-level ones; a name already listed keeps its first definition.
+    for t in added.into_iter().filter_map(tool_of) {
+        if !req.tools.iter().any(|known| known.name == t.name) {
+            req.tools.push(t);
         }
-        req.tools.push(Tool {
-            name: name.to_string(),
-            description: t["description"].as_str().unwrap_or_default().to_string(),
-            parameters: super::chat::params_or_empty(&t["input_schema"]),
-        });
     }
     req.tool_choice = match v["tool_choice"]["type"].as_str() {
         Some("any") => ToolChoice::Required,
@@ -108,6 +105,31 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         req.parallel_tool_calls = Some(false);
     }
     Ok(req)
+}
+
+fn tool_of(t: &Value) -> Option<Tool> {
+    // Anthropic-defined server/client tools (web_search_*, bash_*, ...) have no schema.
+    let name = t["name"].as_str()?;
+    t.get("input_schema")?;
+    Some(Tool {
+        name: name.to_string(),
+        description: t["description"].as_str().unwrap_or_default().to_string(),
+        parameters: super::chat::params_or_empty(&t["input_schema"]),
+    })
+}
+
+/// Tool definitions that Claude Code declares mid-conversation in `tool_addition`
+/// blocks of system messages. A `tool_reference` names a tool that is already sent
+/// (`defer_loading` tools are sent up front), and a `tool_removal` leaves the tool
+/// callable, so neither changes the tool list.
+fn tool_additions(content: &Value) -> impl Iterator<Item = &Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["type"] == "tool_addition")
+        .map(|b| &b["tool"]["definition"])
+        .filter(|definition| definition.is_object())
 }
 
 fn blocks_to_parts(content: &Value) -> Vec<Part> {
@@ -188,6 +210,45 @@ pub fn uses_budget_thinking(model: &str) -> bool {
 fn rejects_sampling(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     ["opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "haiku-5-5", "fable", "mythos"].iter().any(|k| m.contains(k))
+}
+
+/// Claude 4.6 and later, Fable and Mythos answer a final assistant message (prefill)
+/// with a 400; Haiku 4.5 and older still continue from it.
+fn rejects_prefill(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("fable") || m.contains("mythos") {
+        return true;
+    }
+    // One- or two-digit version numbers; a date such as `20250514` is not a minor version.
+    let number = |s: &str| {
+        let digits = &s[..s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len())];
+        (1..=2).contains(&digits.len()).then(|| digits.parse::<u32>().ok()).flatten()
+    };
+    ["opus-", "sonnet-", "haiku-"].iter().any(|family| {
+        m.match_indices(family).any(|(at, _)| {
+            let mut version = m[at + family.len()..].split(['-', '.']);
+            version
+                .next()
+                .and_then(number)
+                .is_some_and(|major| (major, version.next().and_then(number).unwrap_or(0)) >= (4, 6))
+        })
+    })
+}
+
+/// Drops the final assistant message (prefill) of a translated Claude body when its
+/// model rejects prefill, unless it is the only message. Manual thinking, the only
+/// mode whose setup depends on the last assistant turn, is limited to models that
+/// accept prefill, so dropping it here cannot change that choice.
+pub(crate) fn drop_rejected_prefill(body: &mut Value) -> bool {
+    if !body["model"].as_str().is_some_and(rejects_prefill) {
+        return false;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return false };
+    if messages.len() < 2 || messages.last().is_none_or(|m| m["role"] != "assistant") {
+        return false;
+    }
+    messages.pop();
+    true
 }
 
 /// Models that reject forced tool use (`tool_choice` `any` or `tool`) even with thinking off.
@@ -843,4 +904,134 @@ pub fn render_full(agg: &Aggregate, model: &str) -> Value {
         "stop_sequence": null,
         "usage": usage_json(&agg.usage)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefill_is_dropped_only_for_models_that_reject_it() {
+        let rejecting = [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6[1m]",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-4-8",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-mythos-preview",
+        ];
+        let accepting = [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-haiku-latest",
+        ];
+        let body = |model: &str| {
+            json!({ "model": model, "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "Name a colour." }] },
+                { "role": "assistant", "content": [{ "type": "text", "text": "The colour is" }] },
+            ] })
+        };
+        for model in rejecting {
+            // Manual thinking inspects the last assistant turn; it never applies here.
+            assert!(!uses_budget_thinking(model), "{model}");
+            let mut b = body(model);
+            assert!(drop_rejected_prefill(&mut b), "{model}");
+            assert_eq!(b["messages"], json!([body(model)["messages"][0]]));
+            assert!(!drop_rejected_prefill(&mut b), "{model}: only one prefill is dropped");
+        }
+        for model in accepting {
+            let mut b = body(model);
+            assert!(!drop_rejected_prefill(&mut b), "{model}");
+            assert_eq!(b, body(model));
+        }
+        let mut only = json!({ "model": "claude-opus-5-5", "messages": [{ "role": "assistant", "content": "Hi" }] });
+        assert!(!drop_rejected_prefill(&mut only));
+        assert_eq!(only["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn translated_claude_requests_record_the_dropped_prefill() {
+        let chat = json!({ "model": "claude-opus-5-5", "messages": [
+            { "role": "user", "content": "Name a colour." },
+            { "role": "assistant", "content": "The colour is" },
+        ] });
+        let req = super::super::chat::parse_request(&chat).unwrap();
+        let mut body = build_request(&req, "claude-opus-5-5");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(super::super::generation_controls(&mut body, Format::Claude, false, false), ["prefill_unsupported"]);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+        // Other wire formats keep their messages.
+        let mut chat_body = chat.clone();
+        assert!(super::super::generation_controls(&mut chat_body, Format::Chat, false, false).is_empty());
+        assert_eq!(chat_body, chat);
+        let mut haiku = build_request(&req, "claude-haiku-4-5");
+        assert!(super::super::generation_controls(&mut haiku, Format::Claude, false, false).is_empty());
+        assert_eq!(haiku["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mid_conversation_tool_definitions_join_the_tool_list() {
+        let read = json!({ "name": "Read", "description": "Read a file",
+            "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } } });
+        let body = json!({
+            "model": "gpt-6.1-sol",
+            "tools": [
+                read,
+                { "name": "deferred_lookup", "description": "Look up notes", "defer_loading": true,
+                  "input_schema": { "type": "object", "properties": { "query": { "type": "string" } } } }
+            ],
+            "messages": [
+                { "role": "user", "content": "Start task" },
+                { "role": "system", "content": [
+                    { "type": "text", "text": "<system-reminder>SubagentHandback is now available</system-reminder>" },
+                    { "type": "tool_addition", "tool": { "type": "tool_definition", "definition": {
+                        "name": "SubagentHandback", "description": "Deliver subagent report",
+                        "input_schema": { "type": "object", "properties": { "summary": { "type": "string" } }, "required": ["summary"] }
+                    } } },
+                    { "type": "tool_addition", "tool": { "type": "tool_reference", "name": "deferred_lookup" } },
+                    { "type": "tool_removal", "tool": { "type": "tool_reference", "name": "Read" } }
+                ] },
+                { "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1", "name": "Read", "input": { "path": "README.md" } }] },
+                { "role": "system", "content": [
+                    { "type": "tool_addition", "tool": { "type": "tool_definition", "definition": {
+                        "name": "Read", "description": "A redefinition", "input_schema": { "type": "object" }
+                    } } },
+                    { "type": "tool_addition", "tool": { "type": "tool_definition", "definition": {
+                        "name": "SubagentHandback", "description": "Repeated", "input_schema": { "type": "object" }
+                    } } },
+                    { "type": "tool_addition", "tool": { "type": "tool_definition", "definition": { "name": "no_schema" } } }
+                ] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_1", "content": "file contents" }] }
+            ]
+        });
+        let req = parse_request(&body).unwrap();
+        let names: Vec<_> = req.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Read", "deferred_lookup", "SubagentHandback"]);
+        assert_eq!(req.tools[0].description, "Read a file");
+        assert_eq!(req.tools[2].description, "Deliver subagent report");
+        assert_eq!(req.tools[2].parameters["required"], json!(["summary"]));
+        assert_eq!(req.system, ["<system-reminder>SubagentHandback is now available</system-reminder>"]);
+        assert_eq!(req.messages.len(), 3);
+
+        let mut plain = body.clone();
+        plain["messages"] = json!([{ "role": "user", "content": "Start task" }]);
+        let names: Vec<_> = parse_request(&plain).unwrap().tools.into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["Read", "deferred_lookup"]);
+    }
 }

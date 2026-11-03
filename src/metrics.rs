@@ -18,15 +18,17 @@ pub mod performance;
 pub const VERSION: &str = env!("FUSEBOX_VERSION");
 
 /// Ready means it can answer: the usage database (when on) works and at least one
-/// enabled account isn't sitting out. Liveness stays `/healthz`.
+/// enabled account isn't sitting out or held out until a sign-in. Liveness stays `/healthz`.
 pub async fn readyz(State(app): State<Arc<App>>) -> Response {
     let now = Utc::now();
     let accounts = app.pool.all();
     let ready = accounts
         .iter()
         .filter(|a| {
+            // Before the state lock, which `held_out` takes too.
+            let held = a.held_out();
             let st = a.state.lock();
-            !st.disabled && !st.pauses(now).contains_key("*")
+            !held && !st.disabled && !st.pauses(now).contains_key("*")
         })
         .count();
     let usage = match (&app.usage, &app.usage_error) {
@@ -90,6 +92,15 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
         ],
     );
     metric(
+        "fusebox_private_events_dropped_total",
+        "counter",
+        "Private Responses events (Codex's and Meta's) left out for clients that aren't Codex, by client program.",
+        crate::proxy::private_dropped()
+            .into_iter()
+            .map(|(client, n)| (format!("client=\"{}\"", label(client)), n as f64))
+            .collect(),
+    );
+    metric(
         "fusebox_requests_in_flight",
         "gauge",
         "Requests being answered now.",
@@ -114,8 +125,9 @@ pub async fn metrics(State(app): State<Arc<App>>) -> Response {
     for a in app.pool.all() {
         let id =
             format!("account=\"{}\",provider=\"{}\",label=\"{}\"", label(&a.id), a.provider.as_str(), label(&a.label));
+        let held = a.held_out();
         let st = a.state.lock();
-        let up = !st.disabled && !st.pauses(now).contains_key("*");
+        let up = !held && !st.disabled && !st.pauses(now).contains_key("*");
         ready.push((id.clone(), f64::from(u8::from(up))));
         in_flight.push((id.clone(), st.active_requests.load(Ordering::Relaxed) as f64));
         requests.push((id.clone(), st.counters.requests as f64));

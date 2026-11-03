@@ -72,6 +72,9 @@ const LEVELS: &[(&str, &[&str])] = &[
 
 const ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Models Devin also serves in fast mode, as `<model>-<level>-fast` UIDs.
+const FAST: &[&str] = &["claude-opus-5-5", "claude-opus-5"];
+
 fn has_effort_suffix(m: &str) -> bool {
     [
         "-none",
@@ -154,9 +157,16 @@ pub fn model_uid(model: &str, effort: Option<&str>) -> String {
     match LEVELS.iter().find(|(m, _)| *m == base) {
         Some((_, levels)) => {
             let def = default_effort(&base, levels);
+            // `(high-fast)` picks the fast UID at that level, and `(fast)` at the default
+            // level, where the model has fast UIDs. `Some(None)` is the default level.
+            let fast = effort.filter(|_| FAST.contains(&base.as_str())).and_then(|e| match e {
+                "fast" => Some(None),
+                e => e.strip_suffix("-fast").filter(|l| *l == "none" || ORDER.contains(l)).map(Some),
+            });
+            let effort = fast.unwrap_or(effort);
             let level =
                 if effort == Some("none") && !levels.contains(&"none") { def } else { clamp(effort, levels, &def) };
-            format!("{base}-{level}")
+            format!("{base}-{level}{}", if fast.is_some() { "-fast" } else { "" })
         }
         None => base,
     }
@@ -850,6 +860,27 @@ mod tests {
         assert_eq!(model_uid("gpt-6-1-sol", Some("none")), "gpt-6-1-sol-medium");
         assert_eq!(model_uid("claude-haiku-5-5", Some("max")), "claude-haiku-5-5-max");
         assert_eq!(model_uid("claude-sonnet-5-5", Some("xhigh")), "claude-sonnet-5-5-xhigh");
+    }
+
+    #[test]
+    fn fast_efforts_pick_fast_uids_only_where_devin_has_them() {
+        assert_eq!(model_uid("claude-opus-5-5", Some("high-fast")), "claude-opus-5-5-high-fast");
+        assert_eq!(model_uid("claude-opus-5-5", Some("max-fast")), "claude-opus-5-5-max-fast");
+        assert_eq!(model_uid("claude-opus-5-5", Some("fast")), "claude-opus-5-5-medium-fast");
+        assert_eq!(model_uid("claude-opus-5-5", Some("none-fast")), "claude-opus-5-5-medium-fast");
+        assert_eq!(model_uid("claude-opus-5", Some("xhigh-fast")), "claude-opus-5-xhigh-fast");
+        assert_eq!(model_uid("claude-opus-5", Some("minimal-fast")), "claude-opus-5-low-fast");
+        assert_eq!(model_uid("claude-opus-5-5-high-fast", None), "claude-opus-5-5-high-fast");
+        // Other models, and unknown levels, keep the plain clamped UID.
+        assert_eq!(model_uid("claude-opus-5-5", Some("turbo-fast")), "claude-opus-5-5-medium");
+        assert_eq!(model_uid("claude-sonnet-5-5", Some("high-fast")), "claude-sonnet-5-5-medium");
+        assert_eq!(model_uid("claude-sonnet-5-5", Some("fast")), "claude-sonnet-5-5-medium");
+        assert_eq!(model_uid("claude-haiku-4-5", Some("high-fast")), "MODEL_PRIVATE_11");
+        assert_eq!(model_uid("swe-2", Some("high-fast")), "swe-2-high");
+        // The model-name suffix reaches the UID.
+        let (model, reasoning) = crate::ir::split_model_suffix("claude-opus-5-5(high-fast)");
+        let req = Request { reasoning, ..Default::default() };
+        assert_eq!(build_request(&req, &model)["model_uid"], "claude-opus-5-5-high-fast");
     }
 
     #[test]

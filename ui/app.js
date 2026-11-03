@@ -1215,6 +1215,9 @@ function alertsList() {
       const others = S.overview?.session_affinity && accounts.some((x) => x.id !== a.id && x.provider === a.provider && acctState(x).cls === 'ready');
       out.push({ lvl: 'warn', id: a.id, title: `${spent ? windowTitle(spent) : 'Usage'} limit used up`,
         detail: `${st.resetUnknown ? 'Provider did not report a reset time. Refresh quota to check availability.' : `Back at ${when(back)}, in ${left(back)}.`}${others ? ` Its sessions moved to another ${provName(a)} account.` : ''}`, act: 'View' });
+    } else if (st.cls === 'cooling' && st.kind === 'credit') {
+      out.push({ lvl: 'err', id: a.id, title: 'API credit used up',
+        detail: `Add credit to this API key. Requests skip it until ${when(st.until)}, in ${left(st.until)}.`, act: 'View' });
     } else if (st.cls === 'cooling' && st.kind === 'rate_limit') {
       out.push({ lvl: 'warn', id: a.id, title: 'Rate limited',
         detail: `${st.model === '*' ? 'Every model' : st.model} is paused until ${when(st.until)}, in ${left(st.until)}.`, act: 'View' });
@@ -3123,6 +3126,8 @@ function failuresByModel() {
 function routeStepText(step, a) {
   const st = acctState(a);
   if (step.state === 'disabled' || a.disabled) return { txt: 'Disabled · skipped', short: 'Disabled', cls: 'off' };
+  // Held out until a sign-in, even after its error was cleared or the account reset.
+  if (step.state === 'signin') return { txt: 'Sign-in expired · skipped', short: 'Sign-in expired', cls: 'err' };
   if (step.state === 'cooling' || st.cls === 'cooling') {
     if (st.resetUnknown) return { txt: 'Quota used up · Reset time unknown', short: 'Quota used up', cls: 'warn' };
     const until = step.until || st.until;

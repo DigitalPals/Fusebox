@@ -864,6 +864,7 @@ fn gemini(t: &Target, mut body: Value) -> Prepared {
     if let Some(o) = body.as_object_mut() {
         o.remove("model");
     }
+    crate::formats::gemini::drop_empty_system_parts(&mut body);
     let headers = vec![
         ("x-goog-api-key".into(), token),
         ("content-type".into(), "application/json".into()),
@@ -889,6 +890,7 @@ fn vertex(t: &Target, mut body: Value) -> Prepared {
     if let Some(o) = body.as_object_mut() {
         o.remove("model");
     }
+    crate::formats::gemini::drop_empty_system_parts(&mut body);
     let action = gemini_action(t);
     let mut headers = vec![
         ("content-type".into(), "application/json".into()),
@@ -915,8 +917,10 @@ fn vertex(t: &Target, mut body: Value) -> Prepared {
 
 // ----------------------------------------------------------------- antigravity
 
-fn antigravity(t: &Target, body: Value) -> Prepared {
+fn antigravity(t: &Target, mut body: Value) -> Prepared {
     let (token, _, _, _) = creds(t.acct);
+    // Before wrapping: the envelope moves the instruction under `request`.
+    crate::formats::gemini::drop_empty_system_parts(&mut body);
     let project = crate::antigravity::project(t.acct);
     let base = crate::antigravity::request_base(t.acct);
     let path = if t.stream { "streamGenerateContent?alt=sse" } else { "generateContent" };

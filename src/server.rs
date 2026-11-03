@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 use crate::formats::{self, Frame};
 use crate::ir::Format;
@@ -43,7 +43,15 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(middleware::from_fn_with_state(app.clone(), request_body::encoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), client_auth))
         .layer(DefaultBodyLimit::max(request_body::MAX_BODY_SIZE))
-        .layer(CorsLayer::permissive());
+        // Any origin, with no cookies or credentials. Headers a preflight asks for are
+        // allowed by name: the `*` of `CorsLayer::permissive` doesn't cover `Authorization`.
+        .layer(
+            CorsLayer::new()
+                .allow_headers(AllowHeaders::mirror_request())
+                .allow_methods(Any)
+                .allow_origin(Any)
+                .expose_headers(Any),
+        );
 
     Router::new()
         .merge(api)
@@ -672,9 +680,14 @@ async fn codex_models(
 fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
     match r {
         Reply::Json(v) => axum::Json(v).into_response(),
-        Reply::Error(status, v) => {
+        Reply::Error(status, mut v) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-            (code, axum::Json(v)).into_response()
+            let wait = proxy::take_retry_after(&mut v);
+            let mut resp = (code, axum::Json(v)).into_response();
+            if let Some(wait) = wait {
+                resp.headers_mut().insert(header::RETRY_AFTER, wait.into());
+            }
+            resp
         }
         Reply::Stream { frames, account } => {
             let (body, ctype) = if json_array {
@@ -895,6 +908,53 @@ mod tests {
             let src = icon["src"].as_str().unwrap();
             let resp = router(app.clone()).oneshot(Request::get(src).body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{src}");
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_apps_may_send_a_bearer_key_to_the_proxy_routes_only() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            api_keys: vec!["client-key".into()],
+            ..Default::default()
+        };
+        let app = App::new(cfg, "/nonexistent/config.yaml".into());
+        let preflight = |path: &str| {
+            Request::builder()
+                .method("OPTIONS")
+                .uri(path)
+                .header(header::ORIGIN, "https://app.example")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type,x-stainless-os")
+                .body(Body::empty())
+                .unwrap()
+        };
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let resp = router(app.clone()).oneshot(preflight(path)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let h = resp.headers();
+            assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*", "{path}");
+            assert_eq!(h[header::ACCESS_CONTROL_ALLOW_HEADERS], "authorization,content-type,x-stainless-os", "{path}");
+            assert_eq!(h[header::ACCESS_CONTROL_ALLOW_METHODS], "*", "{path}");
+            assert!(!h.contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS), "{path}");
+        }
+        // The answer itself still exposes every header, and is still authenticated.
+        let request = Request::get("/v1/models").header(header::ORIGIN, "https://app.example");
+        let resp = router(app.clone()).oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS], "*");
+        assert!(!resp.headers().contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+
+        // The management API, the dashboard and metrics get no CORS headers at all.
+        for path in ["/api/accounts", "/api/config", "/", "/metrics"] {
+            let resp = router(app.clone()).oneshot(preflight(path)).await.unwrap();
+            let cors = resp.headers().keys().filter(|k| k.as_str().starts_with("access-control-")).count();
+            assert_eq!(cors, 0, "{path}: {:?}", resp.headers());
+            let request = Request::get(path).header(header::ORIGIN, "https://app.example");
+            let resp = router(app.clone()).oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            let cors = resp.headers().keys().filter(|k| k.as_str().starts_with("access-control-")).count();
+            assert_eq!(cors, 0, "{path}: {:?}", resp.headers());
         }
     }
 }

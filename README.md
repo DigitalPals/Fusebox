@@ -242,6 +242,7 @@ gpt-6-astra(high)                  effort level
 claude-opus-5-5(max)               adaptive thinking at max effort
 claude-sonnet-4-5-20250929(16000)  thinking budget in tokens
 gemini-2.5-pro(0)                  thinking off
+devin/claude-opus-5-5(high-fast)   Devin fast mode at high effort; (fast) uses the default effort
 ```
 
 ### Images
@@ -443,7 +444,23 @@ Streams are held back until their first content, at most 5 seconds after they st
 
 Rate limits and used-up limits are kept in `.cooldowns.state` in the auth directory, so a restart doesn't send requests straight back to an account that is sitting out.
 
-A 429 that says the provider is at capacity ("Codex is at capacity, please try again later") is an overload, not the account's rate limit: it is retried on the same account after 1 and 3 seconds, and if it lasts only that request fails, with the provider's error. The model stays available to the account's other sessions.
+When a provider refuses a refresh token for good (`invalid_grant`, `token_revoked`, an expired, reused or invalidated refresh token, or a bare 401 from OpenAI's token endpoint), Fusebox stops asking with that token. It first checks the credential file, in case another program already renewed the token there, and uses that one if so. Otherwise the account keeps serving while its access token is valid, then sits out of rotation, as a switched-off account does, until a sign-in or a different refresh token in its file. Its error says to sign in again, and that shows on the dashboard and in notifications rather than as a cooldown. A restart keeps that: `.cooldowns.state` remembers the refused token by its digest, never the token. `invalid_client` is not held: refreshing waits 5 minutes, doubling up to an hour. Vertex and Meta mint their own keys and are not held.
+
+If the auth directory exists but can't be read, its accounts stay as they were, with their sessions and cooldowns, until it can be read again; an empty or deleted directory removes them.
+
+Meta answers a Muse Code subscription's key used from another client with 403 `client_attestation_denied`. That rejects the request, not the account: Fusebox skips Meta's other accounts for that request, tries another provider that serves the same model, and otherwise returns Meta's message. The account gets no pause, error or failed-request count.
+
+When every account for a model is sitting out, the 429 says when the next one is back. If a rate limit, a used-up limit or a quota check keeps it away for a minute or less, the answer carries a `Retry-After` header, which clients wait out before trying again. A longer wait gets no header, because clients would sleep through it; OpenAI clients get a `usage_limit_reached` error with `resets_at` instead, which Codex shows as a usage limit. A sign-in or permission problem is never offered as a wait.
+
+A 429 that says the provider is at capacity ("Codex is at capacity, please try again later", or Codex's `turn_rate_limit_exceeded`) is an overload, not the account's rate limit. If it names a wait of 10 seconds or less, or none, it is retried on the same account after 1 and 3 seconds; a longer wait moves the request to the next account at once, since retries within it fail. If no account answers, only that request fails, with the provider's error and any wait it named as `Retry-After` (at most ten minutes), so Codex sits out just that turn. That holds for a capacity error inside a successful stream too. The model stays available to the account's other sessions.
+
+On a Codex WebSocket, a rate limit or capacity error that arrives before anything else moves the turn to HTTP, with the retries and failover above. A plain rate limit does so only when another account can take the model; otherwise the client gets the provider's own error. WebSocket error events carry any wait in their `headers`, where Codex reads it.
+
+An Anthropic API key whose credit has run out (a 400 "Your credit balance is too low…") sits out for 30 minutes and the request moves to the next account; the dashboard and notifications say "API credit used up". Meanwhile a request with no other account left gets that 400 again, without asking Anthropic, also after a restart. Subscriptions are not paused for it.
+
+ChatGPT's 502 "response protection is unavailable" refuses the request as sent, so it is answered at once, also when it arrives inside a stream, without retries on this account or another, and the account shows no error. The request log counts it as `response_protection_unavailable`.
+
+Codex asks for remote compaction (a `compaction_trigger` input item) by provider, not by model, and Kimi and Meta can't do it, so such a request leaves their accounts out. If only they serve the model, it gets a 400 without calling them: point Codex at those models through a model provider entry of their own with `capabilities.remote_compaction = "unsupported"`, and Codex compacts locally.
 
 Temporary upstream failures (connection failures, capacity 429s and HTTP 500, 502, 503 and 529, including errors before a stream's first content) appear as a recent account error for 30 seconds. The error then clears automatically, even if the account is idle; the original failure remains in the request log. Ready means the account is eligible to serve requests, without sending an inference to probe it.
 
@@ -521,7 +538,7 @@ stream-limits:
 
 The decoder bounds SSE events and unfinished lines; native WebSocket events also have a size check. Models whose names contain `image`, `audio` or `video` use the larger media limit. Once the first event has arrived, reaching the bootstrap threshold releases buffered chunks for streaming; it does not repeat inference. Before the first event, the first-token deadline still applies and the event limit bounds buffering. An oversized event ends the stream with an error and retains usage already received. A nonzero pre-output timeout gives HTTP headers and the first event one absolute deadline, or bounds the first native WebSocket event including its send. Expiry is terminal `504`, with no automatic inference retry. Zero keeps the existing timeout behavior.
 
-Output limits are preserved during translation. Manual Claude thinking needs an output limit greater than 1,024 tokens; incompatible requests receive a `400` instead of silently increasing the limit. Gemini reasoning suffixes use the same mapping for native and translated requests.
+Output limits are preserved during translation. Manual Claude thinking needs an output limit greater than 1,024 tokens; incompatible requests receive a `400` instead of silently increasing the limit. Gemini reasoning suffixes use the same mapping for native and translated requests. Claude 4.6 and later, Fable and Mythos reject a final assistant message (prefill), so translated requests to them leave it out and record `prefill_unsupported` in request diagnostics; native Claude requests are sent as they are.
 
 Chat↔Responses translation retains late system/developer messages in their original positions, with cache boundaries. ChatGPT subscription requests map system roles to developer roles at the OAuth boundary, on HTTP and WebSocket transports. Public OpenAI API requests keep their original roles. Routes to Claude, Gemini or Devin add late instructions to the system prompt in their original order, as before, rather than demoting them to user turns. Translated low-verbosity preferences are retained for supported GPT-5/6 models on the Codex provider. Translated OpenAI service tiers require `translation.allow-service-tier: true`; dropped controls appear in request diagnostics. Native requests keep caller controls. Codex subscription preparation still removes output caps that its backend does not accept, so those caps are not a subscription billing limit.
 
@@ -558,7 +575,7 @@ To sign in accounts on a server, open the dashboard, click **Connect account**, 
 
 On Ctrl-C or SIGTERM, Fusebox stops taking connections, tells open WebSockets to reconnect, and gives requests in flight up to 10 seconds before it saves sessions, cooldowns and the usage database, well inside `TimeoutStopSec`.
 
-**Keeping an eye on it.** `GET /healthz` answers while the process runs. `GET /readyz` answers 200 when at least one account can take requests and the usage database works, and 503 with the reason otherwise. `GET /metrics` serves Prometheus metrics (requests, tokens, each account's readiness, load and quota windows, faults, client spend), with the dashboard's authentication: from localhost, or with the management key as a bearer token:
+**Keeping an eye on it.** `GET /healthz` answers while the process runs. `GET /readyz` answers 200 when at least one account can take requests and the usage database works, and 503 with the reason otherwise. `GET /metrics` serves Prometheus metrics (requests, tokens, each account's readiness, load and quota windows, faults, client spend, private Responses events left out per client program), with the dashboard's authentication: from localhost, or with the management key as a bearer token:
 
 ```yaml
 scrape_configs:

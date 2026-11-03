@@ -339,3 +339,330 @@ async fn codex_interrupts_reach_the_running_native_response() {
         assert!(!text.contains("unsupported message type"), "{text}");
     }
 }
+
+async fn client_with(server: &Server, headers: &[(&'static str, &str)]) -> Upstream {
+    let url = format!("{}/v1/responses", server.url.replace("http://", "ws://"));
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(url).unwrap();
+    for (name, value) in headers {
+        request.headers_mut().insert(*name, value.parse().unwrap());
+    }
+    tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+
+/// Every event of one turn, through its terminal event.
+async fn turn_events(client: &mut Upstream) -> Vec<Value> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        loop {
+            let tungstenite::Message::Text(text) = client.next().await.unwrap().unwrap() else { continue };
+            let value: Value = serde_json::from_str(&text).unwrap();
+            let terminal = matches!(value["type"].as_str(), Some("response.completed" | "response.failed" | "error"));
+            events.push(value);
+            if terminal {
+                return events;
+            }
+        }
+    })
+    .await
+    .expect("the turn did not end")
+}
+
+/// Codex parses an `error` event with `code: Option<String>` and drops the event otherwise.
+fn codex_reads(event: &Value) -> &str {
+    assert_eq!(event["type"], "error", "{event}");
+    assert!(event["status"].is_u64(), "{event}");
+    event["error"]["code"].as_str().unwrap_or_else(|| panic!("Codex ignores this error event: {event}"))
+}
+
+#[derive(Default)]
+struct Turns {
+    /// Accounts whose socket received a turn, in order.
+    websocket: parking_lot::Mutex<Vec<String>>,
+    /// Accounts that served a turn over HTTP.
+    http: parking_lot::Mutex<Vec<String>>,
+}
+
+fn bearer(headers: &axum::http::HeaderMap) -> String {
+    headers["authorization"].to_str().unwrap().trim_start_matches("Bearer ").to_string()
+}
+
+/// A Codex upstream whose socket answers each turn with `frames`, and whose HTTP
+/// endpoint completes it.
+async fn codex_upstream(frames: Vec<Value>) -> (Server, Arc<Turns>) {
+    let turns = Arc::new(Turns::default());
+    let (ws_turns, http_turns) = (turns.clone(), turns.clone());
+    let router = axum::Router::new().route(
+        "/responses",
+        axum::routing::get(move |headers: axum::http::HeaderMap, upgrade: axum::extract::ws::WebSocketUpgrade| {
+            let (turns, frames) = (ws_turns.clone(), frames.clone());
+            async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if !matches!(message, axum::extract::ws::Message::Text(_)) {
+                            continue;
+                        }
+                        turns.websocket.lock().push(bearer(&headers));
+                        for frame in &frames {
+                            let text = axum::extract::ws::Message::Text(frame.to_string().into());
+                            if socket.send(text).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                })
+            }
+        })
+        .post(move |headers: axum::http::HeaderMap| {
+            let turns = http_turns.clone();
+            async move {
+                let account = bearer(&headers);
+                turns.http.lock().push(account.clone());
+                let events = [
+                    json!({"type":"response.created","response":{"id":"resp-http","status":"in_progress"}}),
+                    json!({"type":"response.output_text.delta","delta":account}),
+                    json!({"type":"response.completed","response":{"id":"resp-http","status":"completed","output":[],
+                        "usage":{"input_tokens":5,"output_tokens":1}}}),
+                ];
+                let body: String = events.iter().map(|v| format!("data: {v}\n\n")).collect();
+                ([("content-type", "text/event-stream")], body)
+            }
+        }),
+    );
+    (serve(router).await, turns)
+}
+
+/// Codex subscriptions `a` and `b` on one upstream, both able to open native sockets.
+fn codex_app(base: &str) -> Arc<App> {
+    let key = |name: &str| KeyEntry {
+        api_key: name.into(),
+        base_url: Some(base.into()),
+        label: Some(name.into()),
+        ..Default::default()
+    };
+    let cfg = Config { auth_dir: "/nonexistent".into(), codex_api_key: vec![key("a"), key("b")], ..Default::default() };
+    let app = App::new(cfg, "/nonexistent/config.yaml".into());
+    for account in app.pool.all() {
+        *account.cred.write() = Credential::OAuth(OAuth {
+            access_token: account.label.clone(),
+            base_url: Some(base.into()),
+            ..Default::default()
+        });
+        account.state.lock().credential_identity = account.cred.read().identity(account.provider);
+    }
+    app
+}
+
+#[tokio::test]
+async fn a_busy_first_frame_falls_back_to_http_but_never_after_output_or_on_a_5xx() {
+    let capacity = json!({"type":"error","status":429,"error":{"type":"server_error","code":"turn_rate_limit_exceeded",
+        "message":"Codex is at capacity, please try again later"}});
+    let rate_limit = json!({"type":"error","status":429,"error":{"code":"rate_limit_exceeded","message":"slow down"}});
+    let created = json!({"type":"response.created","response":{"id":"resp-ws","status":"in_progress"}});
+    let delta = json!({"type":"response.output_text.delta","delta":"partial"});
+    let overloaded = json!({"type":"response.failed","response":{"id":"resp-ws","status":"failed",
+        "error":{"code":"server_is_overloaded","message":"Codex is overloaded"}}});
+    let server_error =
+        json!({"type":"error","status":503,"error":{"code":"server_is_overloaded","message":"overloaded"}});
+    let rate_limits =
+        json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300}}});
+    for (name, frames, falls_back) in [
+        ("capacity first", vec![capacity.clone()], true),
+        ("rate limit first", vec![rate_limit.clone()], true),
+        // A frame only Fusebox read reached no client: still nothing forwarded.
+        ("capacity after a private frame", vec![rate_limits, capacity.clone()], true),
+        ("capacity after output", vec![created.clone(), delta.clone(), capacity.clone()], false),
+        ("rate limit after created", vec![created.clone(), rate_limit], false),
+        ("5xx response.failed first", vec![overloaded], false),
+        ("5xx error first", vec![server_error], false),
+    ] {
+        let (upstream, turns) = codex_upstream(frames.clone()).await;
+        let app = codex_app(&upstream.url);
+        let proxy = serve(crate::server::router(app.clone())).await;
+        let mut socket = client(&proxy).await;
+        create(&mut socket, true, "question").await;
+        let events = turn_events(&mut socket).await;
+        let websocket = turns.websocket.lock().clone();
+        let http = turns.http.lock().clone();
+        assert_eq!(websocket.len(), 1, "{name}");
+        if falls_back {
+            // The client sees one clean HTTP turn, never the upstream's error.
+            let kinds: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+            assert_eq!(kinds, ["response.created", "response.output_text.delta", "response.completed"], "{name}");
+            assert_eq!(http.len(), 1, "{name}");
+            if name.starts_with("rate limit") {
+                assert_ne!(http[0], websocket[0], "{name}: a rate limit moves the turn to another account");
+            }
+        } else {
+            assert!(http.is_empty(), "{name}: a turn that may have run, or was seen, is never replayed");
+            let shown: Vec<_> = frames.iter().filter(|f| f["type"] != "codex.rate_limits").cloned().collect();
+            assert_eq!(events, shown, "{name}");
+        }
+        let account = app.pool.all().into_iter().find(|a| a.label == websocket[0]).unwrap();
+        let rate_limited = account.cooling_until("gpt-6.1-sol").is_some();
+        assert_eq!(rate_limited, name.starts_with("rate limit"), "{name}: only a plain rate limit pauses the model");
+    }
+}
+
+#[tokio::test]
+async fn native_sockets_send_private_events_to_codex_clients_only() {
+    let frames = vec![
+        json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":40.0,"window_minutes":300,"reset_after_seconds":3600}}}),
+        json!({"type":"response.metadata","metadata":{"buffer":true}}),
+        json!({"type":"response.created","response":{"id":"resp-private","status":"in_progress"}}),
+        json!({"type":"codex.response.metadata","headers":{"x-models-etag":"etag"}}),
+        json!({"type":"response.output_text.delta","delta":"OK"}),
+        json!({"type":"response.subscription_usage","usage":{"credits":1}}),
+        json!({"type":"responsesapi.websocket_timing","elapsed_ms":3}),
+        json!({"type":"response.completed","response":{"id":"resp-private","status":"completed","output":[],
+            "usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":4}}}}),
+    ];
+    let t3 = "T3 Code/0.164.0 (Mac OS 26.5.2; arm64) xterm-256color (T3 Code; 0.5.1)";
+    for (headers, codex) in [
+        (vec![("user-agent", "OpenAI/Python 2.3.0")], false),
+        (vec![], false),
+        (vec![("user-agent", t3), ("originator", "T3 Code")], true),
+        (vec![("user-agent", crate::upstream::CODEX_USER_AGENT), ("originator", "codex-tui")], true),
+    ] {
+        let (upstream, _turns) = codex_upstream(frames.clone()).await;
+        let app = codex_app(&upstream.url);
+        let proxy = serve(crate::server::router(app.clone())).await;
+        let mut socket = client_with(&proxy, &headers).await;
+        create(&mut socket, true, "question").await;
+        let events = turn_events(&mut socket).await;
+        if codex {
+            assert_eq!(events, frames, "{headers:?}");
+        } else {
+            let kinds: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+            assert_eq!(kinds, ["response.created", "response.output_text.delta", "response.completed"], "{headers:?}");
+        }
+        // Fusebox read the quota event either way, and recorded the usage.
+        let account = app.pool.all().into_iter().find(|a| a.state.lock().quota.windows.len() == 1);
+        assert!(account.is_some(), "{headers:?}: the quota event was not observed");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(log) = app.stats.recent.lock().front().cloned() {
+                    assert_eq!(log.status, 200);
+                    assert_eq!((log.input_tokens, log.output_tokens, log.cache_tokens), (8, 2, 4));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn translated_and_refused_turns_send_error_events_codex_can_read() {
+    let upstream = serve(axum::Router::new().route(
+        "/v1/messages",
+        post(|axum::Json(body): axum::Json<Value>| async move {
+            let prompt = body["messages"][0]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+            let message = if prompt == "long" {
+                "prompt is too long: 210000 tokens > 200000 maximum"
+            } else {
+                "messages: text content blocks must be non-empty"
+            };
+            let error = json!({"type":"error","error":{"type":"invalid_request_error","message":message}});
+            (axum::http::StatusCode::BAD_REQUEST, axum::Json(error))
+        }),
+    ))
+    .await;
+    let app = app(&upstream.url, false);
+    let mut cfg = (*app.cfg()).clone();
+    cfg.named_clients = vec![crate::config::NamedClient {
+        id: "socket".into(),
+        label: "socket".into(),
+        key: "fbx_socket".into(),
+        requests_per_minute: Some(2),
+        ..Default::default()
+    }];
+    app.set_config(cfg);
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let mut socket = client_with(&proxy, &[("authorization", "Bearer fbx_socket")]).await;
+
+    create(&mut socket, false, "long").await;
+    let events = turn_events(&mut socket).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(codex_reads(&events[0]), "context_length_exceeded");
+    assert_eq!(events[0]["status"], 400);
+    assert!(events[0]["error"]["message"].as_str().unwrap().starts_with("prompt is too long"));
+
+    create(&mut socket, false, "other").await;
+    let events = turn_events(&mut socket).await;
+    assert_eq!(codex_reads(&events[0]), "invalid_request_error");
+    assert_eq!(events[0]["status"], 400);
+
+    // The key's third turn this minute is refused before any upstream.
+    create(&mut socket, false, "long").await;
+    let events = turn_events(&mut socket).await;
+    assert_eq!(codex_reads(&events[0]), "rate_limit_exceeded");
+    assert_eq!(events[0]["status"], 429);
+    assert!(events[0]["error"]["message"].as_str().unwrap().contains("requests a minute"));
+
+    // Codes the body already names as strings are kept as they are.
+    let body = json!({"error":{"message":"gone","code":"previous_response_not_found"}});
+    let event: Value = serde_json::from_str(&error_event(400, &body)).unwrap();
+    assert_eq!(codex_reads(&event), "previous_response_not_found");
+    let event: Value =
+        serde_json::from_str(&error_event(502, &json!({"error":{"message":"x","type":"upstream_error"}}))).unwrap();
+    assert!(event["error"].get("code").is_none());
+    let event: Value =
+        serde_json::from_str(&error_event(401, &crate::formats::error_body(Format::Responses, 401, "no key"))).unwrap();
+    assert_eq!(codex_reads(&event), "invalid_api_key");
+}
+
+/// With no other account to take it, a plain rate limit as the first frame reaches the
+/// client as the provider sent it: falling back would only meet the pause it just set.
+#[tokio::test]
+async fn a_plain_rate_limit_on_the_only_account_reaches_the_client_as_sent() {
+    let rate_limit = json!({"type":"error","status":429,"error":{"code":"rate_limit_exceeded","message":"slow down"}});
+    let (upstream, turns) = codex_upstream(vec![rate_limit.clone()]).await;
+    let app = codex_app(&upstream.url);
+    let only = app.pool.all().into_iter().find(|a| a.label == "a").unwrap();
+    for account in app.pool.all().into_iter().filter(|a| a.id != only.id) {
+        account.state.lock().disabled = true;
+    }
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let mut socket = client(&proxy).await;
+    create(&mut socket, true, "question").await;
+    let events = turn_events(&mut socket).await;
+    assert_eq!(events, [rate_limit]);
+    assert!(turns.http.lock().is_empty(), "no HTTP turn");
+    assert!(only.cooling_until("gpt-6.1-sol").is_some(), "the rate limit still pauses the model");
+}
+
+/// A socket has no response headers, so a wait for the client goes in the error event's
+/// own `headers`, where Codex reads it; the private marker never reaches the client.
+#[test]
+fn error_events_carry_a_wait_in_their_headers() {
+    let body = json!({"error":{"message":"all accounts are rate limited","code":429},"__fusebox_retry_after":30});
+    let event: Value = serde_json::from_str(&error_event(429, &body)).unwrap();
+    assert_eq!(event["headers"]["retry-after"], "30");
+    assert_eq!(event["error"]["code"], "rate_limit_exceeded");
+    assert!(!event.to_string().contains("__fusebox"), "{event}");
+    let plain: Value = serde_json::from_str(&error_event(400, &json!({"error":{"message":"bad"}}))).unwrap();
+    assert!(plain.get("headers").is_none(), "{plain}");
+}
+
+/// A 401 after output, on an account whose refresh token was refused for good, puts it
+/// out until a sign-in, as over HTTP; a cooldown would only hide that it needs one.
+#[tokio::test]
+async fn a_refused_token_after_output_puts_a_held_account_out_rather_than_cooling_it() {
+    let created = json!({"type":"response.created","response":{"id":"resp-ws","status":"in_progress"}});
+    let refused = json!({"type":"error","status":401,"error":{"code":"invalid_api_key","message":"token revoked"}});
+    let (upstream, _turns) = codex_upstream(vec![created, refused]).await;
+    let app = codex_app(&upstream.url);
+    for account in app.pool.all() {
+        account.state.lock().refresh_hold = Some(crate::accounts::RefreshHold::new("", "invalid_grant".into()));
+        assert!(!account.held_out(), "it serves while its access token lasts");
+    }
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let mut socket = client(&proxy).await;
+    create(&mut socket, true, "question").await;
+    let events = turn_events(&mut socket).await;
+    assert_eq!(events.last().unwrap()["status"], 401, "{events:?}");
+    let refused = app.pool.all().into_iter().find(|a| a.held_out()).expect("the refusing account is out");
+    assert!(refused.state.lock().cooldowns.is_empty(), "no cooldown hides the sign-in");
+}

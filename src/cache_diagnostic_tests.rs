@@ -61,7 +61,7 @@ async fn provider_cache_diagnostics_capture_full_http_and_native_websocket_wire_
 async fn provider_cache_diagnostics_survive_passthrough_and_collected_sse_without_rewriting_wire_data() {
     let wire = json!({"type":"response.completed", "response":response(miss())});
     let (app, tracker) = tracker("http");
-    let mut stream = passthrough_stream(bytes(&wire), Format::Responses, tracker, false, 16 << 20);
+    let mut stream = passthrough_stream(bytes(&wire), Format::Responses, tracker, false, 16 << 20, false);
     let frame = stream.next().await.unwrap();
     assert_eq!(serde_json::from_str::<Value>(&frame.data).unwrap(), wire);
     // Dropping after the terminal event must still retain diagnostics.

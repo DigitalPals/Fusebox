@@ -195,7 +195,7 @@ async fn broken_http_body_records_sanitized_source_chain() {
     });
     let response = reqwest::get(format!("http://{address}/private?token=secret")).await.unwrap();
     let mut stream =
-        passthrough_stream(Box::pin(response.bytes_stream()), Format::Responses, tracker(&app), false, 16 << 20);
+        passthrough_stream(Box::pin(response.bytes_stream()), Format::Responses, tracker(&app), false, 16 << 20, false);
     while stream.next().await.is_some() {}
     peer.await.unwrap();
     let logs = app.stats.recent.lock();
@@ -206,4 +206,140 @@ async fn broken_http_body_records_sanitized_source_chain() {
     assert!(journal.contains("body_decode"), "{journal}");
     assert!(journal.contains("unexpected_eof"), "{journal}");
     assert!(!journal.contains("token=secret"));
+}
+
+/// Whether Codex access tokens die before `expires_at` (action list B2): each Codex 401
+/// logs the token's age from its `iat` and the time it had left, in whole hours, and
+/// nothing else from the token.
+#[test]
+fn codex_401s_log_the_token_age_and_time_left_only() {
+    if run_in_isolated_process("codex_401s_log_the_token_age_and_time_left_only") {
+        return;
+    }
+    let buffer = LogBuffer::default();
+    tracing::subscriber::set_global_default(buffer.subscriber()).unwrap();
+    let directory = std::env::temp_dir().join(format!("fusebox-codex-401-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    use base64::Engine;
+    let claims = json!({"iat": Utc::now().timestamp() - 50 * 3600 - 60, "email": "FAKE_CLAIM_MARKER"});
+    let encode = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+    let jwt = format!("{}.{}.FAKE_SIGNATURE_MARKER", encode(&json!({"alg":"none"})), encode(&claims));
+    let expires = (Utc::now() + Duration::hours(46) + Duration::minutes(30)).to_rfc3339();
+    std::fs::write(
+        directory.join("a.json"),
+        json!({"type":"codex", "access_token":jwt, "expired":expires, "account_id":"a"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("b.json"),
+        json!({"type":"codex", "access_token":"FAKE_OPAQUE_MARKER", "account_id":"b"}).to_string(),
+    )
+    .unwrap();
+    let app = App::new(
+        Config { auth_dir: directory.to_string_lossy().into(), ..Default::default() },
+        directory.join("config.yaml"),
+    );
+    log_codex_401(&app.pool.get("file:a.json").unwrap(), None, 7);
+    log_codex_401(&app.pool.get("file:b.json").unwrap(), None, 8);
+    // A refresh replaced the token after the request went out: the age and expiry are
+    // those of the token the request carried.
+    let sent_claims =
+        json!({"iat": Utc::now().timestamp() - 170 * 3600 - 60, "exp": Utc::now().timestamp() + 70 * 3600 + 60});
+    let sent = format!("{}.{}.FAKE_SIGNATURE_MARKER", encode(&json!({"alg":"none"})), encode(&sent_claims));
+    log_codex_401(&app.pool.get("file:a.json").unwrap(), Some(&sent), 9);
+    let _ = std::fs::remove_dir_all(&directory);
+    let journal = buffer.text();
+    assert!(
+        journal.contains("request_id=7") && journal.contains("token_age_hours=50 expires_in_hours=46"),
+        "{journal}"
+    );
+    assert!(journal.contains("token_age_hours=unknown expires_in_hours=unknown"), "{journal}");
+    assert!(
+        journal.contains("request_id=9") && journal.contains("token_age_hours=170 expires_in_hours=70"),
+        "{journal}"
+    );
+    for secret in ["FAKE_CLAIM_MARKER", "FAKE_SIGNATURE_MARKER", "FAKE_OPAQUE_MARKER", &jwt, &sent] {
+        assert!(!journal.contains(secret), "{journal}");
+    }
+}
+
+#[tokio::test]
+async fn codex_stream_errors_and_capacity_waits_are_logged_without_messages() {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if run_in_isolated_process("codex_stream_errors_and_capacity_waits_are_logged_without_messages") {
+        return;
+    }
+    let buffer = LogBuffer::default();
+    tracing::subscriber::set_global_default(buffer.subscriber()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let provider = axum::Router::new().route(
+        "/v1/responses",
+        axum::routing::post(move || {
+            let n = counter.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let too_many = axum::http::StatusCode::TOO_MANY_REQUESTS;
+                match n {
+                    0 => {
+                        let event = json!({"type":"response.failed","response":{"error":{"code":"auth_unavailable",
+                            "type":"invalid_request_error","message":"private-detail"}}});
+                        ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response()
+                    }
+                    1 => {
+                        let error = json!({"error":{"code":"turn_rate_limit_exceeded","message":"private-detail"}});
+                        (too_many, [("retry-after", "300")], axum::Json(error)).into_response()
+                    }
+                    2 => {
+                        let error = json!({"error":{"message":"Codex is at capacity: private-detail"}});
+                        (too_many, [("retry-after", "1")], axum::Json(error)).into_response()
+                    }
+                    _ => axum::Json(json!({"id":"resp","object":"response","status":"completed","model":"gpt-6.1-sol",
+                        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+                        "usage":{"input_tokens":1,"output_tokens":1}}))
+                    .into_response(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+    let app = App::new(
+        Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![KeyEntry {
+                api_key: "mock-only".into(),
+                base_url: Some(base_url),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        "/nonexistent/config.yaml".into(),
+    );
+    let call = |stream: bool| Call {
+        format: Format::Responses,
+        body: json!({"model":"gpt-6.1-sol","input":"question","stream":stream}),
+        headers: HeaderMap::new(),
+        stream,
+        transport: "http",
+        path_model: None,
+        session: None,
+        session_source: None,
+        routing_selection: None,
+    };
+    assert!(matches!(execute(app.clone(), call(true)).await, Reply::Error(500, _)));
+    assert!(matches!(execute(app.clone(), call(false)).await, Reply::Error(429, _)));
+    assert!(matches!(execute(app.clone(), call(false)).await, Reply::Json(_)));
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    let journal = buffer.text();
+    let line =
+        |text: &str| journal.lines().find(|l| l.contains(text)).unwrap_or_else(|| panic!("no {text}: {journal}"));
+    let opened = line("codex stream opened with an error");
+    assert!(opened.contains("error_code=auth_unavailable error_type=invalid_request_error"), "{opened}");
+    let long = line("upstream at capacity for longer than a retry");
+    assert!(long.contains("upstream_retry_after_seconds=300 client_retry_after_seconds=300"), "{long}");
+    let retry = line("upstream busy; retrying");
+    assert!(retry.contains("retry_delay_seconds=1 upstream_retry_after_seconds=1"), "{retry}");
+    assert!(!journal.contains("private-detail"), "messages are not logged: {journal}");
 }

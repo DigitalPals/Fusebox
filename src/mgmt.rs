@@ -143,7 +143,9 @@ pub async fn start_login(app: &Arc<App>, provider: Provider) -> Result<(String, 
 /// Where a new sign-in is saved: `name`, unless Fusebox already has this account in a
 /// file named otherwise (older releases used other names). That file is then signed in
 /// again, so the account keeps its ID, selections and settings, and no stale copy is left
-/// retrying a revoked refresh token.
+/// retrying a revoked refresh token. When `name` holds another account (`a+b@x` and
+/// `a_b@x` share a file name, as do one email's ChatGPT workspaces), the sign-in gets a
+/// name of its own, `<stem>-<8 hex of its identity>.json`, rather than overwriting it.
 fn sign_in_path(app: &App, provider: Provider, cred: &crate::accounts::OAuth, name: &str) -> std::path::PathBuf {
     let fresh = app.cfg().auth_dir().join(name);
     let exact = Credential::OAuth(cred.clone()).identity(provider);
@@ -162,8 +164,36 @@ fn sign_in_path(app: &App, provider: Provider, cred: &crate::accounts::OAuth, na
         .filter_map(|a| a.path.clone())
         .collect();
     same.sort();
-    if same.is_empty() || same.contains(&fresh) { fresh } else { same.swap_remove(0) }
+    if !same.is_empty() && !same.contains(&fresh) {
+        return same.swap_remove(0);
+    }
+    // Whether another account holds a file name: the file says, or while it can't be
+    // read, the account loaded from it.
+    let taken = |path: &std::path::Path| {
+        let holder =
+            crate::accounts::read_oauth_file(path).map(|(p, o, _, _)| (p, Credential::OAuth(o))).or_else(|| {
+                let held = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path))?;
+                let cred = held.cred.read().clone();
+                Some((held.provider, cred))
+            });
+        holder.is_some_and(|(p, c)| {
+            let same_claude_email = matches!(&c, Credential::OAuth(o) if p == Provider::Claude
+                && provider == Provider::Claude
+                && o.email.as_deref().zip(cred.email.as_deref()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)));
+            c.identity(p) != exact && !same_claude_email
+        })
+    };
+    if !taken(&fresh) {
+        return fresh;
+    }
+    // The suffix grows in the unlikely case that its shorter form is someone else's too.
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    let named = |len: usize| app.cfg().auth_dir().join(format!("{stem}-{}.json", &exact[..len]));
+    [8, 16].into_iter().map(named).find(|path| !taken(path)).unwrap_or_else(|| named(exact.len()))
 }
+
+/// One sign-in is saved at a time, so two can't pick the same free file name.
+static SIGN_IN_SAVES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Saves a sign-in and, when it signs an existing account in again, makes it that
 /// account's credential at once. Waiting out a refresh of the old tokens first keeps the
@@ -175,6 +205,7 @@ async fn save_sign_in(
     name: &str,
     extra: &[(&str, Value)],
 ) -> Result<std::path::PathBuf> {
+    let _one_at_a_time = SIGN_IN_SAVES.lock().await;
     let path = sign_in_path(app, provider, cred, name);
     let existing = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path.as_path()));
     let guard = match &existing {
@@ -610,13 +641,17 @@ fn ok() -> Response {
 async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
     let cfg = app.cfg();
     let accounts = app.pool.all();
-    let (mut active, mut cooling, mut disabled) = (0, 0, 0);
+    let (mut active, mut cooling, mut disabled, mut signin) = (0, 0, 0, 0);
     let mut providers = std::collections::BTreeMap::<&str, usize>::new();
     for a in &accounts {
         *providers.entry(a.provider.as_str()).or_default() += 1;
+        let held = a.held_out();
         let st = a.state.lock();
         if st.disabled {
             disabled += 1;
+        } else if held {
+            // Out of rotation until a sign-in.
+            signin += 1;
         } else if st.quota_refreshing
             || st.cooldowns.get("*").is_some_and(|t| *t > chrono::Utc::now())
             || st.quota_cooldowns.get("*").is_some_and(|t| *t > chrono::Utc::now())
@@ -646,7 +681,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "totals": *app.stats.totals.lock(),
         "active": app.stats.active.load(Ordering::Relaxed),
         "series": app.stats.series(),
-        "accounts": { "total": accounts.len(), "active": active, "cooling": cooling, "disabled": disabled, "providers": providers },
+        "accounts": { "total": accounts.len(), "active": active, "cooling": cooling, "disabled": disabled, "signin": signin, "providers": providers },
         // Each provider's subscriptions together, per window: the dashboard's combined limits.
         "pools": crate::push::current_pools(&app),
         "models": app.pool.models().len(),
@@ -1813,7 +1848,16 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!saving.is_finished(), "the save waits for the refresh");
-        acct.state.lock().set_error("refresh failed: OAuth endpoint returned HTTP 400 (invalid_grant)");
+        // The refresh ends refused for good: the account waits for a sign-in.
+        {
+            let mut hold =
+                crate::accounts::RefreshHold::new("revoked", "OAuth endpoint returned HTTP 400 (invalid_grant)".into());
+            let mut st = acct.state.lock();
+            st.set_error(hold.error_text());
+            hold.error_id = st.last_error_id(chrono::Utc::now()).map(String::from);
+            st.refresh_hold = Some(hold);
+        }
+        assert!(acct.held_out());
         drop(refreshing);
         saving.await.unwrap().unwrap();
         let all = app.pool.all();
@@ -1821,6 +1865,9 @@ mod tests {
         let Credential::OAuth(o) = all[0].cred.read().clone() else { panic!() };
         assert_eq!((o.access_token.as_str(), o.refresh_token.as_str()), ("new", "fresh"));
         assert_eq!(all[0].state.lock().last_error(chrono::Utc::now()), None, "the old sign-in's error is over");
+        assert!(!all[0].held_out(), "the new refresh token lifts the hold");
+        oauth::ensure_fresh(&app, &all[0], chrono::Duration::minutes(5), false).await.unwrap();
+        assert!(all[0].state.lock().refresh_hold.is_none());
         assert!(!dir.join("claude-x@example.test.json").exists());
         // Other errors are not the sign-in's to clear.
         all[0].state.lock().set_error("500: upstream exploded");
@@ -1886,6 +1933,81 @@ mod tests {
         assert_eq!(disk["refresh_token"], "fresh-grant");
     }
 
+    #[tokio::test]
+    async fn a_sign_in_never_overwrites_another_accounts_file() {
+        let dir = std::env::temp_dir().join(format!("fusebox-sign-in-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app =
+            App::new(Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() }, dir.join("config.yaml"));
+        let oauth = |id: &str, email: &str| crate::accounts::OAuth {
+            access_token: format!("FAKE_ACCESS_{id}"),
+            refresh_token: format!("FAKE_REFRESH_{id}"),
+            email: Some(email.into()),
+            account_id: Some(id.into()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(8)),
+            ..Default::default()
+        };
+        let hex = |p: Provider, o: &crate::accounts::OAuth| Credential::OAuth(o.clone()).identity(p)[..8].to_string();
+        let token = |path: &std::path::Path| {
+            let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            saved["access_token"].as_str().unwrap().to_string()
+        };
+        let cases = [
+            // `file_safe` writes both `a+b@x` and `a_b@x` as `a_b@x`.
+            (
+                Provider::Claude,
+                oauth("u1", "a_b@example.test"),
+                oauth("u2", "a+b@example.test"),
+                "claude-a_b@example.test",
+            ),
+            // One email, two ChatGPT workspaces on the same plan.
+            (
+                Provider::Codex,
+                oauth("w1", "w@example.test"),
+                oauth("w2", "w@example.test"),
+                "codex-w@example.test-plus",
+            ),
+        ];
+        for (provider, first, second, stem) in cases {
+            let name = format!("{stem}.json");
+            let first_path = save_sign_in(&app, provider, &first, &name, &[]).await.unwrap();
+            assert_eq!(first_path, dir.join(&name));
+            let second_path = save_sign_in(&app, provider, &second, &name, &[]).await.unwrap();
+            assert_eq!(second_path, dir.join(format!("{stem}-{}.json", hex(provider, &second))));
+            assert_eq!(token(&first_path), "FAKE_ACCESS_".to_string() + first.account_id.as_deref().unwrap());
+            assert_eq!(token(&second_path), "FAKE_ACCESS_".to_string() + second.account_id.as_deref().unwrap());
+            // Signing in again finds each account's own file.
+            let again = crate::accounts::OAuth { access_token: "FAKE_AGAIN".into(), ..second.clone() };
+            assert_eq!(save_sign_in(&app, provider, &again, &name, &[]).await.unwrap(), second_path);
+            assert_eq!(save_sign_in(&app, provider, &first, &name, &[]).await.unwrap(), first_path);
+            assert_eq!(token(&second_path), "FAKE_AGAIN");
+        }
+        assert_eq!(app.pool.all().len(), 4, "four accounts, none overwritten");
+        // A file under the suffixed name holding yet another account is kept as well.
+        let third = oauth("w3", "w@example.test");
+        let squatter = dir.join(format!("codex-w@example.test-plus-{}.json", hex(Provider::Codex, &third)));
+        std::fs::write(
+            &squatter,
+            json!({"type":"codex","access_token":"FAKE_SQUATTER","refresh_token":"FAKE_R","email":"w@example.test",
+                "account_id":"w9"})
+            .to_string(),
+        )
+        .unwrap();
+        let full = Credential::OAuth(third.clone()).identity(Provider::Codex);
+        let third_path =
+            save_sign_in(&app, Provider::Codex, &third, "codex-w@example.test-plus.json", &[]).await.unwrap();
+        assert_eq!(third_path, dir.join(format!("codex-w@example.test-plus-{}.json", &full[..16])));
+        assert_eq!(token(&squatter), "FAKE_SQUATTER");
+        assert_eq!(token(&third_path), "FAKE_ACCESS_w3");
+        // One email is one Claude account: a new UUID for it still signs that file in again.
+        let renewed = oauth("u3", "a_b@example.test");
+        assert_eq!(
+            sign_in_path(&app, Provider::Claude, &renewed, "claude-a_b@example.test.json"),
+            dir.join("claude-a_b@example.test.json")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn signing_in_again_reuses_the_accounts_file_whatever_it_is_called() {
         let dir = std::env::temp_dir().join(format!("fusebox-sign-in-{}", uuid::Uuid::new_v4()));
@@ -1931,11 +2053,13 @@ mod tests {
             dir.join("claude-legacy-old@example.test.json"),
             "a Claude file without its UUID is found by email"
         );
-        // A ChatGPT email can have several workspaces: only the same account ID counts.
+        // A ChatGPT email can have several workspaces: only the same account ID counts, and
+        // another workspace gets a file of its own rather than overwriting this one.
         let workspace = oauth("w2", "w@example.test");
+        let hex = &Credential::OAuth(workspace.clone()).identity(Provider::Codex)[..8];
         assert_eq!(
             path(Provider::Codex, &workspace, "codex-w@example.test-plus.json"),
-            dir.join("codex-w@example.test-plus.json")
+            dir.join(format!("codex-w@example.test-plus-{hex}.json"))
         );
         let same = oauth("w1", "w@example.test");
         assert_eq!(

@@ -80,3 +80,15 @@ test('large ragged families visit each model route a fixed number of times', () 
   assert.deepEqual(page.run(ids), expected(ids, models, routes, accounts));
   assert.ok(page.reads() <= ids.length * 3 + 1, `route reads should scale with models, got ${page.reads()}`);
 });
+
+test('a route step held out until a sign-in says so, even when the account shows no error', () => {
+  const start = source.indexOf('function routeStepText(');
+  const fn = source.slice(start, source.indexOf('\n}\n', start) + 3);
+  const context = { acctState: () => ({ cls: 'ok' }), when: () => '', hm: () => '', windowOf: () => null, quotaOf: () => null };
+  vm.createContext(context);
+  vm.runInContext(fn, context);
+  const text = (step, account) => JSON.parse(vm.runInContext(`JSON.stringify(routeStepText(${JSON.stringify(step)}, ${JSON.stringify(account)}))`, context));
+  assert.deepEqual(text({ state: 'signin' }, { id: 'a' }), { txt: 'Sign-in expired · skipped', short: 'Sign-in expired', cls: 'err' });
+  assert.equal(text({ state: 'disabled' }, { id: 'a' }).short, 'Disabled');
+  assert.equal(text({ state: 'ready' }, { id: 'a' }).txt, 'Ready');
+});

@@ -196,6 +196,7 @@ pub(crate) fn error_classification(value: &Value) -> Option<&'static str> {
         "refresh_token_expired" => "refresh_token_expired",
         "refresh_token_reused" => "refresh_token_reused",
         "refresh_token_invalidated" => "refresh_token_invalidated",
+        "token_revoked" => "token_revoked",
         _ => return None,
     })
 }
@@ -454,6 +455,7 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
         app.reload_accounts();
         bail!("account identity changed; reload accounts");
     }
+    lift_stale_hold(acct);
     let needs = |acct: &Account| match &*acct.cred.read() {
         Credential::OAuth(o) => {
             force || o.access_token.is_empty() || o.expires_at.is_some_and(|t| t - Utc::now() < margin)
@@ -462,6 +464,9 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
     };
     if !needs(acct) {
         return Ok(());
+    }
+    if let Some(answer) = refresh_gate(acct, force) {
+        return answer;
     }
     let token_before = match &*acct.cred.read() {
         Credential::OAuth(o) => o.access_token.clone(),
@@ -476,12 +481,23 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
         Credential::OAuth(o) => o.clone(),
         _ => return Ok(()),
     };
-    // Another task refreshed while we waited for the lock.
+    // Another task refreshed, or found the token refused, while we waited for the lock.
     if old.access_token != token_before || !needs(acct) {
         return Ok(());
     }
+    if let Some(answer) = refresh_gate(acct, force) {
+        return answer;
+    }
     let self_minted = matches!(acct.provider, Provider::Vertex | Provider::Meta);
     if old.refresh_token.is_empty() && !self_minted {
+        // Said once per access token, not on every minute's attempt.
+        let access = crate::accounts::token_digest(&old.access_token);
+        let mut st = acct.state.lock();
+        if st.no_refresh_reported != Some(access) {
+            st.no_refresh_reported = Some(access);
+            tracing::warn!(account = %acct.label, "token refresh failed: no refresh token");
+            st.set_error("refresh failed: no refresh token");
+        }
         bail!("no refresh token");
     }
     let http = app.http.control_for_account(acct);
@@ -493,12 +509,7 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
     let result = tokio::spawn(async move {
         let _registration = registration;
         let _guard = guard;
-        let result = refresh_locked(&refreshing, http, old).await;
-        if let Err(error) = &result {
-            tracing::warn!(account = %refreshing.label, "token refresh failed: {error:#}");
-            refreshing.state.lock().set_error(format!("refresh failed: {error}"));
-        }
-        result
+        refresh_and_report(&refreshing, http, old, margin).await
     })
     .await
     .context("token refresh task failed")?;
@@ -507,7 +518,151 @@ pub async fn ensure_fresh(app: &App, acct: &Arc<Account>, margin: chrono::Durati
         app.reload_accounts();
         bail!("account identity changed; reload accounts");
     }
+    // A final answer still leaves the access token to serve with until it expires.
+    if result.is_err()
+        && let Some(answer) = refresh_gate(acct, force)
+    {
+        return answer;
+    }
     result
+}
+
+/// What a refresh comes to without asking the token endpoint: `None` unless the account's
+/// refresh token was refused for good, or `invalid_client` asked Fusebox to wait. The
+/// account then serves on while its access token lasts, unless the caller (`force`) has
+/// just seen that token refused.
+fn refresh_gate(acct: &Account, force: bool) -> Option<Result<()>> {
+    let now = Utc::now();
+    let mut st = acct.state.lock();
+    let cred = acct.cred.read();
+    let Credential::OAuth(o) = &*cred else { return None };
+    let serving = !force && !o.access_token.is_empty() && o.expires_at.is_none_or(|t| t > now);
+    if let Some(hold) = st.refresh_hold.as_ref().filter(|hold| hold.applies(o)) {
+        let out = hold.out(o, now);
+        if serving && !out {
+            return Some(Ok(()));
+        }
+        let message = format!("{}; sign in again", hold.reason);
+        if out {
+            drop(cred);
+            st.report_held_out();
+        }
+        return Some(Err(anyhow!(message)));
+    }
+    let (until, _) = st.refresh_backoff.filter(|(until, _)| *until > now)?;
+    if serving {
+        return Some(Ok(()));
+    }
+    Some(Err(anyhow!(
+        "token refresh paused after invalid_client; next try in {} min",
+        (until - now).num_minutes().max(1)
+    )))
+}
+
+/// A different refresh token (a sign-in, a new file, a newer copy on disk) lifts a hold,
+/// and with it the error that asked for the sign-in.
+fn lift_stale_hold(acct: &Account) {
+    let mut st = acct.state.lock();
+    let Some(hold) = &st.refresh_hold else { return };
+    if matches!(&*acct.cred.read(), Credential::OAuth(o) if hold.applies(o)) {
+        return;
+    }
+    if let Some(id) = st.refresh_hold.take().and_then(|hold| hold.error_id) {
+        st.clear_error_if(&id);
+    }
+}
+
+/// Token-endpoint answers that no retry with the same refresh token can change. Vertex
+/// mints from a service account (`invalid_grant` there can be clock skew) and Meta mints
+/// its own keys, so neither is held. Only OpenAI's endpoint means a bare 401 for good.
+fn final_refresh_answer(provider: Provider, failure: &OAuthResponseFailure) -> bool {
+    if matches!(provider, Provider::Vertex | Provider::Meta) {
+        return false;
+    }
+    match failure.classification {
+        Some(code) => matches!(
+            code,
+            "invalid_grant"
+                | "refresh_token_expired"
+                | "refresh_token_reused"
+                | "refresh_token_invalidated"
+                | "token_revoked"
+        ),
+        None => provider == Provider::Codex && failure.status == reqwest::StatusCode::UNAUTHORIZED,
+    }
+}
+
+/// One refresh and what its failure means, each logged once, here. A final answer first
+/// looks at the credential file: a CLI or a second Fusebox sharing it may have rotated
+/// the token, so the refusal was for an old one. The newer token is used instead;
+/// otherwise the refused token is held. `invalid_client` backs off, since it would
+/// refuse every account of the provider alike.
+async fn refresh_and_report(
+    acct: &Arc<Account>,
+    http: reqwest::Client,
+    mut old: OAuth,
+    margin: chrono::Duration,
+) -> Result<()> {
+    let mut adopted = false;
+    loop {
+        let result = refresh_locked(acct, http.clone(), old.clone()).await;
+        let Err(error) = &result else {
+            acct.state.lock().refresh_backoff = None;
+            return result;
+        };
+        let failure = error.downcast_ref::<OAuthResponseFailure>().copied();
+        if let Some(failure) = failure.filter(|f| final_refresh_answer(acct.provider, f)) {
+            if !adopted && let Some(disk) = adopt_rotated(acct, &old) {
+                adopted = true;
+                tracing::info!(account = %acct.label, "the credential file holds a newer refresh token; using it");
+                if !disk.access_token.is_empty() && disk.expires_at.is_none_or(|t| t - Utc::now() >= margin) {
+                    return Ok(());
+                }
+                old = disk;
+                continue;
+            }
+            tracing::warn!(account = %acct.label, "token refresh failed for good: {failure}; it won't be retried until a sign-in");
+            let mut hold = crate::accounts::RefreshHold::new(&old.refresh_token, failure.to_string());
+            let mut st = acct.state.lock();
+            st.set_error(hold.error_text());
+            hold.error_id = st.last_error_id(Utc::now()).map(String::from);
+            st.refresh_hold = Some(hold);
+            return result;
+        }
+        tracing::warn!(account = %acct.label, "token refresh failed: {error:#}");
+        let mut st = acct.state.lock();
+        st.set_error(format!("refresh failed: {error}"));
+        if failure.and_then(|f| f.classification) == Some("invalid_client") {
+            let n = st.refresh_backoff.map_or(0, |(_, n)| n).saturating_add(1);
+            let minutes = (5i64 << (n - 1).min(4)).min(60);
+            st.refresh_backoff = Some((Utc::now() + chrono::Duration::minutes(minutes), n));
+        }
+        return result;
+    }
+}
+
+/// The credential file's copy when it has another refresh token than the refused one,
+/// made the account's credential. Not while a save is pending (memory is newer than
+/// the file then) or when the file now holds another account (a reload replaces it).
+fn adopt_rotated(acct: &Account, refused: &OAuth) -> Option<OAuth> {
+    let path = acct.path.as_ref()?;
+    let pending = acct.pending_oauth_save.lock();
+    let (provider, disk, _, _) = crate::accounts::read_oauth_file(path)?;
+    if pending.is_some()
+        || provider != acct.provider
+        || disk.refresh_token.is_empty()
+        || disk.refresh_token == refused.refresh_token
+    {
+        return None;
+    }
+    let state = acct.state.lock();
+    let mut cred = acct.cred.write();
+    let identity = Credential::OAuth(disk.clone()).identity(provider);
+    if identity != state.credential_identity || cred.identity(provider) != state.credential_identity {
+        return None;
+    }
+    *cred = Credential::OAuth(disk.clone());
+    Some(disk)
 }
 
 async fn refresh_locked(acct: &Arc<Account>, http: reqwest::Client, old: OAuth) -> Result<()> {
@@ -756,9 +911,9 @@ pub async fn refresher(app: Arc<App>) {
                     if !acct.is_oauth() || acct.state.lock().disabled {
                         return;
                     }
+                    // `ensure_fresh` logs and shows its failures, once each.
                     if let Err(e) = ensure_fresh(app, &acct, chrono::Duration::minutes(10), false).await {
-                        tracing::warn!(account = %acct.label, "token refresh failed: {e:#}");
-                        acct.state.lock().set_error(format!("refresh failed: {e}"));
+                        tracing::debug!(account = %acct.label, "token refresh: {e:#}");
                     }
                 }
             })
@@ -769,6 +924,7 @@ pub async fn refresher(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::Pick;
     use crate::config::Config;
 
     struct Directory(std::path::PathBuf);
@@ -876,7 +1032,7 @@ mod tests {
     async fn refresh_errors_and_account_status_exclude_response_and_redirect_secrets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let cases = [
-            (400, json!({"error":"invalid_grant", "error_description":"FAKE_SECRET_MARKER", "refresh_token":"FAKE_SECRET_MARKER"}).to_string(), "HTTP 400 (invalid_grant)"),
+            (400, json!({"error":"invalid_grant", "error_description":"FAKE_SECRET_MARKER", "refresh_token":"FAKE_SECRET_MARKER"}).to_string(), "HTTP 400 (invalid_grant); sign in again"),
             (401, json!({"error":"FAKE_SECRET_MARKER", "error_description":"FAKE_SECRET_MARKER"}).to_string(), "HTTP 401"),
             (503, "FAKE_SECRET_MARKER".into(), "HTTP 503"),
             (307, "FAKE_SECRET_MARKER".into(), "HTTP 307"),
@@ -929,13 +1085,253 @@ mod tests {
             let account = app.pool.all().pop().unwrap();
             let error = ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap_err();
             assert!(error.to_string().contains(expected), "{error:#}");
-            for message in [format!("{error:#}"), format!("{error:?}"), account.snapshot().to_string()] {
+            // A held refresh token is kept as a digest only.
+            let state = format!("{:?}", *account.state.lock());
+            for message in [format!("{error:#}"), format!("{error:?}"), account.snapshot().to_string(), state] {
                 assert!(!message.contains("FAKE_SECRET_MARKER"), "unsafe OAuth failure: {message}");
                 assert!(!message.contains("FAKE_REFRESH_REQUEST_MARKER"));
             }
             assert_eq!(redirected.load(Ordering::Relaxed), 0);
             server.abort();
         }
+    }
+
+    /// A token endpoint that answers each refresh token as told (default: `invalid_grant`)
+    /// and counts its calls.
+    struct TokenEndpoint {
+        url: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl TokenEndpoint {
+        async fn new(answers: Vec<(&'static str, u16, Value)>) -> Self {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/token", listener.local_addr().unwrap());
+            let router = axum::Router::new().route(
+                "/token",
+                axum::routing::post({
+                    let calls = calls.clone();
+                    move |form: String| {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let (status, body) = answers
+                            .iter()
+                            .find(|(token, ..)| {
+                                form.contains(&format!("refresh_token={token}&"))
+                                    || form.ends_with(&format!("refresh_token={token}"))
+                            })
+                            .map(|(_, status, body)| (*status, body.clone()))
+                            .unwrap_or((400, json!({"error":"invalid_grant"})));
+                        async move { (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(body)) }
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            Self { url, calls, server }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for TokenEndpoint {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    /// An xAI sign-in (its token endpoint is configurable) whose access token expires in `left`.
+    fn signed_in(directory: &Directory, endpoint: &TokenEndpoint, refresh: &str, left: chrono::Duration) -> Arc<App> {
+        std::fs::write(
+            directory.0.join("account.json"),
+            json!({"type":"xai", "access_token":"FAKE_ACCESS", "refresh_token":refresh,
+                "expired": (Utc::now() + left).to_rfc3339(), "token_endpoint":endpoint.url})
+            .to_string(),
+        )
+        .unwrap();
+        let cfg =
+            Config { auth_dir: directory.0.to_string_lossy().into(), proxy_url: "direct".into(), ..Default::default() };
+        App::new(cfg, directory.0.join("config.yaml"))
+    }
+
+    #[tokio::test]
+    async fn a_final_refresh_answer_is_asked_once_whoever_asks_again() {
+        let directory = Directory::new();
+        let endpoint = TokenEndpoint::new(vec![]).await;
+        let app = signed_in(&directory, &endpoint, "FAKE_REFUSED", -chrono::Duration::minutes(1));
+        let account = app.pool.all().pop().unwrap();
+        let error = ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap_err();
+        assert!(error.to_string().contains("sign in again"), "{error:#}");
+        assert_eq!(endpoint.calls(), 1);
+        let first_error = account.state.lock().last_error_id(Utc::now()).map(String::from);
+        // The request path, a forced refresh after a 401, the periodic refresher's margin,
+        // quota and discovery checks, the dashboard's refresh button: none asks again.
+        for (margin, force) in [(5, false), (5, true), (10, false), (60, true)] {
+            let error = ensure_fresh(&app, &account, chrono::Duration::minutes(margin), force).await.unwrap_err();
+            assert!(error.to_string().contains("sign in again"), "{error:#}");
+        }
+        assert!(ensure_ready(&app, &account).await.is_err());
+        assert_eq!(endpoint.calls(), 1);
+        assert_eq!(account.state.lock().last_error_id(Utc::now()).map(String::from), first_error, "said once");
+        // Out of rotation as a disabled account is, not paused: a pause would hide the
+        // sign-in fault behind "Cooling".
+        assert!(account.held_out());
+        let cfg = app.cfg();
+        assert!(matches!(app.pool.pick("grok-4.20", &[], &cfg, None, None, &Default::default()), Pick::None));
+        let st = account.state.lock();
+        assert!(st.pauses(Utc::now()).is_empty());
+        assert!(crate::push::signin_error(st.last_error(Utc::now()).unwrap()));
+        assert!(!st.last_error(Utc::now()).unwrap().contains("FAKE_REFUSED"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_refresh_token_serves_until_its_access_token_expires() {
+        let directory = Directory::new();
+        let endpoint = TokenEndpoint::new(vec![]).await;
+        let app = signed_in(&directory, &endpoint, "FAKE_REFUSED", chrono::Duration::minutes(3));
+        let account = app.pool.all().pop().unwrap();
+        let cfg = app.cfg();
+        // Due for renewal within the 5-minute margin, but still valid for 3 minutes.
+        ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap();
+        ensure_ready(&app, &account).await.unwrap();
+        assert_eq!(endpoint.calls(), 1);
+        assert!(!account.held_out());
+        assert!(matches!(app.pool.pick("grok-4.20", &[], &cfg, None, None, &Default::default()), Pick::Ok(..)));
+        // A successful request doesn't end the need to sign in again.
+        account.record_ok();
+        assert!(crate::push::signin_error(account.state.lock().last_error(Utc::now()).unwrap()));
+        // The provider refusing the access token too ends serving at once.
+        assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(5), true).await.is_err());
+        account.state.lock().clear_error();
+        assert!(account.refuse_access());
+        assert!(account.held_out());
+        assert!(crate::push::signin_error(account.state.lock().last_error(Utc::now()).unwrap()), "shown again");
+        assert!(matches!(app.pool.pick("grok-4.20", &[], &cfg, None, None, &Default::default()), Pick::None));
+        assert_eq!(endpoint.calls(), 1);
+        // Expiry does the same without a refusal.
+        let app = signed_in(&directory, &endpoint, "FAKE_REFUSED", chrono::Duration::minutes(3));
+        let account = app.pool.all().pop().unwrap();
+        ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap();
+        if let Credential::OAuth(o) = &mut *account.cred.write() {
+            o.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+        assert!(account.held_out());
+        assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.is_err());
+        assert_eq!(endpoint.calls(), 2, "one per App: a restart may ask once");
+    }
+
+    #[tokio::test]
+    async fn the_hold_lifts_for_a_new_file_or_a_newer_token_already_on_disk() {
+        let fresh = json!({"access_token":"FAKE_RENEWED", "refresh_token":"FAKE_NEXT", "expires_in":3600});
+        let endpoint = TokenEndpoint::new(vec![("FAKE_ON_DISK", 200, fresh)]).await;
+        // A new credential file with another refresh token, picked up by a reload.
+        let directory = Directory::new();
+        let app = signed_in(&directory, &endpoint, "FAKE_REFUSED", -chrono::Duration::minutes(1));
+        let account = app.pool.all().pop().unwrap();
+        assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.is_err());
+        assert!(account.held_out());
+        std::fs::write(
+            directory.0.join("account.json"),
+            json!({"type":"xai", "access_token":"FAKE_NEW", "refresh_token":"FAKE_NEW_REFRESH",
+                "expired": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(), "token_endpoint":endpoint.url})
+            .to_string(),
+        )
+        .unwrap();
+        app.reload_accounts();
+        let account = app.pool.all().pop().unwrap();
+        assert!(!account.held_out());
+        ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap();
+        assert!(account.state.lock().refresh_hold.is_none());
+        assert_eq!(account.state.lock().last_error(Utc::now()), None, "the sign-in error ends with the hold");
+        assert_eq!(endpoint.calls(), 1);
+
+        // Another program rotated the token on disk before the refusal: use its token.
+        let directory = Directory::new();
+        let app = signed_in(&directory, &endpoint, "FAKE_REFUSED", -chrono::Duration::minutes(1));
+        let account = app.pool.all().pop().unwrap();
+        crate::accounts::set_file_field(
+            &directory.0.join("account.json"),
+            "refresh_token",
+            Some(json!("FAKE_ON_DISK")),
+        )
+        .unwrap();
+        ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap();
+        assert_eq!(endpoint.calls(), 3, "the refused token, then the one on disk");
+        let Credential::OAuth(current) = account.cred.read().clone() else { unreachable!() };
+        assert_eq!((current.access_token.as_str(), current.refresh_token.as_str()), ("FAKE_RENEWED", "FAKE_NEXT"));
+        assert!(account.state.lock().refresh_hold.is_none());
+        assert!(!account.held_out());
+        let saved: Value = serde_json::from_slice(&std::fs::read(directory.0.join("account.json")).unwrap()).unwrap();
+        assert_eq!(saved["refresh_token"], "FAKE_NEXT");
+    }
+
+    #[tokio::test]
+    async fn only_final_answers_hold_and_invalid_client_backs_off() {
+        let endpoint = TokenEndpoint::new(vec![
+            ("FAKE_UNAVAILABLE", 503, json!({"error":"temporarily_unavailable"})),
+            ("FAKE_CLIENT", 401, json!({"error":"invalid_client"})),
+            ("FAKE_BARE", 401, json!({})),
+        ])
+        .await;
+        for (refresh, calls_after_two) in [("FAKE_UNAVAILABLE", 2), ("FAKE_BARE", 2), ("FAKE_CLIENT", 1)] {
+            let directory = Directory::new();
+            let start = endpoint.calls();
+            let app = signed_in(&directory, &endpoint, refresh, -chrono::Duration::minutes(1));
+            let account = app.pool.all().pop().unwrap();
+            for _ in 0..2 {
+                assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.is_err());
+            }
+            assert_eq!(endpoint.calls() - start, calls_after_two, "{refresh}");
+            let st = account.state.lock();
+            assert!(st.refresh_hold.is_none(), "{refresh}: not final");
+            assert_eq!(st.refresh_backoff.is_some(), refresh == "FAKE_CLIENT", "{refresh}");
+        }
+        let failure = |status: u16, classification| OAuthResponseFailure {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            classification,
+        };
+        for code in [
+            "invalid_grant",
+            "refresh_token_expired",
+            "refresh_token_reused",
+            "refresh_token_invalidated",
+            "token_revoked",
+        ] {
+            for provider in [Provider::Claude, Provider::Codex, Provider::Antigravity, Provider::Kimi, Provider::Xai] {
+                assert!(final_refresh_answer(provider, &failure(400, Some(code))), "{provider:?} {code}");
+            }
+            // A JWT mint (clock skew) and a self-minted key are never held.
+            for provider in [Provider::Vertex, Provider::Meta] {
+                assert!(!final_refresh_answer(provider, &failure(400, Some(code))), "{provider:?} {code}");
+            }
+        }
+        assert!(final_refresh_answer(Provider::Codex, &failure(401, None)), "a bare 401 from OpenAI");
+        assert!(!final_refresh_answer(Provider::Claude, &failure(401, None)));
+        assert!(!final_refresh_answer(Provider::Codex, &failure(401, Some("invalid_client"))));
+        assert!(!final_refresh_answer(Provider::Codex, &failure(503, None)));
+        assert!(!final_refresh_answer(Provider::Codex, &failure(400, Some("invalid_request"))));
+    }
+
+    #[tokio::test]
+    async fn a_missing_refresh_token_is_reported_once() {
+        let directory = Directory::new();
+        std::fs::write(
+            directory.0.join("account.json"),
+            json!({"type":"codex", "access_token":"FAKE_ACCESS", "expired":"2000-01-01T00:00:00Z"}).to_string(),
+        )
+        .unwrap();
+        let cfg = Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() };
+        let app = App::new(cfg, directory.0.join("config.yaml"));
+        let account = app.pool.all().pop().unwrap();
+        assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(10), false).await.is_err());
+        let first = account.state.lock().last_error_id(Utc::now()).map(String::from);
+        assert!(first.is_some());
+        for _ in 0..3 {
+            assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(10), false).await.is_err());
+        }
+        assert_eq!(account.state.lock().last_error_id(Utc::now()).map(String::from), first);
     }
 
     #[test]
@@ -948,6 +1344,8 @@ mod tests {
             error_classification(&json!({"error":{"code":"access_denied", "message":"FAKE_SECRET_MARKER"}})),
             Some("access_denied")
         );
+        assert_eq!(error_classification(&json!({"error":"token_revoked"})), Some("token_revoked"));
+        assert_eq!(error_classification(&json!({"error":{"code":"token_revoked"}})), Some("token_revoked"));
         for value in [
             json!({"error":"FAKE_SECRET_MARKER"}),
             json!({"error":"invalid_grant\nFAKE_SECRET_MARKER"}),

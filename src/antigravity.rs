@@ -260,6 +260,56 @@ fn session_id(req: &Value) -> String {
     format!("-{n}")
 }
 
+/// Cloud Code turns a response schema into a forced tool, which Opus and Sonnet 5.5
+/// reject. They get the schema as an instruction instead, so the JSON is not guaranteed.
+fn schema_as_instruction(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    ["opus-5-5", "sonnet-5-5"].iter().any(|name| {
+        m.match_indices(name).any(|(at, _)| !m[at + name.len()..].starts_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
+/// Moves the response schema into the system instruction and removes the native
+/// structured-output fields. Returns whether there was a schema to move.
+fn move_schema_to_instruction(req: &mut Value) -> bool {
+    const CONFIGS: [&str; 2] = ["generationConfig", "generation_config"];
+    const SCHEMAS: [&str; 4] = ["responseJsonSchema", "responseSchema", "response_json_schema", "response_schema"];
+    let Some(schema) =
+        CONFIGS.iter().find_map(|c| SCHEMAS.iter().find_map(|k| req.get(c)?.get(k).filter(|s| s.is_object()).cloned()))
+    else {
+        return false;
+    };
+    for c in CONFIGS {
+        if let Some(gc) = req.get_mut(c).and_then(Value::as_object_mut) {
+            for k in SCHEMAS.iter().chain(&["responseMimeType", "response_mime_type"]) {
+                gc.remove(*k);
+            }
+        }
+    }
+    let text = format!(
+        "You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n{schema}"
+    );
+    let key = if req.get("systemInstruction").is_none() && req.get("system_instruction").is_some() {
+        "system_instruction"
+    } else {
+        "systemInstruction"
+    };
+    let Some(instruction) = req.as_object_mut().map(|o| o.entry(key).or_insert_with(|| json!({}))) else {
+        return false;
+    };
+    if let Value::String(earlier) = instruction {
+        *instruction = json!({ "parts": [{ "text": std::mem::take(earlier) }] });
+    } else if !instruction.is_object() {
+        *instruction = json!({});
+    }
+    let parts = instruction.as_object_mut().unwrap().entry("parts").or_insert_with(|| json!([]));
+    if !parts.is_array() {
+        *parts = json!([]);
+    }
+    parts.as_array_mut().unwrap().push(json!({ "text": text }));
+    true
+}
+
 /// Wraps a Gemini request for the Cloud Code API.
 pub fn envelope(mut req: Value, model: &str, project: Option<&str>) -> Value {
     let claude = model.contains("claude");
@@ -269,6 +319,7 @@ pub fn envelope(mut req: Value, model: &str, project: Option<&str>) -> Value {
         o.remove("safetySettings");
         o.remove("safety_settings");
     }
+    let schema_in_instruction = schema_as_instruction(model) && move_schema_to_instruction(&mut req);
     // Function schemas: the backend only accepts its OpenAPI subset under `parameters`.
     let validated = claude || model.contains("gemini-3-pro") || model.contains("gemini-3.1-pro");
     for t in req.get_mut("tools").and_then(Value::as_array_mut).into_iter().flatten() {
@@ -299,7 +350,17 @@ pub fn envelope(mut req: Value, model: &str, project: Option<&str>) -> Value {
         }
     }
     if claude && req["tools"].as_array().is_some_and(|t| !t.is_empty()) {
-        req["toolConfig"]["functionCallingConfig"]["mode"] = "VALIDATED".into();
+        let calling = &mut req["toolConfig"]["functionCallingConfig"];
+        if schema_in_instruction {
+            // Forced modes are rejected too; AUTO takes no allowed-function list.
+            calling["mode"] = "AUTO".into();
+            if let Some(c) = calling.as_object_mut() {
+                c.remove("allowedFunctionNames");
+                c.remove("allowed_function_names");
+            }
+        } else {
+            calling["mode"] = "VALIDATED".into();
+        }
     }
     let mut env = json!({
         "model": model,
@@ -368,6 +429,51 @@ mod tests {
         assert!(gem["request"]["generationConfig"].get("maxOutputTokens").is_none());
         assert!(gem["request"].get("generation_config").is_none());
         assert!(gem["request"]["tools"][0].get("function_declarations").is_none());
+    }
+
+    #[test]
+    fn opus_and_sonnet_5_5_get_the_response_schema_as_an_instruction() {
+        let schema = json!({ "type": "object", "properties": { "title": { "type": "string", "minLength": 1 } },
+            "required": ["title"], "additionalProperties": false });
+        let req = json!({
+            "contents": [{ "role": "user", "parts": [{ "text": "Name a book." }] }],
+            "systemInstruction": { "parts": [{ "text": "Be brief." }] },
+            "tools": [{ "functionDeclarations": [{ "name": "f", "parametersJsonSchema": { "type": "object", "properties": {} } }] }],
+            "toolConfig": { "functionCallingConfig": { "mode": "ANY", "allowedFunctionNames": ["f"] } },
+            "generationConfig": { "temperature": 0.2, "responseMimeType": "application/json", "responseJsonSchema": schema }
+        });
+        let instructed = |r: &Value, at: usize| {
+            let text = r["systemInstruction"]["parts"][at]["text"].as_str().unwrap().to_string();
+            serde_json::from_str::<Value>(&text[text.find('{').unwrap()..]).unwrap()
+        };
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5-5-max", "claude-sonnet-5-5-low"] {
+            let r = &envelope(req.clone(), model, None)["request"];
+            let gc = &r["generationConfig"];
+            assert!(gc.get("responseJsonSchema").is_none() && gc.get("responseMimeType").is_none(), "{model}: {gc}");
+            assert_eq!(gc["temperature"], 0.2);
+            assert_eq!(r["systemInstruction"]["parts"][0]["text"], "Be brief.");
+            assert_eq!(instructed(r, 1), schema, "{model}: the schema is sent as written");
+            assert_eq!(r["toolConfig"]["functionCallingConfig"], json!({ "mode": "AUTO" }), "{model}");
+        }
+        for model in ["claude-sonnet-4-6", "claude-haiku-5-5", "claude-opus-5-50"] {
+            let r = &envelope(req.clone(), model, None)["request"];
+            assert!(r["generationConfig"]["responseJsonSchema"].is_object(), "{model}");
+            assert_eq!(r["generationConfig"]["responseMimeType"], "application/json");
+            assert_eq!(r["systemInstruction"]["parts"].as_array().unwrap().len(), 1);
+            assert_eq!(r["toolConfig"]["functionCallingConfig"]["mode"], "VALIDATED");
+        }
+        // Without a schema, a 5.5 request keeps its instruction and VALIDATED tools.
+        let mut plain = req.clone();
+        plain["generationConfig"] = json!({ "temperature": 0.2 });
+        let r = &envelope(plain, "claude-opus-5-5", None)["request"];
+        assert_eq!(r["systemInstruction"]["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(r["toolConfig"]["functionCallingConfig"]["mode"], "VALIDATED");
+        // snake_case fields, and no instruction yet.
+        let snake = json!({ "contents": req["contents"],
+            "generation_config": { "response_mime_type": "application/json", "response_schema": { "type": "OBJECT" } } });
+        let r = &envelope(snake, "claude-sonnet-5-5", None)["request"];
+        assert_eq!(r["generation_config"], json!({}));
+        assert_eq!(instructed(r, 0), json!({ "type": "OBJECT" }));
     }
 
     #[test]

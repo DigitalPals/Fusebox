@@ -417,7 +417,11 @@ pub fn usage_of(u: &Value) -> Option<Usage> {
 
 fn status_of_code(code: &str) -> u16 {
     match code {
-        "rate_limit_exceeded" | "usage_limit_reached" | "insufficient_quota" | "quota_exhausted" => 429,
+        "rate_limit_exceeded"
+        | "usage_limit_reached"
+        | "insufficient_quota"
+        | "quota_exhausted"
+        | "turn_rate_limit_exceeded" => 429,
         "invalid_prompt" | "invalid_request_error" | "context_length_exceeded" => 400,
         "server_is_overloaded" | "slow_down" => 503,
         _ => 500,
@@ -789,7 +793,7 @@ fn request_echo(req: &Request) -> Value {
     })
 }
 
-fn error_code(status: u16) -> &'static str {
+pub(crate) fn error_code(status: u16) -> &'static str {
     match status {
         429 => "rate_limit_exceeded",
         400 | 404 | 413 => "invalid_request_error",

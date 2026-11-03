@@ -57,9 +57,15 @@ such as `claude-d204ac98-<email>.json`). The account keeps its ID, priority,
 window-starter selection and sessions, and no stale copy is left retrying a
 revoked refresh token. The same account means the same provider and account ID;
 a Claude file without one is matched by email, a ChatGPT one only by its
-workspace's account ID. A refresh of the old tokens that is still running finishes
-first, then the new tokens take effect at once and an error from the old sign-in
-(such as `invalid_grant`) is cleared. Any Claude or ChatGPT sign-in, new or
+workspace's account ID. A new sign-in never overwrites another account's file:
+when its usual name is taken (`a+b@x` and `a_b@x` share one, as do two ChatGPT
+workspaces of one email on the same plan), it is saved as
+`<name>-<8 hex digits of its identity>.json` instead. Existing files keep their
+names, because the account ID is the file name. A Claude file with the same email
+is the same account and is signed in again. A refresh of the old tokens that is
+still running finishes first, then the new tokens take effect at once and an error
+from the old sign-in (such as `invalid_grant`) is cleared, as is the hold on a
+refresh token the provider refused. Any Claude or ChatGPT sign-in, new or
 repeated, then reads its usage and plan straight away, so its meters fill in
 without waiting for the next minute's poll.
 

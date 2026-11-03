@@ -108,6 +108,11 @@ pub struct Tracker {
 }
 
 impl Tracker {
+    /// This request's id in the request log and journal.
+    pub fn request_id(&self) -> u64 {
+        self.log.id
+    }
+
     pub fn new(app: &Arc<App>, client: Format, stream: bool, transport: &'static str, model: &str) -> Self {
         app.stats.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
@@ -601,7 +606,11 @@ fn soft_failure(
                 return None;
             }
             if at_capacity(status, body) {
-                return Some(reset_after(headers, body).and_then(short).unwrap_or_default());
+                // A longer wait is not sat out on the same account (`long_capacity_wait`).
+                return match reset_after(headers, body) {
+                    Some(until) => short(until),
+                    None => Some(std::time::Duration::ZERO),
+                };
             }
             match reset_after(headers, body) {
                 Some(until) => short(until),
@@ -646,11 +655,199 @@ pub fn quota_exhausted(acct: &Account, model: &str, status: u16, body: &str) -> 
 }
 
 /// Codex answers "Codex is at capacity, please try again later" with a 429 when OpenAI
-/// is short of servers. Like a 529 it says nothing about the subscription, so it is
-/// retried and shown but pauses no model: a pause would turn away working sessions.
+/// is short of servers, or limits turns with `turn_rate_limit_exceeded`. Like a 529 it
+/// says nothing about the subscription, so it is retried and shown but pauses no model:
+/// a pause would turn away working sessions. The code counts even when the message
+/// doesn't say "at capacity".
 pub fn at_capacity(status: u16, body: &str) -> bool {
     let b = body.to_ascii_lowercase();
-    status == 429 && ["at capacity", "overloaded"].iter().any(|s| b.contains(s))
+    status == 429 && ["at capacity", "overloaded", "turn_rate_limit_exceeded"].iter().any(|s| b.contains(s))
+}
+
+/// A capacity shortage whose own wait is too long to sit out on the same account (over
+/// the ten seconds `soft_failure` waits): the request moves on to another account at
+/// once. Codex's turn limit names waits of several minutes, and retries within them fail.
+fn long_capacity_wait(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> bool {
+    at_capacity(status, body)
+        && reset_after(headers, body).is_some_and(|until| until - Utc::now() > Duration::seconds(10))
+}
+
+/// The longest wait a capacity shortage passes on to a client left without an account,
+/// so it sits out only this turn.
+const CAPACITY_WAIT_LIMIT: u64 = 600;
+/// The longest pause a dry pool advertises as Retry-After. Clients sleep through whatever
+/// they are told, and Claude Code may give up past a minute.
+const ADVERTISED_WAIT_LIMIT: u64 = 60;
+
+/// The Retry-After a capacity shortage passes on to the client, if the provider named one.
+fn capacity_retry_after(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> Option<u64> {
+    let until = reset_after(headers, body).filter(|_| at_capacity(status, body))?;
+    Some(seconds_until(until).min(CAPACITY_WAIT_LIMIT))
+}
+
+/// Whole seconds until `until`, rounded up, at least one.
+fn seconds_until(until: chrono::DateTime<Utc>) -> u64 {
+    ((until - Utc::now()).num_milliseconds().max(1) as u64).div_ceil(1000)
+}
+
+/// The provider's own Retry-After in seconds, for logs.
+fn upstream_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
+}
+
+/// `Reply::Error` has no headers, so a Retry-After rides in the error body under this key
+/// until `server::reply` turns it into the header. No client sees the key.
+const RETRY_AFTER_KEY: &str = "__fusebox_retry_after";
+
+fn with_retry_after(mut body: Value, seconds: u64) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        object.insert(RETRY_AFTER_KEY.into(), seconds.into());
+    }
+    body
+}
+
+/// Takes the Retry-After an error reply carries out of its body.
+pub fn take_retry_after(body: &mut Value) -> Option<u64> {
+    body.as_object_mut()?.remove(RETRY_AFTER_KEY)?.as_u64()
+}
+
+/// The Retry-After an error body carries for its client, without removing it.
+pub fn retry_after_of(body: &Value) -> Option<u64> {
+    body.get(RETRY_AFTER_KEY)?.as_u64()
+}
+
+/// Anthropic answers an API key whose prepaid credit ran out with a 400. Only adding
+/// credit fixes it, so the key sits out (`refuse`). Subscriptions are left alone: the same
+/// text was seen on them with an unclear cause, and a usage reading would undo the pause.
+fn credit_exhausted(acct: &Account, status: u16, message: &str) -> bool {
+    acct.provider == Provider::Claude
+        && !acct.is_oauth()
+        && status == 400
+        && message.trim_start().to_ascii_lowercase().starts_with("your credit balance is too low")
+}
+
+/// ChatGPT answers 502 "response protection is unavailable" to a request it won't run
+/// as sent (one replaying web search results without the web search tool). Another try
+/// or another account gets the same answer, and the account is fine. Inside a stream the
+/// same refusal can come with another server-error status.
+pub(crate) fn protection_refused(provider: Provider, status: u16, message: &str) -> bool {
+    provider == Provider::Codex
+        && (500..600).contains(&status)
+        && message.to_ascii_lowercase().contains("response protection is unavailable")
+}
+
+/// What keeps every account for a model away, judged by the one back first.
+enum Dry {
+    /// A refusal only the owner can fix, to give again: status and message.
+    Refused(u16, String),
+    /// A rate limit, spent quota or a quota check, until then.
+    Limit(chrono::DateTime<Utc>),
+    /// Anything else, such as a sign-in or permission pause: not a wait to advertise.
+    Other,
+}
+
+/// None when an account for `model` is free: the request used up its own choices.
+fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclude: &[String]) -> Option<Dry> {
+    let mut next: Option<(chrono::DateTime<Utc>, Arc<Account>)> = None;
+    for a in app.pool.all() {
+        let disabled = a.state.lock().disabled;
+        // As at selection: a held account is out until a sign-in, not back at some time.
+        if exclude.contains(&a.id) || disabled || a.held_out() || app.pool.resolve_account(&a, model, only).is_none() {
+            continue;
+        }
+        let until = a.cooling_until(model)?;
+        if next.as_ref().is_none_or(|(t, _)| until < *t) {
+            next = Some((until, a));
+        }
+    }
+    let (until, a) = next?;
+    Some(match a.refusal() {
+        Some((status, message)) => Dry::Refused(status, message),
+        None if a.paused_by_limit(model) => Dry::Limit(until),
+        None => Dry::Other,
+    })
+}
+
+/// The answer for a request left without an account. A 429 tells when the next account
+/// is back if a rate limit, spent quota or a quota check is all that keeps it away: within
+/// a minute as Retry-After; later with no header, which clients would sleep through for
+/// hours, and to OpenAI clients as `usage_limit_reached` with `resets_at`. A sign-in or
+/// permission pause is no wait. With `refusals`, a refusal only the owner can fix (a
+/// used-up API credit balance) is given instead while it keeps the next account away.
+#[allow(clippy::too_many_arguments)]
+fn no_account_left(
+    app: &App,
+    format: Format,
+    model: &str,
+    only: Option<&crate::accounts::Only>,
+    exclude: &[String],
+    status: u16,
+    body: Value,
+    refusals: bool,
+) -> (u16, Value) {
+    if status != 429 || body.get(RETRY_AFTER_KEY).is_some() {
+        return (status, body);
+    }
+    match dry_pool(app, model, only, exclude) {
+        Some(Dry::Refused(status, message)) if refusals => (status, formats::error_body(format, status, &message)),
+        Some(Dry::Limit(until)) => {
+            let wait = seconds_until(until);
+            if wait <= ADVERTISED_WAIT_LIMIT {
+                (status, with_retry_after(body, wait))
+            } else if matches!(format, Format::Chat | Format::Responses)
+                && body["error"]["type"] != "usage_limit_reached"
+            {
+                let message = error_message(&body.to_string());
+                let error = json!({"type": "usage_limit_reached", "code": "usage_limit_reached", "message": message,
+                    "resets_at": until.timestamp(), "resets_in_seconds": wait});
+                (status, json!({ "error": error }))
+            } else {
+                (status, body)
+            }
+        }
+        _ => (status, body),
+    }
+}
+
+/// The failure a stream opened with, before any content: its error object, to match
+/// codes, and its `code` and `type` as logs may show them.
+struct FirstError {
+    raw: String,
+    code: String,
+    kind: String,
+}
+
+impl FirstError {
+    /// The failure a stream event reports, if it reports one.
+    fn of(event: &Value) -> Option<Self> {
+        let (error, typed) = if event["type"] == "response.failed" {
+            (&event["response"]["error"], true)
+        } else if event["error"].is_object() {
+            (&event["error"], true)
+        } else if event["type"] == "error" {
+            // A bare `error` event carries the code itself; its type names only the event.
+            (event, false)
+        } else {
+            return None;
+        };
+        let kind = if typed { log_label(&error["type"]) } else { "none" };
+        Some(Self { raw: error.to_string(), code: log_label(&error["code"]).into(), kind: kind.into() })
+    }
+}
+
+/// A provider's error code or type as logs may show it: a plain identifier, or "other"
+/// for anything else, so no message or account detail is ever logged.
+fn log_label(value: &Value) -> &str {
+    match value {
+        Value::Null => "none",
+        Value::String(s)
+            if (1..=64).contains(&s.len())
+                && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b)) =>
+        {
+            s
+        }
+        _ => "other",
+    }
 }
 
 pub fn mark_quota_exhausted(acct: &Account, model: &str, headers: &reqwest::header::HeaderMap, body: &str) {
@@ -682,6 +879,36 @@ fn forbidden_for_good(body: &str) -> bool {
     ["not available in your", "unsupported_country", "permission_denied", "terms of service"]
         .iter()
         .any(|k| b.contains(k))
+}
+
+/// Meta's 403 for a Muse Code subscription used from another client (it looks at the
+/// request's tools). It refuses this request, not the account.
+fn attestation_denied(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|v| v["error"]["code"] == "client_attestation_denied")
+}
+
+/// Whether Codex access tokens die before `expires_at`: the refused token's age from its
+/// `iat` and the time it had left, in whole hours. Never the token or another claim.
+pub(crate) fn log_codex_401(acct: &Account, sent: Option<&str>, request_id: u64) {
+    let crate::accounts::Credential::OAuth(o) = &*acct.cred.read() else { return };
+    let now = Utc::now();
+    let hours = |h: Option<i64>| h.map_or_else(|| "unknown".to_string(), |h| h.to_string());
+    // The token the request carried, which a refresh meanwhile may have replaced on file.
+    let token = sent.unwrap_or(&o.access_token);
+    let claims = crate::oauth::jwt_claims(token);
+    let age = claims["iat"].as_i64().map(|iat| (now.timestamp() - iat) / 3600);
+    let left = claims["exp"]
+        .as_i64()
+        .map(|exp| (exp - now.timestamp()) / 3600)
+        .or_else(|| o.expires_at.filter(|_| token == o.access_token).map(|t| (t - now).num_hours()));
+    tracing::info!(request_id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+        token_age_hours = %hours(age), expires_in_hours = %hours(left), "Codex refused its access token");
+}
+
+/// The bearer token a prepared request carries.
+fn bearer(headers: &[(String, String)]) -> Option<&str> {
+    let (_, value) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("authorization"))?;
+    value.strip_prefix("Bearer ")
 }
 
 fn backoff(acct: &Account) -> chrono::DateTime<Utc> {
@@ -979,6 +1206,11 @@ struct RetryBudget {
     remaining_accounts: usize,
     remaining_attempts: usize,
     selected: std::collections::HashSet<(String, String)>,
+    /// Accounts no model of this request may reach, apart from those it tried: Meta's,
+    /// once Meta refused this client's tools. Kept across a model group's models.
+    skipped: Vec<String>,
+    /// The answer refuses the request itself, so a model group stops there too.
+    terminal: bool,
 }
 
 impl RetryBudget {
@@ -988,6 +1220,8 @@ impl RetryBudget {
             remaining_accounts: (attempts as usize).clamp(1, MAX_ACCOUNTS),
             remaining_attempts: MAX_ACCOUNTS,
             selected: Default::default(),
+            skipped: Vec::new(),
+            terminal: false,
         }
     }
 
@@ -1070,8 +1304,16 @@ async fn execute_models(app: Arc<App>, mut call: Call) -> Reply {
             routing_selection: if i == 0 { call.routing_selection.clone() } else { None },
         };
         set_model(&mut attempt, model);
-        let reply = execute_inner(app.clone(), attempt, &mut budget).await;
-        if i + 1 < order.len() && group_moves_on(&reply) && budget.next_model() {
+        let mut reply = execute_inner(app.clone(), attempt, &mut budget).await;
+        // A model left without accounts by this request's own refusal (Meta's) adds nothing:
+        // the refusal stays the answer.
+        if matches!(reply, Reply::Error(404, _))
+            && !budget.skipped.is_empty()
+            && let Some(earlier) = last.take()
+        {
+            reply = earlier;
+        }
+        if i + 1 < order.len() && !budget.terminal && group_moves_on(&reply) && budget.next_model() {
             tracing::info!(group = %base, model = %model, "model group: trying the next model");
             last = Some(reply);
             continue;
@@ -1103,7 +1345,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     let mut parsed: Option<Request> = None;
     let mut shortened: Option<(Request, HashMap<String, String>)> = None;
     let mut tried: Vec<String> = Vec::new();
-    let residency_excluded: Vec<_> = if residency.is_some() {
+    let mut residency_excluded: Vec<_> = if residency.is_some() {
         app.pool
             .all()
             .into_iter()
@@ -1113,6 +1355,33 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     } else {
         Vec::new()
     };
+    // Codex asks for remote compaction by provider, not model, and Kimi and Meta can't
+    // compact: their accounts sit out such a request rather than fail it.
+    if call.format == Format::Responses
+        && call.body["input"].as_array().is_some_and(|items| items.iter().any(|i| i["type"] == "compaction_trigger"))
+    {
+        let serving: Vec<_> = app
+            .pool
+            .all()
+            .into_iter()
+            .filter(|a| {
+                let disabled = a.state.lock().disabled;
+                !residency_excluded.contains(&a.id)
+                    && !disabled
+                    && !a.held_out()
+                    && app.pool.resolve_account(a, &model, only.as_ref()).is_some()
+            })
+            .collect();
+        let cannot = |a: &Account| matches!(a.provider, Provider::Kimi | Provider::Meta);
+        if !serving.is_empty() && serving.iter().all(|a| cannot(a)) {
+            let message = format!(
+                "{model} can't compact a Codex conversation remotely: Kimi and Meta don't support it. Point Codex at this model through a model provider entry of its own with `capabilities.remote_compaction = \"unsupported\"`, so Codex compacts locally"
+            );
+            tracker.finish(400, &Usage::default(), Some(message.clone()));
+            return error_reply(call.format, 400, &message);
+        }
+        residency_excluded.extend(serving.iter().filter(|a| cannot(a)).map(|a| a.id.clone()));
+    }
     let mut refreshed: Vec<String> = Vec::new();
     let mut last_error: Option<(u16, Value)> = None;
     let mut retry_same: Option<String> = None;
@@ -1128,7 +1397,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         crate::cache::key(&call.headers, &call.body, call.session.as_deref(), call.session_source, &cfg.prompt_cache);
 
     while tried.len() < attempts {
-        let excluded: Vec<_> = tried.iter().chain(&residency_excluded).cloned().collect();
+        let excluded: Vec<_> = tried.iter().chain(&residency_excluded).chain(&budget.skipped).cloned().collect();
         // Past the budget, the error so far is the answer rather than another wait.
         if !budget.available() {
             break;
@@ -1137,7 +1406,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         // A retry on a temporary detour must stay on that account without
         // replacing the session's long-lived assignment to its original account.
         let retry = pin.as_deref().and_then(|id| app.pool.get(id)).and_then(|account| {
-            if tried.contains(&account.id) || account.state.lock().disabled || account.cooling_until(&model).is_some() {
+            if tried.contains(&account.id)
+                || account.state.lock().disabled
+                || account.held_out()
+                || account.cooling_until(&model).is_some()
+            {
                 return None;
             }
             app.pool.resolve_account(&account, &model, only.as_ref()).map(|model| crate::affinity::Selected {
@@ -1195,12 +1468,19 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     status = 400;
                     msg = "Requested Codex residency requires an available Codex subscription route".into();
                 }
+                // Judged by the accounts this request could reach, including those it tried.
+                let unreachable: Vec<_> = residency_excluded.iter().chain(&budget.skipped).cloned().collect();
+                let left = |status, body, refusals| {
+                    no_account_left(&app, call.format, &model, only.as_ref(), &unreachable, status, body, refusals)
+                };
                 if let Some((s, b)) = last_error {
+                    let (s, b) = left(s, b, false);
                     tracker.finish(s, &Usage::default(), Some(error_message(&b.to_string())));
                     return Reply::Error(s, b);
                 }
-                tracker.finish(status, &Usage::default(), Some(msg.clone()));
-                return error_reply(call.format, status, &msg);
+                let (status, body) = left(status, formats::error_body(call.format, status, &msg), true);
+                tracker.finish(status, &Usage::default(), Some(error_message(&body.to_string())));
+                return Reply::Error(status, body);
             }
         };
         // Native eligibility checks can assign a session before HTTP sends anything.
@@ -1233,7 +1513,10 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             tracker.diagnostic_failure(failure.clone());
             tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                 failure_kind = failure.kind, error_causes = ?failure.causes, "credential refresh failed");
-            acct.cool(None, Utc::now() + Duration::minutes(5), &format!("token refresh failed: {e}"));
+            // Waiting for a sign-in already keeps it out; a cooldown would hide why.
+            if !acct.held_out() {
+                acct.cool(None, Utc::now() + Duration::minutes(5), &format!("token refresh failed: {e}"));
+            }
             tried.push(acct.id.clone());
             last_error = Some((401, formats::error_body(call.format, 401, &format!("token refresh failed: {e}"))));
             continue;
@@ -1557,10 +1840,46 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             let client_body = if passthrough {
                 serde_json::from_str(&text).unwrap_or_else(|_| formats::error_body(call.format, status, &msg))
             } else {
-                formats::error_body(call.format, status, &msg)
+                formats::translated_error_body(call.format, native, status, &msg)
             };
+            // The request itself is refused: answered at once, and the account is fine.
+            if protection_refused(provider, status, &msg) {
+                let failure = crate::diagnostics::Failure::classified("response_protection_unavailable");
+                tracker.diagnostic_failure(failure.clone());
+                tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                    status, failure_kind = failure.kind, "upstream refused the request as sent; answering without a retry");
+                budget.terminal = true;
+                tracker.finish(status, &Usage::default(), Some(msg));
+                return Reply::Error(status, client_body);
+            }
             if quota_exhausted(&acct, &model, status, &text) {
                 mark_quota_exhausted(&acct, &model, &headers, &text);
+                app.broadcast("accounts", Value::Null);
+                tried.push(acct.id.clone());
+                last_error = Some((status, client_body));
+                continue;
+            }
+            if credit_exhausted(&acct, status, &msg) {
+                let reason = format!("API credit balance too low: {msg}");
+                acct.refuse(Utc::now() + Duration::minutes(30), &reason, status, &msg);
+                app.broadcast("accounts", Value::Null);
+                tried.push(acct.id.clone());
+                last_error = Some((status, client_body));
+                continue;
+            }
+            // A capacity shortage names the client's wait, should no other account answer.
+            let client_wait = capacity_retry_after(status, &headers, &text);
+            let client_body = match client_wait {
+                Some(wait) => with_retry_after(client_body, wait),
+                None => client_body,
+            };
+            if long_capacity_wait(status, &headers, &text) {
+                // Retrying within the wait fails, and a pause would turn away the account's
+                // other sessions: only this request moves on.
+                tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                    status, upstream_retry_after_seconds = upstream_retry_after(&headers),
+                    client_retry_after_seconds = client_wait, "upstream at capacity for longer than a retry; trying another account");
+                acct.state.lock().set_temporary_error(format!("{status}: {msg}"), Utc::now() + Duration::seconds(30));
                 app.broadcast("accounts", Value::Null);
                 tried.push(acct.id.clone());
                 last_error = Some((status, client_body));
@@ -1571,8 +1890,10 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 if *n < 2 {
                     *n += 1;
                     let wait = delay.max(std::time::Duration::from_secs(if *n == 1 { 1 } else { 3 }));
+                    let upstream_wait = upstream_retry_after(&headers).filter(|_| at_capacity(status, &text));
                     tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
-                        status, retry_delay_seconds = wait.as_secs(), "upstream busy; retrying");
+                        status, retry_delay_seconds = wait.as_secs(), upstream_retry_after_seconds = upstream_wait,
+                        "upstream busy; retrying");
                     last_error = Some((status, client_body));
                     if !budget.wait(wait).await {
                         break;
@@ -1601,7 +1922,20 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     acct.rate_limit(&model, until, &format!("429: {msg}"));
                     app.broadcast("accounts", Value::Null);
                 }
+                // Meta refuses this client's tools, not the account: no new key, pause or
+                // account error. Its other accounts would refuse the same, so only another
+                // provider's route for this model may serve it; otherwise Meta's 403 answers.
+                403 if provider == Provider::Meta && attestation_denied(&text) => {
+                    tracing::info!(request_id = tracker.log.id, "Meta refused this client's tools; skipping Meta");
+                    let meta = app.pool.all().into_iter().filter(|a| a.provider == Provider::Meta);
+                    budget.skipped.extend(meta.map(|a| a.id.clone()));
+                    // Not the account's failure, so not in its failed-requests count.
+                    tracker.log.account_id.clear();
+                }
                 401 | 403 if acct.is_oauth() && !refreshed.contains(&acct.id) && !forbidden_for_good(&text) => {
+                    if status == 401 && provider == Provider::Codex {
+                        log_codex_401(&acct, bearer(&prepared.headers), tracker.log.id);
+                    }
                     refreshed.push(acct.id.clone());
                     if crate::oauth::ensure_fresh(&app, &acct, Duration::minutes(5), true).await.is_ok() {
                         // Retry the same account with the new token.
@@ -1609,9 +1943,20 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                         last_error = Some((status, client_body));
                         continue;
                     }
-                    acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}"));
+                    // A 401 refused the access token too, and its refresh token was refused
+                    // for good: it is out until a sign-in, which a cooldown would only hide.
+                    // A 403 can be a permission for this model alone, so the token may still
+                    // serve others; it cools as before.
+                    if status != 401 || !acct.refuse_access() {
+                        acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}"));
+                    }
                 }
-                401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
+                401 | 403 => {
+                    if status == 401 && provider == Provider::Codex && acct.is_oauth() {
+                        log_codex_401(&acct, bearer(&prepared.headers), tracker.log.id);
+                    }
+                    acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}"))
+                }
                 // A gateway timeout may still be generating upstream: answer, don't repeat.
                 400 | 404 | 413 | 422 | 504 => {
                     acct.state.lock().set_error(format!("{status}: {msg}"));
@@ -1636,12 +1981,23 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         // that arrives inside a 200 still goes to another account (see `bootstrap`).
         let mut body: Option<ByteStream> = None;
         if is_sse && !devin {
+            // A wait the provider names for a failure inside the stream is in these headers.
+            let stream_headers = resp.as_ref().map(|r| r.headers().clone()).unwrap_or_default();
             let stream: ByteStream = Box::pin(resp.take().expect("response").bytes_stream());
             let first_event = first_token
                 .into_iter()
                 .chain(absolute_deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now())))
                 .min();
-            match bootstrap(stream, native, first_event, &cfg.stream_limits, &upstream_model).await {
+            let mut first_error = None;
+            let boot =
+                bootstrap(stream, native, first_event, &cfg.stream_limits, &upstream_model, &mut first_error).await;
+            if provider == Provider::Codex
+                && let Some(error) = &first_error
+            {
+                tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                    error_code = %error.code, error_type = %error.kind, "codex stream opened with an error");
+            }
+            match boot {
                 Boot::Ready(stream) => body = Some(stream),
                 Boot::Failed { status, message, held } => {
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
@@ -1657,9 +2013,22 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     if let Some(c) = &tap.usage {
                         c.headers(&HeaderMap::new(), status);
                     }
+                    // As over plain HTTP: the request itself is refused, the account is fine.
+                    if protection_refused(provider, status, &message) {
+                        let failure = crate::diagnostics::Failure::classified("response_protection_unavailable");
+                        tracker.diagnostic_failure(failure.clone());
+                        tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                            status, failure_kind = failure.kind, "upstream refused the request as sent; answering without a retry");
+                        budget.terminal = true;
+                        tracker.finish(status, &Usage::default(), Some(message.clone()));
+                        return error_reply(call.format, status, &message);
+                    }
+                    // The error's code tells a capacity shortage too, whatever its message says.
+                    let capacity = at_capacity(status, &message)
+                        || first_error.as_ref().is_some_and(|e| at_capacity(status, &e.raw));
                     if status == 429 && quota_exhausted(&acct, &model, status, &message) {
                         mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
-                    } else if status == 429 && !at_capacity(status, &message) {
+                    } else if status == 429 && !capacity {
                         acct.rate_limit(&model, Utc::now() + Duration::seconds(30), &format!("429: {message}"));
                     } else if matches!(status, 429 | 500 | 502 | 503 | 529) {
                         acct.state
@@ -1676,7 +2045,16 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     }
                     app.broadcast("accounts", Value::Null);
                     tried.push(acct.id.clone());
-                    last_error = Some((status, formats::error_body(call.format, status, &message)));
+                    let body = formats::error_body(call.format, status, &message);
+                    // A capacity shortage passes its wait on, as over plain HTTP, should no
+                    // other account answer.
+                    let error =
+                        first_error.as_ref().map_or_else(|| message.clone(), |e| format!("{{\"error\":{}}}", e.raw));
+                    let body = match capacity_retry_after(status, &stream_headers, &error) {
+                        Some(wait) => with_retry_after(body, wait),
+                        None => body,
+                    };
+                    last_error = Some((status, body));
                     continue;
                 }
                 Boot::Stalled => {
@@ -1712,7 +2090,14 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             if let Some(body) = body {
                 if call.stream {
                     return Reply::Stream {
-                        frames: passthrough_stream(body, native, tracker, unwrap, event_limit),
+                        frames: passthrough_stream(
+                            body,
+                            native,
+                            tracker,
+                            unwrap,
+                            event_limit,
+                            !reads_private_events(&call.headers),
+                        ),
                         account,
                     };
                 }
@@ -1790,6 +2175,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     let (status, body) = last_error.unwrap_or_else(|| {
         (404, formats::error_body(call.format, 404, &format!("no available account serves model `{model}`")))
     });
+    let unreachable: Vec<_> = residency_excluded.iter().chain(&budget.skipped).cloned().collect();
+    let (status, body) = no_account_left(&app, call.format, &model, only.as_ref(), &unreachable, status, body, false);
     tracker.finish(status, &Usage::default(), Some(error_message(&body.to_string())));
     Reply::Error(status, body)
 }
@@ -1888,13 +2275,15 @@ enum Boot {
 /// end or an error, so a rate limit or overload that arrives inside a 200 response
 /// can go to another account before the client sees anything. The first event must
 /// come within `first_event`; after it, content gets `BOOT_HOLD` before the stream is
-/// let through as it is.
+/// let through as it is. An error that comes before any content or end is noted in
+/// `first_error`, whether or not it fails the stream here.
 async fn bootstrap(
     mut body: ByteStream,
     native: Format,
     first_event: Option<std::time::Duration>,
     limits: &crate::stream_limits::Limits,
     model: &str,
+    first_error: &mut Option<FirstError>,
 ) -> Boot {
     let start = tokio::time::Instant::now();
     let stall_at = first_event.map(|d| start + d);
@@ -1925,7 +2314,15 @@ async fn bootstrap(
         for sse in dec.push(&chunk) {
             release_at.get_or_insert_with(|| tokio::time::Instant::now() + BOOT_HOLD);
             let parsed = serde_json::from_str::<Value>(&sse.data).ok();
+            let before = events.len();
             parser.feed_value(&sse, parsed.as_ref(), &mut events);
+            let opens = |e: &Event| is_content(e) || matches!(e, Event::Error { .. } | Event::Finish(_));
+            if first_error.is_none()
+                && !events[..before].iter().any(opens)
+                && events[before..].iter().any(|e| matches!(e, Event::Error { .. }))
+            {
+                *first_error = parsed.as_ref().and_then(FirstError::of);
+            }
         }
         if dec.failed() {
             return ready(held, body);
@@ -2113,14 +2510,54 @@ async fn collect(events: EventStream, format: Format, model: &str, req: &Request
     Reply::Json(formats::render_full(format, &agg, model, req))
 }
 
-/// Forwards upstream SSE events untouched while tapping usage.
+/// Private Responses events left out, by client program, for `/metrics`: a client
+/// wrongly taken for one that isn't Codex shows up here.
+static PRIVATE_DROPPED: parking_lot::Mutex<std::collections::BTreeMap<&'static str, u64>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+pub fn count_private_dropped(client_app: Option<&'static str>) {
+    *PRIVATE_DROPPED.lock().entry(client_app.unwrap_or("other")).or_default() += 1;
+}
+
+pub fn private_dropped() -> Vec<(&'static str, u64)> {
+    PRIVATE_DROPPED.lock().iter().map(|(k, v)| (*k, *v)).collect()
+}
+
+/// Codex reads its private events (`response.metadata` drives its routing and safety
+/// buffering), so every Codex client keeps them, including app-server hosts such as
+/// T3 Code that name themselves only in `originator`. `client_app` doesn't know those
+/// hosts, so it must not decide this.
+pub(crate) fn reads_private_events(headers: &HeaderMap) -> bool {
+    crate::clients::is_codex(headers) || headers.contains_key("originator")
+}
+
+/// Codex's own events (`response.metadata`, `codex.*`), Meta's `response.subscription_usage`
+/// and the Responses websocket's timing telemetry are not public Responses events, and
+/// strict clients reject an event they don't know.
+pub(crate) fn private_event(name: &str) -> bool {
+    matches!(name, "response.metadata" | "response.subscription_usage")
+        || name.starts_with("codex.")
+        || name.starts_with("responsesapi.")
+}
+
+/// Whether a frame is one of those, by its SSE event name or its `type`. A frame that
+/// produced an IR event (usage, an error, the end) is never one: it is always forwarded.
+pub(crate) fn private_frame(event: Option<&str>, data: Option<&Value>, events: &[Event]) -> bool {
+    events.is_empty()
+        && (event.is_some_and(private_event) || data.and_then(|v| v["type"].as_str()).is_some_and(private_event))
+}
+
+/// Forwards upstream SSE events untouched while tapping usage. With `drop_private`, a
+/// native Responses stream leaves out the private events of `private_event`.
 fn passthrough_stream(
     mut body: ByteStream,
     native: Format,
     mut tracker: Tracker,
     unwrap: bool,
     event_limit: usize,
+    drop_private: bool,
 ) -> FrameStream {
+    let drop_private = drop_private && native == Format::Responses;
     Box::pin(async_stream::stream! {
         let mut dec = SseDecoder::with_limit(event_limit);
         let mut parser = formats::parser(native);
@@ -2167,6 +2604,14 @@ fn passthrough_stream(
                     tracker.finish_stream();
                     yield Frame::data("[DONE]");
                     return;
+                }
+                // Fusebox's own observers above have already read it.
+                if drop_private && private_frame(sse.event.as_deref(), parsed.as_ref(), &events) {
+                    count_private_dropped(tracker.log.client_app);
+                    tracing::debug!(request_id = tracker.log.id, client_app = tracker.log.client_app,
+                        event = sse.event.as_deref().or(parsed.as_ref().and_then(|v| v["type"].as_str())),
+                        "left out a private Responses event this client does not read");
+                    continue;
                 }
                 for ev in events {
                     tracker.observe_stream_event(&ev);
@@ -2423,14 +2868,144 @@ mod tests {
         soon.insert("retry-after", "2".parse().unwrap());
         assert!(soft_failure(Provider::Codex, 429, &soon, "{}").is_some());
         assert!(soft_failure(Provider::Codex, 400, &h, "{}").is_none());
-        // OpenAI's capacity shortage is retried even when it names a long wait.
+        // OpenAI's capacity shortage is retried on the same account only when its wait is
+        // brief. A longer one moves the request on at once, and its wait goes to the client.
         let capacity = r#"{"error":{"message":"Codex is at capacity, please try again later"}}"#;
         assert_eq!(soft_failure(Provider::Codex, 429, &h, capacity), Some(std::time::Duration::ZERO));
-        assert_eq!(soft_failure(Provider::Codex, 429, &later, capacity), Some(std::time::Duration::ZERO));
+        assert_eq!(soft_failure(Provider::Codex, 429, &later, capacity), None);
         assert_eq!(soft_failure(Provider::Codex, 429, &soon, capacity).map(|d| d.as_secs() <= 2), Some(true));
+        assert!(long_capacity_wait(429, &later, capacity));
+        assert!(!long_capacity_wait(429, &soon, capacity));
+        assert!(!long_capacity_wait(429, &h, capacity), "no named wait: retried as before");
+        assert!(!long_capacity_wait(429, &later, "{}"), "a plain rate limit is not a capacity shortage");
+        assert_eq!(capacity_retry_after(429, &later, capacity), Some(CAPACITY_WAIT_LIMIT));
+        assert_eq!(capacity_retry_after(429, &soon, capacity), Some(2));
+        assert_eq!(capacity_retry_after(429, &h, capacity), None);
+        assert_eq!(capacity_retry_after(429, &later, "{}"), None);
+        let mut minutes = reqwest::header::HeaderMap::new();
+        minutes.insert("retry-after", "256".parse().unwrap());
+        // Codex's turn limit counts by its code, even when the message doesn't say "at capacity".
+        let turn = r#"{"error":{"code":"turn_rate_limit_exceeded","message":"Too many turns, try again later"}}"#;
+        assert!(at_capacity(429, turn));
+        assert_eq!(soft_failure(Provider::Codex, 429, &minutes, turn), None);
+        assert!(long_capacity_wait(429, &minutes, turn));
+        assert_eq!(capacity_retry_after(429, &minutes, turn), Some(256));
         assert!(at_capacity(429, r#"{"error":{"code":"server_is_overloaded"}}"#));
         assert!(!at_capacity(503, capacity), "only 429s need telling apart from rate limits");
         assert!(!at_capacity(429, r#"{"error":{"code":"rate_limit_exceeded"}}"#));
+    }
+
+    #[test]
+    fn codex_turn_limits_inside_a_stream_are_429s() {
+        use crate::formats::StreamParser;
+        for event in [
+            json!({"type":"response.failed","response":{"error":{"code":"turn_rate_limit_exceeded","message":"Too many turns"}}}),
+            json!({"type":"error","code":"turn_rate_limit_exceeded","message":"Too many turns"}),
+        ] {
+            let mut parser = formats::responses::Parser::default();
+            let mut out = Vec::new();
+            parser.feed_value(&crate::sse::SseEvent { event: None, data: event.to_string() }, Some(&event), &mut out);
+            assert!(matches!(out.last(), Some(Event::Error { status: 429, .. })), "{event}");
+        }
+    }
+
+    #[test]
+    fn stream_errors_are_logged_by_plain_codes_only() {
+        let labels = |event: Value| FirstError::of(&event).map(|e| (e.code, e.kind));
+        let failed = json!({"type":"response.failed","response":{"error":{"code":"auth_unavailable","type":"invalid_request_error","message":"private detail"}}});
+        assert_eq!(labels(failed.clone()), Some(("auth_unavailable".into(), "invalid_request_error".into())));
+        assert!(FirstError::of(&failed).unwrap().raw.contains("auth_unavailable"));
+        // A bare error event's type names the event, not the error.
+        let bare = json!({"type":"error","code":"rate_limit_exceeded","message":"private detail"});
+        assert_eq!(labels(bare), Some(("rate_limit_exceeded".into(), "none".into())));
+        let odd = json!({"type":"error","error":{"code":"Has Spaces","type":"x".repeat(65)}});
+        assert_eq!(labels(odd), Some(("other".into(), "other".into())));
+        let numeric = json!({"type":"error","error":{"code":429,"type":"rate_limit_error"}});
+        assert_eq!(labels(numeric), Some(("other".into(), "rate_limit_error".into())));
+        assert_eq!(labels(json!({"type":"response.created","response":{"id":"r"}})), None);
+        assert_eq!(labels(json!({"type":"response.output_text.delta","delta":"error"})), None);
+    }
+
+    #[test]
+    fn only_a_claude_api_keys_empty_credit_balance_sits_it_out() {
+        let directory = std::env::temp_dir().join(format!("fusebox-credit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("signed-in.json"),
+            json!({"type":"claude","access_token":"token","email":"owner@example.com"}).to_string(),
+        )
+        .unwrap();
+        let cfg = crate::config::Config {
+            auth_dir: directory.to_string_lossy().into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "key".into(), ..Default::default() }],
+            codex_api_key: vec![crate::config::KeyEntry { api_key: "codex".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let find = |provider: Provider, oauth: bool| {
+            pool.all().into_iter().find(|a| a.provider == provider && a.is_oauth() == oauth).unwrap()
+        };
+        let (key, subscription, codex) =
+            (find(Provider::Claude, false), find(Provider::Claude, true), find(Provider::Codex, false));
+        let empty = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing.";
+        assert!(credit_exhausted(&key, 400, empty));
+        assert!(credit_exhausted(&key, 400, &format!("  {}", empty.to_uppercase())));
+        assert!(!credit_exhausted(&key, 429, empty));
+        assert!(!credit_exhausted(&key, 400, "prompt is too long: your credit balance is too low"));
+        assert!(!credit_exhausted(&subscription, 400, empty), "subscriptions are left alone");
+        assert!(!credit_exhausted(&codex, 400, empty));
+        // The pause covers the whole account and keeps the refusal, but is no wait to advertise.
+        let until = Utc::now() + Duration::minutes(30);
+        key.refuse(until, "API credit balance too low: empty", 400, empty);
+        assert_eq!(key.cooling_until("claude-sonnet-4-6"), Some(until));
+        assert_eq!(key.refusal(), Some((400, empty.to_string())));
+        assert!(!key.paused_by_limit("claude-sonnet-4-6"));
+        assert_eq!(key.state.lock().last_error(Utc::now()), Some("API credit balance too low: empty"));
+        assert!(!quota_exhausted(&key, "claude-sonnet-4-6", 400, empty), "no subscription migration");
+        key.state.lock().cooldowns.clear();
+        assert_eq!(key.refusal(), None, "the refusal ends with its pause");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn only_limits_are_waits_to_advertise() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![crate::config::KeyEntry { api_key: "test".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let account = pool.all().remove(0);
+        let model = "gpt-6.1-sol";
+        let soon = Utc::now() + Duration::seconds(30);
+        let clear = || {
+            let mut st = account.state.lock();
+            st.cooldowns.clear();
+            st.quota_cooldowns.clear();
+            st.quota_refreshing = false;
+            st.clear_error();
+        };
+        account.rate_limit(model, soon, "429: slow down");
+        assert!(account.paused_by_limit(model));
+        clear();
+        account.exhaust(model, soon, "subscription quota exhausted: spent");
+        assert!(account.paused_by_limit(model));
+        clear();
+        account.state.lock().quota_refreshing = true;
+        assert!(account.paused_by_limit(model));
+        clear();
+        // A sign-in or permission pause, and a stalled model, are not waits however short.
+        account.cool(None, soon, "401: unauthorized");
+        assert!(!account.paused_by_limit(model));
+        clear();
+        account.cool(Some(model), soon, "upstream sent nothing within 120s");
+        assert!(!account.paused_by_limit(model));
+        // Nor is a rate limit stacked on one.
+        account.rate_limit(model, soon, "429: slow down");
+        account.cool(None, Utc::now() + Duration::minutes(10), "403: forbidden");
+        assert!(!account.paused_by_limit(model));
     }
 
     #[test]

@@ -30,8 +30,12 @@ pub struct TranslationConfig {
 
 /// Restrict translated OpenAI controls to a verified backend. Native requests
 /// remain under the caller's control. Never invent a tier or lower an effort.
+/// Translated Claude requests also lose a prefill that their model rejects.
 pub fn generation_controls(body: &mut Value, wire: Format, openai: bool, allow_tier: bool) -> Vec<&'static str> {
     let mut dropped = Vec::new();
+    if wire == Format::Claude && claude::drop_rejected_prefill(body) {
+        dropped.push("prefill_unsupported");
+    }
     if !openai {
         let removed = if wire == Format::Responses {
             body.get_mut("text").and_then(Value::as_object_mut).and_then(|t| t.remove("verbosity"))
@@ -511,6 +515,22 @@ pub fn error_body(format: Format, status: u16, message: &str) -> Value {
     }
 }
 
+/// An upstream's rejection, translated into the client's dialect. Claude says a prompt
+/// overflowed its context only in words ("prompt is too long: …"); OpenAI clients look
+/// for the `context_length_exceeded` code. Every other body is `error_body`'s.
+pub fn translated_error_body(format: Format, upstream: Format, status: u16, message: &str) -> Value {
+    let mut body = error_body(format, status, message);
+    let prefix = "prompt is too long";
+    if matches!(format, Format::Chat | Format::Responses)
+        && upstream == Format::Claude
+        && status == 400
+        && message.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    {
+        body["error"]["code"] = "context_length_exceeded".into();
+    }
+    body
+}
+
 fn claude_error_type(status: u16) -> &'static str {
     match status {
         400 => "invalid_request_error",
@@ -954,5 +974,40 @@ mod tests {
         assert_eq!(m, "claude-opus-4-1");
         assert_eq!(r.unwrap().budget, Some(8000));
         assert!(crate::ir::split_model_suffix("plain").1.is_none());
+    }
+
+    #[test]
+    fn only_claude_prompt_overflows_name_context_length_exceeded_for_openai_clients() {
+        let long = "Prompt is too long: 210000 tokens > 200000 maximum";
+        for format in [Format::Chat, Format::Responses] {
+            let body = translated_error_body(format, Format::Claude, 400, long);
+            assert_eq!(body["error"]["code"], "context_length_exceeded", "{format:?}");
+            assert_eq!(body["error"]["message"], long);
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(
+                translated_error_body(format, Format::Claude, 400, "prompt is too long")["error"]["code"],
+                "context_length_exceeded"
+            );
+        }
+        // Anything else keeps error_body's numeric code, and other dialects keep their own shape.
+        for (client, upstream, status, message) in [
+            (Format::Chat, Format::Claude, 400, "messages: text content blocks must be non-empty"),
+            (Format::Responses, Format::Claude, 413, long),
+            (Format::Responses, Format::Claude, 429, long),
+            (Format::Responses, Format::Gemini, 400, long),
+            (Format::Chat, Format::Responses, 400, long),
+            (Format::Responses, Format::Claude, 400, "the prompt is too long"),
+            (Format::Responses, Format::Claude, 400, "prompt is too"),
+            (Format::Responses, Format::Claude, 400, "prompt is too lon\u{f6}g"),
+            (Format::Gemini, Format::Claude, 400, long),
+            (Format::Claude, Format::Responses, 400, long),
+        ] {
+            assert_eq!(
+                translated_error_body(client, upstream, status, message),
+                error_body(client, status, message),
+                "{client:?} {upstream:?} {status} {message}"
+            );
+        }
+        assert_eq!(error_body(Format::Responses, 400, long)["error"]["code"], 400);
     }
 }

@@ -199,6 +199,18 @@ fn best_branch(items: &[Value]) -> (usize, Vec<String>) {
 }
 
 fn clean(v: &Value, opts: Opts) -> Value {
+    let mut out = clean_branch(v, opts);
+    // Placeholder items come last, so a branch without items never hides another's.
+    if let Value::Object(m) = &mut out
+        && m.get("type").and_then(Value::as_str) == Some("array")
+    {
+        m.entry("items").or_insert_with(|| json!({ "type": "string" }));
+    }
+    out
+}
+
+/// `clean` without placeholder items: `allOf` and `anyOf` branches are merged first.
+fn clean_branch(v: &Value, opts: Opts) -> Value {
     let Value::Object(src) = v else {
         // `true` / `{}`-like schemas: accept anything.
         return if v == &Value::Bool(false) { json!({ "type": "string" }) } else { json!({}) };
@@ -208,7 +220,7 @@ fn clean(v: &Value, opts: Opts) -> Value {
     // allOf: merge every branch into this node.
     if let Some(Value::Array(all)) = m.remove("allOf") {
         for branch in all {
-            let Value::Object(b) = clean(&branch, opts) else { continue };
+            let Value::Object(b) = clean_branch(&branch, opts) else { continue };
             for (k, bv) in b {
                 match (k.as_str(), m.get_mut(&k)) {
                     ("properties", Some(Value::Object(p))) => {
@@ -251,7 +263,7 @@ fn clean(v: &Value, opts: Opts) -> Value {
             }
         } else {
             let (idx, types) = best_branch(&items);
-            if let Value::Object(b) = clean(&items[idx], opts) {
+            if let Value::Object(b) = clean_branch(&items[idx], opts) {
                 for (k, bv) in b {
                     if k == "description" && m.contains_key("description") {
                         continue;
@@ -340,9 +352,7 @@ fn clean(v: &Value, opts: Opts) -> Value {
         None => {}
     }
     match type_of(&Value::Object(m.clone())) {
-        Some("array") => {
-            m.entry("items").or_insert_with(|| json!({ "type": "string" }));
-        }
+        Some("array") => {}
         None if m.contains_key("items") => {
             m.insert("type".into(), "array".into());
         }
@@ -437,6 +447,31 @@ mod tests {
             true,
         );
         assert_eq!(nested["properties"]["o"]["required"], json!(["_"]));
+    }
+
+    #[test]
+    fn branch_placeholders_never_hide_real_array_items() {
+        let schema = json!({
+            "type": "object",
+            "$defs": { "Ids": { "type": "array" } },
+            "properties": {
+                "ids": { "allOf": [{ "type": "array" }, { "items": { "type": "integer" } }] },
+                "refs": { "allOf": [{ "$ref": "#/$defs/Ids" }, { "items": { "type": "number" } }] },
+                "tags": { "items": { "type": "integer" }, "anyOf": [{ "type": "array" }, { "type": "null" }] },
+                "bare": { "allOf": [{ "type": "array" }] }
+            }
+        });
+        for out in [clean_tool(&schema, false), clean_tool(&schema, true), clean_response(&schema)] {
+            let p = &out["properties"];
+            assert_eq!(p["ids"]["type"], "array");
+            assert_eq!(p["ids"]["items"]["type"], "integer", "{out}");
+            assert_eq!(p["refs"]["items"]["type"], "number", "{out}");
+            assert_eq!(p["tags"]["items"]["type"], "integer", "{out}");
+            assert_eq!(p["tags"]["nullable"], true);
+            // An array that still has no items gets the placeholder after merging.
+            assert_eq!(p["bare"]["type"], "array");
+            assert_eq!(p["bare"]["items"]["type"], "string");
+        }
     }
 
     #[test]

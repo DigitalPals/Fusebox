@@ -34,7 +34,7 @@ pub enum Event {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Fault {
     /// Stable identity: `signin:<id>`, `quota:<id>`, `error:<id>`, `failures:<id>`,
-    /// `rate:<id>`, `pace:<id>:<window>`, `pace:pool:<provider>:<window>` or
+    /// `rate:<id>`, `credit:<id>`, `pace:<id>:<window>`, `pace:pool:<provider>:<window>` or
     /// `provider:<provider>`. Also the notification's tag.
     pub key: String,
     pub event: Event,
@@ -174,7 +174,7 @@ impl AccountView {
             history: &self.history,
             forecast_available: !self.signin_error(),
             no_five_hour: self.no_five_hour,
-            paused: matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit"))),
+            paused: matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit"))),
         }
     }
 
@@ -189,7 +189,7 @@ impl AccountView {
 
     /// Can't take any request now: paused whole for a limit, or its sign-in expired.
     fn unavailable(&self) -> bool {
-        matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit"))) || self.signin_error()
+        matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit"))) || self.signin_error()
     }
 
     fn path(&self) -> String {
@@ -278,6 +278,22 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
                         Event::AccountUsedUp,
                         format!("{}: {limit} limit used up", a.label),
                         format!("{} · back in {}.", a.provider_name, span(back - now)),
+                    )
+                });
+            }
+            // Only adding credit brings it back; meanwhile requests skip it.
+            Some((_, (until, "credit"))) => {
+                out.push(Fault {
+                    kind: "credit",
+                    level: "err",
+                    summary: "API credit used up".into(),
+                    detail: Some("Add credit to this API key. Requests skip it meanwhile.".into()),
+                    until: Some(*until),
+                    ..fault(
+                        "credit",
+                        Event::AccountErrors,
+                        format!("{}: API credit used up", a.label),
+                        format!("{} · add credit; requests skip it for {}.", a.provider_name, span(*until - now)),
                     )
                 });
             }
@@ -573,6 +589,11 @@ mod tests {
             "Your refresh token was revoked",
             "OAuth token has expired",
             "please sign in again",
+            // A refresh token refused for good (`RefreshHold::error_text`): the codes alone
+            // would not read as a sign-in, so the text says it.
+            "refresh failed: OAuth endpoint returned HTTP 400 (refresh_token_reused); sign in again",
+            "refresh failed: OAuth endpoint returned HTTP 400 (token_revoked); sign in again",
+            "refresh failed: OAuth endpoint returned HTTP 401; sign in again",
         ] {
             assert!(signin_error(text), "{text}");
         }
@@ -584,8 +605,10 @@ mod tests {
     #[test]
     fn mirrors_the_faults_menu() {
         let now = Utc::now();
+        // Held out for a sign-in: no pause, so nothing hides the fault.
         let mut signin = acct("a", "claude");
-        signin.last_error = Some("token refresh failed: invalid_grant".into());
+        signin.last_error =
+            Some("refresh failed: OAuth endpoint returned HTTP 400 (token_revoked); sign in again".into());
         let mut key = acct("k", "claude");
         key.api_key = true;
         key.last_error = Some("401 Unauthorized".into());
@@ -603,9 +626,16 @@ mod tests {
         let mut off = acct("d", "claude");
         off.disabled = true;
         off.last_error = Some("invalid_grant".into());
+        // An API key out of prepaid credit says so, rather than "rate limited".
+        let mut broke = acct("b", "claude");
+        broke.api_key = true;
+        broke.pauses.insert("*".into(), (now + Duration::minutes(30), "credit"));
+        broke.last_error = Some("API credit balance too low: Your credit balance is too low".into());
 
-        let f = faults(&[signin, key, spent, limited, checking, off], now);
-        assert_eq!(keys(&f), ["signin:a", "error:k", "quota:q", "rate:r", "failures:r"]);
+        let f = faults(&[signin, key, spent, limited, checking, off, broke], now);
+        assert_eq!(keys(&f), ["signin:a", "error:k", "quota:q", "rate:r", "failures:r", "credit:b"]);
+        assert_eq!(f[5].event, Event::AccountErrors);
+        assert_eq!(f[5].title, "b@example.com: API credit used up");
         assert_eq!(f[0].title, "Claude sign-in expired");
         assert_eq!(f[0].path, "#/accounts/a");
         assert_eq!(f[2].title, "q@example.com: weekly limit used up");

@@ -830,6 +830,45 @@ async fn temporary_failures_detour_and_the_session_returns_to_its_subscription()
     }
 }
 
+/// A Responses request from client-one: its status, body and Retry-After.
+async fn ask(fixture: &Fixture, task: Option<&str>, body: Value) -> (u16, Value, Option<u64>) {
+    let mut request = reqwest::Client::new()
+        .post(format!("{}/v1/responses", fixture.proxy.url))
+        .bearer_auth("client-one")
+        .json(&body);
+    if let Some(task) = task {
+        request = request.header("thread-id", task);
+    }
+    let response = request.send().await.unwrap();
+    let retry_after = response.headers().get("retry-after").map(|v| v.to_str().unwrap().parse().unwrap());
+    (response.status().as_u16(), response.json().await.unwrap(), retry_after)
+}
+
+/// A provider answering every call, on any route, with what `answer` gives for the
+/// calling account; it lists the accounts that called.
+async fn scripted(answer: impl Fn(&str) -> Response + Send + Sync + 'static) -> (Server, Arc<Mutex<Vec<String>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (seen, answer) = (calls.clone(), Arc::new(answer));
+    let handler = move |headers: HeaderMap| {
+        let account = account(&headers);
+        seen.lock().push(account.clone());
+        let response = answer(&account);
+        async move { response }
+    };
+    let router = axum::Router::new().route("/v1/responses", post(handler.clone())).route("/v1/messages", post(handler));
+    (serve(router).await, calls)
+}
+
+/// Points the fixture's Codex keys at another provider, keeping only the first `keep`.
+fn codex_keys_at(fixture: &Fixture, provider: &Server, keep: usize) {
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(keep);
+    for key in &mut cfg.codex_api_key {
+        key.base_url = Some(format!("{}/v1", provider.url));
+    }
+    fixture.app.set_config(cfg);
+}
+
 #[tokio::test]
 async fn a_rate_limited_only_subscription_tells_its_sessions_when_to_return() {
     let fixture = Fixture::new(Routing::RoundRobin, false).await;
@@ -838,14 +877,23 @@ async fn a_rate_limited_only_subscription_tells_its_sessions_when_to_return() {
     fixture.app.set_config(cfg);
     assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
     fixture.mock.mode.store(2, Ordering::Relaxed); // a rate limit for 120 seconds
-    assert_eq!(fixture.request(Some("new-task"), prompt()).await.0, 429);
+    let (status, body, retry_after) = ask(&fixture, Some("new-task"), prompt()).await;
+    assert_eq!(status, 429);
+    // Past a minute there is no Retry-After, which clients would sleep through: OpenAI
+    // clients hear when the subscription is back as a usage limit instead.
+    assert_eq!(retry_after, None);
+    assert_eq!(body["error"]["type"], "usage_limit_reached", "{body}");
+    assert_eq!(body["error"]["message"], "mock error");
     let calls = fixture.mock.calls.lock().len();
     // The session's own subscription is paused and there is no other: it is told to wait,
     // which clients retry, instead of that no account serves the model.
-    let (status, body) = fixture.request(Some("task"), prompt()).await;
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
     assert_eq!(status, 429, "{body}");
     let message = body["error"]["message"].as_str().unwrap();
     assert!(message.starts_with("all accounts for gpt-6.1-sol are rate limited; next available in"), "{message}");
+    assert_eq!((retry_after, &body["error"]["type"]), (None, &json!("usage_limit_reached")));
+    let resets_in = body["error"]["resets_at"].as_i64().unwrap() - chrono::Utc::now().timestamp();
+    assert!((100..=121).contains(&resets_in), "{body}");
     assert_eq!(fixture.mock.calls.lock().len(), calls, "a paused subscription is not called");
     fixture.recover();
     assert_eq!(answer(&fixture.request(Some("task"), prompt()).await.1), "a");
@@ -868,10 +916,11 @@ async fn codex_capacity_errors_retry_the_subscription_without_pausing_its_sessio
     // A lasting one fails only the request that met it, with OpenAI's own error...
     *fixture.mock.capacity.lock() = 3;
     let calls = fixture.mock.calls.lock().len();
-    let (status, body) = fixture.request(Some("another-task"), prompt()).await;
+    let (status, body, retry_after) = ask(&fixture, Some("another-task"), prompt()).await;
     assert_eq!(status, 429, "{body}");
     assert!(body["error"]["message"].as_str().unwrap().contains("at capacity"), "{body}");
     assert_eq!(fixture.mock.calls.lock().len() - calls, 3, "one request and two retries");
+    assert_eq!(retry_after, None, "OpenAI named no wait");
     // ...and pauses nothing, so the subscription's other sessions carry on.
     let snapshot = account.snapshot();
     assert_eq!(snapshot["cooldowns"], json!({}), "a capacity shortage does not pause routing");
@@ -880,6 +929,283 @@ async fn codex_capacity_errors_retry_the_subscription_without_pausing_its_sessio
     let (status, body) = fixture.request(Some("working"), prompt()).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(fixture.logs(4).await.pop().unwrap().routing_reason, Some("session_reused"));
+
+    // Codex's turn limit names waits of minutes, and retries within them fail: the
+    // request is not retried, nothing is paused, and the client hears the wait (at most
+    // ten minutes) so it sits out only this turn.
+    for (named, told) in [("256", 256), ("3600", 600)] {
+        let (limited, upstream) = scripted(move |_| {
+            let error =
+                json!({"error":{"code":"turn_rate_limit_exceeded","message":"Too many turns, try again later"}});
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", named)], Json(error)).into_response()
+        })
+        .await;
+        codex_keys_at(&fixture, &limited, 1);
+        let (status, body, retry_after) = ask(&fixture, Some("working"), prompt()).await;
+        assert_eq!(status, 429, "{body}");
+        assert_eq!(body["error"]["code"], "turn_rate_limit_exceeded", "OpenAI's own error: {body}");
+        assert!(body.get("__fusebox_retry_after").is_none());
+        assert_eq!(retry_after, Some(told));
+        assert_eq!(upstream.lock().len(), 1, "no retries on the same subscription");
+        let account = fixture.app.pool.all().into_iter().next().unwrap();
+        assert_eq!(account.snapshot()["cooldowns"], json!({}), "the model stays available");
+        assert!(account.snapshot()["last_error_until"].is_string());
+    }
+    codex_keys_at(&fixture, &fixture.provider, 1);
+    assert_eq!(answer(&fixture.request(Some("working"), prompt()).await.1), "a");
+}
+
+#[tokio::test]
+async fn a_long_capacity_wait_moves_the_request_to_another_subscription_at_once() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let (provider, calls) = scripted(|account| {
+        if account == "a" {
+            let error =
+                json!({"error":{"code":"turn_rate_limit_exceeded","message":"Too many turns, try again later"}});
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "300")], Json(error)).into_response();
+        }
+        let output = json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":account}]}]);
+        Json(json!({"id":"resp_b","object":"response","status":"completed","model":"gpt-6.1-sol","output":output,
+            "usage":{"input_tokens":1,"output_tokens":1}}))
+        .into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &provider, 2);
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!((status, retry_after), (200, None), "{body}");
+    assert_eq!(answer(&body), "b");
+    assert_eq!(*calls.lock(), ["a", "b"]);
+    assert_eq!(fixture.logs(1).await[0].routing_attempts.len(), 2);
+    let a = fixture.app.pool.all().into_iter().find(|a| a.label == "a").unwrap();
+    assert_eq!(a.snapshot()["cooldowns"], json!({}), "for this request only");
+}
+
+#[tokio::test]
+async fn a_turn_limit_inside_a_stream_is_a_429_that_pauses_nothing() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let (provider, calls) = scripted(|_| {
+        // No "at capacity" in the message: the code alone tells it from a rate limit.
+        let event = json!({"type":"response.failed","response":{"error":{"code":"turn_rate_limit_exceeded","message":"Too many turns"}}});
+        ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &provider, 1);
+    let mut body = prompt();
+    body["stream"] = true.into();
+    let (status, body, _) = ask(&fixture, Some("task"), body).await;
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(calls.lock().len(), 1);
+    let account = fixture.app.pool.all().into_iter().next().unwrap();
+    assert_eq!(account.snapshot()["cooldowns"], json!({}), "a capacity shortage pauses no model");
+    assert!(account.snapshot()["last_error"].as_str().unwrap().starts_with("429:"));
+}
+
+#[tokio::test]
+async fn a_dry_pool_advertises_only_short_waits_that_limits_impose() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(1);
+    fixture.app.set_config(cfg);
+    let account = fixture.app.pool.all().into_iter().next().unwrap();
+    let model = "gpt-6.1-sol";
+    let soon = || chrono::Utc::now() + chrono::Duration::seconds(30);
+    let clear = || {
+        let mut st = account.state.lock();
+        st.cooldowns.clear();
+        st.quota_cooldowns.clear();
+        st.quota_refreshing = false;
+    };
+    let generic = |body: &Value| {
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("all accounts for gpt-6.1-sol are rate limited"), "{body}");
+        assert_ne!(body["error"]["type"], "usage_limit_reached");
+    };
+    // A rate limit, spent quota or a quota check ending within a minute: Retry-After.
+    for pause in ["rate limit", "quota", "check"] {
+        match pause {
+            "rate limit" => account.rate_limit(model, soon(), "429: slow down"),
+            "quota" => account.exhaust(model, soon(), "subscription quota exhausted: spent"),
+            _ => account.state.lock().quota_refreshing = true,
+        }
+        for task in [Some("task"), None] {
+            let (status, body, retry_after) = ask(&fixture, task, prompt()).await;
+            assert_eq!(status, 429, "{pause}: {body}");
+            assert!(retry_after.is_some_and(|s| (29..=30).contains(&s)), "{pause}: {retry_after:?}");
+            generic(&body);
+        }
+        clear();
+    }
+    // A sign-in or permission pause is never a wait, however short.
+    account.cool(None, soon(), "401: unauthorized");
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!((status, retry_after), (429, None));
+    generic(&body);
+    clear();
+    // A longer one has no header; OpenAI clients get a usage limit with its reset, others
+    // the usual error.
+    let later = chrono::Utc::now() + chrono::Duration::hours(2);
+    account.exhaust(model, later, "subscription quota exhausted: spent");
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!((status, retry_after), (429, None));
+    assert_eq!(body["error"]["type"], "usage_limit_reached");
+    assert_eq!(body["error"]["code"], "usage_limit_reached");
+    assert_eq!(body["error"]["resets_at"], later.timestamp());
+    let chat = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", fixture.proxy.url))
+        .bearer_auth("client-one")
+        .json(&json!({"model":model,"messages":[{"role":"user","content":"question"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(chat.headers().get("retry-after").is_none());
+    assert_eq!(chat.json::<Value>().await.unwrap()["error"]["type"], "usage_limit_reached");
+    let claude = reqwest::Client::new()
+        .post(format!("{}/v1/messages", fixture.proxy.url))
+        .header("x-api-key", "client-one")
+        .json(&json!({"model":model,"max_tokens":16,"messages":[{"role":"user","content":"question"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claude.status(), 429);
+    assert!(claude.headers().get("retry-after").is_none());
+    assert_eq!(claude.json::<Value>().await.unwrap()["error"]["type"], "rate_limit_error");
+    clear();
+    assert!(fixture.mock.calls.lock().is_empty(), "a paused subscription is not called");
+
+    // The request that met the limit is told too.
+    let (limited, _) = scripted(|_| {
+        let error = json!({"error":{"code":"rate_limit_exceeded","message":"Slow down"}});
+        (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "20")], Json(error)).into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &limited, 1);
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!(status, 429);
+    assert_eq!(body["error"]["code"], "rate_limit_exceeded", "the provider's own error: {body}");
+    assert!(retry_after.is_some_and(|s| (19..=20).contains(&s)), "{retry_after:?}");
+}
+
+#[tokio::test]
+async fn a_claude_key_out_of_credit_sits_out_and_its_refusal_is_repeated() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let empty = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+    let (provider, calls) = scripted(move |account| {
+        if account == "a" {
+            let error = json!({"type":"error","error":{"type":"invalid_request_error","message":empty}});
+            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+        }
+        Json(json!({"id":"message","type":"message","role":"assistant","model":"claude-sonnet-4-6",
+            "content":[{"type":"text","text":account}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+        .into_response()
+    })
+    .await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.claude_api_key = cfg.codex_api_key.drain(..).collect();
+    for key in &mut cfg.claude_api_key {
+        key.base_url = Some(provider.url.clone());
+    }
+    let ask = |format: &'static str| {
+        let fixture = &fixture;
+        async move {
+            let request = reqwest::Client::new().post(format!("{}{format}", fixture.proxy.url));
+            let response = if format == "/v1/messages" {
+                request.header("x-api-key", "client-one").json(&json!({"model":"claude-sonnet-4-6","max_tokens":16,
+                    "messages":[{"role":"user","content":"question"}]}))
+            } else {
+                request.bearer_auth("client-one").json(&json!({"model":"claude-sonnet-4-6","input":"question"}))
+            }
+            .send()
+            .await
+            .unwrap();
+            (response.status().as_u16(), response.json::<Value>().await.unwrap())
+        }
+    };
+    // With one key, the refusal is the answer; while the key sits out, it is given again
+    // without asking Anthropic, in the client's own format.
+    let mut one = cfg.clone();
+    one.claude_api_key.truncate(1);
+    fixture.app.set_config(one);
+    let (status, body) = ask("/v1/messages").await;
+    assert_eq!((status, body["error"]["message"].as_str()), (400, Some(empty)), "{body}");
+    let (status, body) = ask("/v1/messages").await;
+    assert_eq!((status, body["error"]["message"].as_str()), (400, Some(empty)), "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    let (status, body) = ask("/v1/responses").await;
+    assert_eq!((status, body["error"]["message"].as_str()), (400, Some(empty)), "{body}");
+    assert_eq!(calls.lock().len(), 1, "a key out of credit is not called again");
+    let a = fixture.app.pool.all().into_iter().next().unwrap();
+    let snapshot = a.snapshot();
+    assert!(snapshot["cooldowns"]["*"].is_string(), "every model sits out: {snapshot}");
+    assert!(snapshot["last_error"].as_str().unwrap().starts_with("API credit balance too low:"), "{snapshot}");
+    let until = chrono::DateTime::parse_from_rfc3339(snapshot["last_error_until"].as_str().unwrap()).unwrap();
+    let left = until.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    assert!(left > chrono::Duration::minutes(29) && left <= chrono::Duration::minutes(30));
+
+    // With two, the request moves on to the other key.
+    a.state.lock().cooldowns.clear();
+    fixture.app.set_config(cfg);
+    let (status, body) = ask("/v1/messages").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["content"][0]["text"], "b");
+    assert_eq!(calls.lock()[1..], ["a", "b"]);
+    let (status, body) = ask("/v1/messages").await;
+    assert_eq!((status, &body["content"][0]["text"]), (200, &json!("b")));
+    assert_eq!(calls.lock()[3..], ["b"], "the empty key sits out");
+}
+
+#[tokio::test]
+async fn kimi_and_meta_sit_out_codex_compaction() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let mut cfg = fixture.cfg.clone();
+    let key = |name: &str| KeyEntry {
+        api_key: name.into(),
+        base_url: Some(format!("{}/v1", fixture.provider.url)),
+        label: Some(name.into()),
+        ..Default::default()
+    };
+    // Kimi goes first for its model, ahead of a Codex key serving it under another name.
+    cfg.kimi_api_key = vec![KeyEntry { priority: 1, ..key("kimi") }];
+    cfg.meta_api_key = vec![key("meta")];
+    cfg.codex_api_key.truncate(1);
+    cfg.codex_api_key[0].models =
+        vec![crate::config::ModelAlias { name: "gpt-6.1-sol".into(), alias: Some("kimi-k3".into()) }];
+    fixture.app.set_config(cfg);
+    let compaction = |model: &str| json!({"model":model,"input":[{"type":"message","role":"user","content":"question"},{"type":"compaction_trigger"}]});
+    // Without the trigger nothing changes: Kimi serves its model.
+    assert_eq!(answer(&fixture.request(None, json!({"model":"kimi-k3","input":"question"})).await.1), "kimi");
+    // With it, the request goes to the account that can compact.
+    let (status, body) = fixture.request(None, compaction("kimi-k3")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(answer(&body), "a");
+    // With none left, it is refused before any provider is called, and no account errs.
+    let calls = fixture.mock.calls.lock().len();
+    let (status, body) = fixture.request(None, compaction("muse-spark-1.3")).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("remote_compaction = \"unsupported\""), "{body}");
+    assert_eq!(fixture.mock.calls.lock().len(), calls);
+    for account in fixture.app.pool.all() {
+        assert_eq!(account.snapshot()["last_error"], Value::Null, "{}", account.label);
+    }
+}
+
+#[tokio::test]
+async fn codex_response_protection_refusals_are_answered_at_once() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let (provider, calls) = scripted(|_| {
+        let error =
+            json!({"error":{"message":"Response protection is unavailable for this request","type":"server_error"}});
+        (StatusCode::BAD_GATEWAY, Json(error)).into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &provider, 2);
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!((status, retry_after), (502, None), "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("Response protection is unavailable"));
+    assert_eq!(calls.lock().len(), 1, "no retry on this account or another");
+    for account in fixture.app.pool.all() {
+        assert_eq!(account.snapshot()["last_error"], Value::Null, "the account is fine");
+    }
+    assert_eq!(fixture.logs(1).await[0].failure_kind, Some("response_protection_unavailable"));
 }
 
 #[tokio::test]
@@ -2213,18 +2539,370 @@ async fn identity_learning_requires_authenticated_opt_in_and_management_reset_is
 #[tokio::test]
 async fn oauth_error_markers_do_not_escape_to_downstream_status_or_request_logs() {
     let fixture = Fixture::new(Routing::FillFirst, true).await;
-    let provider = serve(axum::Router::new().route("/token",post(||async {
-        (StatusCode::BAD_REQUEST,Json(json!({"error":"invalid_grant","error_description":"FAKE_CREDENTIAL_MARKER","refresh_token":"FAKE_CREDENTIAL_MARKER"})))
+    let token_calls = Arc::new(AtomicU64::new(0));
+    let provider = serve(axum::Router::new().route("/token",post({
+        let token_calls = token_calls.clone();
+        move || async move {
+            token_calls.fetch_add(1, Ordering::Relaxed);
+            (StatusCode::BAD_REQUEST,Json(json!({"error":"invalid_grant","error_description":"FAKE_CREDENTIAL_MARKER","refresh_token":"FAKE_CREDENTIAL_MARKER"})))
+        }
     }))).await;
     std::fs::write(fixture.directory.join("xai.json"),json!({"type":"xai","access_token":"FAKE_ACCESS","refresh_token":"FAKE_REFRESH","expired":"2000-01-01T00:00:00Z","token_endpoint":format!("{}/token",provider.url),"base_url":provider.url}).to_string()).unwrap();
     fixture.app.reload_accounts();
     let response = fixture.request(Some("refresh-error"), json!({"model":"grok-4.20","input":"hello"})).await;
     assert_eq!(response.0, 401, "{}", response.1);
+    // The refused refresh token is final: the account waits for a sign-in, without a
+    // cooldown that would hide that, and no later request asks the token endpoint again.
+    let again = fixture.request(Some("refresh-error"), json!({"model":"grok-4.20","input":"hello"})).await;
+    assert_ne!(again.0, 200, "{}", again.1);
+    assert_eq!(token_calls.load(Ordering::Relaxed), 1);
+    let xai = fixture.app.pool.get("file:xai.json").unwrap();
+    assert!(xai.held_out());
+    let snapshot = xai.snapshot();
+    assert_eq!(snapshot["cooldowns"], json!({}));
+    assert!(crate::push::signin_error(snapshot["last_error"].as_str().unwrap()), "{snapshot}");
     let accounts = reqwest::get(format!("{}/api/accounts", fixture.proxy.url)).await.unwrap().text().await.unwrap();
-    let logs = serde_json::to_string(&fixture.logs(1).await).unwrap();
-    for text in [response.1.to_string(), accounts, logs] {
+    let logs = serde_json::to_string(&fixture.logs(2).await).unwrap();
+    for text in [response.1.to_string(), again.1.to_string(), accounts, logs] {
         for marker in ["FAKE_CREDENTIAL_MARKER", "FAKE_REFRESH", "FAKE_ACCESS"] {
             assert!(!text.contains(marker), "{text}");
         }
     }
+}
+
+/// The provider refuses an account's access token and then its refresh token for good:
+/// the account is out until a sign-in, without a cooldown that would hide why.
+#[tokio::test]
+async fn a_refused_access_token_with_a_refused_refresh_token_leaves_no_cooldown() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let (token_calls, upstream_calls) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let provider = serve(
+        axum::Router::new()
+            .route(
+                "/token",
+                post({
+                    let token_calls = token_calls.clone();
+                    move || async move {
+                        token_calls.fetch_add(1, Ordering::Relaxed);
+                        (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})))
+                    }
+                }),
+            )
+            .route(
+                "/responses",
+                post({
+                    let upstream_calls = upstream_calls.clone();
+                    move || async move {
+                        upstream_calls.fetch_add(1, Ordering::Relaxed);
+                        (StatusCode::UNAUTHORIZED, Json(json!({"error":{"message":"token revoked"}})))
+                    }
+                }),
+            ),
+    )
+    .await;
+    let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    std::fs::write(fixture.directory.join("xai.json"), json!({"type":"xai","access_token":"FAKE_ACCESS","refresh_token":"FAKE_REFRESH","expired":expires,"token_endpoint":format!("{}/token",provider.url),"base_url":provider.url}).to_string()).unwrap();
+    fixture.app.reload_accounts();
+    let response = fixture.request(None, json!({"model":"grok-4.20","input":"hello"})).await;
+    assert_eq!(response.0, 401, "{}", response.1);
+    let xai = fixture.app.pool.get("file:xai.json").unwrap();
+    assert!(xai.held_out(), "out before its access token expires");
+    let snapshot = xai.snapshot();
+    assert_eq!(snapshot["cooldowns"], json!({}));
+    assert!(crate::push::signin_error(snapshot["last_error"].as_str().unwrap()), "{snapshot}");
+    let again = fixture.request(None, json!({"model":"grok-4.20","input":"hello"})).await;
+    assert_ne!(again.0, 200, "{}", again.1);
+    assert_eq!((token_calls.load(Ordering::Relaxed), upstream_calls.load(Ordering::Relaxed)), (1, 1));
+}
+
+/// Meta refuses a Muse Code subscription's key for other clients' tools. That is about
+/// this request: no new key, pause or account error, no failed-request count, and no
+/// other Meta account tried. Only another provider's route for the model may serve it.
+#[tokio::test]
+async fn meta_attestation_denials_skip_meta_and_fail_over_only_to_other_providers() {
+    #[derive(Default)]
+    struct Calls {
+        meta: AtomicU64,
+        other: AtomicU64,
+    }
+    let calls = Arc::new(Calls::default());
+    let denial = "This API key is billed to a Muse Code subscription. Muse Code subscriptions cover requests from the Muse Code client only.";
+    let upstream = serve(
+        axum::Router::new()
+            .route(
+                "/meta/responses",
+                post({
+                    let calls = calls.clone();
+                    move || async move {
+                        calls.meta.fetch_add(1, Ordering::Relaxed);
+                        let body = json!({"error":{"code":"client_attestation_denied","message":denial}});
+                        (StatusCode::FORBIDDEN, Json(body))
+                    }
+                }),
+            )
+            .route(
+                "/other/chat/completions",
+                post({
+                    let calls = calls.clone();
+                    move |Json(body): Json<Value>| async move {
+                        calls.other.fetch_add(1, Ordering::Relaxed);
+                        Json(json!({"id":"chat-response", "object":"chat.completion", "model":body["model"],
+                            "choices":[{"index":0,"message":{"role":"assistant","content":"other"},"finish_reason":"stop"}],
+                            "usage":{"prompt_tokens":1,"completion_tokens":1}}))
+                    }
+                }),
+            ),
+    )
+    .await;
+    for mixed in [false, true] {
+        calls.meta.store(0, Ordering::Relaxed);
+        calls.other.store(0, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!("fusebox-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        // A signed-in key: re-minting it would need a device token it doesn't have.
+        std::fs::write(
+            directory.join("meta.json"),
+            json!({"type":"meta", "api_key":"meta-signed-in", "base_url":format!("{}/meta", upstream.url)}).to_string(),
+        )
+        .unwrap();
+        let mut cfg = Config {
+            auth_dir: directory.to_string_lossy().into(),
+            api_keys: vec!["client-one".into()],
+            meta_api_key: vec![KeyEntry {
+                api_key: "meta-key".into(),
+                base_url: Some(format!("{}/meta", upstream.url)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        if mixed {
+            cfg.openai_compatibility = vec![crate::config::CompatEntry {
+                name: "other".into(),
+                base_url: format!("{}/other", upstream.url),
+                api_keys: vec!["other-key".into()],
+                models: vec![crate::config::ModelAlias { name: "muse-spark-1.3".into(), alias: None }],
+                ..Default::default()
+            }];
+        }
+        let app = App::new(cfg, directory.join("config.yaml"));
+        let proxy = serve(crate::server::router(app.clone())).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", proxy.url))
+            .bearer_auth("client-one")
+            .json(&json!({"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(calls.meta.load(Ordering::Relaxed), 1, "one Meta account answers for all of them");
+        if mixed {
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(calls.other.load(Ordering::Relaxed), 1);
+        } else {
+            assert_eq!(status, 403, "{body}");
+            assert!(body.to_string().contains("Muse Code subscription"), "Meta's message reaches the client: {body}");
+        }
+        let meta: Vec<_> =
+            app.pool.all().into_iter().filter(|a| a.provider == crate::accounts::Provider::Meta).collect();
+        assert_eq!(meta.len(), 2);
+        for account in meta {
+            let st = account.state.lock();
+            assert_eq!(st.last_error(chrono::Utc::now()), None, "{}", account.id);
+            assert!(st.cooldowns.is_empty(), "{}", account.id);
+            drop(st);
+            assert_eq!(app.stats.account_failures(&account.id), 0, "{}", account.id);
+            let crate::accounts::Credential::OAuth(o) = account.cred.read().clone() else { continue };
+            assert_eq!(o.access_token, "meta-signed-in", "no new key was minted");
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+/// A 403 can be a permission for one model, so an account whose refresh token was refused
+/// cools as before rather than going out until a sign-in: its access token still serves
+/// other models.
+#[tokio::test]
+async fn a_forbidden_model_with_a_refused_refresh_token_cools_but_stays_in() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let token_calls = Arc::new(AtomicU64::new(0));
+    let provider = serve(
+        axum::Router::new()
+            .route(
+                "/token",
+                post({
+                    let token_calls = token_calls.clone();
+                    move || async move {
+                        token_calls.fetch_add(1, Ordering::Relaxed);
+                        (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})))
+                    }
+                }),
+            )
+            .route(
+                "/responses",
+                post(|| async { (StatusCode::FORBIDDEN, Json(json!({"error":{"message":"model not enabled"}}))) }),
+            ),
+    )
+    .await;
+    let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    std::fs::write(fixture.directory.join("xai.json"), json!({"type":"xai","access_token":"FAKE_ACCESS","refresh_token":"FAKE_REFRESH","expired":expires,"token_endpoint":format!("{}/token",provider.url),"base_url":provider.url}).to_string()).unwrap();
+    fixture.app.reload_accounts();
+    let response = fixture.request(None, json!({"model":"grok-4.20","input":"hello"})).await;
+    assert_eq!(response.0, 403, "{}", response.1);
+    let xai = fixture.app.pool.get("file:xai.json").unwrap();
+    assert!(!xai.held_out(), "its access token still serves until it expires");
+    assert!(xai.snapshot()["cooldowns"].get("*").is_some(), "{}", xai.snapshot());
+    assert_eq!(token_calls.load(Ordering::Relaxed), 1);
+}
+
+/// An account held out until a sign-in is no account coming back, so it doesn't hide
+/// another one's short rate limit from the client.
+#[tokio::test]
+async fn a_held_account_does_not_hide_another_accounts_short_wait() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(1);
+    fixture.app.set_config(cfg);
+    let expired = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    std::fs::write(
+        fixture.directory.join("codex-held.json"),
+        json!({"type":"codex","access_token":"FAKE_ACCESS","refresh_token":"FAKE_REFRESH","expired":expired,
+            "account_id":"held"})
+        .to_string(),
+    )
+    .unwrap();
+    fixture.app.reload_accounts();
+    let model = "gpt-6.1-sol";
+    let held = fixture.app.pool.get("file:codex-held.json").unwrap();
+    assert!(fixture.app.pool.resolve_account(&held, model, None).is_some(), "it would serve the model");
+    held.state.lock().refresh_hold = Some(crate::accounts::RefreshHold::new("FAKE_REFRESH", "invalid_grant".into()));
+    assert!(held.held_out());
+    let key = fixture.app.pool.all().into_iter().find(|a| a.id != held.id).unwrap();
+    key.rate_limit(model, chrono::Utc::now() + chrono::Duration::seconds(30), "429: slow down");
+    let (status, body, retry_after) = ask(&fixture, Some("task"), prompt()).await;
+    assert_eq!(status, 429, "{body}");
+    assert!(retry_after.is_some_and(|s| (29..=30).contains(&s)), "{retry_after:?}: {body}");
+    assert!(fixture.mock.calls.lock().is_empty());
+}
+
+/// A turn limit inside a 200 stream names its wait in the response's headers, as over
+/// plain HTTP, and the client left without an account is told it.
+#[tokio::test]
+async fn a_turn_limit_inside_a_stream_passes_its_wait_on() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let (provider, calls) = scripted(|_| {
+        let event = json!({"type":"response.failed","response":{"error":{"code":"turn_rate_limit_exceeded",
+            "message":"Codex is at capacity, please try again later"}}});
+        ([("content-type", "text/event-stream"), ("retry-after", "256")], format!("data: {event}\n\n")).into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &provider, 1);
+    let mut body = prompt();
+    body["stream"] = true.into();
+    let (status, body, retry_after) = ask(&fixture, Some("task"), body).await;
+    assert_eq!((status, retry_after), (429, Some(256)), "{body}");
+    assert!(body.get("__fusebox_retry_after").is_none(), "{body}");
+    assert_eq!(calls.lock().len(), 1);
+    let account = fixture.app.pool.all().into_iter().next().unwrap();
+    assert_eq!(account.snapshot()["cooldowns"], json!({}), "a capacity shortage pauses no model");
+}
+
+/// A model group shares one request: Meta's refusal of the client's tools keeps every
+/// Meta account away from the group's other models too, and stays the answer when they
+/// have no other account; ChatGPT's refusal of the request as sent ends the group.
+#[tokio::test]
+async fn model_groups_keep_a_requests_refusals() {
+    let meta_calls = Arc::new(AtomicU64::new(0));
+    let denial = "This API key is billed to a Muse Code subscription. Muse Code subscriptions cover requests from the Muse Code client only.";
+    let upstream = serve(axum::Router::new().route(
+        "/meta/responses",
+        post({
+            let meta_calls = meta_calls.clone();
+            move || async move {
+                meta_calls.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"client_attestation_denied","message":denial}})))
+            }
+        }),
+    ))
+    .await;
+    let cfg = Config {
+        auth_dir: "/nonexistent".into(),
+        api_keys: vec!["client-one".into()],
+        meta_api_key: ["one", "two"]
+            .into_iter()
+            .map(|key| KeyEntry {
+                api_key: key.into(),
+                base_url: Some(format!("{}/meta", upstream.url)),
+                ..Default::default()
+            })
+            .collect(),
+        model_groups: std::collections::BTreeMap::from([(
+            "muse".to_string(),
+            crate::config::ModelGroup {
+                models: vec!["muse-spark-1.3".into(), "muse-wonder-1.0".into()],
+                balance: false,
+            },
+        )]),
+        ..Default::default()
+    };
+    let app = App::new(cfg, "/nonexistent/config.yaml".into());
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", proxy.url))
+        .bearer_auth("client-one")
+        .json(&json!({"model":"muse","messages":[{"role":"user","content":"hello"}],
+            "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(meta_calls.load(Ordering::Relaxed), 1, "no Meta account is asked again for the next model");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.to_string().contains("Muse Code subscription"), "{body}");
+
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let (provider, calls) = scripted(|_| {
+        let error =
+            json!({"error":{"message":"Response protection is unavailable for this request","type":"server_error"}});
+        (StatusCode::BAD_GATEWAY, Json(error)).into_response()
+    })
+    .await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.truncate(2);
+    for key in &mut cfg.codex_api_key {
+        key.base_url = Some(format!("{}/v1", provider.url));
+    }
+    cfg.model_groups.insert(
+        "pair".into(),
+        crate::config::ModelGroup { models: vec!["gpt-6.1-sol".into(), "gpt-6-astra".into()], balance: false },
+    );
+    fixture.app.set_config(cfg);
+    let (status, body, _) = ask(&fixture, Some("task"), json!({"model":"pair","input":"question"})).await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(calls.lock().len(), 1, "the group does not try its next model");
+}
+
+/// The same refusal inside a successful stream is answered at once too.
+#[tokio::test]
+async fn codex_response_protection_refusals_inside_a_stream_are_answered_at_once() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let (provider, calls) = scripted(|_| {
+        let event = json!({"type":"response.failed","response":{"error":{"code":"server_error",
+            "message":"Response protection is unavailable for this request"}}});
+        ([("content-type", "text/event-stream")], format!("data: {event}\n\n")).into_response()
+    })
+    .await;
+    codex_keys_at(&fixture, &provider, 2);
+    let mut body = prompt();
+    body["stream"] = true.into();
+    let (status, body, retry_after) = ask(&fixture, Some("task"), body).await;
+    assert!((500..600).contains(&status) && retry_after.is_none(), "{status}: {body}");
+    assert!(body.to_string().contains("Response protection is unavailable"), "{body}");
+    assert_eq!(calls.lock().len(), 1, "no retry on this account or another");
+    for account in fixture.app.pool.all() {
+        assert_eq!(account.snapshot()["last_error"], Value::Null, "the account is fine");
+    }
+    assert_eq!(fixture.logs(1).await[0].failure_kind, Some("response_protection_unavailable"));
 }

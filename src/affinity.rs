@@ -647,7 +647,8 @@ impl Sessions {
             let upstream = assigned.as_ref().and_then(|acct| pool.resolve_account(acct, model, only));
             match (&assigned, upstream) {
                 (None, _) => moving = Some("account_removed"),
-                (Some(acct), _) if acct.state.lock().disabled => moving = Some("account_disabled"),
+                // Waiting for a sign-in is out of rotation the way disabled is.
+                (Some(acct), _) if acct.state.lock().disabled || acct.held_out() => moving = Some("account_disabled"),
                 (Some(_), None) => moving = Some("model_unavailable"),
                 (Some(acct), Some(_)) if acct.exhausted_until(model).is_some() => {
                     moving = Some("quota_exhausted");
@@ -917,7 +918,7 @@ impl Sessions {
             return;
         };
         let mut input = full_input.into();
-        input.extend(output.clone());
+        input.extend(output.iter().cloned().map(replayable_output).collect());
         let bytes = input.bytes;
         if bytes > MAX_RESPONSE_BYTES {
             return;
@@ -941,6 +942,21 @@ impl Sessions {
             .responses
             .insert(key, Conversation { session: session.into(), input, bytes, last_seen: Utc::now().timestamp() });
     }
+}
+
+/// An output item as it is replayed for the next turn. Codex tags its output with a
+/// `content_token_count` that is output-only, so it is left out of the replayed copy,
+/// with its parent object if nothing else is left in it.
+fn replayable_output(mut item: Value) -> Value {
+    const PARENT: &str = "internal_chat_message_metadata_passthrough";
+    if let Some(metadata) = item.get_mut(PARENT).and_then(Value::as_object_mut)
+        && metadata.remove("content_token_count").is_some()
+        && metadata.is_empty()
+        && let Some(item) = item.as_object_mut()
+    {
+        item.remove(PARENT);
+    }
+    item
 }
 
 /// Count the exact serialized array size, stopping at the entry limit before
@@ -1731,6 +1747,39 @@ mod tests {
         assert!(sessions.previous(&headers, "r1", Some("another-task")).is_none());
         headers.insert("authorization", "Bearer second".parse().unwrap());
         assert!(sessions.previous(&headers, "r1", None).is_none());
+    }
+
+    #[test]
+    fn replayed_output_leaves_out_its_token_counts_but_client_input_is_kept_as_sent() {
+        let sessions = Sessions::memory();
+        let meta = "internal_chat_message_metadata_passthrough";
+        let input = vec![
+            json!({"type":"message", "role":"user", "content":"question", meta:{"content_token_count":99}}),
+            json!({"type":"function_call_output", "call_id":"c0", "output":"ok", meta:{"content_token_count":7, "turn_id":"t0"}}),
+        ];
+        let output = json!([
+            {"type":"message", "role":"assistant", "content":[], meta:{"turn_id":"t1", "create_time":1.5, "content_token_count":64}},
+            {"type":"message", "role":"assistant", "content":[], meta:{"content_token_count":3}},
+            {"type":"message", "role":"assistant", "content":[], meta:{"turn_id":"t3"}},
+            {"type":"message", "role":"assistant", "content":[], meta:{}},
+            {"type":"message", "role":"assistant", "content":[], meta:null},
+            {"type":"function_call", "call_id":"c1", "name":"lookup", "arguments":"{}", meta:{"content_token_count":5, "turn_id":"t1"}},
+            {"type":"message", "role":"assistant", "content":[], "content_token_count":1},
+        ]);
+        sessions.remember(&HeaderMap::new(), "task", &json!({"id":"r1", "output":output}), input.clone());
+        let history = sessions.previous(&HeaderMap::new(), "r1", Some("task")).unwrap().1.to_values();
+        assert_eq!(&history[..2], &input[..], "client input is replayed as the client sent it");
+        let replayed = &history[2..];
+        assert_eq!(replayed[0][meta], json!({"turn_id":"t1", "create_time":1.5}));
+        assert!(replayed[1].get(meta).is_none(), "an object emptied by the removal goes too");
+        assert_eq!(replayed[2][meta], json!({"turn_id":"t3"}));
+        assert_eq!(replayed[3][meta], json!({}), "only an object the removal emptied is dropped");
+        assert!(replayed[4][meta].is_null() && replayed[4].get(meta).is_some());
+        assert_eq!(replayed[5][meta], json!({"turn_id":"t1"}));
+        assert_eq!(replayed[6]["content_token_count"], 1, "only that key, only under its parent");
+        assert_eq!(history.len(), 9);
+        let bytes = serde_json::to_vec(&history).unwrap().len();
+        assert_eq!(sessions.registry.lock().history_bytes, bytes, "sizes count what is stored");
     }
 
     #[test]

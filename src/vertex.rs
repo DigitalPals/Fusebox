@@ -17,6 +17,10 @@ pub fn base_url(location: &str) -> String {
     match location.trim() {
         "" => "https://us-central1-aiplatform.googleapis.com".into(),
         "global" => "https://aiplatform.googleapis.com".into(),
+        // The `us` and `eu` multi-regions are served from regional endpoints (REP).
+        loc if loc.eq_ignore_ascii_case("us") || loc.eq_ignore_ascii_case("eu") => {
+            format!("https://aiplatform.{}.rep.googleapis.com", loc.to_ascii_lowercase())
+        }
         loc => format!("https://{loc}-aiplatform.googleapis.com"),
     }
 }
@@ -110,6 +114,56 @@ mod tests {
         assert_eq!(base_url("global"), "https://aiplatform.googleapis.com");
         assert_eq!(base_url("europe-west4"), "https://europe-west4-aiplatform.googleapis.com");
         assert_eq!(base_url(""), "https://us-central1-aiplatform.googleapis.com");
+        assert_eq!(base_url("us"), "https://aiplatform.us.rep.googleapis.com");
+        assert_eq!(base_url(" EU "), "https://aiplatform.eu.rep.googleapis.com");
+        assert_eq!(base_url("us-east5"), "https://us-east5-aiplatform.googleapis.com");
+    }
+
+    #[test]
+    fn multi_region_requests_use_rep_hosts_unless_a_base_url_is_configured() {
+        let dir = std::env::temp_dir().join(format!("fusebox-vertex-rep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, extra) in [("us", json!({})), ("gateway", json!({ "base_url": "https://gateway.example.invalid" }))]
+        {
+            let mut cred = json!({ "type": "vertex", "access_token": "t", "email": format!("{name}@example.invalid"),
+                "project_id": "p", "location": "us" });
+            cred.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            std::fs::write(dir.join(format!("vertex-{name}.json")), cred.to_string()).unwrap();
+        }
+        let cfg = crate::config::Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let _ = std::fs::remove_dir_all(&dir);
+        let headers = axum::http::HeaderMap::new();
+        let mut urls: Vec<_> = pool
+            .all()
+            .iter()
+            .map(|acct| {
+                let target = crate::upstream::Target {
+                    acct,
+                    cfg: &cfg,
+                    client_headers: &headers,
+                    model: "gemini-3.8-flash",
+                    wire: crate::ir::Format::Gemini,
+                    passthrough: true,
+                    stream: false,
+                    count_tokens: false,
+                    cache_key: None,
+                    provider_session: None,
+                    cache_defaults: false,
+                };
+                crate::upstream::prepare(&target, json!({ "contents": [] })).url
+            })
+            .collect();
+        urls.sort();
+        let path = "/v1/projects/p/locations/us/publishers/google/models/gemini-3.8-flash:generateContent";
+        assert_eq!(
+            urls,
+            [
+                format!("https://aiplatform.us.rep.googleapis.com{path}"),
+                format!("https://gateway.example.invalid{path}")
+            ]
+        );
     }
 
     #[test]

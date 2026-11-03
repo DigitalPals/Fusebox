@@ -125,6 +125,9 @@ struct Session {
     /// Credential identity used by the upstream handshake, independent of quota polls.
     upstream_identity_epoch: u64,
     upstream_session: Option<String>,
+    /// The access token the upstream handshake used, so a later 401 on that socket is
+    /// told about that token rather than a newer one on file. Never logged.
+    upstream_token: Option<String>,
     key: Option<String>,
     source: Option<&'static str>,
     pending_selection: Option<crate::affinity::Selected>,
@@ -141,6 +144,7 @@ impl Default for Session {
             upstream_quota_epoch: 0,
             upstream_identity_epoch: 0,
             upstream_session: None,
+            upstream_token: None,
             key: None,
             source: None,
             pending_selection: None,
@@ -156,6 +160,7 @@ impl Session {
         self.upstream_quota_epoch = 0;
         self.upstream_identity_epoch = 0;
         self.upstream_session = None;
+        self.upstream_token = None;
         self.upstream.take()
     }
 
@@ -266,12 +271,22 @@ fn message_bytes(message: &Message) -> usize {
 }
 
 fn error_event(status: u16, body: &Value) -> String {
-    let err = if body["error"].is_object() {
+    let mut err = if body["error"].is_object() {
         body["error"].clone()
     } else {
         json!({ "message": proxy::error_message(&body.to_string()) })
     };
-    json!({ "type": "error", "status": status, "error": err }).to_string()
+    // Codex reads `error.code` as a string or null, and ignores the whole event (waiting
+    // for its idle timeout) when it is anything else, such as `error_body`'s status number.
+    if err.get("code").is_some_and(|code| !code.is_string() && !code.is_null()) {
+        err["code"] = responses::error_code(status).into();
+    }
+    let mut event = json!({ "type": "error", "status": status, "error": err });
+    // A socket has no response headers: Codex reads the wait from the event's own.
+    if let Some(wait) = proxy::retry_after_of(body) {
+        event["headers"] = json!({ "retry-after": wait.to_string() });
+    }
+    event.to_string()
 }
 
 fn input_items(body: &Value) -> Vec<Value> {
@@ -665,8 +680,13 @@ async fn native_turn(
         if crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
             return Native::Fallback("oauth_refresh");
         }
+        let token = match &*acct.cred.read() {
+            crate::accounts::Credential::OAuth(o) => Some(o.access_token.clone()),
+            crate::accounts::Credential::ApiKey { .. } => None,
+        };
         match connect(app, &acct, headers, &provider_session).await {
             Ok(ws) => {
+                sess.upstream_token = token;
                 sess.upstream_quota_epoch = acct.quota_epoch();
                 sess.upstream_identity_epoch = identity_epoch;
                 sess.upstream_session = Some(provider_session);
@@ -752,6 +772,7 @@ async fn native_turn(
     let mut error: Option<(u16, String)> = None;
     let mut forwarded = false;
     let mut terminal = false;
+    let drop_private = !proxy::reads_private_events(headers);
     // An interrupt meant for an earlier response must not stop this one.
     while let Some(Ok(_)) = sess.interrupts.as_mut().map(|rx| rx.try_recv()) {}
     loop {
@@ -828,6 +849,7 @@ async fn native_turn(
         crate::quota::observe_codex_event(&acct, &v, quota_epoch);
         // The message is already parsed; the parser reads the value, not the text.
         parser.feed_value(&SseEvent { event: None, data: String::new() }, Some(&v), &mut evs);
+        let private = drop_private && proxy::private_frame(None, Some(&v), &evs);
         for ev in evs.drain(..) {
             aggregate.push(&ev);
             tracker.observe_stream_event(&ev);
@@ -837,6 +859,18 @@ async fn native_turn(
                 Event::Text(_) | Event::Reasoning(_) | Event::ToolStart { .. } => tracker.first_token(),
                 _ => {}
             }
+        }
+        // Read by the observers above, but not sent to a client that isn't Codex; it
+        // reached no client, so the turn still counts as having forwarded nothing.
+        if private {
+            proxy::count_private_dropped(proxy::client_app(headers));
+            tracing::debug!(
+                connection_id = sess.connection_id,
+                client_app = proxy::client_app(headers),
+                event = kind,
+                "left out a private Responses event this client does not read"
+            );
+            continue;
         }
         if matches!(kind.as_str(), "error" | "response.failed")
             && let Some((status, msg)) = error.clone()
@@ -856,6 +890,10 @@ async fn native_turn(
                 close_upstream(&mut up, &sess.connection_id, "auth_rejected").await;
                 tracker.cancel();
                 return Native::Fallback("upstream_closed");
+            } else if proxy::protection_refused(Provider::Codex, status, &msg) {
+                // The request itself is refused: the client sees it, the account is fine,
+                // and a turn the client saw is never replayed.
+                tracker.diagnostic_failure(crate::diagnostics::Failure::classified("response_protection_unavailable"));
             } else if proxy::at_capacity(status, &text) {
                 // OpenAI is short of servers: shown, but other sessions keep the account.
                 acct.state
@@ -867,15 +905,34 @@ async fn native_turn(
                 acct.rate_limit(&model, chrono::Utc::now() + chrono::Duration::seconds(60), &format!("429: {msg}"));
                 app.broadcast("accounts", Value::Null);
             } else if matches!(status, 401 | 403) {
+                if status == 401 {
+                    proxy::log_codex_401(&acct, sess.upstream_token.as_deref(), tracker.request_id());
+                }
                 // An error after response.created also invalidates this socket.
-                // Refresh the same subscription before the client's next turn.
-                if let Err(e) = crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), true).await {
+                // Refresh the same subscription before the client's next turn. As over
+                // HTTP, a 401 whose refresh token was refused for good puts the account
+                // out until a sign-in, which a cooldown would only hide.
+                if let Err(e) = crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), true).await
+                    && (status != 401 || !acct.refuse_access())
+                {
                     acct.cool(
                         None,
                         chrono::Utc::now() + chrono::Duration::seconds(60),
                         &format!("token refresh failed: {e}"),
                     );
                 }
+            }
+            // A rate limit or capacity shortage as the first frame ran nothing and reached no
+            // client: HTTP serves the turn, with its own retries and failover. Never a 5xx,
+            // or anything after output, which the client has already seen. A plain rate limit
+            // just paused this account, so HTTP helps only if another account can serve;
+            // otherwise the provider's own refusal, and any wait it names, reaches the client.
+            let elsewhere = || app.pool.another_can_serve(&model, &acct.id, only.as_ref());
+            if !forwarded && status == 429 && (proxy::at_capacity(status, &text) || elsewhere()) {
+                sess.discard_upstream();
+                close_upstream(&mut up, &sess.connection_id, "busy_rejected").await;
+                tracker.finish_fallback(status, &usage, Some(msg));
+                return Native::Fallback("upstream_busy");
             }
         }
         if kind == "response.completed" || kind == "response.incomplete" {

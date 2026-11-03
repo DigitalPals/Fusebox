@@ -47,10 +47,15 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
         });
     }
     if g(gc, "responseMimeType", "response_mime_type").as_str() == Some("application/json") {
-        let schema = g(gc, "responseJsonSchema", "response_json_schema");
-        let schema = if schema.is_null() { g(gc, "responseSchema", "response_schema") } else { schema };
+        let json_schema = g(gc, "responseJsonSchema", "response_json_schema");
+        // `responseSchema` is the OpenAPI-style Schema; `responseJsonSchema` is JSON Schema.
+        let schema = if json_schema.is_null() {
+            lower_schema_types(g(gc, "responseSchema", "response_schema"))
+        } else {
+            json_schema.clone()
+        };
         req.response_format = Some(if schema.is_object() {
-            ResponseFormat::JsonSchema { name: "response".into(), schema: schema.clone(), strict: false }
+            ResponseFormat::JsonSchema { name: "response".into(), schema, strict: false }
         } else {
             ResponseFormat::JsonObject
         });
@@ -59,7 +64,14 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
     let mut pending: HashMap<String, VecDeque<String>> = HashMap::new();
     let mut counter = 0usize;
     for c in v["contents"].as_array().into_iter().flatten() {
-        let role = if c["role"] == "model" { Role::Assistant } else { Role::User };
+        // Gemini lets a turn omit its role; one that calls a function is the model's.
+        let calls =
+            || c["parts"].as_array().into_iter().flatten().any(|p| g(p, "functionCall", "function_call").is_object());
+        let role = match c["role"].as_str() {
+            Some("model") => Role::Assistant,
+            None | Some("") if calls() => Role::Assistant,
+            _ => Role::User,
+        };
         let mut parts = Vec::new();
         for p in c["parts"].as_array().into_iter().flatten() {
             let sig =
@@ -146,24 +158,43 @@ pub fn parse_request(v: &Value) -> Result<Request, String> {
     Ok(req)
 }
 
-/// Gemini's OpenAPI-style schemas use upper-case type names ("OBJECT").
+/// Schema limits that Gemini types as int64, which its JSON sends as strings, and
+/// `minimum`/`maximum`, which clients may quote too.
+const NUMERIC_LIMITS: &[&str] =
+    &["minItems", "maxItems", "minLength", "maxLength", "minProperties", "maxProperties", "minimum", "maximum"];
+
+/// Gemini's OpenAPI-style schemas use upper-case type names ("OBJECT") and send
+/// integer limits as strings (`"maxLength": "10"`). Rewrites both at schema keyword
+/// positions only, so property names and literal values (`enum`, `default`) stay.
 fn lower_schema_types(v: &Value) -> Value {
-    match v {
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .map(|(k, val)| {
-                    let val = if k == "type" {
-                        val.as_str().map(|s| Value::String(s.to_ascii_lowercase())).unwrap_or_else(|| val.clone())
-                    } else {
-                        lower_schema_types(val)
-                    };
-                    (k.clone(), val)
-                })
-                .collect(),
-        ),
-        Value::Array(a) => Value::Array(a.iter().map(lower_schema_types).collect()),
-        other => other.clone(),
-    }
+    let Value::Object(m) = v else { return v.clone() };
+    let each = |a: &Vec<Value>| Value::Array(a.iter().map(lower_schema_types).collect());
+    let named = |o: &serde_json::Map<String, Value>| {
+        Value::Object(o.iter().map(|(name, s)| (name.clone(), lower_schema_types(s))).collect())
+    };
+    Value::Object(
+        m.iter()
+            .map(|(k, val)| {
+                let val = match (k.as_str(), val) {
+                    ("type", Value::String(s)) => Value::String(s.to_ascii_lowercase()),
+                    (k, Value::String(s)) if NUMERIC_LIMITS.contains(&k) => numeric(s).unwrap_or_else(|| val.clone()),
+                    ("properties" | "patternProperties" | "$defs" | "definitions", Value::Object(o)) => named(o),
+                    ("items" | "additionalProperties" | "not", Value::Object(_)) => lower_schema_types(val),
+                    ("items" | "prefixItems" | "anyOf" | "oneOf" | "allOf", Value::Array(a)) => each(a),
+                    _ => val.clone(),
+                };
+                (k.clone(), val)
+            })
+            .collect(),
+    )
+}
+
+fn numeric(s: &str) -> Option<Value> {
+    let s = s.trim();
+    s.parse::<i64>()
+        .map(Value::from)
+        .ok()
+        .or_else(|| s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number))
 }
 
 // ----------------------------------------------------------------- request out
@@ -203,6 +234,22 @@ pub fn thinking_config(reasoning: Option<&Reasoning>, model: &str) -> Value {
             None => json!({ "includeThoughts": true }),
         },
         None => json!({ "includeThoughts": true }),
+    }
+}
+
+/// Google rejects an empty system part (`{}`, "required oneof field 'data'"). Removes
+/// such parts, and the instruction when none remain; other bodies stay as they are.
+pub fn drop_empty_system_parts(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else { return };
+    for key in ["systemInstruction", "system_instruction"] {
+        let Some(parts) = object.get_mut(key).and_then(|s| s.get_mut("parts")).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = parts.len();
+        parts.retain(|p| p.as_object().is_none_or(|p| !p.is_empty()));
+        if parts.is_empty() && before > 0 {
+            object.remove(key);
+        }
     }
 }
 
@@ -615,4 +662,138 @@ pub fn render_full(agg: &Aggregate, model: &str) -> Value {
         "modelVersion": model,
         "responseId": new_id(""),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+
+    use super::*;
+    use crate::accounts::Provider;
+    use crate::config::{Config, KeyEntry};
+
+    #[test]
+    fn empty_system_parts_are_removed_before_every_google_upstream() {
+        let dir = std::env::temp_dir().join(format!("fusebox-gemini-parts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, cred) in [
+            (
+                "antigravity-a.json",
+                json!({"type":"antigravity","access_token":"t","email":"a@example.invalid","project_id":"p"}),
+            ),
+            ("vertex-a.json", json!({"type":"vertex","access_token":"t","email":"v@example.invalid","project_id":"p"})),
+        ] {
+            std::fs::write(dir.join(name), cred.to_string()).unwrap();
+        }
+        let key = |k: &str| vec![KeyEntry { api_key: k.into(), ..Default::default() }];
+        let cfg = Config {
+            auth_dir: dir.to_string_lossy().into(),
+            gemini_api_key: key("g"),
+            vertex_api_key: key("v"),
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let accounts = pool.all();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut providers: Vec<_> = accounts.iter().map(|a| a.provider.as_str()).collect();
+        providers.sort();
+        assert_eq!(providers, ["antigravity", "gemini", "vertex", "vertex"]);
+        let contents = json!([{ "role": "user", "parts": [{ "text": "hi" }] }]);
+        let empty =
+            json!({ "model": "gemini-3.8-flash", "contents": contents, "systemInstruction": { "parts": [{}] } });
+        let mixed =
+            json!({ "contents": contents, "system_instruction": { "parts": [{}, { "text": "Be brief." }, {}] } });
+        let normal = json!({ "contents": contents, "systemInstruction": { "role": "user", "parts": [{ "text": "Be brief." }] } });
+        let headers = HeaderMap::new();
+        for acct in &accounts {
+            let prepare = |body: &Value| {
+                let target = crate::upstream::Target {
+                    acct,
+                    cfg: &cfg,
+                    client_headers: &headers,
+                    model: "gemini-3.8-flash",
+                    wire: Format::Gemini,
+                    passthrough: true,
+                    stream: false,
+                    count_tokens: false,
+                    cache_key: None,
+                    provider_session: None,
+                    cache_defaults: false,
+                };
+                let out = crate::upstream::prepare(&target, body.clone()).body;
+                if acct.provider == Provider::Antigravity { out["request"].clone() } else { out }
+            };
+            let out = prepare(&empty);
+            assert!(out.get("systemInstruction").is_none() && out.get("system_instruction").is_none(), "{out}");
+            assert_eq!(out["contents"], contents);
+            assert_eq!(prepare(&mixed)["system_instruction"], json!({ "parts": [{ "text": "Be brief." }] }));
+            let out = prepare(&normal);
+            assert_eq!(out["systemInstruction"], normal["systemInstruction"], "{}", acct.provider.as_str());
+        }
+        let mut unchanged =
+            json!({ "contents": contents, "systemInstruction": { "parts": [] }, "system_instruction": "x" });
+        let before = unchanged.clone();
+        drop_empty_system_parts(&mut unchanged);
+        assert_eq!(unchanged, before);
+    }
+
+    #[test]
+    fn a_turn_without_a_role_that_calls_a_function_is_the_model_turn() {
+        let body = json!({ "contents": [
+            { "parts": [{ "text": "Weather in Paris?" }] },
+            { "parts": [{ "functionCall": { "name": "weather", "args": { "city": "Paris" } } }] },
+            { "role": "user", "parts": [{ "functionResponse": { "name": "weather", "response": { "result": "sunny" } } }] },
+            { "role": "", "parts": [{ "text": "Checking again." }, { "function_call": { "name": "weather", "args": {} } }] },
+            { "role": "user", "parts": [{ "functionResponse": { "name": "weather", "response": { "result": "sunny" } } }] },
+            { "parts": [{ "text": "Thanks" }] }
+        ] });
+        let req = parse_request(&body).unwrap();
+        let roles: Vec<_> = req.messages.iter().map(|m| m.role).collect();
+        use Role::{Assistant, User};
+        assert_eq!(roles, [User, Assistant, User, Assistant, User, User]);
+    }
+
+    #[test]
+    fn openapi_schemas_are_lowered_at_keyword_positions_only() {
+        let body = json!({
+            "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }],
+            "tools": [{ "functionDeclarations": [{ "name": "f", "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "type": { "type": "STRING", "enum": ["A", "B"] },
+                    "maxLength": { "type": "INTEGER", "minimum": "1", "maximum": "2.5" },
+                    "tags": { "type": "ARRAY", "items": { "type": "STRING", "maxLength": "10", "minLength": " 2 " },
+                              "minItems": "1", "maxItems": "many" },
+                    "choice": { "anyOf": [{ "type": "STRING" }, { "type": "NUMBER" }],
+                                "default": { "type": "KEEP", "maxLength": "3" } }
+                },
+                "required": ["type"]
+            } }] }],
+            "generationConfig": { "responseMimeType": "application/json",
+                "responseSchema": { "type": "OBJECT", "properties": { "n": { "type": "STRING", "maxLength": "4" } } } }
+        });
+        let req = parse_request(&body).unwrap();
+        let p = &req.tools[0].parameters;
+        assert_eq!(p["type"], "object");
+        assert_eq!(p["properties"]["type"], json!({ "type": "string", "enum": ["A", "B"] }));
+        assert_eq!(p["properties"]["maxLength"], json!({ "type": "integer", "minimum": 1, "maximum": 2.5 }));
+        let tags = &p["properties"]["tags"];
+        assert_eq!(tags["items"], json!({ "type": "string", "maxLength": 10, "minLength": 2 }));
+        assert_eq!((&tags["minItems"], &tags["maxItems"]), (&json!(1), &json!("many")));
+        assert_eq!(p["properties"]["choice"]["anyOf"], json!([{ "type": "string" }, { "type": "number" }]));
+        assert_eq!(p["properties"]["choice"]["default"], json!({ "type": "KEEP", "maxLength": "3" }));
+        assert_eq!(p["required"], json!(["type"]));
+        let Some(ResponseFormat::JsonSchema { schema, .. }) = &req.response_format else { panic!("no schema") };
+        assert_eq!(schema, &json!({ "type": "object", "properties": { "n": { "type": "string", "maxLength": 4 } } }));
+        // JSON Schema needs no lowering and is passed on as sent.
+        let mut json_schema = body.clone();
+        json_schema["generationConfig"] = json!({ "responseMimeType": "application/json",
+            "responseJsonSchema": { "type": "object", "properties": { "n": { "type": "string", "maxLength": "4" } } } });
+        let Some(ResponseFormat::JsonSchema { schema, .. }) = parse_request(&json_schema).unwrap().response_format
+        else {
+            panic!("no schema")
+        };
+        assert_eq!(schema["properties"]["n"]["maxLength"], "4");
+    }
 }
