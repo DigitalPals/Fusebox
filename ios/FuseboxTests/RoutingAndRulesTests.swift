@@ -117,6 +117,16 @@ struct RulesTests {
         #expect(a.state(now: now).word == "Disabled")
     }
 
+    @Test func cooldownReasons() {
+        var a = Account(id: "k", provider: "claude", label: "key", kind: "api-key")
+        a.cooldownKinds = ["*": "credit", "claude-opus-5-5": "rate_limit", "claude-sonnet-5-5": "quota", "x": "checking"]
+        #expect(a.cooldownReason("*") == "API credit used up")
+        #expect(a.cooldownReason("claude-opus-5-5") == "Rate limited")
+        #expect(a.cooldownReason("claude-sonnet-5-5") == "Usage limit used up")
+        #expect(a.cooldownReason("x") == "Checking quota")
+        #expect(a.cooldownReason("unlisted") == "Rate limited")
+    }
+
     @Test func noFiveHourLimit() {
         let a = Account(id: "a", provider: "claude", label: "u", quota: Quota(windows: [QuotaWindow(name: "week", used: 26, resetsAt: now.addingTimeInterval(86400))], plan: "max_20x", noFiveHourLimit: true))
         #expect(a.noShortLimit)

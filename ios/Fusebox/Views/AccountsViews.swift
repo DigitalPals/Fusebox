@@ -256,9 +256,7 @@ struct AccountDetail: View {
     private var cooldowns: some View {
         let cds = (account.cooldowns ?? [:]).compactMap { k, v in FuseboxDate.parse(v).map { (k, $0) } }
             .filter { $0.1 > .now }.sorted { $0.1 < $1.1 }
-        let reason: (String) -> String = { m in
-            ["quota": "Usage limit used up", "rate_limit": "Rate limited", "checking": "Checking quota"][account.cooldownKinds?[m] ?? ""] ?? "Rate limited"
-        }
+        let reason: (String) -> String = { m in account.cooldownReason(m) }
         return Card(spacing: 10) {
             PanelHead("Cooldowns") {
                 if !cds.isEmpty { Button("Clear all") { pending = .clearCooldowns }.buttonStyle(.outlineSmall).disabled(busy) }

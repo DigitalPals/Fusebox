@@ -274,6 +274,17 @@ extension Account {
         return st.word
     }
 
+    /// Why `model` is paused on this account, as the account page says it. `credit` is an
+    /// API key whose prepaid credit ran out; an unknown kind reads as a rate limit.
+    public func cooldownReason(_ model: String) -> String {
+        switch cooldownKinds?[model] {
+        case "quota": "Usage limit used up"
+        case "checking": "Checking quota"
+        case "credit": "API credit used up"
+        default: "Rate limited"
+        }
+    }
+
     /// A usage-limit cooldown lasting until the window renews means the window is used up.
     public func windowSpent(_ w: QuotaWindow?) -> Bool {
         guard let renews = w?.resetsAt?.addingTimeInterval(-60) else { return false }
