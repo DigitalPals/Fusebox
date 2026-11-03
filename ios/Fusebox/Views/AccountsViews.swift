@@ -185,7 +185,7 @@ struct AccountDetail: View {
 
     /// Refresh and the on/off switch: the dashboard's breaker.
     @ViewBuilder private var actions: some View {
-        if account.kind == "oauth" && ["claude", "codex"].contains(account.provider) {
+        if account.kind == "oauth" && ["claude", "codex", "meta"].contains(account.provider) {
             Button {
                 Task { await run("Quota refreshed") { try await store.refreshQuota(account.id) } }
             } label: {

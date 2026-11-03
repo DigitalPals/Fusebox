@@ -511,7 +511,7 @@ async fn native_sockets_send_private_events_to_codex_clients_only() {
         json!({"type":"response.created","response":{"id":"resp-private","status":"in_progress"}}),
         json!({"type":"codex.response.metadata","headers":{"x-models-etag":"etag"}}),
         json!({"type":"response.output_text.delta","delta":"OK"}),
-        json!({"type":"response.subscription_usage","usage":{"credits":1}}),
+        json!({"type":"response.subscription_usage","subscription":{"tier":"t1","window":{"used_percent":3,"window_duration_mins":300,"resets_at":4102444800i64},"weekly":{"used_percent":1,"resets_at":4102444800i64}}}),
         json!({"type":"responsesapi.websocket_timing","elapsed_ms":3}),
         json!({"type":"response.completed","response":{"id":"resp-private","status":"completed","output":[],
             "usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":4}}}}),

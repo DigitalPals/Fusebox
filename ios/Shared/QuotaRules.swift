@@ -200,7 +200,9 @@ extension Account {
         let codex = ["chatgptprolite": "Pro 100", "chatgptpro": "Pro 200", "chatgptpromax": "Pro 500"]
         let claude = ["max_5x": "Max", "max_20x": "Ultra"]
         if provider == "codex", let n = quota?.subscriptionPlan.flatMap({ codex[$0] }) { return n }
-        if provider == "claude", let n = quota?.planName ?? quota?.plan.flatMap({ claude[$0] }) { return n }
+        // A provider-reported display name (Claude's, Meta's tier name) wins over any tier identifier.
+        if let n = quota?.planName, !n.isEmpty { return n }
+        if provider == "claude", let n = quota?.plan.flatMap({ claude[$0] }) { return n }
         guard let plan = quota?.plan, !plan.isEmpty else { return nil }
         return Fmt.capitalized(plan.replacingOccurrences(of: #"[_-]+"#, with: " ", options: .regularExpression))
     }
@@ -227,7 +229,7 @@ extension Account {
 
     /// Subscriptions that can report limits get meters; API keys have none.
     public var metered: Bool {
-        (kind == "oauth" && ["claude", "codex"].contains(provider))
+        (kind == "oauth" && ["claude", "codex", "meta"].contains(provider))
             || !(quota?.windows ?? []).isEmpty || !(quota?.limits ?? []).isEmpty
     }
 

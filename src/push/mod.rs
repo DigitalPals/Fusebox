@@ -573,7 +573,7 @@ fn views(app: &App) -> Vec<AccountView> {
                 group_name,
                 label: a.label.clone(),
                 api_key,
-                subscription: sign_in && matches!(a.provider, Provider::Claude | Provider::Codex),
+                subscription: sign_in && matches!(a.provider, Provider::Claude | Provider::Codex | Provider::Meta),
                 plan: st.quota.plan.clone(),
                 no_five_hour: st.quota.no_five_hour_limit,
                 disabled: st.disabled,

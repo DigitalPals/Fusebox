@@ -240,7 +240,7 @@ async fn save_sign_in(
 /// so its meters fill in without waiting for the next poll round (up to a minute).
 fn read_signed_in(app: &Arc<App>, path: &std::path::Path) {
     let Some(acct) = app.pool.all().into_iter().find(|a| a.path.as_deref() == Some(path)) else { return };
-    if !matches!(acct.provider, Provider::Codex | Provider::Claude) || !acct.is_oauth() {
+    if !matches!(acct.provider, Provider::Codex | Provider::Claude | Provider::Meta) || !acct.is_oauth() {
         return;
     }
     let app = app.clone();
@@ -1093,10 +1093,10 @@ async fn apply_banked_reset(
 }
 async fn refresh_quota(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
-    if !matches!(acct.provider, Provider::Codex | Provider::Claude) || !acct.is_oauth() {
+    if !matches!(acct.provider, Provider::Codex | Provider::Claude | Provider::Meta) || !acct.is_oauth() {
         return err(
             StatusCode::BAD_REQUEST,
-            "Subscription quota is only available for Codex and Claude OAuth accounts",
+            "Subscription quota is only available for Codex, Claude and Meta OAuth accounts",
         );
     }
     if oauth::ensure_fresh(&app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
@@ -1112,7 +1112,8 @@ async fn refresh_quota(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
     }
     let _ = crate::quota::poll_plan(&app, &acct).await;
     app.broadcast("accounts", Value::Null);
-    if !app.cfg().banked_resets {
+    // Banked resets are a Claude/Codex feature; a Meta refresh ends with quota.
+    if !app.cfg().banked_resets || acct.provider == Provider::Meta {
         return ok();
     }
     match crate::banked_resets::refresh(&app, &acct).await {

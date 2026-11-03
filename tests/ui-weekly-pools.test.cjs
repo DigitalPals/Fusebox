@@ -77,6 +77,14 @@ test('Claude plans show the provider’s name, and the renamed Max tiers their n
   assert.equal(run(`planName(${JSON.stringify({ provider: 'codex', quota: { plan: 'max_20x' } })})`), 'Max 20x', 'only Claude is renamed');
 });
 
+test('Meta plans show the mint’s tier name when Meta sends one', () => {
+  const run = load();
+  const meta = (quota) => run(`planName(${JSON.stringify({ provider: 'meta', quota })})`);
+  assert.equal(meta({ plan_name: 'Muse Code Max Usage' }), 'Muse Code Max Usage');
+  assert.equal(meta({ windows: [] }), '', 'no tier name, no plan');
+  assert.equal(meta({}), '');
+});
+
 test('the meter draws the server’s weekly pools with their accounts', () => {
   const accounts = [sub('a', 'max_20x'), sub('b', 'max_20x'), sub('c', 'pro'), sub('x', null, 'codex'), sub('y', null, 'codex')];
   const run = load(state(accounts, [

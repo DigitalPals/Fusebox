@@ -24,6 +24,7 @@ function load() {
     piece('const esc = (v) =>'), piece('function left(iso) {'), piece('function compactLeft(iso) {'),
     piece('const hm ='), piece('const weekday ='), piece('const fullResetTime ='), piece('const when ='), piece('const liveLeft ='),
     piece('function quotaOf(w'), piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
+    piece('const metered ='),
     piece('function windowOf(a, short) {'), piece('const NO_SHORT_LIMIT ='), piece('const noShortLimit ='), piece('const noShortNote ='),
     piece('const windowLabel ='), piece('const windowTitle ='), piece('function windowSeconds(w) {'),
     piece('function windowElapsed(w'), piece('function windowSpent(a, w) {'),
@@ -116,4 +117,23 @@ test('lists leave out the 5-hour meter of an account without that limit; its pag
   assert.equal((run(`meterRowsHTML(${JSON.stringify(pro)})`).match(/class="mrow"/g) || []).length, 1);
   assert.equal(run(`noShortNote(${JSON.stringify(pro)})`), ' · no 5h limit');
   assert.match(run(`quotaWindowsHTML(${JSON.stringify(pro)}, 'lg')`), /5-hour<\/span><span class="dim">No limit/);
+});
+
+test('Meta sign-ins are metered subscriptions with 5-hour and weekly rows', () => {
+  const run = load();
+  const meta = (quota, kind = 'oauth') => ({ id: 'm', provider: 'meta', kind, quota });
+  assert.equal(run(`metered(${JSON.stringify(meta({ windows: [] }))})`), true, 'metered before the first reading, like Claude and Codex');
+  assert.equal(run(`metered(${JSON.stringify(meta({ windows: [] }, 'api-key'))})`), false, 'a Meta API key has no subscription meters');
+  const live = meta({
+    plan_name: 'Muse Code Max Usage',
+    windows: [{ name: '5h', used: 3, resets_at: RESET }, { name: 'week', used: 1, resets_at: '2026-10-28T16:00:00Z' }],
+  });
+  assert.equal(run(`metered(${JSON.stringify(live)})`), true);
+  const rows = run(`meterRowsHTML(${JSON.stringify(live)})`);
+  assert.equal((rows.match(/class="mrow"/g) || []).length, 2);
+  assert.match(rows, /<span class="capsm">5H<\/span>/);
+  assert.match(rows, /<span class="capsm">WK<\/span>/);
+  const blocks = run(`quotaWindowsHTML(${JSON.stringify(live)}, 'lg')`);
+  assert.match(blocks, /5-hour/);
+  assert.match(blocks, /Weekly/);
 });

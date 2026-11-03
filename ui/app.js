@@ -882,8 +882,10 @@ function authName(a) {
 const CODEX_PLAN_NAMES = new Map([['chatgptprolite', 'Pro 100'], ['chatgptpro', 'Pro 200'], ['chatgptpromax', 'Pro 500']]);
 // Claude renamed Max 5x and Max 20x on 30 October 2026; their tier identifiers stayed.
 const CLAUDE_PLAN_NAMES = new Map([['max_5x', 'Max'], ['max_20x', 'Ultra']]);
+// A provider-reported display name (Claude's, Meta's tier name) wins over any tier identifier.
 const planName = (a) => (a.provider === 'codex' && CODEX_PLAN_NAMES.get(a.quota?.subscription_plan))
-  || (a.provider === 'claude' && (a.quota?.plan_name || CLAUDE_PLAN_NAMES.get(a.quota?.plan)))
+  || a.quota?.plan_name
+  || (a.provider === 'claude' && CLAUDE_PLAN_NAMES.get(a.quota?.plan))
   || (a.quota && a.quota.plan ? cap(String(a.quota.plan).replace(/[_-]+/g, ' ')) : '');
 
 // "Claude · OAuth · token valid 5h 11m"
@@ -971,7 +973,7 @@ function quotaView(q) {
 }
 
 // Subscriptions that can report limits get meters (empty until they do); API keys have none.
-const metered = (a) => (a.kind === 'oauth' && ['claude', 'codex'].includes(a.provider))
+const metered = (a) => (a.kind === 'oauth' && ['claude', 'codex', 'meta'].includes(a.provider))
   || (a.quota?.windows || []).length > 0 || (a.quota?.limits || []).length > 0;
 
 // The tightest live usage window of a kind: short (5-hour) or long (weekly).

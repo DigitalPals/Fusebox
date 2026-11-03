@@ -134,6 +134,25 @@ struct RulesTests {
         #expect(a.subtitle == "Claude · Ultra · no 5h limit")
     }
 
+    @Test func metaSubscriptionsAreMeteredLikeClaudeAndCodex() {
+        // Metered from sign-in, before the first reading, like Claude and Codex.
+        #expect(Account(id: "m", provider: "meta", label: "u", quota: Quota(windows: [])).metered)
+        #expect(!Account(id: "k", provider: "meta", label: "key", kind: "api-key", quota: Quota(windows: [])).metered)
+        let live = Account(id: "m", provider: "meta", label: "u", quota: Quota(
+            windows: [
+                QuotaWindow(name: "5h", used: 3, resetsAt: now.addingTimeInterval(3600)),
+                QuotaWindow(name: "week", used: 1, resetsAt: now.addingTimeInterval(86400)),
+            ], planName: "Muse Code Max Usage"))
+        #expect(live.metered)
+        #expect(live.planName == "Muse Code Max Usage", "the mint's tier name")
+        #expect(live.subtitle == "Meta · Muse Code Max Usage")
+        #expect(live.window(short: true, now: now)?.name == "5h")
+        #expect(live.window(short: false, now: now)?.name == "week")
+        let unnamed = Account(id: "m", provider: "meta", label: "u", quota: Quota(windows: []))
+        #expect(unnamed.planName == nil, "no tier name, no plan")
+        #expect(unnamed.subtitle == "Meta · Device code")
+    }
+
     @Test func renewalRow() throws {
         let json = #"{"renewal":{"at":"2026-11-06T09:53:56Z","estimated":false,"ends":false,"period":"monthly"}}"#
         var a = Account(id: "a", provider: "codex", label: "u", quota: try JSONDecoder.fusebox.decode(Quota.self, from: Data(json.utf8)))

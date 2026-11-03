@@ -859,6 +859,9 @@ pub fn mark_quota_exhausted(acct: &Account, model: &str, headers: &reqwest::head
 }
 
 fn observe_quota_value(acct: &Account, model: &str, v: &Value) {
+    if acct.provider == Provider::Meta {
+        crate::quota::observe_meta_frame(acct, v);
+    }
     let error = if v["response"]["error"].is_object() { &v["response"]["error"] } else { &v["error"] };
     if error.is_object() {
         let status = v["status"].as_u64().unwrap_or(429) as u16;

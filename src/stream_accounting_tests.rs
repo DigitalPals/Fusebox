@@ -486,7 +486,10 @@ fn private_wire() -> (String, usize) {
         ),
         format!("data: {}\n\n", json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":10.0}}})),
         format!("event: codex.response.metadata\ndata: {}\n\n", json!({"headers":{"x-models-etag":"etag"}})),
-        format!("data: {}\n\n", json!({"type":"response.subscription_usage","usage":{"credits":1}})),
+        format!(
+            "data: {}\n\n",
+            json!({"type":"response.subscription_usage","subscription":{"tier":"t1","window":{"used_percent":3,"window_duration_mins":300,"resets_at":4102444800i64},"weekly":{"used_percent":1,"resets_at":4102444800i64}}})
+        ),
         format!("data: {}\n\n", json!({"type":"responsesapi.websocket_timing","elapsed_ms":3})),
         format!(
             "event: response.output_text.delta\ndata: {}\n\n",

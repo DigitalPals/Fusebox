@@ -1,14 +1,15 @@
-//! Subscription quota: how much of each usage window (Claude's 5-hour and
-//! weekly limits, ChatGPT's Codex windows) an account has used. Read from
-//! response headers on every request and from the providers' usage endpoints
-//! in the background, so routing can prefer the account with most headroom.
+//! Subscription quota: how much of each usage window (Claude's, ChatGPT's and
+//! Meta's 5-hour and weekly limits) an account has used. Read from response
+//! headers and stream frames on every request, and from the providers' usage
+//! endpoints — or, for Meta, a key mint — in the background, so routing can
+//! prefer the account with most headroom.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::accounts::{Account, Credential, Provider};
@@ -42,7 +43,7 @@ const POLL_CONCURRENCY: usize = 4;
 const USAGE_WAIT_MIN: i64 = 60;
 const USAGE_WAIT_MAX: i64 = 30 * 60;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Window {
     /// "5h", "week", ...
     pub name: String,
@@ -105,6 +106,8 @@ struct Reading {
     windows: Vec<Window>,
     limits: Vec<Limit>,
     plan: Option<String>,
+    /// The plan's display name when the reading itself carries one (Meta mints).
+    plan_name: Option<String>,
     /// The provider confirms the account has no 5-hour limit.
     no_five_hour: bool,
 }
@@ -510,8 +513,31 @@ fn codex_windows(v: &Value) -> Vec<Window> {
     readings::codex(v).windows
 }
 
+/// Meta has no usage endpoint. Its key mint is free, hands back the account's
+/// same key, and may carry the subscription snapshot; stream frames are the
+/// reliable source. A mint without one counts as a check that brought no data,
+/// so idle polling backs off to every 30 minutes.
+async fn poll_meta(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
+    if !matches!(&*acct.cred.read(), Credential::OAuth(o) if o.field("dca_token").is_some()) {
+        return Ok(());
+    }
+    // No epoch is captured before the mint: publishing the rotated key may bump
+    // it (a changed base URL is a changed identity), and the reading belongs to
+    // the credential just published either way.
+    let minted = crate::oauth::meta_mint_refresh(app, acct).await?;
+    let mut st = acct.state.lock();
+    if !st.quota_refreshing {
+        st.quota_epoch += 1;
+        apply_reading(&mut st, readings::meta(&minted));
+    }
+    Ok(())
+}
+
 /// Asks the provider's usage endpoint (free, no tokens) for current quota.
 pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
+    if acct.provider == Provider::Meta {
+        return poll_meta(app, acct).await;
+    }
     let epoch = acct.quota_epoch();
     let (token, account_id) = match &*acct.cred.read() {
         Credential::OAuth(o) if o.base_url.is_none() => (o.access_token.clone(), o.account_id.clone()),
@@ -655,11 +681,14 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
-    let Reading { windows, limits, plan, no_five_hour } = reading;
+    let Reading { windows, limits, plan, plan_name, no_five_hour } = reading;
     // Only a provider-confirmed absence retires a retained 5-hour window; an omitted one stays.
     let retired = |w: &Window| no_five_hour && w.name == "5h" && w.model.is_none();
     if windows.is_empty() && limits.is_empty() {
         st.quota.set(windows, plan);
+        if plan_name.is_some() {
+            st.quota.plan_name = plan_name;
+        }
         return;
     }
     let covered: Vec<String> = st
@@ -682,6 +711,10 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
         .cloned()
         .collect();
     st.set_quota(windows, plan);
+    // After `set`, so a plan change (which clears the old name) still ends named.
+    if plan_name.is_some() {
+        st.quota.plan_name = plan_name;
+    }
     if no_five_hour {
         st.quota.windows.retain(|w| !retired(w));
         st.quota.no_five_hour_limit = true;
@@ -706,12 +739,30 @@ pub fn usage(st: &mut crate::accounts::AccountState, provider: Provider, value: 
         Provider::Claude => readings::claude(value),
         Provider::Codex => readings::codex(value),
         Provider::Antigravity => readings::antigravity(value),
+        Provider::Meta => readings::meta(value),
         _ => return,
     };
     apply_reading(st, reading);
 }
 
-/// Keeps quota and model lists fresh for signed-in Claude and ChatGPT accounts.
+/// Meta streams report subscription use as a `response.subscription_usage`
+/// frame: a partial observation like Claude's headers, so it updates the
+/// windows without claiming a usage-endpoint refresh.
+pub fn observe_meta_frame(acct: &Account, v: &Value) {
+    if v["type"] != "response.subscription_usage" {
+        return;
+    }
+    let windows = readings::meta(v).windows;
+    if windows.is_empty() {
+        return;
+    }
+    let mut st = acct.state.lock();
+    if !st.quota_refreshing {
+        st.set_quota(windows, None);
+    }
+}
+
+/// Keeps quota and model lists fresh for signed-in Claude, ChatGPT and Meta accounts.
 pub async fn poller(app: Arc<App>) {
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
@@ -746,10 +797,14 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
             Err(e) => tracing::debug!(account = %acct.label, "antigravity setup failed: {e:#}"),
         }
     }
-    if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity) || !acct.is_oauth() {
+    if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity | Provider::Meta)
+        || !acct.is_oauth()
+    {
         return changed;
     }
-    let reset_stale = acct.provider != Provider::Antigravity && app.cfg().banked_resets && {
+    // Banked resets and separate plan reads are Claude/Codex features; Meta's
+    // mint already carries its tier name with every usage reading.
+    let reset_stale = matches!(acct.provider, Provider::Claude | Provider::Codex) && app.cfg().banked_resets && {
         let st = acct.state.lock();
         !st.disabled
             && st.quota.usage_wait(Utc::now()).is_none()
@@ -762,8 +817,10 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         let _ = crate::banked_resets::refresh(app, &acct).await;
         changed = true;
     }
-    changed |= crate::banked_resets::automatic_check(app, &acct).await;
-    let plan_due = acct.provider != Provider::Antigravity
+    if matches!(acct.provider, Provider::Claude | Provider::Codex) {
+        changed |= crate::banked_resets::automatic_check(app, &acct).await;
+    }
+    let plan_due = matches!(acct.provider, Provider::Claude | Provider::Codex)
         && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
         && (acct.provider != Provider::Codex || o.account_id.as_ref().is_some_and(|id| !id.is_empty())))
         && {
@@ -881,6 +938,40 @@ mod tests {
             None,
         );
         assert_eq!(q.weekly_reset("claude-sonnet-5-5"), Some(reset));
+    }
+
+    #[test]
+    fn meta_stream_frames_update_windows_without_claiming_a_refresh() {
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            meta_api_key: vec![crate::config::KeyEntry { api_key: "a".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = &pool.all()[0];
+        assert_eq!(acct.provider, Provider::Meta);
+        observe_meta_frame(
+            acct,
+            &json!({"type": "response.subscription_usage", "subscription": {
+                "tier": "tier-9",
+                "weekly": { "resets_at": 4102444800i64, "used_percent": 1 },
+                "window": { "resets_at": 4102444800i64, "used_percent": 3, "window_duration_mins": 300 },
+            }}),
+        );
+        {
+            let st = acct.state.lock();
+            assert_eq!(st.quota.five_hour_remaining("muse-wonder-1.0"), Some(97.0));
+            assert_eq!(st.quota.weekly_remaining("muse-wonder-1.0"), Some(99.0));
+            assert!(st.quota.updated_at.is_some());
+            assert!(st.quota.refreshed_at.is_none(), "a frame is an observation, not a mint");
+            assert!(st.quota.needs_refresh(Utc::now(), []), "the first mint poll is still due");
+        }
+        // Other frames and payload-less usage frames change nothing.
+        observe_meta_frame(acct, &json!({"type": "response.created", "response": {"id": "r1"}}));
+        observe_meta_frame(acct, &json!({"type": "response.subscription_usage", "subscription": {}}));
+        let st = acct.state.lock();
+        assert_eq!(st.quota.five_hour_remaining("muse-wonder-1.0"), Some(97.0));
     }
 
     #[test]

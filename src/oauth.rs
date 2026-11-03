@@ -665,8 +665,50 @@ fn adopt_rotated(acct: &Account, refused: &OAuth) -> Option<OAuth> {
     Some(disk)
 }
 
+/// The credential a Meta mint produces: the minted key on the minted base URL,
+/// with no fixed expiry (the device token is what expires).
+fn meta_oauth(old: &OAuth, minted: &Value) -> OAuth {
+    OAuth {
+        access_token: minted["api_key"].as_str().unwrap_or_default().to_string(),
+        base_url: minted["base_url"].as_str().filter(|s| !s.is_empty()).map(String::from).or(old.base_url.clone()),
+        expires_at: None,
+        ..old.clone()
+    }
+}
+
+/// Mints a Meta key under the account's refresh lock and returns the mint
+/// response. Quota polling mints too, so it must never do so behind the refresh
+/// lock's back. Meta hands back the account's same key, so an unchanged key is
+/// not published again (that would rewrite the account file on every poll).
+pub(crate) async fn meta_mint_refresh(app: &App, acct: &Arc<Account>) -> Result<Value> {
+    let _guard = acct.refresh_lock.clone().lock_owned().await;
+    // A replaced account must not mint with the old allocation's device token.
+    // Read the credential before locking state: publishing locks them the other way.
+    let current = || {
+        let identity = acct.cred.read().identity(acct.provider);
+        identity == acct.state.lock().credential_identity
+    };
+    if !current() {
+        bail!("account identity changed; reload accounts");
+    }
+    let old = match &*acct.cred.read() {
+        Credential::OAuth(o) => o.clone(),
+        _ => bail!("Meta subscription usage requires a signed-in account"),
+    };
+    let dca = old.field("dca_token").ok_or_else(|| anyhow!("no device token to mint a new key; sign in again"))?;
+    let http = app.http.control_for_account(acct);
+    let minted = device::meta_mint(&http, dca).await.map_err(sanitize_custom_error)?;
+    let new = meta_oauth(&old, &minted);
+    let same = new.access_token == old.access_token && new.base_url == old.base_url;
+    if !(if same { current() } else { publish_refreshed(acct, new, vec![]) }) {
+        bail!("account identity changed; refresh result discarded");
+    }
+    Ok(minted)
+}
+
 async fn refresh_locked(acct: &Arc<Account>, http: reqwest::Client, old: OAuth) -> Result<()> {
     let mut extra: Vec<(&str, Value)> = vec![];
+    let mut meta_minted: Option<Value> = None;
     let keep = |access: String, v: &Value| OAuth {
         access_token: access,
         refresh_token: v["refresh_token"].as_str().map(String::from).unwrap_or(old.refresh_token.clone()),
@@ -773,16 +815,9 @@ async fn refresh_locked(acct: &Arc<Account>, http: reqwest::Client, old: OAuth) 
             let dca =
                 old.field("dca_token").ok_or_else(|| anyhow!("no device token to mint a new key; sign in again"))?;
             let minted = device::meta_mint(&http, dca).await.map_err(sanitize_custom_error)?;
-            OAuth {
-                access_token: minted["api_key"].as_str().unwrap_or_default().to_string(),
-                base_url: minted["base_url"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .or(old.base_url.clone()),
-                expires_at: None,
-                ..old.clone()
-            }
+            let new = meta_oauth(&old, &minted);
+            meta_minted = Some(minted);
+            new
         }
         Provider::Vertex => {
             let sa = old.raw.get("service_account").cloned().ok_or_else(|| anyhow!("no service account"))?;
@@ -793,6 +828,10 @@ async fn refresh_locked(acct: &Arc<Account>, http: reqwest::Client, old: OAuth) 
     };
     if !publish_refreshed(acct, new, extra) {
         bail!("account identity changed; refresh result discarded");
+    }
+    // A Meta mint doubles as a fresh subscription reading; keep the quota it carried.
+    if let Some(minted) = &meta_minted {
+        crate::quota::usage(&mut acct.state.lock(), Provider::Meta, minted);
     }
     tracing::info!(account = %acct.label, "refreshed {} token", acct.provider.as_str());
     Ok(())
