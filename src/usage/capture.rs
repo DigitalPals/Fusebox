@@ -256,8 +256,48 @@ fn assign(dst: &mut Option<u64>, src: Option<u64>) {
     }
 }
 
+/// Server-tool calls (web search and fetch, code execution) are billed per
+/// call or by time, never in tokens, so their counts ride in numeric
+/// metadata. Claude reports them in `usage.server_tool_use`; Responses has
+/// no count, so `web_search_call` output items are counted: a whole
+/// response's `output` array is authoritative, and while streaming each
+/// item's `output_item.done` stands in until the final response replaces it.
+fn observe_server_tools(o: &mut Observation, v: &Value) {
+    // Usage rides at the top (a Claude delta), in `message` (Claude's
+    // message_start) or in `response` (a whole Responses answer).
+    let stu = [&v["usage"], &v["message"]["usage"], &v["response"]["usage"]]
+        .into_iter()
+        .map(|usage| &usage["server_tool_use"])
+        .find(|stu| stu.is_object())
+        .unwrap_or(&Value::Null);
+    if stu.is_object() {
+        for (field, key) in [
+            ("web_search_requests", "web_search_requests"),
+            ("web_fetch_requests", "web_fetch_requests"),
+            ("code_execution_requests", "code_execution_requests"),
+        ] {
+            if let Some(n) = stu.get(field).and_then(number) {
+                o.numeric_metadata.insert(key.into(), n);
+            }
+        }
+    }
+    let response = if v["response"].is_object() { &v["response"] } else { v };
+    if let Some(output) = response["output"].as_array() {
+        let searches = output.iter().filter(|item| item["type"].as_str() == Some("web_search_call")).count();
+        if searches > 0 || v["type"].as_str() == Some("response.completed") {
+            o.numeric_metadata.insert("web_search_requests".into(), searches as u64);
+        }
+    } else if v["type"].as_str() == Some("response.output_item.done")
+        && v["item"]["type"].as_str() == Some("web_search_call")
+    {
+        let n = o.numeric_metadata.entry("web_search_requests".into()).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+}
+
 /// Usage snapshots replace reported fields; repeated final snapshots never add.
 pub fn observe(o: &mut Observation, v: &Value) {
+    observe_server_tools(o, v);
     let mut v = v;
     if v["response"].is_object() {
         v = &v["response"];
@@ -566,6 +606,46 @@ mod tests {
         assert_eq!(o.tokens.reasoning, Some(30));
         assert_eq!(o.actual_model.as_deref(), Some("actual"));
     }
+    #[test]
+    fn server_tool_calls_are_counted_from_claude_usage_and_responses_items() {
+        // Claude: counts ride in usage.server_tool_use (message, then a delta
+        // snapshot replaces rather than adds).
+        let mut o = Observation::new("proxy", "id".into(), "anthropic", chrono::Utc::now().timestamp_millis());
+        observe(
+            &mut o,
+            &json!({"message":{"usage":{"input_tokens":100,"output_tokens":1,"server_tool_use":{"web_search_requests":1}}}}),
+        );
+        assert_eq!(o.numeric_metadata["web_search_requests"], 1, "message_start's own count is kept");
+        observe(
+            &mut o,
+            &json!({"usage":{"output_tokens":50,"server_tool_use":{"web_search_requests":3,"web_fetch_requests":2,"code_execution_requests":1}}}),
+        );
+        assert_eq!(o.numeric_metadata["web_search_requests"], 3);
+        assert_eq!(o.numeric_metadata["web_fetch_requests"], 2);
+        assert_eq!(o.numeric_metadata["code_execution_requests"], 1);
+        assert!(o.validate().is_ok());
+
+        // Responses streaming: each search item's done counts once, and the
+        // completed response's output array is the authoritative total.
+        let mut o = Observation::new("proxy", "id".into(), "openai", chrono::Utc::now().timestamp_millis());
+        observe(&mut o, &json!({"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws_1"}}));
+        assert!(!o.numeric_metadata.contains_key("web_search_requests"), "added alone never counts");
+        observe(&mut o, &json!({"type":"response.output_item.done","item":{"type":"web_search_call","id":"ws_1"}}));
+        observe(&mut o, &json!({"type":"response.output_item.done","item":{"type":"message","id":"m_1"}}));
+        assert_eq!(o.numeric_metadata["web_search_requests"], 1);
+        observe(
+            &mut o,
+            &json!({"type":"response.completed","response":{"output":[{"type":"web_search_call","id":"ws_1"},{"type":"web_search_call","id":"ws_2"}]}}),
+        );
+        assert_eq!(o.numeric_metadata["web_search_requests"], 2);
+        assert!(o.validate().is_ok());
+
+        // A non-streamed response counts its output items directly.
+        let mut o = Observation::new("proxy", "id".into(), "openai", chrono::Utc::now().timestamp_millis());
+        observe(&mut o, &json!({"output":[{"type":"web_search_call"}]}));
+        assert_eq!(o.numeric_metadata["web_search_requests"], 1);
+    }
+
     #[test]
     fn claude_delta_does_not_erase_input() {
         let mut o = Observation::new("proxy", "id".into(), "anthropic", chrono::Utc::now().timestamp_millis());

@@ -95,6 +95,77 @@ pub struct Snapshot {
 fn usd() -> String {
     "USD".into()
 }
+
+/// Per-call server-tool fees, bundled beside the rates but never inside the
+/// catalogue: catalogues are stored in the usage database under strict
+/// (`deny_unknown_fields`) types, so a fee field there would break older
+/// binaries reading them back on rollback. Web fetch carries no per-call
+/// fee (its content is billed as tokens); code execution is billed by
+/// container time, which a call count cannot price.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerToolFees {
+    pub version: String,
+    pub verified_at: String,
+    pub fees: Vec<ServerToolFee>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerToolFee {
+    pub provider: String,
+    pub tool: String,
+    pub nanos_per_call: i64,
+    pub source_url: String,
+}
+impl ServerToolFees {
+    pub fn bundled() -> Option<&'static ServerToolFees> {
+        static BUNDLED: std::sync::LazyLock<Option<ServerToolFees>> =
+            std::sync::LazyLock::new(|| serde_json::from_str(include_str!("server_tool_fees.json")).ok());
+        BUNDLED.as_ref()
+    }
+    fn per_call(&self, provider: &str, tool: &str) -> Option<i64> {
+        self.fees.iter().find(|f| f.provider == provider && f.tool == tool).map(|f| f.nanos_per_call)
+    }
+}
+
+/// Adds per-call server-tool fees to a token cost. A counted call whose fee
+/// is unknown (code execution's time-based pricing, an unlisted provider)
+/// marks the snapshot partial and keeps the token cost, never treating the
+/// call as free; named-client budgets pick fees up through `cost_nanos`.
+fn add_server_tool_fees(o: &Observation, snapshot: &mut Snapshot) {
+    let count = |key: &str| o.numeric_metadata.get(key).copied().unwrap_or(0);
+    let (searches, fetches, executions) =
+        (count("web_search_requests"), count("web_fetch_requests"), count("code_execution_requests"));
+    if searches == 0 && fetches == 0 && executions == 0 {
+        return;
+    }
+    if executions > 0 {
+        snapshot.assumptions.push("code_execution_time_unpriced".into());
+        snapshot.partial = true;
+    }
+    if searches == 0 {
+        return;
+    }
+    let fee = ServerToolFees::bundled().and_then(|fees| fees.per_call(&o.provider, "web_search"));
+    match fee {
+        Some(per_call) => {
+            snapshot.assumptions.push("server_tool_fees_included".into());
+            if let Some(cost) = snapshot.cost_nanos {
+                snapshot.cost_nanos = i64::try_from(searches)
+                    .ok()
+                    .and_then(|n| n.checked_mul(per_call))
+                    .and_then(|fees| cost.checked_add(fees));
+                if snapshot.cost_nanos.is_none() {
+                    snapshot.partial = true;
+                }
+            }
+        }
+        None => {
+            snapshot.assumptions.push("server_tool_fees_unpriced".into());
+            snapshot.partial = true;
+        }
+    }
+}
 impl Catalogue {
     pub fn basis(&self) -> &'static str {
         match self.calculation {
@@ -405,6 +476,7 @@ impl Catalogue {
             "unsupported_rate_or_overflow"
         }
         .into();
+        add_server_tool_fees(o, &mut snapshot);
         if self.local_override {
             snapshot.basis = format!("local_override:{}", snapshot.basis);
         }
@@ -497,6 +569,7 @@ impl Catalogue {
             "unsupported_rate_or_overflow"
         }
         .into();
+        add_server_tool_fees(o, &mut snapshot);
         if self.local_override {
             snapshot.basis = format!("local_override:{}", snapshot.basis);
         }
@@ -527,7 +600,7 @@ pub fn date_ms(s: &str) -> Result<i64> {
 pub fn catalogue_info() -> serde_json::Value {
     match Catalogue::load(None) {
         Ok(c) => {
-            serde_json::json!({"version":c.version,"verified_at":c.verified_at,"calculation":c.calculation,"currency":"USD","unit":"integer nanodollars","rate_count":c.rates.len(),"effective_dates":"null effective_from means no start date: usage older than the catalogue is priced at today's published rates, labelled a current-rate equivalent (backdated), and is not what was actually paid at the time; rates with an explicit effective_from leave earlier events unpriced","basis":c.basis(),"sources":c.rates.iter().map(|r|r.source_url.clone()).collect::<std::collections::BTreeSet<_>>()})
+            serde_json::json!({"version":c.version,"verified_at":c.verified_at,"calculation":c.calculation,"currency":"USD","unit":"integer nanodollars","rate_count":c.rates.len(),"effective_dates":"null effective_from means no start date: usage older than the catalogue is priced at today's published rates, labelled a current-rate equivalent (backdated), and is not what was actually paid at the time; rates with an explicit effective_from leave earlier events unpriced","basis":c.basis(),"sources":c.rates.iter().map(|r|r.source_url.clone()).collect::<std::collections::BTreeSet<_>>(),"server_tool_fees":ServerToolFees::bundled().map(|f| serde_json::json!({"version":f.version,"verified_at":f.verified_at,"fees":f.fees.iter().map(|fee| serde_json::json!({"provider":fee.provider,"tool":fee.tool,"usd_per_call":fee.nanos_per_call as f64 / 1e9,"source":fee.source_url})).collect::<Vec<_>>()}))})
         }
         Err(e) => serde_json::json!({"error":e.to_string()}),
     }
@@ -696,6 +769,36 @@ mod tier_tests {
             assert_eq!(c.price(&o).basis, "unknown_model");
             assert!(c.price(&o).cost_nanos.is_none());
         }
+    }
+
+    #[test]
+    fn server_tool_fees_join_the_token_cost_and_unpriced_calls_stay_partial() {
+        let c = Catalogue::provider_fixture();
+        let mut o = event("openai", "gpt-6.1-terra");
+        o.service_tier = Some("standard".into());
+        let tokens_only = c.price(&o).cost_nanos.unwrap();
+        // Two searches at $10 per 1,000 calls add exactly 20,000,000 nanos;
+        // a web fetch carries no per-call fee.
+        o.numeric_metadata.insert("web_search_requests".into(), 2);
+        o.numeric_metadata.insert("web_fetch_requests".into(), 1);
+        let priced = c.price(&o);
+        assert_eq!(priced.cost_nanos, Some(tokens_only + 20_000_000));
+        assert!(priced.assumptions.contains(&"server_tool_fees_included".into()));
+        // Code execution is billed by container time: counted, never free.
+        o.numeric_metadata.insert("code_execution_requests".into(), 1);
+        let priced = c.price(&o);
+        assert_eq!(priced.cost_nanos, Some(tokens_only + 20_000_000));
+        assert!(priced.partial && priced.assumptions.contains(&"code_execution_time_unpriced".into()));
+        // A bundled fee table decodes, and the strict catalogue types keep
+        // accepting a catalogue document without any fee fields in it.
+        let fees = ServerToolFees::bundled().unwrap();
+        assert_eq!(fees.per_call("anthropic", "web_search"), Some(10_000_000));
+        assert!(serde_json::from_str::<Catalogue>(include_str!("rates.json")).is_ok());
+        // Anthropic search counts price on a Claude model too.
+        let mut o = event("anthropic", "claude-sonnet-4-6");
+        let tokens_only = c.price(&o).cost_nanos;
+        o.numeric_metadata.insert("web_search_requests".into(), 1);
+        assert_eq!(c.price(&o).cost_nanos, tokens_only.map(|n| n + 10_000_000));
     }
 
     #[test]

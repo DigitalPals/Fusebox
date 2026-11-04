@@ -200,6 +200,9 @@ impl Observation {
                         | "control_downgrade_count"
                         | "requested_speed"
                         | "reported_cost_nanos"
+                        | "web_search_requests"
+                        | "web_fetch_requests"
+                        | "code_execution_requests"
                 ) || *v > if k == "reported_cost_nanos" { i64::MAX as u64 } else { MAX_TOKENS }
             })
         {
