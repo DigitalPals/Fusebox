@@ -367,7 +367,7 @@ api-keys: []                  # shared keys from before named clients; with neit
 management-key: ""            # empty = dashboard only from localhost
 proxy-url: ""                 # optional http://, https:// or socks5:// upstream proxy; never falls back to direct
 request-retry: 3              # account/model choices across the whole request (at most 10)
-first-token-timeout-seconds: 120 # a stream silent this long moves to the next account; 0 = off
+first-token-timeout-seconds: 120 # a stream silent this long moves to the next account (twice as long when there is none); 0 = off
 routing: least-used           # new sessions: most quota left; or smart-quota, round-robin, fill-first
 session-affinity: true        # keep each coding session on one account, for prompt caching
 session-affinity-idle-seconds: 86400 # forget assignments after a day without requests
@@ -450,7 +450,7 @@ The account's **Enabled** switch survives configuration reloads and restarts. Si
 
 A request tries up to `request-retry` account/model choices and at most ten attempts, including temporary retries on the same account. These limits and the two-minute retry budget cover every model in a model group together. A connection that never opened gets one more try on the same account; one that broke after the request went out moves to the next account, so the same account never runs it twice. An upstream HTTP 504 is answered, including in a model group, because the provider may still be working on it.
 
-Streams are held back until their first content, at most 5 seconds after they start. A rate limit or overload that arrives inside a successful response before then moves the request to the next account, and the client never sees it. A stream that sends nothing at all for `first-token-timeout-seconds` (120 by default) moves too, and that account sits out the model for two minutes.
+Streams are held back until their first content, at most 5 seconds after they start. A rate limit or overload that arrives inside a successful response before then moves the request to the next account, and the client never sees it. A stream that sends nothing at all for `first-token-timeout-seconds` (120 by default) moves too, and that account sits out the model for two minutes. When no other account could take the request, the account gets twice as long and stays in, so the client's retry can reach it again.
 
 Rate limits and used-up limits are kept in `.cooldowns.state` in the auth directory, so a restart doesn't send requests straight back to an account that is sitting out.
 

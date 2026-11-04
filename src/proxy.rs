@@ -789,6 +789,13 @@ fn another_account_free(app: &App, model: &str, only: Option<&crate::accounts::O
 /// How long a stalled account sits out the model, when another account can take it.
 const STALL_PAUSE_MINUTES: i64 = 2;
 
+/// How many first-token deadlines an attempt waits when no other account could take the
+/// request. Cutting it off would only have the client send the same prompt to the same
+/// account again. Meta's Wonder Full, with one account, often sends its headers only after
+/// 30 to 120 s and its first token as late as 209 s. Twice the default 120 s stays under
+/// the 300 s a Codex client waits on a silent stream.
+const LONE_STALL_FACTOR: u32 = 2;
+
 /// An account whose upstream stalled sits out the model while another account can take
 /// it. With none free, a pause would only turn the client's retries into errors when this
 /// account may well answer them, so the stall is just shown on the account. True if paused.
@@ -1967,6 +1974,13 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         });
         tracker.prepared_ms = Some(tracker.attempt_started.elapsed().as_millis() as u64);
         let send = rb.body(payload).send();
+        // With no other account to move to, a slow first token is still the best answer
+        // to wait for, so the deadline is longer (see `LONE_STALL_FACTOR`).
+        let first_token = first_token.map(|limit| {
+            let mut others: Vec<String> = excluded.clone();
+            others.push(acct.id.clone());
+            if another_account_free(&app, &model, only.as_ref(), &others) { limit } else { limit * LONE_STALL_FACTOR }
+        });
         // A stream's headers come before its first token; an upstream that hasn't even
         // sent those by the first-token deadline has stalled.
         let header_limit = first_token

@@ -37,6 +37,8 @@ enum Act {
     BigDelta,
     /// A Codex image generation stream whose image event is 4 KiB.
     BigImage,
+    /// A normal answer whose headers come only after 1.5 s.
+    Late,
 }
 
 #[derive(Default)]
@@ -68,6 +70,9 @@ async fn responses(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
     let model = body["model"].as_str().unwrap_or_default().to_string();
     mock.calls.lock().push((account.clone(), model.clone()));
     let act = mock.acts.lock().get(&(account.clone(), model.clone())).copied().unwrap_or(Act::Answer);
+    if act == Act::Late {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
     let created = json!({"type":"response.created","response":{"id":"resp_1","model":model}});
     let sse = |events: Vec<Value>| {
         let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
@@ -107,7 +112,7 @@ async fn responses(State(mock): State<Arc<Mock>>, headers: HeaderMap, Json(body)
             json!({"type":"response.output_item.done","item":{"type":"image_generation_call","result":"x".repeat(4096),"output_format":"png"}}),
             json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","tool_usage":{"image_gen":{"images":1}}}}),
         ]),
-        Act::Answer | Act::BigDelta => {
+        Act::Answer | Act::BigDelta | Act::Late => {
             let text = if act == Act::BigDelta { "x".repeat(4096) } else { format!("{account}:{model}") };
             let done = json!({"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":model,
                 "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],
@@ -566,6 +571,27 @@ async fn the_last_account_left_is_not_benched_for_a_stall() {
     let message = body["error"]["message"].as_str().unwrap();
     assert!(message.contains("gpt-slow stalled") && !message.contains("rate limited"), "{body}");
     assert_eq!(s.mock.calls.lock().len(), calls, "no upstream call");
+}
+
+#[tokio::test]
+async fn the_last_account_left_gets_longer_to_send_its_first_token() {
+    let s = setup(|cfg, _| {
+        cfg.codex_api_key[0].priority = 10;
+        cfg.first_token_timeout_seconds = 1;
+    })
+    .await;
+    s.mock.acts.lock().insert(("a".into(), "gpt-late".into()), Act::Late);
+    let account = |label: &str| s.app.pool.all().into_iter().find(|x| x.label == label).unwrap();
+    // While `b` could take it, `a` keeps to the deadline and the request moves on.
+    assert_eq!(ask(&s, "client", "gpt-late", &[]).await, (200, "b:gpt-late".into()));
+    account("a").state.lock().cooldowns.clear();
+    account("a").state.lock().stall_pauses.clear();
+    // With `b` out, `a` is all there is: its 1.5 s headers are waited for.
+    account("b").cool(None, chrono::Utc::now() + chrono::Duration::minutes(5), "401: unauthorized");
+    let calls = s.mock.calls.lock().len();
+    assert_eq!(ask(&s, "client", "gpt-late", &[]).await, (200, "a:gpt-late".into()));
+    assert_eq!(s.mock.calls.lock().len(), calls + 1, "one upstream call");
+    assert!(account("a").cooling_until("gpt-late").is_none());
 }
 
 #[tokio::test]
