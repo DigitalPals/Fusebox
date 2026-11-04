@@ -160,6 +160,8 @@ pub struct AccountView {
     pub clients: Vec<(String, Option<String>, BTreeMap<String, f64>)>,
     /// When the subscription next charges, or ends.
     pub renewal: Option<crate::quota::NextRenewal>,
+    /// A sustained run of refused usage reads: (HTTP status, since when).
+    pub usage_refused: Option<(u16, DateTime<Utc>)>,
 }
 
 impl AccountView {
@@ -381,6 +383,28 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
                 });
             }
         }
+        // Usage reads refused for a while after good refreshes: the readings
+        // shown are stale and the account may be suspended. Display only —
+        // routing is untouched — and the sign-in fault already covers an
+        // account whose error says to sign in again.
+        if let Some((status, since)) = a.usage_refused
+            && !a.signin_error()
+        {
+            out.push(Fault {
+                kind: "error",
+                level: "warn",
+                summary: "Usage check refused".into(),
+                detail: Some(format!(
+                    "The provider answers HTTP {status} to usage checks; the quota shown may be stale. Requests are not paused by this."
+                )),
+                ..fault(
+                    "usage-refused",
+                    Event::AccountErrors,
+                    format!("{}: usage check refused (HTTP {status})", a.label),
+                    format!("{} · refused for {}; quota shown may be stale.", a.provider_name, span(now - since)),
+                )
+            });
+        }
         if a.failures >= 3 && !error {
             let mut f = Fault {
                 kind: "failures",
@@ -600,6 +624,21 @@ mod tests {
         for text in ["429 rate limited", "token refresh failed: connection reset", "status 4010", "5401 bytes"] {
             assert!(!signin_error(text), "{text}");
         }
+    }
+
+    #[test]
+    fn a_sustained_usage_refusal_warns_without_touching_the_signin_fault() {
+        let now = Utc::now();
+        let mut refused = acct("u", "claude");
+        refused.usage_refused = Some((403, now - Duration::hours(2)));
+        let f = faults(std::slice::from_ref(&refused), now);
+        assert_eq!(keys(&f), ["usage-refused:u"]);
+        assert_eq!((f[0].kind, f[0].level, f[0].event), ("error", "warn", Event::AccountErrors));
+        assert!(f[0].detail.as_deref().unwrap().contains("HTTP 403"), "{f:?}");
+        // A sign-in error already says it louder; no second fault.
+        refused.last_error = Some("401 Unauthorized".into());
+        let f = faults(&[refused], now);
+        assert!(keys(&f).contains(&"signin:u") && !keys(&f).contains(&"usage-refused:u"), "{:?}", keys(&f));
     }
 
     #[test]

@@ -152,6 +152,15 @@ pub struct Quota {
     pub(crate) plan_failures: u32,
     #[serde(skip)]
     pub(crate) plan_checked_at: Option<DateTime<Utc>>,
+    /// Usage reads the provider refused with 401/403 in a row (with a freshly
+    /// refreshed token), since when, and the latest status. A sustained run means the
+    /// account is likely suspended while its sign-in still refreshes fine.
+    #[serde(skip)]
+    pub(crate) refused_checks: u32,
+    #[serde(skip)]
+    pub(crate) refused_since: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub(crate) refused_status: Option<u16>,
     /// The usage endpoint answered 429: the quota poll, banked resets and the window
     /// starter all leave it alone until then, so their retries don't keep it limited.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -345,6 +354,30 @@ impl Quota {
     fn checked(&mut self, now: DateTime<Utc>, refreshed: bool) {
         self.checked_at = Some(now);
         self.check_failures = if refreshed { 0 } else { self.check_failures.saturating_add(1) };
+        if refreshed {
+            self.refused_checks = 0;
+            self.refused_since = None;
+            self.refused_status = None;
+        }
+    }
+
+    /// A usage read the provider refused with 401/403 after a successful
+    /// refresh. Other failures (429, 5xx, timeouts) neither count nor clear:
+    /// they only mark the reading stale.
+    pub(crate) fn usage_refused(&mut self, now: DateTime<Utc>, status: u16) {
+        if self.refused_checks == 0 {
+            self.refused_since = Some(now);
+        }
+        self.refused_checks = self.refused_checks.saturating_add(1);
+        self.refused_status = Some(status);
+    }
+
+    /// The sustained refusal worth a fault: at least three refused reads
+    /// spanning at least half an hour. Returns (status, since).
+    pub fn refusal_fault(&self, now: DateTime<Utc>) -> Option<(u16, DateTime<Utc>)> {
+        let since = self.refused_since?;
+        (self.refused_checks >= 3 && now - since >= chrono::Duration::minutes(30))
+            .then(|| (self.refused_status.unwrap_or(403), since))
     }
 
     /// The plan is read every 6 hours; after a failed read, again after 5, 10, 20 ...
@@ -869,10 +902,28 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         return changed;
     }
     let before = acct.state.lock().quota.refreshed_at;
-    let result = poll(app, &acct).await;
+    let mut result = poll(app, &acct).await;
+    // A refused read says little while the token may simply be stale: the token
+    // above was refreshed only if it was near expiry. So the first refusal of a
+    // run refreshes the token and reads again, and only a refused read with a
+    // freshly refreshed token counts. A failed refresh counts nothing; its own
+    // fault reports it.
+    let mut countable = true;
+    if refused(&result).is_some() && acct.state.lock().quota.refused_checks == 0 {
+        match crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), true).await {
+            Ok(()) => result = poll(app, &acct).await,
+            Err(e) => {
+                countable = false;
+                tracing::debug!(account = %acct.label, "refresh after a refused usage read failed: {e:#}");
+            }
+        }
+    }
     {
         let mut st = acct.state.lock();
         let refreshed = st.quota.refreshed_at.is_some() && st.quota.refreshed_at != before;
+        if countable && let Some(status) = refused(&result) {
+            st.quota.usage_refused(Utc::now(), status);
+        }
         st.quota.checked(Utc::now(), refreshed);
     }
     match result {
@@ -882,10 +933,37 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     changed
 }
 
+/// The status of a usage read the provider refused with 401 or 403.
+fn refused(result: &anyhow::Result<()>) -> Option<u16> {
+    let status = result.as_ref().err()?.downcast_ref::<reqwest::Error>()?.status()?.as_u16();
+    matches!(status, 401 | 403).then_some(status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_a_sustained_run_of_refused_usage_reads_is_a_fault() {
+        let now = Utc::now();
+        let mut q = Quota::default();
+        // One or two refusals, and a brief run, stay quiet.
+        q.usage_refused(now, 403);
+        q.usage_refused(now + chrono::Duration::minutes(20), 403);
+        assert_eq!(q.refusal_fault(now + chrono::Duration::hours(2)), None);
+        q.usage_refused(now + chrono::Duration::minutes(25), 401);
+        assert_eq!(q.refusal_fault(now + chrono::Duration::minutes(29)), None, "spans under half an hour stay quiet");
+        assert_eq!(
+            q.refusal_fault(now + chrono::Duration::minutes(31)),
+            Some((401, now)),
+            "three refusals over half an hour"
+        );
+        // The next good read clears the run.
+        q.checked(now + chrono::Duration::minutes(32), true);
+        assert_eq!(q.refusal_fault(now + chrono::Duration::hours(3)), None);
+        assert_eq!(q.refused_checks, 0);
+    }
 
     #[tokio::test]
     async fn quota_refreshes_are_bounded_and_a_stalled_account_does_not_stop_others() {
