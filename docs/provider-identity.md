@@ -87,8 +87,8 @@ named-clients:
 
 # Optional operator-selected versions for generated requests:
 client-identities:
-  claude-code: 2.1.310
-  codex: 0.164.0
+  claude-code: 2.1.319
+  codex: 0.167.0
 ```
 
 **Config → Clients → More → Allow identity learning** enables trust;

@@ -384,7 +384,7 @@ model-groups:                 # one name, several models; see "Model groups" bel
   smart: [claude-opus-5-5, gpt-6-astra]
 background-model: gemini-3.8-flash # Claude Code's quick Haiku calls go here
 # client-identities:          # operator-selected emulation versions (see Client compatibility)
-#   claude-code: 2.1.310
+#   claude-code: 2.1.319
 # upstream-header-allowlist:  # optional exact extra inbound names; reserved/private names are rejected
 #   claude: [x-provider-feature]
 #   codex: [x-provider-feature]
@@ -743,8 +743,8 @@ Inspect effective versions, runtime values and their sources under **Config → 
 
 ```yaml
 client-identities:     # explicit operator override for generated identities
-  claude-code: 2.1.310
-  codex: 0.164.0       # also grok-build, devin-cli, antigravity
+  claude-code: 2.1.319
+  codex: 0.167.0       # also grok-build, devin-cli, antigravity
 ```
 
 An entry older than the built-in release is ignored, so a forgotten one can't hold Fusebox back. `fusebox check` prints the release it claims for each client. Muse Code's identity includes a build hash, so it can't be set this way.

@@ -35,7 +35,7 @@ const PROFILE: [(&str, &str); 4] = [
     ("x-stainless-package-version", "0.128.0"),
     ("x-stainless-os", "MacOS"),
     ("x-stainless-arch", "arm64"),
-    ("x-stainless-runtime-version", "v26.3.0"),
+    ("x-stainless-runtime-version", "v26.12.1"),
 ];
 
 const PROVENANCE: &str = "trusted-named-client-v1";

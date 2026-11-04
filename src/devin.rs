@@ -23,7 +23,7 @@ const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const APP_BASE: &str = "https://app.devin.ai";
 const API_BASE: &str = "https://api.devin.ai";
 const CLIENT_NAME: &str = "chisel";
-pub(crate) const CLIENT_VERSION: &str = "3000.11.205";
+pub(crate) const CLIENT_VERSION: &str = "3000.11.234";
 const FINGERPRINT_LEN: usize = 732;
 const DEFAULT_MAX_TOKENS: u64 = 64_000;
 const TOKEN_PREFIX: &str = "devin-session-token$";
@@ -789,17 +789,17 @@ mod tests {
     }
 
     #[test]
-    fn request_metadata_matches_devin_cli_3000_11_205() {
+    fn request_metadata_matches_devin_cli_3000_11_234() {
         let body = encode(&json!({}), "tok", "seed");
         let metadata = bytes_field(&body, 1).unwrap();
         // Existing protobuf layout, with the checksum-verified release's identity.
         for (number, expected) in [
             (1, "devin-cli"),
-            (2, "3000.11.205"),
+            (2, "3000.11.234"),
             (3, "tok"),
             (4, "en"),
             (5, os_name()),
-            (7, "3000.11.205"),
+            (7, "3000.11.234"),
             (12, "chisel"),
             (28, "chisel"),
         ] {
