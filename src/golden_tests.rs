@@ -157,6 +157,7 @@ impl Account {
 }
 
 struct Golden {
+    app: Arc<App>,
     _recorder_server: crate::routing_tests::Server,
     proxy: crate::routing_tests::Server,
     recorder: Arc<Recorder>,
@@ -214,8 +215,8 @@ async fn golden(account: Account) -> Golden {
         }
     }
     let app = App::new(cfg, directory.join("config.yaml"));
-    let proxy = crate::routing_tests::serve(crate::server::router(app)).await;
-    Golden { _recorder_server: upstream, proxy, recorder, directory, recorder_url: url }
+    let proxy = crate::routing_tests::serve(crate::server::router(app.clone())).await;
+    Golden { app, _recorder_server: upstream, proxy, recorder, directory, recorder_url: url }
 }
 
 /// The client side of a case: the format it speaks and how it identifies.
@@ -452,3 +453,227 @@ fn placeholders_number_each_uuid_once() {
     assert_eq!(placeholders(&format!("x{device}"), &mut Vec::new()), format!("x{device}"), "only whole tokens");
 }
 
+/// Generated values differ between an inspection and the real request, so
+/// both sides drop them before comparing.
+fn generic(text: &str) -> String {
+    let mut ids = Vec::new();
+    let numbered = placeholders(text, &mut ids);
+    let mut out = String::new();
+    let mut rest = numbered.as_str();
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match ["<uuid-", "<hex64-"].iter().find(|p| tail.starts_with(**p)).and_then(|_| tail.find('>')) {
+            Some(end) => {
+                out.push_str(&tail[..tail[1..].find('-').unwrap() + 1]);
+                out.push('>');
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('<');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn client_format(client: Client) -> crate::ir::Format {
+    match client {
+        Client::Responses | Client::CodexCli => crate::ir::Format::Responses,
+        Client::Chat => crate::ir::Format::Chat,
+        Client::Messages | Client::ClaudeCode => crate::ir::Format::Claude,
+        Client::Gemini => crate::ir::Format::Gemini,
+    }
+}
+
+/// `/api/inspect` shows exactly what the real request then sends (credentials
+/// and account ids aside), and inspecting reaches no provider and leaves no
+/// log or session behind.
+#[tokio::test]
+async fn inspection_shows_what_is_sent_and_changes_nothing() {
+    let mut failures = Vec::new();
+    for (name, account, client, stream) in cases() {
+        let golden = golden(account).await;
+        let (path, headers, body) = client_request(client, account.model(), stream);
+        let mut map = HeaderMap::new();
+        for (k, v) in &headers {
+            map.insert(*k, v.parse().unwrap());
+        }
+        let inspected = crate::inspect::inspect_call(
+            &golden.app,
+            crate::proxy::Call {
+                format: client_format(client),
+                body: body.clone(),
+                headers: map,
+                stream: stream || body["stream"] == true,
+                transport: "inspect",
+                path_model: matches!(client, Client::Gemini).then(|| account.model().to_string()),
+                session: None,
+                session_source: None,
+                routing_selection: None,
+                pinned_account: None,
+            },
+        );
+        assert!(golden.recorder.seen.lock().is_empty(), "{name}: inspecting sent a request");
+        assert!(golden.app.stats.recent.lock().is_empty(), "{name}: inspecting logged a request");
+        assert!(golden.app.sessions.session_counts(3600).is_empty(), "{name}: inspecting assigned a session");
+        assert!(inspected.get("refusal").is_none(), "{name}: {inspected}");
+        let mut request =
+            reqwest::Client::new().post(format!("{}{}", golden.proxy.url, path)).bearer_auth("client-one");
+        for (k, v) in headers {
+            request = request.header(k, v);
+        }
+        assert_eq!(request.json(&body).send().await.unwrap().status(), 200, "{name}");
+        let seen = golden.recorder.seen.lock();
+        let real = &seen[0];
+        let shown = &inspected["request"];
+        let url = shown["url"].as_str().unwrap().replace(&golden.recorder_url, "");
+        if generic(&url) != generic(&real.uri) {
+            failures.push(format!("{name}: url {url} vs {}", real.uri));
+        }
+        let real_body: Value = serde_json::from_slice(&real.body).unwrap();
+        let mut redacted = real_body.clone();
+        crate::inspect::redact_for_tests(&mut redacted);
+        if generic(&shown["body"].to_string()) != generic(&redacted.to_string()) {
+            failures.push(format!("{name}: body\n  shown {}\n  sent  {redacted}", shown["body"]));
+        }
+        for pair in shown["headers"].as_array().unwrap() {
+            let (k, v) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            let sent = real.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
+            if v != "<redacted>" && sent.map(generic) != Some(generic(v)) {
+                failures.push(format!("{name}: header {k}: shown {v:?}, sent {sent:?}"));
+            }
+        }
+        let path_shown = inspected["shape"]["path"].as_str().unwrap();
+        let native = matches!(
+            (client, account),
+            (Client::Responses | Client::CodexCli, Account::CodexOAuth | Account::CodexKey)
+                | (Client::Chat, Account::Compat)
+                | (Client::Messages | Client::ClaudeCode, Account::ClaudeOAuth | Account::ClaudeKey)
+                | (Client::Gemini, Account::GeminiKey)
+        );
+        if path_shown != if native { "passthrough" } else { "translated" } {
+            failures.push(format!("{name}: path {path_shown}"));
+        }
+    }
+    assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));
+}
+
+#[tokio::test]
+async fn the_inspect_route_needs_management_auth_and_explains_refusals() {
+    let golden = golden(Account::CodexKey).await;
+    let mut cfg = (*golden.app.cfg()).clone();
+    cfg.management_key = "fake-management-key".into();
+    golden.app.set_config(cfg);
+    let url = format!("{}/api/inspect", golden.proxy.url);
+    let client = reqwest::Client::new();
+    let body = json!({"body": {"model": "gpt-6-astra", "input": "golden question"}});
+    assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 401);
+    let shown: Value =
+        client.post(&url).bearer_auth("fake-management-key").json(&body).send().await.unwrap().json().await.unwrap();
+    assert_eq!((shown["format"].as_str(), shown["sent"].as_bool()), (Some("responses"), Some(false)), "{shown}");
+    assert_eq!(shown["shape"]["path"], "passthrough");
+    assert_eq!(shown["account"]["provider"], "codex");
+    assert!(shown["request"]["url"].as_str().unwrap().ends_with("/v1/responses"), "{shown}");
+    let headers = shown["request"]["headers"].as_array().unwrap();
+    assert!(headers.iter().any(|h| h[0] == "authorization" && h[1] == "<redacted>"), "{shown}");
+    for (body, want) in [
+        (json!({"format": "telnet", "body": {"model": "gpt-6-astra"}}), 400),
+        (json!({"client": "nobody", "body": {"model": "gpt-6-astra"}}), 400),
+        (json!({"body": "not an object"}), 400),
+    ] {
+        let status = client.post(&url).bearer_auth("fake-management-key").json(&body).send().await.unwrap().status();
+        assert_eq!(status, want, "{body}");
+    }
+    let missing: Value = client
+        .post(&url)
+        .bearer_auth("fake-management-key")
+        .json(&json!({"body": {"model": "no-such-model", "messages": [{"role": "user", "content": "hi"}]}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missing["refusal"]["status"], 404, "{missing}");
+    assert!(golden.recorder.seen.lock().is_empty(), "nothing was sent");
+}
+
+fn inspect_chat(app: &App, model: &str, headers: &[(&'static str, &str)]) -> Value {
+    let mut map = HeaderMap::new();
+    for (k, v) in headers {
+        map.insert(*k, v.parse().unwrap());
+    }
+    crate::inspect::inspect_call(
+        app,
+        crate::proxy::Call {
+            format: crate::ir::Format::Responses,
+            // No user content, so no session is inferred: a balanced group would take a turn.
+            body: json!({"model": model, "input": []}),
+            headers: map,
+            stream: false,
+            transport: "inspect",
+            path_model: None,
+            session: None,
+            session_source: None,
+            routing_selection: None,
+            pinned_account: None,
+        },
+    )
+}
+
+#[tokio::test]
+async fn inspecting_a_balanced_group_takes_no_turn() {
+    let golden = golden(Account::CodexKey).await;
+    let mut cfg = (*golden.app.cfg()).clone();
+    let group = crate::config::ModelGroup { models: vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()], balance: true };
+    cfg.model_groups.insert("golden-duo".into(), group.clone());
+    golden.app.set_config(cfg);
+    let preview = |g: &crate::config::ModelGroup| -> Vec<String> {
+        crate::proxy::group_order_preview(g, None).into_iter().map(String::from).collect()
+    };
+    let before = preview(&group);
+    for _ in 0..3 {
+        let shown = inspect_chat(&golden.app, "golden-duo", &[]);
+        assert_eq!(shown["group"]["order"], json!(before), "{shown}");
+    }
+    assert_eq!(preview(&group), before, "the next real request starts where it would have");
+}
+
+#[tokio::test]
+async fn inspection_skips_accounts_execution_skips() {
+    // A higher-priority OpenAI key and a ChatGPT subscription: a Codex residency
+    // request can only go to the subscription, in inspection as in execution.
+    let golden = golden(Account::CodexOAuth).await;
+    let mut cfg = (*golden.app.cfg()).clone();
+    cfg.codex_api_key = vec![KeyEntry {
+        api_key: "golden-key".into(),
+        base_url: Some(format!("{}/v1", golden.recorder_url)),
+        priority: 10,
+        ..Default::default()
+    }];
+    golden.app.set_config(cfg);
+    golden.app.reload_accounts();
+    let residency = [("x-openai-internal-codex-residency", "us")];
+    let plain = inspect_chat(&golden.app, "gpt-6-astra", &[]);
+    assert_eq!(plain["account"]["subscription"], false, "the key goes first otherwise: {plain}");
+    let shown = inspect_chat(&golden.app, "gpt-6-astra", &residency);
+    assert!(shown.get("refusal").is_none(), "{shown}");
+    assert_eq!(shown["account"]["subscription"], true, "{shown}");
+    assert_eq!(shown["ineligible"].as_array().map(Vec::len), Some(1), "{shown}");
+    assert!(golden.recorder.seen.lock().is_empty());
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", golden.proxy.url))
+        .bearer_auth("client-one")
+        .header(residency[0].0, residency[0].1)
+        .json(&json!({"model": "gpt-6-astra", "input": "golden question"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let seen = golden.recorder.seen.lock();
+    let auth = seen[0].headers.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.as_str());
+    assert_eq!(auth, Some("Bearer golden-token"), "execution used the subscription too");
+}

@@ -234,6 +234,9 @@ pub fn residency_requirement(headers: &HeaderMap) -> Result<Option<String>, Stri
 /// Fusebox sets itself, and names the client's `Connection` header nominated.
 fn note_dropped(provider: Provider, recorded_as: Option<&'static str>, nominated: &HashSet<String>, name: &str) {
     let Some(recorded_as) = recorded_as else { return };
+    if INSPECTING.with(std::cell::Cell::get) {
+        return;
+    }
     if nominated.contains(name) || !forwardable(name) || matches!(name, "content-type" | "accept") {
         return;
     }
@@ -244,6 +247,23 @@ fn note_dropped(provider: Provider, recorded_as: Option<&'static str>, nominated
             "client header is not forwarded upstream; recorded for the compatibility review"
         );
     }
+}
+
+thread_local! {
+    static INSPECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` (a synchronous `prepare`) for an inspection: a request that is never
+/// sent is no evidence of what clients send, so dropped headers aren't recorded.
+pub(crate) fn inspecting<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INSPECTING.with(|i| i.set(self.0));
+        }
+    }
+    let _reset = Reset(INSPECTING.with(|i| i.replace(true)));
+    f()
 }
 
 fn inbound_headers(provider: Provider, cfg: Option<&Config>, client: &HeaderMap) -> Vec<(String, String)> {
@@ -1232,6 +1252,19 @@ mod tests {
         let _ = inbound_headers(Provider::Claude, None, &stranger);
         assert!(crate::clients::dropped_headers().is_empty());
         crate::clients::reset();
+    }
+
+    #[test]
+    fn an_inspection_records_no_dropped_header_names() {
+        let genuine = request_headers(&[("user-agent", CC_USER_AGENT), ("x-only-seen-while-inspecting", "v")]);
+        let forwarded = inspecting(|| inbound_headers(Provider::Claude, None, &genuine));
+        assert!(get_header(&forwarded, "x-only-seen-while-inspecting").is_none(), "still dropped");
+        let recorded = crate::clients::dropped_headers();
+        assert!(
+            !recorded.values().flatten().any(|name| name == "x-only-seen-while-inspecting"),
+            "an inspection is not evidence of client traffic: {recorded:?}"
+        );
+        assert!(!INSPECTING.with(std::cell::Cell::get), "the flag is cleared afterwards");
     }
 
     fn oauth_account(provider: Provider) -> std::sync::Arc<Account> {

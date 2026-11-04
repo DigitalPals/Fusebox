@@ -83,7 +83,7 @@ const S = {
     msg: null, busy: false, loading: false, section: 'clients', provider: 'claude', oauthProvider: 'claude',
     errors: {}, opens: {}, secrets: {}, reloadConfirm: false, reveal: false, raw: { text: null, saved: null, revision: '', loading: false }, named: namedIdle(),
     webhooks: { draft: '', error: '', testing: null, results: {} }, review: null, clientUsage: null, clientUsageAt: 0 },
-  play: null, // { model, prompt, out, busy, meta, error, abort } while the playground is open
+  play: null, // the open "Try a model" card (playground.js): its mode, drafts and last result
   theme: store.get('theme') || 'system', // 'system' | 'light' | 'dark'
 };
 
@@ -3289,92 +3289,7 @@ function groupsCardHTML() {
     ${background ? line('<span class="idchip static">Claude Code background calls</span>', 'go to', [background], '') : ''}</section>`;
 }
 
-// The playground: one prompt to one model, through routing like any request, streamed.
-function playHTML() {
-  const P = S.play;
-  if (!P) return '';
-  const ids = [...Object.keys(S.routes?.groups || {}), ...S.models.map((m) => m.id)];
-  return `<section class="card pad play" aria-label="Try a model">
-    <div class="card-head"><span class="label">Try a model</span><button class="icon-btn" type="button" data-act="close-play" aria-label="Close the playground">×</button></div>
-    <form id="play-form" class="play-form">
-      <div class="field"><label for="play-model">Model</label><input id="play-model" list="play-models" value="${esc(P.model)}" required autocomplete="off" spellcheck="false" placeholder="claude-sonnet-5-5">
-        <datalist id="play-models">${ids.map((id) => `<option value="${esc(id)}">`).join('')}</datalist></div>
-      <div class="field"><label for="play-prompt">Prompt</label><textarea id="play-prompt" rows="3" required>${esc(P.prompt)}</textarea></div>
-      <div class="play-actions"><button class="btn primary" type="submit"${P.busy ? ' disabled' : ''}>${P.busy ? 'Sending…' : 'Send'}</button>
-        ${P.busy ? '<button class="btn ghost" type="button" data-act="stop-play">Stop</button>' : ''}
-        <span class="meta" id="play-meta" role="status">${esc(P.meta || 'Shows on the Usage page as the client dashboard.')}</span></div>
-    </form>
-    <pre class="play-out${P.error ? ' err' : ''}" id="play-out"${P.out || P.error ? '' : ' hidden'}>${esc(P.error || P.out)}</pre></section>`;
-}
-
-async function runPlay(form) {
-  const P = S.play;
-  if (!P || P.busy) return;
-  P.model = form.querySelector('#play-model').value.trim();
-  P.prompt = form.querySelector('#play-prompt').value;
-  if (!P.model || !P.prompt.trim()) return;
-  Object.assign(P, { busy: true, out: '', error: '', meta: '', abort: new AbortController() });
-  patch('models-play', playHTML);
-  const started = performance.now();
-  let first = null;
-  let usage = null;
-  let account = null;
-  try {
-    const headers = { 'content-type': 'application/json' };
-    if (S.key) headers.authorization = `Bearer ${S.key}`;
-    const res = await fetch('/api/playground', { method: 'POST', headers, body: JSON.stringify({ model: P.model, prompt: P.prompt }), signal: P.abort.signal });
-    account = res.headers.get('x-fusebox-account');
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error?.message || data.error || res.statusText);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let cut;
-      while ((cut = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, cut);
-        buf = buf.slice(cut + 2);
-        for (const line of block.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') continue;
-          let v;
-          try { v = JSON.parse(data); } catch { continue; }
-          if (v.error) throw new Error(v.error.message || 'The request failed');
-          const delta = v.choices?.[0]?.delta || {};
-          if ((delta.content || delta.reasoning_content) && first == null) first = performance.now() - started;
-          if (delta.content) {
-            P.out += delta.content;
-            const out = $('#play-out');
-            if (out) { out.hidden = false; out.textContent = P.out; }
-          }
-          if (v.usage) usage = v.usage;
-        }
-      }
-    }
-    P.meta = [account && `Answered by ${who(account)}`, first != null && `first token ${ms(Math.round(first))}`, `total ${ms(Math.round(performance.now() - started))}`,
-      usage && `${fmt(usage.prompt_tokens || 0)} in · ${fmt(usage.completion_tokens || 0)} out`].filter(Boolean).join(' · ');
-  } catch (e) {
-    if (e.name === 'AbortError') P.meta = 'Stopped.';
-    else P.error = e.message;
-  }
-  Object.assign(P, { busy: false, abort: null });
-  if (S.play === P) patch('models-play', playHTML);
-}
-
-document.addEventListener('submit', (e) => {
-  if (e.target.id !== 'play-form') return;
-  e.preventDefault();
-  runPlay(e.target);
-});
-document.addEventListener('keydown', (e) => {
-  if (e.target.id === 'play-prompt' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runPlay(e.target.form); }
-});
+// The playground ("Try a model") is in playground.js.
 
 const MODEL_EXAMPLE = {
   claude: 'claude-opus-6', codex: 'gpt-7', gemini: 'gemini-4-pro', vertex: 'gemini-4-pro', antigravity: 'gemini-4-pro',
@@ -3998,19 +3913,10 @@ document.addEventListener('click', (e) => {
       patchModelsPanel();
       return $('#models-panel input[name="model"]')?.focus();
     case 'check-models': return checkModels(el);
-    case 'open-play':
-      if (S.play) { S.play.abort?.abort(); S.play = null; patch('models-play', playHTML); return; }
-      S.play = { model: S.models.find((m) => m.id.startsWith('claude-'))?.id || S.models[0]?.id || '', prompt: 'Say hello in one sentence.', out: '', error: '', meta: '', busy: false, abort: null };
-      patch('models-play', playHTML);
-      for (const b of $$('[data-act="open-play"]')) b.setAttribute('aria-expanded', 'true');
-      return $('#play-prompt')?.focus();
-    case 'close-play':
-      S.play?.abort?.abort();
-      S.play = null;
-      patch('models-play', playHTML);
-      for (const b of $$('[data-act="open-play"]')) b.setAttribute('aria-expanded', 'false');
-      return $('[data-act="open-play"]')?.focus();
-    case 'stop-play': S.play?.abort?.abort(); return;
+    case 'open-play': return openPlay();
+    case 'close-play': return closePlay();
+    case 'stop-play': return stopPlay();
+    case 'play-mode': return setPlayMode(id);
     case 'remove-model': return removeModel(id, el.dataset.provider);
     case 'dismiss-removed':
       store.set('removedSeen', (S.routes?.removed_models || []).map((r) => r.at).sort().pop() || new Date().toISOString());

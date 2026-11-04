@@ -1433,6 +1433,14 @@ details[open] > summary .cfg-chevron { transform: rotate(90deg); }
 .play-out { margin: 0; padding: 12px 14px; max-height: 360px; overflow: auto; font: 400 13px/1.6 var(--sans); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 .play-out.err { color: var(--err); font-family: var(--mono); font-size: 12.5px; }
 @media (max-width: 759px) { .play-form { grid-template-columns: 1fr; } }
+.play .card-head { gap: 10px; }
+.inspect-form .field { display: flex; flex-direction: column; gap: 6px; }
+.inspect-form textarea.mono { font: 400 12.5px/1.55 var(--mono); }
+.inspect-out { display: flex; flex-direction: column; gap: 8px; }
+.inspect-row { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; align-items: baseline; font-size: 13px; overflow-wrap: anywhere; }
+.inspect-row .idchip { margin: 0 2px 2px 0; }
+.inspect-out .play-out { font: 400 12px/1.55 var(--mono); max-height: 480px; }
+.inspect-note { margin: 0; font-size: 12px; }
 .groups { padding: 16px 20px; margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 .group-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 .group-line .meta { font-size: 12.5px; }

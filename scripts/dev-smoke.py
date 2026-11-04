@@ -75,7 +75,7 @@ def main():
                 assert status == 200
                 page = page.decode()
                 urls = {}
-                for file in ['usage.js', 'app.js']:
+                for file in ['usage.js', 'playground.js', 'app.js']:
                     match = re.search(r'/ui/' + re.escape(file) + r'\?v=[a-f0-9]+', page)
                     assert match, file
                     urls[file] = match.group()
@@ -86,9 +86,17 @@ def main():
                     assert gzip.decompress(compressed) == body
                     status, _, empty = request(port, match.group(), headers={'If-None-Match': headers['etag']})
                     assert status == 304 and empty == b''
-                assert page.index(urls['usage.js']) < page.index(urls['app.js'])
-                checks.append('current app/usage source is embedded, versioned, gzip-negotiated and conditionally cached')
-                checks.append('shared UsageTools loads before app consumers')
+                assert page.index(urls['usage.js']) < page.index(urls['playground.js']) < page.index(urls['app.js'])
+                checks.append('current app/usage/playground source is embedded, versioned, gzip-negotiated and conditionally cached')
+                checks.append('shared UsageTools and the playground load before app consumers')
+                helpers['Provider'].last_request = None
+                inspected = {'body': {'model': 'gpt-6.1-sol', 'messages': [{'role': 'user', 'content': 'synthetic check'}]}}
+                status, _, body = request(port, '/api/inspect', json.dumps(inspected).encode())
+                shown = json.loads(body)
+                assert status == 200 and shown['sent'] is False and shown['format'] == 'chat', shown
+                assert shown['shape']['path'] == 'translated' and shown['request']['url'].endswith('/v1/responses'), shown
+                assert helpers['Provider'].last_request is None, 'inspection reached the provider'
+                checks.append('inspection shows the translated upstream request and sends nothing')
                 status, _, body = request(port, '/metrics')
                 assert status == 200 and b'fusebox_build_info' in body
                 checks.append('rebuilt service exposes management metrics')

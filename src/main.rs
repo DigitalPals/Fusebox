@@ -23,6 +23,7 @@ mod files;
 mod formats;
 #[cfg(test)]
 mod golden_tests;
+mod inspect;
 mod ir;
 mod json_size;
 mod latency;

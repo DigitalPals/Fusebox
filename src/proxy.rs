@@ -1239,7 +1239,7 @@ impl History {
 }
 
 /// Points a call at another model, keeping a reasoning suffix the client added.
-fn set_model(call: &mut Call, model: &str) {
+pub(crate) fn set_model(call: &mut Call, model: &str) {
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
     let (base, _) = ir::split_model_suffix(&raw);
     let suffix = raw.trim().strip_prefix(base.as_str()).unwrap_or_default();
@@ -1323,7 +1323,17 @@ static GROUP_TURN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// A model group's models in the order this call tries them. In order by default; with
 /// `balance`, new sessions start at different models (a session always the same one,
 /// so its prompt cache keeps working) and the rest follow.
-fn group_order<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>) -> Vec<&'a str> {
+pub(crate) fn group_order<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>) -> Vec<&'a str> {
+    ordered_group(group, session, true)
+}
+
+/// The order the next request without a session would get, without taking its
+/// turn (for inspection).
+pub(crate) fn group_order_preview<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>) -> Vec<&'a str> {
+    ordered_group(group, session, false)
+}
+
+fn ordered_group<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>, take_turn: bool) -> Vec<&'a str> {
     let n = group.models.len();
     let start = if !group.balance || n == 0 {
         0
@@ -1331,8 +1341,10 @@ fn group_order<'a>(group: &'a crate::config::ModelGroup, session: Option<&str>) 
         use sha2::{Digest, Sha256};
         let h = Sha256::digest(s.as_bytes());
         u64::from_le_bytes(h[..8].try_into().unwrap()) as usize % n
-    } else {
+    } else if take_turn {
         GROUP_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % n
+    } else {
+        GROUP_TURN.load(std::sync::atomic::Ordering::Relaxed) % n
     };
     (0..n).map(|i| group.models[(start + i) % n].as_str()).collect()
 }

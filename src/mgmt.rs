@@ -427,6 +427,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/client-identities", get(client_identities))
         .route("/client-identities/reset", post(reset_client_identities))
         .route("/playground", post(crate::server::playground))
+        .route("/inspect", post(crate::inspect::inspect))
         .route("/routes", get(routes))
         .route("/keys", post(add_key))
         .route("/vertex", post(import_vertex))

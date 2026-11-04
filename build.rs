@@ -49,11 +49,12 @@ fn main() {
 /// until it changes. Assets are listed after every asset they name.
 fn build_assets() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
-    let mut declarations = String::from("static ASSETS: [(&str, Asset); 10] = [\n");
+    let mut declarations = String::from("static ASSETS: [(&str, Asset); 11] = [\n");
     let mut versions: Vec<(String, String)> = Vec::new();
     for (path, file, content_type) in [
         ("app.js", "app.js", "text/javascript; charset=utf-8"),
         ("usage.js", "usage.js", "text/javascript; charset=utf-8"),
+        ("playground.js", "playground.js", "text/javascript; charset=utf-8"),
         ("config.js", "config.js", "text/javascript; charset=utf-8"),
         ("i18n-zh.js", "i18n-zh.js", "text/javascript; charset=utf-8"),
         ("i18n.js", "i18n.js", "text/javascript; charset=utf-8"),
