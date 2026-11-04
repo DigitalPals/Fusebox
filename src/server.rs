@@ -73,6 +73,13 @@ pub fn router(app: Arc<App>) -> Router {
                 .route("/metrics", get(crate::metrics::metrics))
                 .layer(middleware::from_fn_with_state(app.clone(), crate::mgmt::auth)),
         )
+        // Pool-level status for client keys (status lines, agents checking
+        // quota). Its own light auth, no CORS: it is not a browser API.
+        .merge(
+            Router::new()
+                .route("/v1/fusebox/status", get(fusebox_status))
+                .layer(middleware::from_fn_with_state(app.clone(), status_auth)),
+        )
         // Before anything else, so every check and log line sees the real client.
         .layer(middleware::from_fn_with_state(app.clone(), crate::source::layer))
         .with_state(app)
@@ -109,11 +116,11 @@ impl ClientAuth {
     }
 }
 
-async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
-    let cfg = app.cfg();
+/// The credential a request carries, in the spellings clients use.
+fn provided_key(req: &Request) -> Option<String> {
     let h = req.headers();
     let get = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(str::trim).map(String::from);
-    let provided = get("authorization")
+    get("authorization")
         .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string()))
         .or_else(|| get("x-api-key"))
         .or_else(|| get("x-goog-api-key"))
@@ -121,7 +128,12 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
             req.uri().query().and_then(|q| {
                 url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
             })
-        });
+        })
+}
+
+async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
+    let cfg = app.cfg();
+    let provided = provided_key(&req);
     // Collector credentials are ingestion-only even on an otherwise open proxy.
     let collector_key = provided.as_deref().is_some_and(|k| k.starts_with("fbxc_"));
     let named = provided.as_ref().and_then(|k| cfg.named_clients.iter().find(|c| crate::mgmt::constant_eq(&c.key, k)));
@@ -205,6 +217,147 @@ async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) 
     let format = format_for_path(req.uri().path());
     (StatusCode::UNAUTHORIZED, axum::Json(formats::error_body(format, 401, "invalid or missing API key")))
         .into_response()
+}
+
+/// Status reads accept any client key (never a collector key, which is
+/// ingestion-only) and apply only a named client's expiry and address list.
+/// They count as no request anywhere: no rate, budget, stats or usage.
+async fn status_auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
+    let cfg = app.cfg();
+    let provided = provided_key(&req);
+    let refused = |status: u16, message: &str| {
+        (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+            axum::Json(formats::error_body(Format::Chat, status, message)),
+        )
+            .into_response()
+    };
+    if provided.as_deref().is_some_and(|k| k.starts_with("fbxc_")) {
+        return refused(401, "invalid or missing API key");
+    }
+    let named = provided.as_ref().and_then(|k| cfg.named_clients.iter().find(|c| crate::mgmt::constant_eq(&c.key, k)));
+    let open = cfg.api_keys.is_empty() && cfg.named_clients.is_empty();
+    let shared = provided.as_ref().is_some_and(|k| cfg.api_keys.iter().any(|a| crate::mgmt::constant_eq(a, k)));
+    if !open && named.is_none() && !shared {
+        return refused(401, "invalid or missing API key");
+    }
+    if open
+        && cfg.is_loopback()
+        && let Some(problem) = crate::mgmt::foreign_page(&req)
+    {
+        return refused(403, problem);
+    }
+    if let Some(client) = named
+        && let Err(denied) = app.clients.admit_status(client, req.headers())
+    {
+        return refused(denied.status, &denied.message);
+    }
+    next.run(req).await
+}
+
+/// Pool-level status for whoever holds a client key: combined quota pools,
+/// account counts and next resets. No account ids, labels, emails or key
+/// material — safe to poll from a status line or a coding agent deciding
+/// whether to start more work. `?format=line` answers one line of text.
+async fn fusebox_status(
+    State(app): State<Arc<App>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let now = chrono::Utc::now();
+    let accounts = app.pool.all();
+    let (mut ready, mut cooling, mut held, mut disabled) = (0usize, 0usize, 0usize, 0usize);
+    let mut by_provider: std::collections::BTreeMap<&str, (usize, usize, Option<chrono::DateTime<chrono::Utc>>)> =
+        std::collections::BTreeMap::new();
+    let mut lone_windows: std::collections::BTreeMap<&str, Vec<Value>> = std::collections::BTreeMap::new();
+    for acct in &accounts {
+        // Before the state lock, which `held_out` takes too.
+        let is_held = acct.held_out();
+        let models = acct.public_models();
+        let st = acct.state.lock();
+        let pauses = st.pauses(now);
+        // Ready means a request can be routed to it: every one of its models
+        // paused is as unavailable as an account-wide pause.
+        let routable = models.is_empty() || models.iter().any(|m| !pauses.contains_key(m.as_str()));
+        let is_ready = !is_held && !st.disabled && !pauses.contains_key("*") && routable;
+        ready += usize::from(is_ready);
+        cooling += usize::from(!st.disabled && !pauses.is_empty());
+        held += usize::from(is_held);
+        disabled += usize::from(st.disabled);
+        let entry = by_provider.entry(acct.provider.as_str()).or_insert((0, 0, None));
+        entry.0 += 1;
+        entry.1 += usize::from(is_ready);
+        for window in &st.quota.windows {
+            if let Some(at) = window.resets_at.filter(|at| *at > now) {
+                entry.2 = Some(entry.2.map_or(at, |prev| prev.min(at)));
+            }
+            if window.model.is_none() {
+                lone_windows.entry(acct.provider.as_str()).or_default().push(json!({
+                    "name": window.name, "used": window.used,
+                    "resets_at": window.resets_at.map(|t| t.to_rfc3339()),
+                }));
+            }
+        }
+    }
+    let mut pools = crate::push::current_pools(&app);
+    let pooled: std::collections::HashSet<String> = pools
+        .as_array()
+        .map(|list| list.iter().filter_map(|p| p["provider"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if let Some(list) = pools.as_array_mut() {
+        for pool in list {
+            if let Some(pool) = pool.as_object_mut() {
+                pool.remove("account_ids");
+            }
+        }
+    }
+    // A provider with one account has no pool; its windows ride along here
+    // unweighted, with no account identity anywhere near them.
+    let providers: Vec<Value> = by_provider
+        .into_iter()
+        .map(|(provider, (total, ready_n, next_reset))| {
+            let windows =
+                if pooled.contains(provider) { Vec::new() } else { lone_windows.remove(provider).unwrap_or_default() };
+            json!({
+                "provider": provider, "accounts": total, "ready": ready_n,
+                "next_reset": next_reset.map(|t| t.to_rfc3339()), "windows": windows,
+            })
+        })
+        .collect();
+    let status = if ready > 0 { "ready" } else { "unavailable" };
+    if query.get("format").is_some_and(|f| f == "line") {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(list) = pools.as_array() {
+            for pool in list {
+                parts.push(format!(
+                    "{} {} {:.0}%",
+                    pool["provider"].as_str().unwrap_or_default(),
+                    pool["window"].as_str().unwrap_or_default(),
+                    pool["used"].as_f64().unwrap_or_default()
+                ));
+            }
+        }
+        for provider in &providers {
+            for window in provider["windows"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                parts.push(format!(
+                    "{} {} {:.0}%",
+                    provider["provider"].as_str().unwrap_or_default(),
+                    window["name"].as_str().unwrap_or_default(),
+                    window["used"].as_f64().unwrap_or_default()
+                ));
+            }
+        }
+        parts.push(format!("{ready}/{} accounts ready", accounts.len()));
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], format!("{}\n", parts.join(" · ")))
+            .into_response();
+    }
+    axum::Json(json!({
+        "status": status,
+        "accounts": {"total": accounts.len(), "ready": ready, "cooling": cooling, "held": held, "disabled": disabled},
+        "providers": providers,
+        "pools": pools,
+        "models": app.pool.models().len(),
+    }))
+    .into_response()
 }
 
 /// A named client's admitted request: its address is recorded, and is news when new.

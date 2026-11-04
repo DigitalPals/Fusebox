@@ -175,8 +175,11 @@ curl http://127.0.0.1:8317/v1/messages \
 | `POST /v1/completions` | Legacy OpenAI completions |
 | `POST /v1/embeddings` | OpenAI embeddings, from OpenAI, OpenAI-compatible, Gemini and Vertex keys |
 | `GET /v1/models` · `GET /v1beta/models` | Model lists, model groups included |
+| `GET /v1/fusebox/status` | Pool-level quota status for client keys (`?format=line` for one text line) |
 
 Clients authenticate with `Authorization: Bearer`, `x-api-key`, `x-goog-api-key` or `?key=`.
+
+`GET /v1/fusebox/status` answers any client key (collector keys excluded) with pool-level status only — combined quota pools, ready/cooling account counts and next resets, with no account ids, labels or emails — so a status line or a coding agent can check how much quota is left before starting work. `?format=line` returns one text line such as `claude week 31% · 4/5 accounts ready`, ready for a Claude Code `statusLine` command: `curl -s -H "authorization: Bearer $FUSEBOX_KEY" "http://127.0.0.1:8317/v1/fusebox/status?format=line"`. A status read is not a request: it ignores model lists, programs, rates and budgets, and is never recorded in usage. A named client's expiry and address list still apply.
 
 Embeddings accept `encoding_format: float` (default) or `base64`; base64 encodes little-endian float32 values. Google adapters preserve input order, split Vertex batches to one text for Gemini embedding models or five for older text embedding models, and disable automatic truncation. A failed later chunk returns an error without replaying completed chunks; their usage is still recorded. Gemini embedding token counts are labelled estimates in the usage database. Models without a known price remain unpriced and cannot be treated as free by monthly budgets.
 

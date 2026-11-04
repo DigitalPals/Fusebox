@@ -2537,6 +2537,95 @@ async fn identity_learning_requires_authenticated_opt_in_and_management_reset_is
 }
 
 #[tokio::test]
+async fn client_key_status_is_pool_level_counts_as_nothing_and_refuses_collectors() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.named_clients = vec![
+        crate::config::NamedClient {
+            id: "agent".into(),
+            label: "Agent".into(),
+            key: "agent-key".into(),
+            ..Default::default()
+        },
+        crate::config::NamedClient {
+            id: "gone".into(),
+            label: "Gone".into(),
+            key: "gone-key".into(),
+            expires: Some(chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()),
+            ..Default::default()
+        },
+    ];
+    fixture.app.set_config(cfg);
+    let client = reqwest::Client::new();
+    // Shared and named keys get pool-level JSON with no account identity.
+    for key in ["client-one", "agent-key"] {
+        let response =
+            client.get(format!("{}/v1/fusebox/status", fixture.proxy.url)).bearer_auth(key).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("access-control-allow-origin").is_none(), "no CORS on the status route");
+        let text = response.text().await.unwrap();
+        let status: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(status["status"], "ready", "{text}");
+        assert!(status["accounts"]["ready"].as_u64().unwrap_or_default() >= 1);
+        assert!(!text.contains(".json") && !text.contains("account_ids"), "{text}");
+    }
+    let line = client
+        .get(format!("{}/v1/fusebox/status?format=line", fixture.proxy.url))
+        .bearer_auth("agent-key")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(line.trim_end().lines().count() == 1 && line.contains("accounts ready"), "{line}");
+    // No key, a collector key and an expired key are refused.
+    assert_eq!(client.get(format!("{}/v1/fusebox/status", fixture.proxy.url)).send().await.unwrap().status(), 401);
+    assert_eq!(
+        client
+            .get(format!("{}/v1/fusebox/status", fixture.proxy.url))
+            .bearer_auth("fbxc_collector")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/fusebox/status", fixture.proxy.url))
+            .bearer_auth("gone-key")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    // Nothing reached a provider and nothing landed in the request log.
+    assert!(fixture.mock.calls.lock().is_empty());
+    assert!(fixture.app.stats.recent.lock().is_empty());
+    // Every model of every account paused is no account ready, though no
+    // account-wide pause is set.
+    let until = chrono::Utc::now() + chrono::Duration::minutes(10);
+    for acct in fixture.app.pool.all() {
+        for model in acct.public_models() {
+            acct.rate_limit(&model, until, "mock limit");
+        }
+    }
+    let status: Value = client
+        .get(format!("{}/v1/fusebox/status", fixture.proxy.url))
+        .bearer_auth("client-one")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["status"], "unavailable", "{status}");
+    assert_eq!(status["accounts"]["ready"], 0, "{status}");
+}
+
+#[tokio::test]
 async fn a_named_clients_model_map_rewrites_the_request_and_the_allowlist_follows_it() {
     let fixture = Fixture::new(Routing::FillFirst, true).await;
     let mut cfg = fixture.cfg.clone();
