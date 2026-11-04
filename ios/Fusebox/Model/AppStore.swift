@@ -38,8 +38,13 @@ final class AppStore {
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
     @ObservationIgnored private var socketTask: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var retryDelay: Double = 1
     @ObservationIgnored private var accountsRefresh: Task<Void, Never>?
+    /// Bumped by every `stop()`: loads capture it and drop their result when a
+    /// disconnect or reconnect has made it stale (`FuseboxAPI` is a struct, so
+    /// an identity check cannot tell an old connection from the current one).
+    @ObservationIgnored var generation = 0
     @ObservationIgnored private var widgetReloadedAt = Date.distantPast
     @ObservationIgnored private var lastFaultKeys: [String] = []
     @ObservationIgnored let outages = OutageActivities()
@@ -84,7 +89,20 @@ final class AppStore {
 
     // MARK: Connection
 
+    /// Applies a state write only while `gen` is still the live generation.
+    /// Every write after an `await` goes through this (or a `gen == generation`
+    /// check), so a delayed answer from a previous connection cannot
+    /// repopulate state, the widget snapshot, the badge or Live Activities.
+    @discardableResult
+    func applyIfCurrent(_ gen: Int, _ mutate: () -> Void) -> Bool {
+        guard gen == generation else { return false }
+        mutate()
+        return true
+    }
+
     func connect(url: URL, key: String) {
+        stop()
+        if Connection.serverURL != url { outages.endAll() }
         Connection.serverURL = url
         Connection.setKey(key)
         api = FuseboxAPI(baseURL: url, key: key)
@@ -93,6 +111,7 @@ final class AppStore {
 
     func signOut() {
         stop()
+        outages.endAll()
         Connection.setKey(nil)
         api = nil
         overview = nil; accounts = []; faults = []; dismissedFaults = []; requests = []; load = [:]; activity = [:]
@@ -103,14 +122,17 @@ final class AppStore {
 
     func start() {
         guard api != nil else { return }
-        Task { await refreshAll() }
+        refreshTask = Task { await refreshAll() }
         connectLive()
     }
 
     func stop() {
+        generation += 1
         socketTask?.cancel(); socketTask = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         pollTask?.cancel(); pollTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        accountsRefresh?.cancel(); accountsRefresh = nil
     }
 
     /// Back from the background: the socket may look open but be dead, so start again.
@@ -123,50 +145,61 @@ final class AppStore {
 
     func refreshAll() async {
         guard let api else { return }
+        let gen = generation
         do {
             async let o = api.overview()
             async let a = api.accounts()
             async let f = api.faults()
             async let r = api.requests(limit: requestsFull ? nil : 60)
             let (ov, ac, fa, rq) = try await (o, a, f, r)
+            guard gen == generation else { return }
             overview = ov; accounts = ac; requests = rq
-            setFaults(fa, dismissed: try? await api.dismissedFaults())
+            let dismissed = try? await api.dismissedFaults()
+            guard gen == generation else { return }
+            setFaults(fa, dismissed: dismissed)
             loadError = nil
             lastLoaded = .now
             dataChanged()
         } catch {
-            loadError = error.localizedDescription
+            applyIfCurrent(gen) { loadError = error.localizedDescription }
         }
     }
 
     func loadFullRequests() async {
         guard let api, !requestsFull else { return }
+        let gen = generation
         if let all = try? await api.requests() {
-            requests = all
-            requestsFull = true
+            applyIfCurrent(gen) {
+                requests = all
+                requestsFull = true
+            }
         }
     }
 
     func refreshAccounts() {
+        let gen = generation
         accountsRefresh?.cancel()
         accountsRefresh = Task {
             try? await Task.sleep(for: .milliseconds(250))
-            guard let api, !Task.isCancelled else { return }
-            if let a = try? await api.accounts() { accounts = a }
-            if let o = try? await api.overview() { overview = o }
-            dataChanged()
+            guard let api, !Task.isCancelled, gen == generation else { return }
+            if let a = try? await api.accounts() { applyIfCurrent(gen) { accounts = a } }
+            guard gen == generation else { return }
+            if let o = try? await api.overview() { applyIfCurrent(gen) { overview = o } }
+            applyIfCurrent(gen) { dataChanged() }
         }
     }
 
     func loadActivity(_ id: String) async {
         guard let api else { return }
-        if let a = try? await api.activity(id) { activity[id] = a }
+        let gen = generation
+        if let a = try? await api.activity(id) { applyIfCurrent(gen) { activity[id] = a } }
     }
 
     // MARK: Live socket
 
     private func connectLive() {
         guard let api else { return }
+        let gen = generation
         live = .connecting
         let task = FuseboxAPI.session.webSocketTask(with: api.liveURL)
         socket = task
@@ -176,7 +209,7 @@ final class AppStore {
             while !Task.isCancelled {
                 do {
                     let msg = try await task.receive()
-                    guard let self else { return }
+                    guard let self, gen == self.generation else { return }
                     if !opened { opened = true; self.live = .live; self.retryDelay = 1; self.pollTask?.cancel(); self.pollTask = nil }
                     let data: Data
                     switch msg {
@@ -186,7 +219,7 @@ final class AppStore {
                     }
                     if let m = try? LiveMessage.decode(data) { self.onLive(m) }
                 } catch {
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self, !Task.isCancelled, gen == self.generation else { return }
                     self.socketClosed()
                     return
                 }
@@ -200,10 +233,11 @@ final class AppStore {
         socket = nil
         startPolling()
         let delay = retryDelay
+        let gen = generation
         retryDelay = min(retryDelay * 2, 15)
         socketTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard let self, !Task.isCancelled else { return }
+            guard let self, !Task.isCancelled, gen == self.generation else { return }
             self.connectLive()
         }
     }
@@ -211,10 +245,11 @@ final class AppStore {
     /// While the socket is down, read everything every 30 seconds.
     private func startPolling() {
         guard pollTask == nil else { return }
+        let gen = generation
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
-                guard let self, !Task.isCancelled, self.live != .live else { return }
+                guard let self, !Task.isCancelled, gen == self.generation, self.live != .live else { return }
                 await self.refreshAll()
             }
         }
@@ -329,64 +364,82 @@ final class AppStore {
     /// Shows every dismissed fault again.
     func restoreDismissedFaults() async throws {
         guard let api else { return }
+        let gen = generation
         struct Body: Encodable {}
         try await api.send("POST", "/faults/restore", json: Body())
-        setFaults(faults + dismissedFaults, dismissed: [])
+        applyIfCurrent(gen) { setFaults(faults + dismissedFaults, dismissed: []) }
     }
 
     // MARK: Account actions (as the dashboard's buttons)
 
     func refreshQuota(_ id: String) async throws {
         guard let api else { return }
+        let gen = generation
         let data = try await api.send("POST", "/accounts/\(FuseboxAPI.encode(id))/quota/refresh")
-        if let r = try? JSONDecoder.fusebox.decode(BankedResets.self, from: data), r.checkedAt != nil,
-           let i = accounts.firstIndex(where: { $0.id == id }) {
-            accounts[i].bankedResets = r
+        applyIfCurrent(gen) {
+            if let r = try? JSONDecoder.fusebox.decode(BankedResets.self, from: data), r.checkedAt != nil,
+               let i = accounts.firstIndex(where: { $0.id == id }) {
+                accounts[i].bankedResets = r
+            }
+            refreshAccounts()
         }
-        refreshAccounts()
     }
 
     func setDisabled(_ id: String, _ disabled: Bool) async throws {
+        let gen = generation
         struct Body: Encodable { var disabled: Bool }
         try await api?.send("POST", "/accounts/\(FuseboxAPI.encode(id))/toggle", json: Body(disabled: disabled))
-        if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].disabled = disabled }
-        refreshAccounts()
+        applyIfCurrent(gen) {
+            if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].disabled = disabled }
+            refreshAccounts()
+        }
     }
 
     func clearCooldowns(_ id: String) async throws {
+        let gen = generation
         try await api?.send("POST", "/accounts/\(FuseboxAPI.encode(id))/reset")
-        refreshAccounts()
+        applyIfCurrent(gen) { refreshAccounts() }
     }
 
     func clearError(_ id: String, errorID: String) async throws {
+        let gen = generation
         struct Body: Encodable { var error_id: String }
         try await api?.send("POST", "/accounts/\(FuseboxAPI.encode(id))/error/clear", json: Body(error_id: errorID))
-        refreshAccounts()
+        applyIfCurrent(gen) { refreshAccounts() }
     }
 
     func setPriority(_ id: String, _ priority: Int) async throws {
+        let gen = generation
         struct Body: Encodable { var priority: Int }
         try await api?.send("POST", "/accounts/\(FuseboxAPI.encode(id))/priority", json: Body(priority: priority))
-        if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].priority = priority }
-        refreshAccounts()
+        applyIfCurrent(gen) {
+            if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].priority = priority }
+            refreshAccounts()
+        }
     }
 
     /// Fetches a fresh quote for using a banked reset.
     func bankedQuote(_ id: String) async throws -> BankedResets {
         guard let api else { throw APIError(status: 0, message: "Not connected") }
+        let gen = generation
         let r: BankedResets = try await api.get("/accounts/\(FuseboxAPI.encode(id))/banked-resets")
-        if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].bankedResets = r }
+        applyIfCurrent(gen) {
+            if let i = accounts.firstIndex(where: { $0.id == id }) { accounts[i].bankedResets = r }
+        }
         return r
     }
 
     func applyBankedReset(_ id: String, request: String, grant: String) async throws {
+        let gen = generation
         struct Body: Encodable { var action = "redeem"; var request_id: String; var grant_id: String; var confirmed = true }
         let data = try await api?.send("POST", "/accounts/\(FuseboxAPI.encode(id))/banked-resets",
                                        json: Body(request_id: request, grant_id: grant))
-        if let data, let r = try? JSONDecoder.fusebox.decode(BankedResets.self, from: data),
-           let i = accounts.firstIndex(where: { $0.id == id }) {
-            accounts[i].bankedResets = r
+        applyIfCurrent(gen) {
+            if let data, let r = try? JSONDecoder.fusebox.decode(BankedResets.self, from: data),
+               let i = accounts.firstIndex(where: { $0.id == id }) {
+                accounts[i].bankedResets = r
+            }
+            refreshAccounts()
         }
-        refreshAccounts()
     }
 }

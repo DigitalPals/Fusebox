@@ -7,9 +7,33 @@ import Foundation
 @MainActor
 final class OutageActivities {
     private var ending: Set<String> = []
+    /// The latest pass. Each new one cancels it and waits for it to stop, so
+    /// two passes never interleave and a pass for faults that are no longer
+    /// current can't update or start an activity.
+    private var task: Task<Void, Never>?
 
     func sync(faults: [Fault], enabled: Bool) {
-        Task { await apply(faults: faults, enabled: enabled) }
+        let previous = task
+        previous?.cancel()
+        task = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await apply(faults: faults, enabled: enabled)
+        }
+    }
+
+    /// Ends every outage activity at once: after sign-out, or on another
+    /// server, they describe a server the app no longer shows.
+    func endAll() {
+        let previous = task
+        previous?.cancel()
+        task = Task {
+            await previous?.value
+            for activity in Activity<OutageAttributes>.activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            ending.removeAll()
+        }
     }
 
     private func apply(faults: [Fault], enabled: Bool) async {
@@ -18,6 +42,7 @@ final class OutageActivities {
         let running = Activity<OutageAttributes>.activities
 
         for activity in running where activity.activityState == .active {
+            if Task.isCancelled { return }
             let provider = activity.attributes.provider
             if let fault = byProvider[provider], enabled {
                 let state = Self.state(for: fault)
@@ -34,8 +59,9 @@ final class OutageActivities {
             }
         }
 
-        guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        guard !Task.isCancelled, enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         for (provider, fault) in byProvider where !running.contains(where: { $0.attributes.provider == provider && $0.activityState == .active }) {
+            if Task.isCancelled { return }
             let attributes = OutageAttributes(provider: provider, providerName: fault.providerName ?? Provider.name(provider))
             _ = try? Activity.request(attributes: attributes,
                                       content: ActivityContent(state: Self.state(for: fault), staleDate: fault.until),
