@@ -15,33 +15,45 @@ until it is signed in again. Run one proxy per auth directory.
 
 ## Copy these
 
-1. **`config.yaml`** — the file `--config`, `FUSEBOX_CONFIG` or the working
-   directory points at. It holds client keys, API keys, webhook URLs and all
-   settings.
+1. **`config.yaml`** — the file `--config`, `FUSEBOX_CONFIG` (or the older
+   `CLIPROXYAPI_RUST_CONFIG`) or the working directory points at. It holds
+   client keys, API keys, webhook URLs and all settings.
 2. **The `auth-dir` directory, whole.** The `*.json` files are the sign-ins.
-   The dotfiles next to them are part of the installation, not caches:
-   - `.cooldowns.state` — account cooldowns and refresh holds
-   - `.quota.state` — last quota readings, including confirmed no-5h-limit
-     findings
-   - `.quota-attribution.state` — which clients and sessions used each
-     quota window, and the weekly outlook history
-   - `.routing-sessions.state` — coding-session account assignments
-   - `.model-lists.state` — fetched provider model lists
-   - `.client-addresses.state` — addresses client keys were seen from
-   - `.web-push.state` — the web-push signing key and device subscriptions;
-     without it, installed apps stop receiving notifications
+   The dotfiles next to them are part of the installation, not caches. Some
+   are relearned when missing; others are not, and losing those changes what
+   Fusebox does:
    - `.disabled-api-keys.state` — the Enabled switches of API-key accounts
-     (contains no keys)
-   - `.banked-resets/`, `.window-starters/` — banked-reset and window
-     starter journals
-
-   Losing a dotfile is not fatal — Fusebox relearns it — but sessions move
-   accounts (and lose their prompt caches) and quota readings restart.
+     (no keys in it). **Not relearned:** an API-key account you switched off,
+     say because its key leaked, serves again.
+   - `.web-push.state` — the web-push signing key and device subscriptions.
+     **Not relearned:** installed apps and browsers stop receiving
+     notifications until they subscribe again.
+   - `.banked-resets/`, `.window-starters/` — journals of banked-reset and
+     window-starter operations. **Not relearned:** an operation that hadn't
+     settled is forgotten and may be made again.
+   - `.cooldowns.state` — account cooldowns and refresh holds. Lost, they
+     lift early: accounts are tried again, and one held out after failed
+     refreshes is retried.
+   - `.quota-attribution.state` — which clients and sessions used each quota
+     window, and the weekly outlook history. Lost, the history starts again.
+   - `.routing-sessions.state` — coding-session account assignments. Lost,
+     sessions move accounts and lose their prompt caches.
+   - `.quota.state` — last quota readings, including confirmed no-5h-limit
+     findings. Relearned from the next readings.
+   - `.model-lists.state`, `.client-addresses.state` — fetched model lists and
+     the addresses client keys were seen from. Relearned.
 3. **The usage database**, if Usage & Costs is on. Copy it with its own
    command rather than copying the live file:
-   `fusebox usage backup --to <file>` writes a consistent snapshot. Put the
-   snapshot where the new installation's config expects the database.
-4. **TLS certificate and key files**, if `tls` is configured.
+   `fusebox --config <path> usage backup <file>` writes a consistent
+   snapshot. Put the snapshot where the new installation's config expects the
+   database.
+4. **Files the config names**: the TLS certificate and key if `tls` is
+   configured, and the Apple push key (`apns.key-file`, a `.p8` file) if push
+   notifications go through APNs directly.
+
+Paths in `config.yaml` (`auth-dir`, the TLS files, `apns.key-file`, the usage
+database) are used as written. Relative ones follow the config file; absolute
+ones must exist on the new machine too, or be edited before the first start.
 
 ## Then
 
