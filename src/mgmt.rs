@@ -1044,6 +1044,9 @@ fn cheapest_model(acct: &crate::accounts::Account) -> Option<String> {
         o.completeness = "complete".into();
         o.tokens.input = Some(1000);
         o.tokens.output = Some(1000);
+        // Pricing needs every token field reported; a test reads no cache.
+        o.tokens.cache_read = Some(0);
+        o.tokens.cache_write = Some(0);
         crate::usage::pricing::Catalogue::bundled_catalogue()
             .and_then(|c| c.price(&o).cost_nanos)
             .map(|cost| (cost, model))
@@ -1058,9 +1061,11 @@ fn cheapest_model(acct: &crate::accounts::Account) -> Option<String> {
     models.iter().find(|m| small(m)).cloned().or_else(|| models.iter().min().cloned())
 }
 
-/// Sends one tiny request pinned to this account — no failover, so the
+/// Sends one tiny request pinned to this account — no failover and no retry on
+/// the same account, except once after refreshing a refused token, so the
 /// result says whether *this* sign-in works. It is a real request: recorded
 /// like the playground and may start a 5-hour window, which the drawer says.
+/// An account waiting for a sign-in or cooling down is reported, not sent to.
 async fn test_account(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -1071,6 +1076,22 @@ async fn test_account(
     if acct.state.lock().disabled {
         return err(StatusCode::CONFLICT, "this account is disabled; enable it to test it");
     }
+    let Some(model) = cheapest_model(&acct) else {
+        return err(StatusCode::CONFLICT, "this account serves no models to test with");
+    };
+    // Sending to an account that waits for a sign-in or is cooling down would
+    // say nothing new, and a fresh 429 would extend its pause.
+    let not_now = |status: u16, error: String| {
+        Json(json!({ "ok": false, "status": status, "model": model, "ms": 0, "reply": "", "error": error, "sent": false }))
+            .into_response()
+    };
+    if acct.held_out() {
+        return not_now(401, "this account is waiting for a sign-in; nothing was sent".into());
+    }
+    if let Some(until) = acct.cooling_until(&model) {
+        let left = (until - chrono::Utc::now()).num_seconds().max(1);
+        return not_now(429, format!("{model} is cooling down on this account for {left}s more; nothing was sent"));
+    }
     {
         let mut tests = ACCOUNT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         if tests.get(&id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60)) {
@@ -1078,9 +1099,6 @@ async fn test_account(
         }
         tests.insert(id.clone(), std::time::Instant::now());
     }
-    let Some(model) = cheapest_model(&acct) else {
-        return err(StatusCode::CONFLICT, "this account serves no models to test with");
-    };
     // A prefixed account is reached as `prefix/model`, the only way it serves
     // anything when `force-model-prefix` is on.
     let model = match acct.prefix.as_deref().filter(|p| !p.is_empty()) {
@@ -1869,6 +1887,33 @@ async fn client_usage(State(app): State<Arc<App>>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_account_test_model_is_the_cheapest_priced_one() {
+        let cfg = Config {
+            auth_dir: "/nonexistent".into(),
+            codex_api_key: vec![crate::config::KeyEntry { api_key: "k".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        let price = |model: &str| {
+            let mut o = crate::usage::types::Observation::new("proxy", "t".into(), "openai", 0);
+            o.actual_model = Some(model.into());
+            o.completeness = "complete".into();
+            o.tokens.input = Some(1000);
+            o.tokens.output = Some(1000);
+            o.tokens.cache_read = Some(0);
+            o.tokens.cache_write = Some(0);
+            crate::usage::pricing::Catalogue::bundled_catalogue().and_then(|c| c.price(&o).cost_nanos)
+        };
+        let chosen = cheapest_model(&acct).unwrap();
+        let cost = price(&chosen).expect("the chosen model is priced, so the pricing branch ran");
+        for model in acct.public_models() {
+            assert!(price(&model).is_none_or(|other| other >= cost), "{model} is cheaper than {chosen}");
+        }
+    }
 
     #[tokio::test]
     async fn removing_a_sign_in_waits_for_refresh_and_invalidates_old_saves() {

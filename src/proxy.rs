@@ -2008,8 +2008,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 // A connection that never opened is a blip worth one more try on the same
                 // account. Once the request went out, the provider may have run it, so it
                 // moves on rather than running it twice on one account.
+                // A pinned call (the account test) sends once; its failure is the answer.
                 let n = soft_tries.entry(acct.id.clone()).or_default();
-                if *n < 1 && e.is_connect() {
+                if call.pinned_account.is_none() && *n < 1 && e.is_connect() {
                     *n += 1;
                     last_error = Some((502, formats::error_body(call.format, 502, &msg)));
                     if !budget.wait(std::time::Duration::from_secs(1)).await {
@@ -2095,7 +2096,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             if let Some(delay) = soft_failure(provider, status, &headers, &text) {
                 let n = soft_tries.entry(acct.id.clone()).or_default();
-                if *n < 2 {
+                if call.pinned_account.is_none() && *n < 2 {
                     *n += 1;
                     let wait = delay.max(std::time::Duration::from_secs(if *n == 1 { 1 } else { 3 }));
                     let upstream_wait = upstream_retry_after(&headers).filter(|_| at_capacity(status, &text));

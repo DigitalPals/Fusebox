@@ -2565,6 +2565,39 @@ async fn the_account_test_is_pinned_and_reports_its_own_failure() {
 }
 
 #[tokio::test]
+async fn the_account_test_sends_once_and_leaves_cooling_accounts_alone() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    // Their own account files: the per-minute test guard is keyed by account id.
+    let (busy, calls) = scripted(|_| {
+        let error = json!({"error":{"type":"server_error","message":"Codex is at capacity, please try again later"}});
+        (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response()
+    })
+    .await;
+    for (name, url) in [("busy", busy.url.clone()), ("cooling", fixture.provider.url.clone())] {
+        let cred = json!({"type":"codex", "access_token":name, "email":name, "base_url":format!("{url}/v1")});
+        std::fs::write(fixture.directory.join(format!("{name}.json")), cred.to_string()).unwrap();
+    }
+    fixture.app.reload_accounts();
+    let client = reqwest::Client::new();
+    let test = |id: &str| client.post(format!("{}/api/accounts/{}/test", fixture.proxy.url, id)).send();
+    // At capacity: one request, no same-account retry, and the failure is the answer.
+    let busy_result: Value = test("file:busy.json").await.unwrap().json().await.unwrap();
+    assert_eq!(busy_result["ok"], false, "{busy_result}");
+    assert_eq!(calls.lock().len(), 1, "one request: {:?}", calls.lock());
+    // Cooling: reported, nothing sent, and the per-minute slot isn't spent.
+    let cooling = fixture.app.pool.get("file:cooling.json").unwrap();
+    for model in cooling.public_models() {
+        cooling.rate_limit(&model, chrono::Utc::now() + chrono::Duration::minutes(10), "mock limit");
+    }
+    let before = fixture.mock.calls.lock().len();
+    let result: Value = test("file:cooling.json").await.unwrap().json().await.unwrap();
+    assert_eq!((result["ok"].as_bool(), result["sent"].as_bool()), (Some(false), Some(false)), "{result}");
+    assert!(result["error"].as_str().unwrap().contains("cooling down"), "{result}");
+    assert_eq!(fixture.mock.calls.lock().len(), before, "nothing reached the provider");
+    assert_eq!(test("file:cooling.json").await.unwrap().status(), StatusCode::OK, "no slot was spent");
+}
+
+#[tokio::test]
 async fn the_account_test_reaches_a_prefixed_account_under_force_model_prefix() {
     let fixture = Fixture::new(Routing::FillFirst, true).await;
     // Its own account file: the per-minute test guard is keyed by account id.
