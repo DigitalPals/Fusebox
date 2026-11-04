@@ -356,7 +356,8 @@ pub(super) fn meta(v: &Value) -> Reading {
         .into_iter()
         .find(|s| s["window"].is_object() || s["weekly"].is_object());
     let tier = text(&v["subscription"]["tier"]).or_else(|| text(&v["subs_tier_id"]));
-    let mut out = Reading { tier, ..Default::default() };
+    let subscription_active = v["is_subs_active"].as_bool();
+    let mut out = Reading { tier, subscription_active, ..Default::default() };
     let Some(snap) = snap else { return out };
     let window = &snap["window"];
     let mins = number(&window["window_duration_mins"]).filter(|m| *m >= 1.0 && m.fract() == 0.0 && *m < 366.0 * 1440.0);
@@ -609,6 +610,34 @@ mod tests {
     }
 
     #[test]
+    fn only_a_meta_mint_says_whether_the_subscription_is_active() {
+        let mut st = crate::accounts::AccountState::default();
+        let lapsed = json!({"api_key": "k", "is_subs_active": false, "subs_tier_id": "28367280949604159", "subs_tier_name": null});
+        usage(&mut st, Provider::Meta, &lapsed);
+        assert!(st.quota.subscription_inactive);
+        assert_eq!(serde_json::to_value(&st.quota).unwrap()["subscription_inactive"], true);
+        // Meta kept sending usage frames while the subscription had lapsed.
+        usage(&mut st, Provider::Meta, &meta_frame());
+        assert!(st.quota.subscription_inactive);
+        // The mint after renewing on 2026-11-04: active, named, with its usage.
+        usage(
+            &mut st,
+            Provider::Meta,
+            &json!({"api_key": "k", "is_subs_active": true, "subs_tier_id": "28367280949604159",
+            "subs_tier_name": "Muse Code Max Usage", "subs_usage": {
+                "window": {"used_percent": 14, "window_duration_mins": 300, "resets_at": 4102444800i64},
+                "weekly": {"used_percent": 8, "resets_at": 4102444800i64}, "tier": "28367280949604159"}}),
+        );
+        assert!(!st.quota.subscription_inactive);
+        assert!(serde_json::to_value(&st.quota).unwrap().get("subscription_inactive").is_none());
+        assert_eq!(st.quota.weekly_remaining("muse-spark-1.3"), Some(92.0));
+        // A mint that does not say keeps what the last one said.
+        usage(&mut st, Provider::Meta, &lapsed);
+        usage(&mut st, Provider::Meta, &json!({"api_key": "k"}));
+        assert!(st.quota.subscription_inactive);
+    }
+
+    #[test]
     fn meta_readings_without_a_subscription_or_a_duration_stay_unknown() {
         // The mint as Meta answered on 3 November 2026: no `subs_usage`, a tier id and
         // a null tier name. No windows, no plan, and no refresh claim.
@@ -621,6 +650,7 @@ mod tests {
         assert!(st.quota.windows.is_empty());
         assert!(st.quota.refreshed_at.is_none());
         assert_eq!((st.quota.plan.as_deref(), st.quota.plan_name.as_deref()), (None, None));
+        assert!(st.quota.subscription_inactive, "that mint came while the subscription had lapsed");
 
         // A window that does not say how long it is cannot be named or routed on.
         let mut st = crate::accounts::AccountState::default();

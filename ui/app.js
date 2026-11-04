@@ -991,7 +991,9 @@ function windowOf(a, short) {
 const NO_SHORT_LIMIT = 'This account has no five-hour limit; only the weekly limits apply.';
 const noShortLimit = (a) => !!a.quota?.no_five_hour_limit && !windowOf(a, true);
 // The lists leave such an account's 5-hour meter out; the line under its name says why.
-const noShortNote = (a) => (noShortLimit(a) ? ' · no 5h limit' : '');
+const noShortNote = (a) => (noShortLimit(a) ? ' · no 5h limit' : '')
+  // Meta's key mint says when the subscription has lapsed; its meters then stop moving.
+  + (a.quota?.subscription_inactive ? ' · subscription inactive' : '');
 
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
 const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);

@@ -117,6 +117,10 @@ test('lists leave out the 5-hour meter of an account without that limit; its pag
   assert.equal((run(`meterRowsHTML(${JSON.stringify(pro)})`).match(/class="mrow"/g) || []).length, 1);
   assert.equal(run(`noShortNote(${JSON.stringify(pro)})`), ' · no 5h limit');
   assert.match(run(`quotaWindowsHTML(${JSON.stringify(pro)}, 'lg')`), /5-hour<\/span><span class="dim">No limit/);
+  // A lapsed Meta subscription says so beside the plan.
+  const lapsed = { id: 'm', provider: 'meta', kind: 'oauth', quota: { plan_name: 'Max Usage', subscription_inactive: true, windows: [] } };
+  assert.equal(run(`noShortNote(${JSON.stringify(lapsed)})`), ' · subscription inactive');
+  assert.equal(run(`noShortNote(${JSON.stringify({ ...lapsed, quota: { ...lapsed.quota, subscription_inactive: undefined } })})`), '');
 });
 
 test('Meta sign-ins are metered subscriptions with 5-hour and weekly rows', () => {

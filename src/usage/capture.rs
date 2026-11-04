@@ -403,14 +403,18 @@ pub fn observe(o: &mut Observation, v: &Value) {
                 .or_else(|| d.get("cache_creation_tokens"))
                 .or_else(|| u.get("cache_creation_input_tokens"));
             // OpenAI omits writes when none were reported (including older
-            // models). An explicitly null/invalid value remains unknown, as do
-            // omitted categories from an arbitrary compatible provider.
+            // models). Meta never reports writes and prices none (its rate card
+            // has cache reads only), so its omission is zero too. An explicitly
+            // null/invalid value remains unknown, as do omitted categories from
+            // an arbitrary compatible provider.
             if let (Some(canonical), Some(alias)) = (d.get("cache_write_tokens"), d.get("cache_creation_tokens")) {
                 invalid |= number(canonical) != number(alias);
             }
             let lifetime_details = d.get("cache_write_tokens_details");
             t.cache_write = write.map(number).unwrap_or_else(|| {
-                (o.provider == "openai" && lifetime_details.is_none()).then_some(0).filter(|_| input.is_some())
+                (matches!(o.provider.as_str(), "openai" | "meta") && lifetime_details.is_none())
+                    .then_some(0)
+                    .filter(|_| input.is_some())
             });
             // Lifetime metadata is evidence of writes, not evidence that their
             // missing aggregate is zero. Preserve the subsets, with unknown input.
@@ -609,6 +613,26 @@ mod tests {
             assert_eq!(o.tokens.input, None);
             assert_eq!(o.completeness, "partial");
         }
+    }
+    #[test]
+    fn meta_usage_without_cache_writes_is_complete() {
+        // A Muse Code response's usage as Meta reports it: cached reads, no writes.
+        let mut o = Observation::new("proxy", "id".into(), "meta", chrono::Utc::now().timestamp_millis());
+        observe(
+            &mut o,
+            &json!({"usage":{"input_tokens":18453,"input_tokens_details":{"cached_tokens":15217},"output_tokens":350,
+                "output_tokens_details":{"reasoning_tokens":174},"total_tokens":18803}}),
+        );
+        assert_eq!((o.tokens.input, o.tokens.cache_read, o.tokens.cache_write), (Some(3236), Some(15217), Some(0)));
+        assert_eq!((o.tokens.output, o.tokens.reasoning), (Some(350), Some(174)));
+        assert_eq!(o.completeness, "complete");
+        // Only a provider known to omit zero writes gets them; others stay unknown.
+        let mut o = Observation::new("proxy", "id".into(), "xai", chrono::Utc::now().timestamp_millis());
+        observe(
+            &mut o,
+            &json!({"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":20},"output_tokens":40}}),
+        );
+        assert_eq!((o.tokens.input, o.tokens.cache_write, o.completeness.as_str()), (None, None, "partial"));
     }
     #[test]
     fn inclusive_top_level_cache_writes_and_partial_snapshots_keep_categories() {

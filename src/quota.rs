@@ -110,6 +110,8 @@ struct Reading {
     plan_name: Option<String>,
     /// Meta's opaque subscription tier id, from a mint or a stream frame.
     tier: Option<String>,
+    /// Whether Meta's mint says the subscription is active.
+    subscription_active: Option<bool>,
     /// The provider confirms the account has no 5-hour limit.
     no_five_hour: bool,
 }
@@ -158,6 +160,11 @@ pub struct Quota {
     /// so it only tells whether the tier name saved at sign-in still applies.
     #[serde(skip)]
     pub meta_tier: Option<String>,
+    /// Meta's mint said the subscription is not active (lapsed or cancelled): the
+    /// windows shown are the last ones reported and no new ones come until it renews.
+    /// Only a mint sets or clears it; stream frames kept coming while it was lapsed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub subscription_inactive: bool,
 }
 
 /// A usage-endpoint call skipped because the provider asked to wait.
@@ -687,9 +694,12 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
-    let Reading { windows, limits, plan, plan_name, tier, no_five_hour } = reading;
+    let Reading { windows, limits, plan, plan_name, tier, subscription_active, no_five_hour } = reading;
     if tier.is_some() {
         st.quota.meta_tier = tier;
+    }
+    if let Some(active) = subscription_active {
+        st.quota.subscription_inactive = !active;
     }
     // Only a provider-confirmed absence retires a retained 5-hour window; an omitted one stays.
     let retired = |w: &Window| no_five_hour && w.name == "5h" && w.model.is_none();
