@@ -2943,9 +2943,19 @@ async fn collect_passthrough(
 // ------------------------------------------------------------------ utilities
 
 /// `/v1/messages/count_tokens`: ask Claude when possible, otherwise estimate.
-pub async fn count_tokens(app: Arc<App>, headers: HeaderMap, body: Value) -> (Value, bool) {
+pub async fn count_tokens(app: Arc<App>, headers: HeaderMap, mut body: Value) -> (Value, bool) {
     let cfg = app.cfg();
-    let (model, _) = ir::split_model_suffix(body["model"].as_str().unwrap_or_default());
+    // The client's model-map and allowlist apply as to any request; a model it
+    // may not use is counted here, never on an account.
+    let raw = body["model"].as_str().unwrap_or_default().to_string();
+    let admitted = match crate::policy::admit_model(&app, &headers, &raw) {
+        Ok(admitted) => admitted,
+        Err(_) => return (json!({ "input_tokens": estimate_tokens(&body) }), true),
+    };
+    if admitted.mapped.is_some() {
+        body["model"] = admitted.model.clone().into();
+    }
+    let (model, _) = ir::split_model_suffix(&admitted.model);
     let (only, model) = app.pool.route(&model);
     let model = app.pool.canonical(&model, only.as_ref());
     let session = crate::affinity::session_key(&headers, &body);

@@ -458,7 +458,13 @@ pub fn note_dropped_header(client: &'static str, name: &str) -> bool {
     if !matches!(client, CLAUDE_CODE | CODEX) || name.is_empty() || name.len() > 64 {
         return false;
     }
-    if state().read().dropped_headers.get(client).is_some_and(|names| names.contains(name)) {
+    // Recorded already, or the list is full: no write lock on the request path.
+    if state()
+        .read()
+        .dropped_headers
+        .get(client)
+        .is_some_and(|names| names.contains(name) || names.len() >= MAX_DROPPED_HEADERS)
+    {
         return false;
     }
     let mut state = state().write();

@@ -422,6 +422,10 @@ pub fn mapped_model(client: &NamedClient, requested: &str) -> Option<String> {
         return None;
     }
     let (base, _) = crate::ir::split_model_suffix(requested);
+    // No model is no model: a catch-all `*` doesn't make one up.
+    if base.trim().is_empty() {
+        return None;
+    }
     let suffix = requested.trim().strip_prefix(base.as_str()).unwrap_or_default();
     let mut best: Option<((bool, usize, &str), &str)> = None;
     for (pattern, target) in &client.model_map {

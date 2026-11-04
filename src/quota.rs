@@ -925,6 +925,12 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
             st.quota.usage_refused(Utc::now(), status);
         }
         st.quota.checked(Utc::now(), refreshed);
+        // An answered read ends a refusal run, even one with nothing to report.
+        if result.is_ok() {
+            st.quota.refused_checks = 0;
+            st.quota.refused_since = None;
+            st.quota.refused_status = None;
+        }
     }
     match result {
         Ok(()) => changed = true,
@@ -935,7 +941,8 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
 
 /// The status of a usage read the provider refused with 401 or 403.
 fn refused(result: &anyhow::Result<()>) -> Option<u16> {
-    let status = result.as_ref().err()?.downcast_ref::<reqwest::Error>()?.status()?.as_u16();
+    // Anywhere in the chain, so added context can't hide it.
+    let status = result.as_ref().err()?.chain().find_map(|e| e.downcast_ref::<reqwest::Error>())?.status()?.as_u16();
     matches!(status, 401 | 403).then_some(status)
 }
 

@@ -149,15 +149,24 @@ fn add_server_tool_fees(o: &Observation, snapshot: &mut Snapshot) {
     let fee = ServerToolFees::bundled().and_then(|fees| fees.per_call(&o.provider, "web_search"));
     match fee {
         Some(per_call) => {
-            snapshot.assumptions.push("server_tool_fees_included".into());
             if let Some(cost) = snapshot.cost_nanos {
-                snapshot.cost_nanos = i64::try_from(searches)
+                // An implausible count overflows: keep the token cost, say the fee is missing.
+                match i64::try_from(searches)
                     .ok()
                     .and_then(|n| n.checked_mul(per_call))
-                    .and_then(|fees| cost.checked_add(fees));
-                if snapshot.cost_nanos.is_none() {
-                    snapshot.partial = true;
+                    .and_then(|f| cost.checked_add(f))
+                {
+                    Some(total) => {
+                        snapshot.cost_nanos = Some(total);
+                        snapshot.assumptions.push("server_tool_fees_included".into());
+                    }
+                    None => {
+                        snapshot.assumptions.push("server_tool_fees_unpriced".into());
+                        snapshot.partial = true;
+                    }
                 }
+            } else {
+                snapshot.assumptions.push("server_tool_fees_included".into());
             }
         }
         None => {
@@ -789,6 +798,13 @@ mod tier_tests {
         let priced = c.price(&o);
         assert_eq!(priced.cost_nanos, Some(tokens_only + 20_000_000));
         assert!(priced.partial && priced.assumptions.contains(&"code_execution_time_unpriced".into()));
+        // A count so large the fee overflows keeps the token cost and is partial.
+        o.numeric_metadata.remove("code_execution_requests");
+        o.numeric_metadata.insert("web_search_requests".into(), 1_000_000_000_000);
+        let priced = c.price(&o);
+        assert_eq!(priced.cost_nanos, Some(tokens_only), "the token cost survives");
+        assert!(priced.partial && priced.assumptions.contains(&"server_tool_fees_unpriced".into()));
+        o.numeric_metadata.insert("web_search_requests".into(), 2);
         // A bundled fee table decodes, and the strict catalogue types keep
         // accepting a catalogue document without any fee fields in it.
         let fees = ServerToolFees::bundled().unwrap();

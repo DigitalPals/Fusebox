@@ -2741,10 +2741,23 @@ async fn a_named_clients_model_map_rewrites_the_request_and_the_allowlist_follow
     // A model the agent may not use, mapped or not, is refused before routing.
     let response = ask("agent-key", "gpt-6.1-terra").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN, "{}", response.text().await.unwrap());
-    let calls = fixture.mock.calls.lock();
-    assert_eq!(calls.len(), 2, "the refused request never reached the provider");
-    assert_eq!(calls[0].1["model"], "gpt-6-astra", "upstream got the mapped model");
-    assert_eq!(calls[1].1["model"], "gpt-6.1-sol", "unmapped traffic is unchanged");
+    {
+        let calls = fixture.mock.calls.lock();
+        assert_eq!(calls.len(), 2, "the refused request never reached the provider");
+        assert_eq!(calls[0].1["model"], "gpt-6-astra", "upstream got the mapped model");
+        assert_eq!(calls[1].1["model"], "gpt-6.1-sol", "unmapped traffic is unchanged");
+    }
+    // Counting tokens follows the same admission: a refused model is estimated locally.
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/messages/count_tokens", fixture.proxy.url))
+        .bearer_auth("agent-key")
+        .json(&json!({"model": "gpt-6.1-terra", "messages": [{"role": "user", "content": "question"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.json::<Value>().await.unwrap()["input_tokens"].is_u64());
+    assert_eq!(fixture.mock.calls.lock().len(), 2, "nothing more reached the provider");
 }
 
 #[tokio::test]

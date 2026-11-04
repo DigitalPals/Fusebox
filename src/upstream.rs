@@ -303,7 +303,10 @@ fn inbound_headers(provider: Provider, cfg: Option<&Config>, client: &HeaderMap)
                 return Some((name.to_string(), value.to_string()));
             }
             tracing::debug!(provider = provider.as_str(), header = name, "dropping upstream header");
-            note_dropped(provider, recorded_as, &nominated, name);
+            // A documented name dropped for its value (not UTF-8) says nothing about the allowlist.
+            if !(documented || extended) {
+                note_dropped(provider, recorded_as, &nominated, name);
+            }
             None
         })
         .collect()

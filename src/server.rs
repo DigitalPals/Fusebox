@@ -275,9 +275,10 @@ async fn fusebox_status(
         let models = acct.public_models();
         let st = acct.state.lock();
         let pauses = st.pauses(now);
-        // Ready means a request can be routed to it: every one of its models
-        // paused is as unavailable as an account-wide pause.
-        let routable = models.is_empty() || models.iter().any(|m| !pauses.contains_key(m.as_str()));
+        // Ready means a request can be routed to it: an account serving no
+        // model, or with every one of its models paused, is as unavailable as
+        // an account-wide pause.
+        let routable = models.iter().any(|m| !pauses.contains_key(m.as_str()));
         let is_ready = !is_held && !st.disabled && !pauses.contains_key("*") && routable;
         ready += usize::from(is_ready);
         cooling += usize::from(!st.disabled && !pauses.is_empty());
