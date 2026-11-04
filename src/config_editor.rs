@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
-use serde_json::{Map, Value, json};
-use serde_yaml::{Mapping, Value as Yaml};
+use serde_json::{Map, Value, Value as Yaml, json};
 use sha2::{Digest, Sha256};
 use yaml_edit::{Document, Mapping as EditMapping, YamlFile, YamlNode};
 
 use crate::accounts::Provider;
 use crate::config::Config;
+
+type Mapping = Map<String, Yaml>;
 
 const PROVIDERS: &[(&str, &str)] = &[
     ("claude-api-key", "claude"),
@@ -28,26 +29,26 @@ pub fn revision(text: &str) -> String {
 }
 
 fn yaml(text: &str) -> Result<Yaml> {
-    let doc: Yaml = serde_yaml::from_str(text).context("The config file is not valid YAML")?;
+    let doc: Yaml = crate::yaml::from_str(text).context("The config file is not valid YAML")?;
     if doc.is_null() {
-        return Ok(Yaml::Mapping(Mapping::new()));
+        return Ok(Yaml::Object(Mapping::new()));
     }
-    ensure!(doc.is_mapping(), "The config must be a mapping of settings");
+    ensure!(doc.is_object(), "The config must be a mapping of settings");
     Ok(doc)
 }
 
 fn at<'a>(doc: &'a Yaml, path: &[Value]) -> Option<&'a Yaml> {
     path.iter().try_fold(doc, |v, part| match part {
-        Value::String(k) => v.as_mapping()?.get(k.as_str()),
-        Value::Number(i) => v.as_sequence()?.get(i.as_u64()? as usize),
+        Value::String(k) => v.as_object()?.get(k.as_str()),
+        Value::Number(i) => v.as_array()?.get(i.as_u64()? as usize),
         _ => None,
     })
 }
 
 fn at_mut<'a>(doc: &'a mut Yaml, path: &[Value]) -> Option<&'a mut Yaml> {
     path.iter().try_fold(doc, |v, part| match part {
-        Value::String(k) => v.as_mapping_mut()?.get_mut(Yaml::String(k.clone())),
-        Value::Number(i) => v.as_sequence_mut()?.get_mut(i.as_u64()? as usize),
+        Value::String(k) => v.as_object_mut()?.get_mut(k.as_str()),
+        Value::Number(i) => v.as_array_mut()?.get_mut(i.as_u64()? as usize),
         _ => None,
     })
 }
@@ -57,16 +58,16 @@ fn p(path: &[&str]) -> Vec<Value> {
 }
 
 fn v8(doc: &Yaml) -> bool {
-    doc["config-version"].as_i64().is_some_and(|v| v >= 8) || doc["api-keys"].is_mapping()
+    doc["config-version"].as_i64().is_some_and(|v| v >= 8) || doc["api-keys"].is_object()
 }
 
 fn provider_sources(doc: &Yaml, field: &str, group: &str) -> Vec<Vec<Value>> {
-    if let Some(groups) = doc["api-keys"][group].as_sequence() {
+    if let Some(groups) = doc["api-keys"][group].as_array() {
         if group == "openai-compatibility" {
             return groups
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| g.is_mapping())
+                .filter(|(_, g)| g.is_object())
                 .map(|(i, _)| vec![json!("api-keys"), json!(group), json!(i)])
                 .collect();
         }
@@ -75,22 +76,21 @@ fn provider_sources(doc: &Yaml, field: &str, group: &str) -> Vec<Vec<Value>> {
             .enumerate()
             .flat_map(|(i, g)| {
                 g["keys"]
-                    .as_sequence()
+                    .as_array()
                     .into_iter()
                     .flatten()
                     .enumerate()
-                    .filter(|(_, key)| key.is_mapping())
+                    .filter(|(_, key)| key.is_object())
                     .map(move |(j, _)| vec![json!("api-keys"), json!(group), json!(i), json!("keys"), json!(j)])
             })
             .collect();
     }
-    let field = if field == "gemini-api-key" && doc[field].is_null() && doc["generative-language-api-key"].is_sequence()
-    {
+    let field = if field == "gemini-api-key" && doc[field].is_null() && doc["generative-language-api-key"].is_array() {
         "generative-language-api-key"
     } else {
         field
     };
-    (0..doc[field].as_sequence().map_or(0, Vec::len)).map(|i| vec![json!(field), json!(i)]).collect()
+    (0..doc[field].as_array().map_or(0, Vec::len)).map(|i| vec![json!(field), json!(i)]).collect()
 }
 
 pub fn values(text: &str) -> Result<Value> {
@@ -170,7 +170,7 @@ fn setting_path(doc: &Yaml, field: &str) -> (Vec<Value>, bool) {
         _ => &[],
     };
     if field == "routing" {
-        return (if doc["routing"].is_mapping() { p(&["routing", "strategy"]) } else { p(&["routing"]) }, false);
+        return (if doc["routing"].is_object() { p(&["routing", "strategy"]) } else { p(&["routing"]) }, false);
     }
     if !nested.is_empty() && at(doc, &p(nested)).is_some_and(|v| !v.is_null()) {
         return (p(nested), false);
@@ -198,22 +198,22 @@ fn set_path(doc: &mut Yaml, path: &[Value], value: Yaml) -> Result<()> {
     let mut current = doc;
     for part in parents {
         let k = part.as_str().context("Invalid setting path")?;
-        if !current[k].is_mapping() {
+        if !current[k].is_object() {
             let old_strategy = (k == "routing").then(|| current[k].as_str().map(str::to_owned)).flatten();
             current
-                .as_mapping_mut()
+                .as_object_mut()
                 .context("Invalid config section")?
-                .insert(Yaml::String(k.into()), Yaml::Mapping(Mapping::new()));
+                .insert(k.to_string(), Yaml::Object(Mapping::new()));
             if let Some(strategy) = old_strategy {
-                current[k].as_mapping_mut().unwrap().insert(Yaml::String("strategy".into()), Yaml::String(strategy));
+                current[k].as_object_mut().unwrap().insert("strategy".into(), Yaml::String(strategy));
             }
         }
-        current = current.as_mapping_mut().unwrap().get_mut(k).unwrap();
+        current = current.as_object_mut().unwrap().get_mut(k).unwrap();
     }
     current
-        .as_mapping_mut()
+        .as_object_mut()
         .context("Invalid config section")?
-        .insert(Yaml::String(last.as_str().context("Invalid setting name")?.into()), value);
+        .insert(last.as_str().context("Invalid setting name")?.into(), value);
     Ok(())
 }
 
@@ -222,7 +222,7 @@ fn delta(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
     if before == after {
         return Ok(());
     }
-    if let (Some(old), Some(new), Some(target)) = (before.as_object(), after.as_object(), raw.as_mapping_mut()) {
+    if let (Some(old), Some(new), Some(target)) = (before.as_object(), after.as_object(), raw.as_object_mut()) {
         for (k, val) in new {
             if k == "_row" && val.is_number() {
                 continue;
@@ -231,13 +231,13 @@ fn delta(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
             if old == val {
                 continue;
             }
-            let target = target.entry(Yaml::String(k.clone())).or_insert(Yaml::Null);
+            let target = target.entry(k.clone()).or_insert(Yaml::Null);
             delta(target, old, val)?;
         }
         for k in old.keys().filter(|k| k.as_str() != "_row" && !new.contains_key(*k)) {
-            target.remove(Yaml::String(k.clone()));
+            target.remove(k);
         }
-    } else if let (Some(old), Some(new), Some(target)) = (before.as_array(), after.as_array(), raw.as_sequence_mut()) {
+    } else if let (Some(old), Some(new), Some(target)) = (before.as_array(), after.as_array(), raw.as_array_mut()) {
         let original = target.clone();
         let mut used = HashSet::new();
         let mut result = Vec::new();
@@ -259,12 +259,12 @@ fn delta(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
                 delta(&mut raw, &old[j], val)?;
                 result.push(raw);
             } else {
-                result.push(serde_yaml::to_value(without_metadata(val))?);
+                result.push(serde_json::to_value(without_metadata(val))?);
             }
         }
         *target = result;
     } else {
-        *raw = serde_yaml::to_value(without_metadata(after))?;
+        *raw = serde_json::to_value(without_metadata(after))?;
     }
     Ok(())
 }
@@ -272,44 +272,44 @@ fn delta(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
 fn append_provider(doc: &mut Yaml, field: &str, group: &str, entry: &Value) -> Result<()> {
     let mut entry = without_metadata(entry);
     entry.as_object_mut().context("Invalid provider entry")?.remove("_id");
-    let mut entry = serde_yaml::to_value(entry)?;
+    let mut entry = serde_json::to_value(entry)?;
     let nested = v8(doc) && group != "kimi";
     if nested {
         if group == "openai-compatibility" {
-            let keys = entry.as_mapping_mut().unwrap().remove("api-keys").unwrap_or(Yaml::Sequence(vec![]));
-            entry.as_mapping_mut().unwrap().insert(
-                Yaml::String("keys".into()),
-                Yaml::Sequence(
-                    keys.as_sequence()
+            let keys = entry.as_object_mut().unwrap().remove("api-keys").unwrap_or(Yaml::Array(vec![]));
+            entry.as_object_mut().unwrap().insert(
+                "keys".into(),
+                Yaml::Array(
+                    keys.as_array()
                         .into_iter()
                         .flatten()
-                        .map(|k| Yaml::Mapping(Mapping::from_iter([(Yaml::String("api-key".into()), k.clone())])))
+                        .map(|k| Yaml::Object(Mapping::from_iter([("api-key".to_string(), k.clone())])))
                         .collect(),
                 ),
             );
         } else {
-            entry = Yaml::Mapping(Mapping::from_iter([(Yaml::String("keys".into()), Yaml::Sequence(vec![entry]))]));
+            entry = Yaml::Object(Mapping::from_iter([("keys".to_string(), Yaml::Array(vec![entry]))]));
         }
-        if !doc["api-keys"].is_mapping() {
-            set_path(doc, &p(&["api-keys"]), Yaml::Mapping(Mapping::new()))?;
+        if !doc["api-keys"].is_object() {
+            set_path(doc, &p(&["api-keys"]), Yaml::Object(Mapping::new()))?;
         }
-        if !doc["api-keys"][group].is_sequence() {
-            set_path(doc, &p(&["api-keys", group]), Yaml::Sequence(vec![]))?;
+        if !doc["api-keys"][group].is_array() {
+            set_path(doc, &p(&["api-keys", group]), Yaml::Array(vec![]))?;
         }
-        doc["api-keys"][group].as_sequence_mut().unwrap().push(entry);
+        doc["api-keys"][group].as_array_mut().unwrap().push(entry);
     } else {
-        if !doc[field].is_sequence() {
-            set_path(doc, &p(&[field]), Yaml::Sequence(vec![]))?;
+        if !doc[field].is_array() {
+            set_path(doc, &p(&[field]), Yaml::Array(vec![]))?;
         }
-        doc[field].as_sequence_mut().unwrap().push(entry);
+        doc[field].as_array_mut().unwrap().push(entry);
     }
     Ok(())
 }
 
 fn compat_keys(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
-    let field = if raw["keys"].is_sequence() {
+    let field = if raw["keys"].is_array() {
         "keys"
-    } else if raw["api-key-entries"].is_sequence() {
+    } else if raw["api-key-entries"].is_array() {
         "api-key-entries"
     } else {
         "api-keys"
@@ -317,7 +317,7 @@ fn compat_keys(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
     if field == "api-keys" {
         return delta(&mut raw[field], before, after);
     }
-    let original = raw[field].as_sequence().cloned().unwrap_or_default();
+    let original = raw[field].as_array().cloned().unwrap_or_default();
     let old = before.as_array().context("Invalid API keys")?;
     let new = after.as_array().context("Invalid API keys")?;
     let mut used = HashSet::new();
@@ -334,14 +334,14 @@ fn compat_keys(raw: &mut Yaml, before: &Value, after: &Value) -> Result<()> {
                 used.insert(j);
                 original.get(j).cloned()
             })
-            .unwrap_or_else(|| Yaml::Mapping(Mapping::new()));
-        if !item.is_mapping() {
-            item = Yaml::Mapping(Mapping::new());
+            .unwrap_or_else(|| Yaml::Object(Mapping::new()));
+        if !item.is_object() {
+            item = Yaml::Object(Mapping::new());
         }
-        item.as_mapping_mut().unwrap().insert(Yaml::String("api-key".into()), serde_yaml::to_value(key)?);
+        item.as_object_mut().unwrap().insert("api-key".into(), serde_json::to_value(key)?);
         keys.push(item);
     }
-    raw.as_mapping_mut().context("Invalid provider")?.insert(Yaml::String(field.into()), Yaml::Sequence(keys));
+    raw.as_object_mut().context("Invalid provider")?.insert(field.into(), Yaml::Array(keys));
     Ok(())
 }
 
@@ -350,7 +350,7 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
     let new = after.as_array().context("Invalid provider list")?;
     // Migrate the ancient scalar-only Gemini layout when provider options are
     // edited. A complete list is retained under its modern legacy spelling.
-    if field == "gemini-api-key" && doc[field].is_null() && doc["generative-language-api-key"].is_sequence() {
+    if field == "gemini-api-key" && doc[field].is_null() && doc["generative-language-api-key"].is_array() {
         for entry in new {
             if let Some(id) = entry.get("_id").filter(|id| !id.is_null()) {
                 ensure!(old.iter().any(|previous| previous.get("_id") == Some(id)), "Invalid Gemini key identifier");
@@ -360,8 +360,8 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
         for entry in &mut entries {
             entry.as_object_mut().context("Invalid Gemini entry")?.remove("_id");
         }
-        set_path(doc, &p(&[field]), serde_yaml::to_value(without_metadata(&json!(entries)))?)?;
-        doc.as_mapping_mut().unwrap().remove("generative-language-api-key");
+        set_path(doc, &p(&[field]), serde_json::to_value(without_metadata(&json!(entries)))?)?;
+        doc.as_object_mut().unwrap().remove("generative-language-api-key");
         return Ok(());
     }
     let mut seen = HashSet::new();
@@ -384,11 +384,8 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
                 compat_keys(raw, &previous[k], val)?;
             } else {
                 let inherited_value = inherited.as_ref().map(|g| g[k.as_str()].clone()).unwrap_or(Yaml::Null);
-                let target = raw
-                    .as_mapping_mut()
-                    .context("Invalid provider entry")?
-                    .entry(Yaml::String(k.clone()))
-                    .or_insert(inherited_value);
+                let target =
+                    raw.as_object_mut().context("Invalid provider entry")?.entry(k.clone()).or_insert(inherited_value);
                 // An explicit empty string overrides a group's inherited URL
                 // or prefix; null means inherit in CLIProxyAPI's v8 layout.
                 let val = if val.is_null()
@@ -404,9 +401,9 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
         }
         // A field the edit left out goes, so the entry falls back to its default.
         let kept = entry.as_object().unwrap();
-        if let (Some(old_fields), Some(mapping)) = (previous.as_object(), raw.as_mapping_mut()) {
+        if let (Some(old_fields), Some(mapping)) = (previous.as_object(), raw.as_object_mut()) {
             for k in old_fields.keys().filter(|k| !k.starts_with('_') && !kept.contains_key(*k)) {
-                mapping.remove(Yaml::String(k.clone()));
+                mapping.remove(k);
             }
         }
     }
@@ -428,7 +425,7 @@ fn edit_providers(doc: &mut Yaml, field: &str, group: &str, before: &Value, afte
         let path = id.as_array().unwrap();
         let (index, parent) = path.split_last().unwrap();
         at_mut(doc, parent)
-            .and_then(Yaml::as_sequence_mut)
+            .and_then(Yaml::as_array_mut)
             .context("Invalid provider list")?
             .remove(index.as_u64().unwrap() as usize);
     }
@@ -572,7 +569,7 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
     for (k, v) in changes {
         merged[k] = v.clone();
     }
-    let cfg = Config::parse(&serde_yaml::to_string(&merged)?)?;
+    let cfg = Config::parse(&crate::yaml::to_string(&merged)?)?;
     if changes.contains_key("proxy-url") {
         crate::config::check_proxy_url(&cfg.proxy_url).map_err(|e| anyhow::anyhow!("Upstream proxy: {e}"))?;
     }
@@ -675,7 +672,7 @@ fn node(value: &Yaml) -> Result<YamlNode> {
 
 fn sync_mapping(mapping: &EditMapping, before: &Mapping, after: &Mapping) -> Result<()> {
     for (key, value) in after {
-        let key = key.as_str().context("Config setting names must be strings")?;
+        let key = key.as_str();
         let old = before.get(key);
         if old == Some(value) {
             continue;
@@ -688,22 +685,20 @@ fn sync_mapping(mapping: &EditMapping, before: &Mapping, after: &Mapping) -> Res
         mapping.set(key, node(value)?);
     }
     for key in before.keys().filter(|k| !after.contains_key(*k)) {
-        if let Some(key) = key.as_str() {
-            mapping.remove(key);
-        }
+        mapping.remove(key);
     }
     Ok(())
 }
 
 fn sync_node(existing: &YamlNode, before: &Yaml, after: &Yaml) -> Result<bool> {
-    if let (Some(mapping), Some(old), Some(new)) = (existing.as_mapping(), before.as_mapping(), after.as_mapping()) {
+    if let (Some(mapping), Some(old), Some(new)) = (existing.as_mapping(), before.as_object(), after.as_object()) {
         if new.is_empty() {
             return Ok(false);
         }
         sync_mapping(mapping, old, new)?;
         return Ok(true);
     }
-    if let (Some(seq), Some(old), Some(new)) = (existing.as_sequence(), before.as_sequence(), after.as_sequence()) {
+    if let (Some(seq), Some(old), Some(new)) = (existing.as_sequence(), before.as_array(), after.as_array()) {
         if new.is_empty() {
             return Ok(false);
         } // The lossless editor must emit [] rather than an empty block.
@@ -761,8 +756,8 @@ pub fn preserve(text: &str, before: &Yaml, after: &Yaml) -> Result<String> {
     let mapping = doc.as_mapping().context("The config must be a mapping")?;
     sync_mapping(
         &mapping,
-        before.as_mapping().context("Invalid config")?,
-        after.as_mapping().context("Invalid config")?,
+        before.as_object().context("Invalid config")?,
+        after.as_object().context("Invalid config")?,
     )?;
     let output = file.to_string();
     // Never write malformed output or a lossless edit that changed unrelated values.
@@ -778,7 +773,7 @@ pub fn render(text: &str, before: &Yaml, after: &Yaml) -> Result<(String, bool)>
         Ok(out) => Ok((out, false)),
         Err(e) => {
             tracing::warn!("rewriting config.yaml without its formatting: {e:#}");
-            let out = serde_yaml::to_string(after)?;
+            let out = crate::yaml::to_string(after)?;
             ensure!(yaml(&out)? == *after, "Could not write this config");
             Ok((out, true))
         }
@@ -983,7 +978,7 @@ mod tests {
             json!({"request-limits":{"max-in-flight":-1}}),
         ] {
             assert!(apply("", invalid.as_object().unwrap()).is_err());
-            assert!(Config::parse(&serde_yaml::to_string(&invalid).unwrap()).is_err());
+            assert!(Config::parse(&crate::yaml::to_string(&invalid).unwrap()).is_err());
         }
     }
 
@@ -1233,7 +1228,7 @@ mod tests {
             assert_eq!(cfg.named_clients.len(), 1);
             assert_eq!(cfg.named_clients[0].label, "Whombat · Cybex BV");
             assert_eq!(values(&out).unwrap()["named-clients"], json!([whombat]));
-            assert!(yaml(&out).unwrap()["named-clients"].is_sequence(), "named-clients stays at the top level");
+            assert!(yaml(&out).unwrap()["named-clients"].is_array(), "named-clients stays at the top level");
             let (out, cfg) = edit(&out, json!({"named-clients": [whombat, laptop]}));
             assert_eq!(cfg.named_clients.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["whombat-cybex", "laptop"]);
             let (out, cfg) = edit(&out, json!({"named-clients": [laptop]}));
@@ -1248,7 +1243,7 @@ mod tests {
             if source.contains("config-version") {
                 assert_eq!(cfg.claude_api_key[0].api_key, "sk-ant");
                 assert!(out.contains("# upstream key"));
-                assert!(yaml(&out).unwrap()["api-keys"].is_mapping());
+                assert!(yaml(&out).unwrap()["api-keys"].is_object());
             }
         }
     }

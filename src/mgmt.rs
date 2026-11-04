@@ -1240,16 +1240,14 @@ pub(crate) fn keep_original(app: &App, text: &str) {
     }
 }
 
-fn edit_config(app: &Arc<App>, edit: impl FnOnce(&mut serde_yaml::Value)) -> Response {
+fn edit_config(app: &Arc<App>, edit: impl FnOnce(&mut Value)) -> Response {
     let _guard = app.config_write.lock();
     let text = match std::fs::read_to_string(&app.cfg_path) {
         Ok(text) => text,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not read config: {e}")),
     };
-    let mut doc: serde_yaml::Value = match serde_yaml::from_str(&text) {
-        Ok(serde_yaml::Value::Null) | Err(_) if text.trim().is_empty() => {
-            serde_yaml::Value::Mapping(Default::default())
-        }
+    let mut doc = match crate::yaml::from_str(&text) {
+        Ok(Value::Null) | Err(_) if text.trim().is_empty() => Value::Object(Default::default()),
         Ok(v) => v,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("config.yaml doesn't parse: {e}")),
     };

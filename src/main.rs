@@ -55,6 +55,7 @@ mod usage;
 mod vertex;
 mod window_starter;
 mod ws;
+mod yaml;
 #[cfg(test)]
 mod yaml_props;
 

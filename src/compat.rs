@@ -2,22 +2,29 @@
 //! layout and the older flat one), in-place edits that keep a file usable by
 //! CLIProxyAPI, and its command-line flags.
 
-use serde_yaml::{Mapping, Value as Yaml};
+use serde_json::{Map, Value as Yaml};
+
+type Mapping = Map<String, Yaml>;
 
 fn key(s: &str) -> Yaml {
     Yaml::String(s.into())
 }
 
+/// A mapping key.
+fn mkey(s: &str) -> String {
+    s.to_string()
+}
+
 fn path<'a>(v: &'a Yaml, p: &[&str]) -> Option<&'a Yaml> {
-    p.iter().try_fold(v, |cur, k| cur.as_mapping()?.get(k)).filter(|v| !v.is_null())
+    p.iter().try_fold(v, |cur, k| cur.as_object()?.get(*k)).filter(|v| !v.is_null())
 }
 
 /// Copies `from` (a nested path) to the flat `to` key. `force` = the new spelling wins.
 fn lift(doc: &mut Yaml, from: &[&str], to: &str, force: bool) {
     let Some(v) = path(doc, from).cloned() else { return };
-    let root = doc.as_mapping_mut().unwrap();
+    let root = doc.as_object_mut().unwrap();
     if force || root.get(to).is_none_or(Yaml::is_null) {
-        root.insert(key(to), v);
+        root.insert(mkey(to), v);
     }
 }
 
@@ -36,20 +43,20 @@ const SHARED: &[&str] = &["base-url", "proxy-url", "headers", "models", "exclude
 
 /// A v8 group (`{name, base-url, ..., keys: [{api-key, ...}]}`) as flat key entries.
 fn flatten_group(group: &Mapping) -> Vec<Yaml> {
-    let keys = group.get("keys").and_then(Yaml::as_sequence).cloned().unwrap_or_default();
+    let keys = group.get("keys").and_then(Yaml::as_array).cloned().unwrap_or_default();
     keys.iter()
-        .filter_map(Yaml::as_mapping)
+        .filter_map(Yaml::as_object)
         .map(|k| {
             let mut entry = Mapping::new();
             for f in SHARED {
                 if let Some(v) = k.get(*f).filter(|v| !v.is_null()).or_else(|| group.get(*f).filter(|v| !v.is_null())) {
-                    entry.insert(key(f), v.clone());
+                    entry.insert(mkey(f), v.clone());
                 }
             }
             if let Some(v) = k.get("api-key") {
-                entry.insert(key("api-key"), v.clone());
+                entry.insert(mkey("api-key"), v.clone());
             }
-            Yaml::Mapping(entry)
+            Yaml::Object(entry)
         })
         .collect()
 }
@@ -57,20 +64,20 @@ fn flatten_group(group: &Mapping) -> Vec<Yaml> {
 /// A v8 openai-compatibility group as one flat compat entry.
 fn compat_group(group: &Mapping) -> Yaml {
     let mut entry = group.clone();
-    let keys = entry.remove("keys").and_then(|k| k.as_sequence().cloned()).unwrap_or_default();
-    entry.insert(key("api-key-entries"), Yaml::Sequence(keys));
-    Yaml::Mapping(entry)
+    let keys = entry.remove("keys").and_then(|k| k.as_array().cloned()).unwrap_or_default();
+    entry.insert(mkey("api-key-entries"), Yaml::Array(keys));
+    Yaml::Object(entry)
 }
 
 /// Rewrites a CLIProxyAPI config into this crate's flat layout, in memory.
 /// Returns the CLIProxyAPI features that have no effect here.
 pub fn normalize(doc: &mut Yaml) -> Vec<String> {
     let mut ignored = Vec::new();
-    let Some(root) = doc.as_mapping_mut() else { return ignored };
+    let Some(root) = doc.as_object_mut() else { return ignored };
 
     // v8 reuses the root `api-keys` for provider groups; client keys moved to access.api-keys.
     let groups = match root.get("api-keys") {
-        Some(Yaml::Mapping(_)) => root.remove("api-keys").and_then(|v| v.as_mapping().cloned()),
+        Some(Yaml::Object(_)) => root.remove("api-keys").and_then(|v| v.as_object().cloned()),
         _ => None,
     };
 
@@ -90,7 +97,7 @@ pub fn normalize(doc: &mut Yaml) -> Vec<String> {
     lift(doc, &["routing", "window-starter"], "window-starter", true);
     // Preserve even an explicit null here so the percentage validator rejects it.
     if let Some(reserve) = doc.get("routing").and_then(|r| r.get("five-hour-reserve-percent")).cloned() {
-        doc.as_mapping_mut().unwrap().insert(key("five-hour-reserve-percent"), reserve);
+        doc.as_object_mut().unwrap().insert(mkey("five-hour-reserve-percent"), reserve);
     }
     lift(doc, &["requests", "proxy-url"], "proxy-url", true);
     lift(doc, &["oauth", "auth-dir"], "auth-dir", true);
@@ -101,32 +108,31 @@ pub fn normalize(doc: &mut Yaml) -> Vec<String> {
     let disable_cloak = path(doc, &["oauth", "providers", "claude", "disable-claude-cloak-mode"])
         .or_else(|| path(doc, &["disable-claude-cloak-mode"]))
         .and_then(Yaml::as_bool);
-    let root = doc.as_mapping_mut().unwrap();
+    let root = doc.as_object_mut().unwrap();
     if let Some(off) = disable_cloak
         && root.get("claude-cloak").is_none()
     {
-        root.insert(key("claude-cloak"), Yaml::Bool(!off));
+        root.insert(mkey("claude-cloak"), Yaml::Bool(!off));
     }
 
     // Very old configs listed Gemini keys as plain strings.
-    if let Some(Yaml::Sequence(old)) = root.remove("generative-language-api-key")
+    if let Some(Yaml::Array(old)) = root.remove("generative-language-api-key")
         && root.get("gemini-api-key").is_none()
     {
-        let entries = old.into_iter().map(|k| Yaml::Mapping(Mapping::from_iter([(key("api-key"), k)]))).collect();
-        root.insert(key("gemini-api-key"), Yaml::Sequence(entries));
+        let entries = old.into_iter().map(|k| Yaml::Object(Mapping::from_iter([(mkey("api-key"), k)]))).collect();
+        root.insert(mkey("gemini-api-key"), Yaml::Array(entries));
     }
 
     if let Some(groups) = groups {
         for (name, list) in groups {
-            let name = name.as_str().unwrap_or_default().to_string();
             let list: Vec<Mapping> =
-                list.as_sequence().into_iter().flatten().filter_map(|g| g.as_mapping().cloned()).collect();
+                list.as_array().into_iter().flatten().filter_map(|g| g.as_object().cloned()).collect();
             if name == "openai-compatibility" {
                 let entries = list.iter().map(compat_group).collect();
-                root.insert(key("openai-compatibility"), Yaml::Sequence(entries));
+                root.insert(mkey("openai-compatibility"), Yaml::Array(entries));
             } else if let Some((_, flat)) = GROUPS.iter().find(|(g, _)| *g == name) {
                 let entries = list.iter().flat_map(flatten_group).collect();
-                root.insert(key(flat), Yaml::Sequence(entries));
+                root.insert(mkey(flat), Yaml::Array(entries));
             } else if !list.is_empty() {
                 ignored.push(format!("api-keys.{name}"));
             }
@@ -134,22 +140,22 @@ pub fn normalize(doc: &mut Yaml) -> Vec<String> {
     }
 
     // Older compat entries keep their keys in api-key-entries: [{api-key, proxy-url}].
-    if let Some(Yaml::Sequence(list)) = root.get_mut("openai-compatibility") {
-        for entry in list.iter_mut().filter_map(Yaml::as_mapping_mut) {
-            let Some(Yaml::Sequence(keys)) = entry.remove("api-key-entries") else { continue };
+    if let Some(Yaml::Array(list)) = root.get_mut("openai-compatibility") {
+        for entry in list.iter_mut().filter_map(Yaml::as_object_mut) {
+            let Some(Yaml::Array(keys)) = entry.remove("api-key-entries") else { continue };
             if entry.get("api-keys").is_none() {
                 let plain: Vec<Yaml> = keys
                     .iter()
-                    .filter_map(|k| k.as_mapping().and_then(|m| m.get("api-key")).or(Some(k)).filter(|v| v.is_string()))
+                    .filter_map(|k| k.as_object().and_then(|m| m.get("api-key")).or(Some(k)).filter(|v| v.is_string()))
                     .cloned()
                     .collect();
-                entry.insert(key("api-keys"), Yaml::Sequence(plain));
+                entry.insert(mkey("api-keys"), Yaml::Array(plain));
             }
-            let proxy = keys.iter().find_map(|k| k.as_mapping()?.get("proxy-url").filter(|v| v.is_string()).cloned());
+            let proxy = keys.iter().find_map(|k| k.as_object()?.get("proxy-url").filter(|v| v.is_string()).cloned());
             if let Some(p) = proxy
                 && entry.get("proxy-url").is_none_or(Yaml::is_null)
             {
-                entry.insert(key("proxy-url"), p);
+                entry.insert(mkey("proxy-url"), p);
             }
         }
     }
@@ -173,21 +179,21 @@ pub fn normalize(doc: &mut Yaml) -> Vec<String> {
 /// Which layout a config file uses, so edits land where CLIProxyAPI also reads them.
 fn is_v8(doc: &Yaml) -> bool {
     path(doc, &["config-version"]).and_then(Yaml::as_i64).is_some_and(|v| v >= 8)
-        || path(doc, &["api-keys"]).is_some_and(Yaml::is_mapping)
+        || path(doc, &["api-keys"]).is_some_and(Yaml::is_object)
 }
 
 fn seq<'a>(m: &'a mut Mapping, k: &str) -> &'a mut Vec<Yaml> {
-    if !m.get(k).is_some_and(Yaml::is_sequence) {
-        m.insert(key(k), Yaml::Sequence(vec![]));
+    if !m.get(k).is_some_and(Yaml::is_array) {
+        m.insert(mkey(k), Yaml::Array(vec![]));
     }
-    m.get_mut(k).and_then(Yaml::as_sequence_mut).unwrap()
+    m.get_mut(k).and_then(Yaml::as_array_mut).unwrap()
 }
 
 fn map<'a>(m: &'a mut Mapping, k: &str) -> &'a mut Mapping {
-    if !m.get(k).is_some_and(Yaml::is_mapping) {
-        m.insert(key(k), Yaml::Mapping(Mapping::new()));
+    if !m.get(k).is_some_and(Yaml::is_object) {
+        m.insert(mkey(k), Yaml::Object(Mapping::new()));
     }
-    m.get_mut(k).and_then(Yaml::as_mapping_mut).unwrap()
+    m.get_mut(k).and_then(Yaml::as_object_mut).unwrap()
 }
 
 pub struct NewKey<'a> {
@@ -201,15 +207,15 @@ pub struct NewKey<'a> {
 }
 
 fn models_yaml(models: &[(String, Option<String>)]) -> Yaml {
-    Yaml::Sequence(
+    Yaml::Array(
         models
             .iter()
             .map(|(name, alias)| {
-                let mut m = Mapping::from_iter([(key("name"), key(name))]);
+                let mut m = Mapping::from_iter([(mkey("name"), key(name))]);
                 if let Some(a) = alias {
-                    m.insert(key("alias"), key(a));
+                    m.insert(mkey("alias"), key(a));
                 }
-                Yaml::Mapping(m)
+                Yaml::Object(m)
             })
             .collect(),
     )
@@ -218,34 +224,34 @@ fn models_yaml(models: &[(String, Option<String>)]) -> Yaml {
 /// Adds an upstream API key in whichever layout the file already uses.
 pub fn add_key(doc: &mut Yaml, k: &NewKey) {
     if doc.is_null() {
-        *doc = Yaml::Mapping(Mapping::new());
+        *doc = Yaml::Object(Mapping::new());
     }
     // CLIProxyAPI's v8 groups have no `kimi`; keep those keys in the flat spelling.
     let v8 = is_v8(doc) && k.group != "kimi";
-    let root = doc.as_mapping_mut().unwrap();
+    let root = doc.as_object_mut().unwrap();
     let compat = k.group == "openai-compatibility";
     let mut entry = Mapping::new();
     if let Some(b) = k.base_url {
-        entry.insert(key("base-url"), key(b));
+        entry.insert(mkey("base-url"), key(b));
     }
     if !k.models.is_empty() {
-        entry.insert(key("models"), models_yaml(&k.models));
+        entry.insert(mkey("models"), models_yaml(&k.models));
     }
-    let key_entry = || Yaml::Mapping(Mapping::from_iter([(key("api-key"), key(k.api_key))]));
+    let key_entry = || Yaml::Object(Mapping::from_iter([(mkey("api-key"), key(k.api_key))]));
 
     if compat {
         let name = k.name.unwrap_or("provider");
         let list =
             if v8 { seq(map(root, "api-keys"), "openai-compatibility") } else { seq(root, "openai-compatibility") };
         let keys_field = if v8 { "keys" } else { "api-key-entries" };
-        let existing = list.iter_mut().filter_map(Yaml::as_mapping_mut).find(|e| {
+        let existing = list.iter_mut().filter_map(Yaml::as_object_mut).find(|e| {
             e.get("name").and_then(Yaml::as_str) == Some(name) && e.get("base-url").and_then(Yaml::as_str) == k.base_url
         });
         match existing {
             Some(e) => {
                 if !k.api_key.is_empty() {
                     match e.get_mut("api-keys") {
-                        Some(Yaml::Sequence(plain)) => plain.push(key(k.api_key)),
+                        Some(Yaml::Array(plain)) => plain.push(key(k.api_key)),
                         _ => seq(e, keys_field).push(key_entry()),
                     }
                 }
@@ -253,20 +259,20 @@ pub fn add_key(doc: &mut Yaml, k: &NewKey) {
                 for (n, a) in &k.models {
                     let public = a.as_deref().unwrap_or(n);
                     let known = models.iter().any(|m| {
-                        let m = m.as_mapping();
+                        let m = m.as_object();
                         let alias = m.and_then(|m| m.get("alias")).and_then(Yaml::as_str).filter(|s| !s.is_empty());
                         alias.or_else(|| m.and_then(|m| m.get("name")).and_then(Yaml::as_str)) == Some(public)
                     });
                     if !known {
-                        models.push(models_yaml(&[(n.clone(), a.clone())]).as_sequence().unwrap()[0].clone());
+                        models.push(models_yaml(&[(n.clone(), a.clone())]).as_array().unwrap()[0].clone());
                     }
                 }
             }
             None => {
-                entry.insert(key("name"), key(name));
+                entry.insert(mkey("name"), key(name));
                 let keys = if k.api_key.is_empty() { vec![] } else { vec![key_entry()] };
-                entry.insert(key(keys_field), Yaml::Sequence(keys));
-                list.push(Yaml::Mapping(entry));
+                entry.insert(mkey(keys_field), Yaml::Array(keys));
+                list.push(Yaml::Object(entry));
             }
         }
         return;
@@ -274,33 +280,33 @@ pub fn add_key(doc: &mut Yaml, k: &NewKey) {
     if v8 {
         let groups = seq(map(root, "api-keys"), k.group);
         let n = groups.len() + 1;
-        entry.insert(key("name"), key(&format!("{}-{n}", k.group)));
-        entry.insert(key("keys"), Yaml::Sequence(vec![key_entry()]));
-        groups.push(Yaml::Mapping(entry));
+        entry.insert(mkey("name"), key(&format!("{}-{n}", k.group)));
+        entry.insert(mkey("keys"), Yaml::Array(vec![key_entry()]));
+        groups.push(Yaml::Object(entry));
     } else {
-        entry.insert(key("api-key"), key(k.api_key));
+        entry.insert(mkey("api-key"), key(k.api_key));
         let flat = GROUPS.iter().find(|(g, _)| *g == k.group).map(|(_, f)| *f).unwrap_or("claude-api-key");
-        seq(root, flat).push(Yaml::Mapping(entry));
+        seq(root, flat).push(Yaml::Object(entry));
     }
 }
 
 /// Removes an upstream API key from every place it appears (both layouts).
 /// `group` limits compat removal to one openai-compatibility entry.
 pub fn remove_key(doc: &mut Yaml, api_key: &str, compat_group: Option<&str>) {
-    let Some(root) = doc.as_mapping_mut() else { return };
+    let Some(root) = doc.as_object_mut() else { return };
     let is_it = |v: &Yaml| {
-        v.as_mapping().and_then(|m| m.get("api-key")).and_then(Yaml::as_str).map(str::trim) == Some(api_key)
+        v.as_object().and_then(|m| m.get("api-key")).and_then(Yaml::as_str).map(str::trim) == Some(api_key)
             || v.as_str().map(str::trim) == Some(api_key)
     };
     let prune_compat = |list: &mut Vec<Yaml>| {
         list.retain_mut(|e| {
-            let Some(m) = e.as_mapping_mut() else { return true };
+            let Some(m) = e.as_object_mut() else { return true };
             if compat_group.is_some_and(|g| m.get("name").and_then(Yaml::as_str) != Some(g)) {
                 return true;
             }
             let mut had = false;
             for f in ["api-keys", "api-key-entries", "keys"] {
-                if let Some(Yaml::Sequence(keys)) = m.get_mut(f) {
+                if let Some(Yaml::Array(keys)) = m.get_mut(f) {
                     had |= !keys.is_empty();
                     if api_key.is_empty() {
                         keys.clear();
@@ -311,28 +317,28 @@ pub fn remove_key(doc: &mut Yaml, api_key: &str, compat_group: Option<&str>) {
             }
             let left = ["api-keys", "api-key-entries", "keys"]
                 .iter()
-                .any(|f| m.get(*f).and_then(Yaml::as_sequence).is_some_and(|s| !s.is_empty()));
+                .any(|f| m.get(*f).and_then(Yaml::as_array).is_some_and(|s| !s.is_empty()));
             // Removing a group's last key removes the group (a keyless one would stay usable).
             !(had || api_key.is_empty()) || left
         });
     };
     for (_, flat) in GROUPS {
-        if let Some(Yaml::Sequence(list)) = root.get_mut(*flat) {
+        if let Some(Yaml::Array(list)) = root.get_mut(*flat) {
             list.retain(|e| !is_it(e));
         }
     }
-    if let Some(Yaml::Sequence(list)) = root.get_mut("openai-compatibility") {
+    if let Some(Yaml::Array(list)) = root.get_mut("openai-compatibility") {
         prune_compat(list);
     }
-    if let Some(Yaml::Mapping(groups)) = root.get_mut("api-keys") {
+    if let Some(Yaml::Object(groups)) = root.get_mut("api-keys") {
         for (name, list) in groups.iter_mut() {
-            let Some(list) = list.as_sequence_mut() else { continue };
-            if name.as_str() == Some("openai-compatibility") {
+            let Some(list) = list.as_array_mut() else { continue };
+            if name == "openai-compatibility" {
                 prune_compat(list);
                 continue;
             }
             list.retain_mut(|g| {
-                let Some(Yaml::Sequence(keys)) = g.as_mapping_mut().and_then(|m| m.get_mut("keys")) else {
+                let Some(Yaml::Array(keys)) = g.as_object_mut().and_then(|m| m.get_mut("keys")) else {
                     return true;
                 };
                 let before = keys.len();
@@ -516,18 +522,18 @@ disable-claude-cloak-mode: true
 
     #[test]
     fn edits_keep_the_files_layout() {
-        let mut v8: Yaml = serde_yaml::from_str(V8).unwrap();
+        let mut v8: Yaml = crate::yaml::from_str(V8).unwrap();
         add_key(&mut v8, &NewKey { group: "claude", api_key: "sk-new", base_url: None, models: vec![], name: None });
         assert_eq!(v8["api-keys"]["claude"][0]["keys"][0]["api-key"], key("sk-new"));
         assert!(v8.get("claude-api-key").is_none());
         remove_key(&mut v8, "AIza-1", None);
-        assert_eq!(v8["api-keys"]["gemini"][0]["keys"].as_sequence().unwrap().len(), 1);
+        assert_eq!(v8["api-keys"]["gemini"][0]["keys"].as_array().unwrap().len(), 1);
         remove_key(&mut v8, "sk-or-1", Some("openrouter"));
-        assert!(v8["api-keys"]["openai-compatibility"].as_sequence().unwrap().is_empty());
+        assert!(v8["api-keys"]["openai-compatibility"].as_array().unwrap().is_empty());
         // Untouched sections survive.
-        assert_eq!(v8["payload"], serde_yaml::from_str::<Yaml>("{ default: [] }").unwrap());
+        assert_eq!(v8["payload"], crate::yaml::from_str("{ default: [] }").unwrap());
 
-        let mut legacy: Yaml = serde_yaml::from_str(LEGACY).unwrap();
+        let mut legacy: Yaml = crate::yaml::from_str(LEGACY).unwrap();
         add_key(&mut legacy, &NewKey { group: "xai", api_key: "xai-1", base_url: None, models: vec![], name: None });
         assert_eq!(legacy["xai-api-key"][0]["api-key"], key("xai-1"));
         let models = vec![("qwen3-coder".to_string(), None)];
@@ -540,13 +546,13 @@ disable-claude-cloak-mode: true
         };
         add_key(&mut legacy, &k);
         let ollama = &legacy["openai-compatibility"][0];
-        assert_eq!(ollama["api-key-entries"].as_sequence().unwrap().len(), 2);
-        assert_eq!(ollama["models"].as_sequence().unwrap().len(), 2);
+        assert_eq!(ollama["api-key-entries"].as_array().unwrap().len(), 2);
+        assert_eq!(ollama["models"].as_array().unwrap().len(), 2);
         remove_key(&mut legacy, "sk-ant-1", None);
-        assert!(legacy["claude-api-key"].as_sequence().unwrap().is_empty());
+        assert!(legacy["claude-api-key"].as_array().unwrap().is_empty());
         // Client keys are never touched.
         remove_key(&mut legacy, "client-1", None);
-        assert_eq!(legacy["api-keys"].as_sequence().unwrap().len(), 1);
+        assert_eq!(legacy["api-keys"].as_array().unwrap().len(), 1);
     }
 
     #[test]

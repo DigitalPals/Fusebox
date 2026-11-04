@@ -1192,7 +1192,7 @@ fn the_config_refuses_settings_that_would_misbehave() {
     assert_eq!(cfg.log_format, crate::config::LogFormat::Json);
     assert_eq!(cfg.named_clients[0].tokens_per_day, Some(5000));
     // Groups serialize back to the short form unless they balance.
-    let yaml = serde_yaml::to_string(&cfg.model_groups).unwrap();
+    let yaml = crate::yaml::to_string(&cfg.model_groups).unwrap();
     assert!(yaml.contains("smart:\n- claude-opus-5-5"), "{yaml}");
     assert!(yaml.contains("balance: true"), "{yaml}");
     assert_eq!(Config::default().first_token_timeout_seconds, 120);

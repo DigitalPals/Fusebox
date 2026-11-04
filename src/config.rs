@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_yaml::Value as Yaml;
+use serde_json::Value as Yaml;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
@@ -205,7 +205,7 @@ impl<'de> Deserialize<'de> for Routing {
         let v = Yaml::deserialize(d)?;
         let s = match &v {
             Yaml::String(s) => s.as_str(),
-            Yaml::Mapping(m) => m.get("strategy").and_then(Yaml::as_str).unwrap_or_default(),
+            Yaml::Object(m) => m.get("strategy").and_then(Yaml::as_str).unwrap_or_default(),
             _ => "",
         };
         Ok(match s.trim().to_ascii_lowercase().as_str() {
@@ -778,13 +778,13 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let mut doc: Yaml = if text.trim().is_empty() {
-            Yaml::Mapping(Default::default())
+            Yaml::Object(Default::default())
         } else {
-            serde_yaml::from_str(text).context("invalid config")?
+            crate::yaml::from_str(text).context("invalid config")?
         };
         let ignored = crate::compat::normalize(&mut doc);
         let explicit = doc.get("auth-dir").is_some_and(|v| !v.is_null());
-        let mut cfg: Config = serde_yaml::from_value(doc).context("invalid config")?;
+        let mut cfg: Config = serde_json::from_value(doc).context("invalid config")?;
         cfg.ignored = ignored;
         cfg.prompt_cache.validate().map_err(anyhow::Error::msg)?;
         cfg.stream_limits.validate().map_err(anyhow::Error::msg)?;
@@ -1074,7 +1074,7 @@ mod tests {
         let apns = cfg.apns.as_ref().unwrap();
         assert_eq!((apns.team_id.as_str(), apns.topic.as_str()), ("ABCDE12345", "com.digitalpals.fusebox"));
         assert!(Config::parse("").unwrap().apns.is_none());
-        assert!(!serde_yaml::to_string(&Config::default()).unwrap().contains("apns"), "unset, it isn't written");
+        assert!(!crate::yaml::to_string(&Config::default()).unwrap().contains("apns"), "unset, it isn't written");
         for (text, problem) in [
             ("apns: {team-id: ABC, key-id: KEY1234567, key-file: k.p8}", "team-id"),
             ("apns: {team-id: ABCDE12345, key-id: KEY1234567, key-file: ''}", "key-file"),

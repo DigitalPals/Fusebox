@@ -616,13 +616,13 @@ fn with_extra_models(
     let changes = json!({ "extra-models": &models });
     // Validates as any settings change does, whichever way the result is written.
     let (out, cfg, rewritten) = crate::config_editor::apply(text, changes.as_object().unwrap())?;
-    let before: serde_yaml::Value = serde_yaml::from_str(text)?;
+    let before = crate::yaml::from_str(text)?;
     if !empty && before.get("extra-models").is_none() {
         let mut out = text.to_string();
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str(&serde_yaml::to_string(&BTreeMap::from([("extra-models", models)]))?);
+        out.push_str(&crate::yaml::to_string(&BTreeMap::from([("extra-models", models)]))?);
         let parsed = crate::config::Config::parse(&out)?;
         anyhow::ensure!(parsed.extra_models == cfg.extra_models, "Could not write the added models");
         return Ok((out, parsed, false));
@@ -630,8 +630,8 @@ fn with_extra_models(
     if !empty {
         return Ok((out, cfg, rewritten));
     }
-    let mut after: serde_yaml::Value = serde_yaml::from_str(&out)?;
-    if let Some(root) = after.as_mapping_mut() {
+    let mut after = crate::yaml::from_str(&out)?;
+    if let Some(root) = after.as_object_mut() {
         root.remove("extra-models");
     }
     let (out, also) = crate::config_editor::render(text, &before, &after)?;

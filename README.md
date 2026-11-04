@@ -109,6 +109,8 @@ fusebox --config config.yaml check
 
 Changes made from the dashboard keep your file's layout, YAML comments, and settings this binary doesn't use, so you can switch back at any time. The rare layout that can't be edited in place, such as lists written without indentation, is rewritten instead, and the original is kept as `config.yaml.bak`.
 
+`config.yaml` is read with YAML 1.2's core schema: `yes`, `on` and `017` stay strings, quoted values are always strings, a repeated key or a second document is an error, and `<<` is an ordinary key rather than a merge. When the dashboard has to rewrite the file, it quotes strings other YAML readers could take for something else, such as `yes` or `017`, so CLIProxyAPI reads the same values.
+
 ## Connect your tools
 
 In **Config → Clients**, choose a tool and a model, then copy or download its setup. Fusebox includes reported context/output limits and image support where the client accepts them. The picker respects each named client's allowed models and keeps the exact public alias or prefix. Unknown capabilities stay marked unknown; Zed asks for a documented context limit before generating settings.

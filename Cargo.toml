@@ -53,6 +53,7 @@ uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
 zstd = "0.14.3"
 yaml-edit = { version = "0.3.2", default-features = false }
+yaml-rust2 = { version = "0.13.0", default-features = false }
 
 [build-dependencies]
 flate2 = "1"
