@@ -263,6 +263,31 @@ test('identity learning requires an explicit named-client opt-in and can be revo
   assert.equal(page.values()['named-clients'][0].key, laptop.key);
 });
 
+test('saving limits keeps fields the form does not know and writes the model map', async () => {
+  const withMap = { ...laptop, 'model-map': { 'claude-*': 'claude-sonnet-5-5' }, 'trust-client-identity': true, 'future-field': 'keep-me' };
+  const page = clients({ 'named-clients': [withMap] });
+  const form = (overrides) => `(() => { const elements = {}; for (const [k] of LIMITS) elements[k] = { value: '' };
+    for (const [k, v] of Object.entries(${JSON.stringify(overrides)})) elements[k].value = v;
+    return { dataset: { id: 'laptop' }, elements, ownerDocument: { getElementById: () => null } }; })()`;
+  // The form opens showing the map it would resave.
+  page.run('S.config.named.limits = "laptop"');
+  assert.ok(page.html().includes('value="claude-* = claude-sonnet-5-5"'), page.html());
+  await page.run(`saveLimits(${form({ 'model-map': 'claude-opus-* = claude-sonnet-5-5, gpt-6-astra=gpt-6-astra-mini(low)', 'requests-per-minute': '30' })})`);
+  assert.equal(page.saves.length, 1);
+  const saved = page.saves[0]['named-clients'][0];
+  assert.deepEqual(saved['model-map'], { 'claude-opus-*': 'claude-sonnet-5-5', 'gpt-6-astra': 'gpt-6-astra-mini(low)' });
+  assert.equal(saved['requests-per-minute'], 30);
+  assert.equal(saved['future-field'], 'keep-me', 'an unknown field survives a limits save');
+  assert.equal(saved['trust-client-identity'], true);
+  assert.equal(saved.key, laptop.key);
+  // A mapping without `=` is refused in the form, not saved half-parsed.
+  await page.run(`saveLimits(${form({ 'model-map': 'claude-opus-5-5' })})`);
+  assert.equal(page.saves.length, 1, 'no second save');
+  assert.ok(page.named.limitsError.includes('pattern = model'), page.named.limitsError);
+  // The limits line names the mapping.
+  assert.ok(page.visible().includes('claude-opus-* → claude-sonnet-5-5'));
+});
+
 test('learned identity inspection escapes values and respects privacy mode', () => {
   const page = clients({});
   page.run(`S.config.identities = { source: '<script>private-client</script>' }`);

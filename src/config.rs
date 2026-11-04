@@ -242,6 +242,12 @@ pub struct NamedClient {
     /// Model patterns this client may use (`*` wildcards); empty allows every model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// Rewrite the requested model before routing: pattern (`*` wildcards,
+    /// matched case-insensitively on the suffix-stripped base model) to the
+    /// model or group to serve instead, which may carry its own reasoning
+    /// suffix. The `models` allowlist is checked against the mapped model.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_map: BTreeMap<String, String>,
     /// User-Agent patterns its requests must match (`claude-cli/*`); empty allows any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_agents: Vec<String>,
@@ -854,6 +860,7 @@ impl Config {
                 client.models.iter().chain(&client.user_agents).all(|p| !p.trim().is_empty()),
                 "named-clients: {id} has an empty model or user-agent pattern"
             );
+            crate::policy::validate_model_map(client).map_err(|e| anyhow::anyhow!("named-clients: {id}: {e}"))?;
             for address in &client.addresses {
                 anyhow::ensure!(
                     crate::source::Cidr::parse(address).is_some(),
@@ -1063,6 +1070,22 @@ mod tests {
             let err = parse(&clients).unwrap_err().to_string();
             assert!(err.contains(problem), "{err}");
         }
+    }
+
+    #[test]
+    fn named_client_model_maps_parse_validate_and_round_trip() {
+        let text = "named-clients:\n  - id: agent\n    label: Agent\n    key: fbx_agent\n    model-map:\n      claude-opus-*: claude-sonnet-5-5\n      gpt-6-astra: \"gpt-6-astra-mini(low)\"\n";
+        let cfg = Config::parse(text).unwrap();
+        assert_eq!(cfg.named_clients[0].model_map.len(), 2);
+        assert_eq!(cfg.named_clients[0].model_map["gpt-6-astra"], "gpt-6-astra-mini(low)");
+        let written = crate::yaml::to_string(&cfg.named_clients[0]).unwrap();
+        assert!(written.contains("model-map:"), "{written}");
+        let back: NamedClient = serde_json::from_value(crate::yaml::from_str(&written).unwrap()).unwrap();
+        assert_eq!(back, cfg.named_clients[0]);
+        // No map, nothing written; a chaining map is refused at load.
+        assert!(!crate::yaml::to_string(&NamedClient::default()).unwrap().contains("model-map"));
+        let chained = text.replace("gpt-6-astra: \"gpt-6-astra-mini(low)\"", "gpt-6-astra: claude-opus-5-5");
+        assert!(format!("{:#}", Config::parse(&chained).unwrap_err()).contains("not mapped again"));
     }
 
     #[test]

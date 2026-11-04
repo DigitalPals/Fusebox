@@ -158,6 +158,21 @@ impl Clients {
     pub fn new(store: Option<Store>) -> Self {
         Self { store, ..Default::default() }
     }
+
+    /// For the read-only status endpoint: identity-level checks only (expiry
+    /// and the address list). Programs, models, rate and budgets are about
+    /// inference, and a status read is not a request.
+    pub fn admit_status(&self, client: &NamedClient, headers: &HeaderMap) -> Result<(), Denied> {
+        if let Some(last) = client.expires
+            && Local::now().date_naive() > last
+        {
+            return Err(denied(401, format!("this key expired on {last}")));
+        }
+        if !address_allowed(client, headers) {
+            return Err(denied(403, "this key doesn't work from here".into()));
+        }
+        Ok(())
+    }
     /// Checks made before the request body is read: expiry, programs, rate and budgets.
     /// `count` is false for a WebSocket's opening request, whose turns count instead.
     pub fn admit(&self, client: &NamedClient, headers: &HeaderMap, count: bool) -> Result<(), Denied> {
@@ -357,15 +372,133 @@ pub fn trusted_identity_source<'a>(cfg: &'a crate::config::Config, headers: &Hea
     named_client(cfg, headers).filter(|client| client.trust_client_identity).map(|client| client.id.as_str())
 }
 
-/// Refuses a model the client's key may not use.
-pub fn check_model(app: &App, headers: &HeaderMap, model: &str) -> Result<(), Denied> {
-    let cfg = app.cfg();
-    match named_client(&cfg, headers) {
-        Some(c) if !model_allowed(c, model) => {
-            Err(denied(403, format!("this key can't use {model}; it may use {}", c.models.join(", "))))
+/// Literal (non-`*`) characters in a model-map pattern; more is more specific.
+fn literal_len(pattern: &str) -> usize {
+    pattern.chars().filter(|c| *c != '*').count()
+}
+
+/// Whether some model name matches both `*`-patterns (case-insensitively).
+fn patterns_overlap(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.to_lowercase().chars().collect(), b.to_lowercase().chars().collect());
+    // reach[i][j]: some prefix of a name matches a[..i] and b[..j].
+    let mut reach = vec![vec![false; b.len() + 1]; a.len() + 1];
+    reach[0][0] = true;
+    for i in 0..=a.len() {
+        for j in 0..=b.len() {
+            if !reach[i][j] {
+                continue;
+            }
+            // A star may match nothing, or take the other pattern's next symbol.
+            if i < a.len() && a[i] == '*' {
+                reach[i + 1][j] = true;
+                if j < b.len() {
+                    reach[i][j + 1] = true;
+                }
+            }
+            if j < b.len() && b[j] == '*' {
+                reach[i][j + 1] = true;
+                if i < a.len() {
+                    reach[i + 1][j] = true;
+                }
+            }
+            if i < a.len() && j < b.len() && a[i] != '*' && b[j] != '*' && a[i] == b[j] {
+                reach[i + 1][j + 1] = true;
+            }
         }
-        _ => Ok(()),
     }
+    reach[a.len()][b.len()]
+}
+
+/// The model a client's `model-map` sends `requested` to, if any: matched
+/// case-insensitively (through [`wildcard`]) on the suffix-stripped base
+/// model. An exact pattern beats a wildcard; among wildcards the longest
+/// literal wins. Two wildcards of equal length that can match the same model
+/// are refused at load ([`validate_model_map`]), so no tie is left to break;
+/// pattern text still orders them, so the result never depends on map order.
+/// A target's own reasoning suffix replaces the request's; without one, the
+/// request's suffix is kept. The result is never mapped again (no chaining).
+pub fn mapped_model(client: &NamedClient, requested: &str) -> Option<String> {
+    if client.model_map.is_empty() {
+        return None;
+    }
+    let (base, _) = crate::ir::split_model_suffix(requested);
+    let suffix = requested.trim().strip_prefix(base.as_str()).unwrap_or_default();
+    let mut best: Option<((bool, usize, &str), &str)> = None;
+    for (pattern, target) in &client.model_map {
+        if !wildcard(pattern, &base) {
+            continue;
+        }
+        let rank = (!pattern.contains('*'), literal_len(pattern), pattern.as_str());
+        if best.is_none_or(|(r, _)| rank > r) {
+            best = Some((rank, target));
+        }
+    }
+    let target = best?.1;
+    let (_, own) = crate::ir::split_model_suffix(target);
+    Some(if own.is_some() { target.to_string() } else { format!("{target}{suffix}") })
+}
+
+/// Whether a named client's `model-map` is usable. Checked at config load.
+pub fn validate_model_map(client: &NamedClient) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for (pattern, target) in &client.model_map {
+        if pattern.trim().is_empty() || target.trim().is_empty() {
+            return Err("model-map needs a pattern and a target model".into());
+        }
+        if target.contains('*') {
+            return Err(format!("model-map target \"{target}\" must name one model or group, without `*`"));
+        }
+        if !seen.insert(pattern.trim().to_ascii_lowercase()) {
+            return Err(format!("model-map pattern \"{pattern}\" is used twice"));
+        }
+        if let Some(other) = client.model_map.keys().find(|other| {
+            *other < pattern
+                && pattern.contains('*')
+                && other.contains('*')
+                && literal_len(other) == literal_len(pattern)
+                && patterns_overlap(other, pattern)
+        }) {
+            return Err(format!(
+                "model-map patterns \"{other}\" and \"{pattern}\" are equally specific and can match the same model; make one more specific"
+            ));
+        }
+        let (target_base, _) = crate::ir::split_model_suffix(target);
+        // Matching its own pattern is a narrowing (`claude-*` to one Claude
+        // model) and safe because mapping runs once; matching another
+        // pattern would chain.
+        if client.model_map.keys().any(|p| p != pattern && wildcard(p, &target_base)) {
+            return Err(format!(
+                "model-map target \"{target}\" matches another pattern; mapped models are not mapped again"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The outcome of admitting a requested model for a client.
+pub struct Admitted {
+    /// The model to serve: the requested one, or the `model-map` target.
+    pub model: String,
+    /// `(client id, requested model)` when a `model-map` rewrote the request.
+    pub mapped: Option<(String, String)>,
+}
+
+/// The one place a requested model is checked for a client, so no path can
+/// check a model without also mapping it: applies the client's `model-map`
+/// first, then checks its `models` allowlist against the mapped model.
+/// Returns the requested model untouched when no client has a map.
+pub fn admit_model(app: &App, headers: &HeaderMap, model: &str) -> Result<Admitted, Denied> {
+    let cfg = app.cfg();
+    let Some(client) = named_client(&cfg, headers) else {
+        return Ok(Admitted { model: model.to_string(), mapped: None });
+    };
+    let mapped = mapped_model(client, model);
+    let effective = mapped.clone().unwrap_or_else(|| model.to_string());
+    let (base, _) = crate::ir::split_model_suffix(&effective);
+    if !model_allowed(client, &base) {
+        return Err(denied(403, format!("this key can't use {base}; it may use {}", client.models.join(", "))));
+    }
+    Ok(Admitted { model: effective, mapped: mapped.map(|_| (client.id.clone(), model.to_string())) })
 }
 
 /// Keeps token and spend totals current for clients that have such limits.
@@ -630,6 +763,82 @@ mod tests {
         assert!(model_allowed(&c, "claude-sonnet-5-5"));
         assert!(model_allowed(&c, "GPT-6-ASTRA"));
         assert!(!model_allowed(&c, "gpt-6.1-sol"));
+    }
+
+    fn mapped_client(pairs: &[(&str, &str)]) -> NamedClient {
+        NamedClient { model_map: pairs.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect(), ..client() }
+    }
+
+    #[test]
+    fn model_map_matches_the_base_model_and_keeps_the_request_suffix() {
+        let c = mapped_client(&[("claude-opus-*", "claude-sonnet-5-5")]);
+        assert_eq!(mapped_model(&c, "claude-opus-5-5").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(mapped_model(&c, "Claude-Opus-5-5(max)").as_deref(), Some("claude-sonnet-5-5(max)"));
+        assert_eq!(mapped_model(&c, "gpt-6-astra"), None);
+        assert_eq!(mapped_model(&client(), "claude-opus-5-5"), None, "no map, no rewrite");
+    }
+
+    #[test]
+    fn model_map_target_suffix_replaces_the_request_suffix() {
+        let c = mapped_client(&[("gpt-6-astra", "gpt-6-astra-mini(low)")]);
+        assert_eq!(mapped_model(&c, "gpt-6-astra(high)").as_deref(), Some("gpt-6-astra-mini(low)"));
+        assert_eq!(mapped_model(&c, "gpt-6-astra").as_deref(), Some("gpt-6-astra-mini(low)"));
+    }
+
+    #[test]
+    fn model_map_prefers_exact_then_the_longest_literal_whatever_the_order() {
+        let forward = mapped_client(&[("claude-*", "any"), ("claude-opus-*", "opus"), ("claude-opus-5-5", "exact")]);
+        let mut reversed = mapped_client(&[]);
+        reversed.model_map = forward.model_map.iter().rev().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for c in [&forward, &reversed] {
+            assert_eq!(mapped_model(c, "claude-opus-5-5").as_deref(), Some("exact"));
+            assert_eq!(mapped_model(c, "claude-opus-4").as_deref(), Some("opus"));
+            assert_eq!(mapped_model(c, "claude-haiku-4").as_deref(), Some("any"));
+        }
+        let catchall = mapped_client(&[("*", "cheap"), ("gpt-*", "gpt")]);
+        assert_eq!(mapped_model(&catchall, "anything-else").as_deref(), Some("cheap"));
+        assert_eq!(mapped_model(&catchall, "gpt-6").as_deref(), Some("gpt"));
+    }
+
+    #[test]
+    fn model_map_validation_refuses_chains_wildcard_targets_and_duplicates() {
+        assert!(validate_model_map(&mapped_client(&[("claude-*", "claude-sonnet-5-5")])).is_ok(), "narrowing is fine");
+        assert!(
+            validate_model_map(&mapped_client(&[("gpt-*", "claude-sonnet-5-5"), ("claude-*", "gemini-3")])).is_err(),
+            "chains"
+        );
+        assert!(validate_model_map(&mapped_client(&[("gpt-*", "gpt-*-mini")])).is_err(), "wildcard target");
+        assert!(
+            validate_model_map(&mapped_client(&[("GPT-*", "a"), ("gpt-*", "b")])).is_err(),
+            "case-insensitive duplicate"
+        );
+        let tie = validate_model_map(&mapped_client(&[("a*", "cheap"), ("*a", "costly")])).unwrap_err();
+        assert!(tie.contains("equally specific"), "{tie}");
+        assert!(
+            validate_model_map(&mapped_client(&[("Claude-*-mini", "x"), ("claude-*", "y")])).is_ok(),
+            "different lengths rank, no tie"
+        );
+        assert!(
+            validate_model_map(&mapped_client(&[("Claude-*-mini", "x"), ("claude-opus-*", "y")])).is_err(),
+            "claude-opus-mini matches both, 12 literal characters each"
+        );
+        assert!(validate_model_map(&mapped_client(&[("gpt-*", "x"), ("glm-*", "y")])).is_ok(), "can't both match");
+        assert!(validate_model_map(&mapped_client(&[("x-*z", "p"), ("x*-z", "q")])).is_err(), "x-z matches both");
+        assert!(validate_model_map(&mapped_client(&[("x-*-z", "p"), ("x-*z", "q")])).is_ok(), "the longer one wins");
+        for (a, b, overlap) in [
+            ("a*", "*a", true),
+            ("gpt-*", "glm-*", false),
+            ("*-mini", "*-nano", false),
+            ("ab*cd", "a*bcd", true),
+            ("claude-*", "CLAUDE-*", true),
+            ("x*", "y*", false),
+        ] {
+            assert_eq!(patterns_overlap(a, b), overlap, "{a} vs {b}");
+            assert_eq!(patterns_overlap(b, a), overlap, "{b} vs {a}");
+        }
+        assert!(validate_model_map(&mapped_client(&[("", "b")])).is_err(), "empty pattern");
+        assert!(validate_model_map(&mapped_client(&[("a-*", "")])).is_err(), "empty target");
+        assert!(validate_model_map(&client()).is_ok(), "no map");
     }
 
     #[test]

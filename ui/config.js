@@ -314,6 +314,7 @@ function connectedHTML() {
 // Limits a named client's key can have; each is optional and works on its own.
 const LIMITS = [
   ['models', 'Models', 'claude-*, gpt-6-astra', 'list', 'Patterns with * wildcards. Empty allows every model.'],
+  ['model-map', 'Model map', 'claude-opus-* = claude-sonnet-5-5', 'map', 'Serve another model instead: pattern = model, comma-separated. The target may carry an effort, as in gpt-6-astra = gpt-6-astra-mini(low). Models above are checked after mapping.'],
   ['user-agents', 'Programs', 'claude-cli/*, codex*', 'list', 'User-Agent patterns its requests must match. Empty allows any.'],
   ['addresses', 'Addresses', '10.10.0.0/24, 100.101.7.12', 'list', 'Addresses or ranges its requests must come from. Empty allows any. Behind a proxy, Fusebox must be told the real address: see trusted-proxies and proxy-protocol-port.'],
   ['requests-per-minute', 'Requests a minute', '60', 'int', ''],
@@ -335,6 +336,7 @@ function namedLimitsText(client) {
     parts.push(day < new Date(new Date().toDateString()) ? `expired ${text}` : `until ${text}`);
   }
   if (client.models?.length) parts.push(client.models.join(', '));
+  for (const [from, to] of Object.entries(client['model-map'] || {})) parts.push(`${from} → ${to}`);
   if (client['user-agents']?.length) parts.push(`from ${client['user-agents'].join(', ')}`);
   if (client.addresses?.length) parts.push(`only at ${client.addresses.map(addrText).join(', ')}`);
   return parts.join(' · ');
@@ -343,11 +345,13 @@ function namedLimitsText(client) {
 function namedLimitsForm(client) {
   const n = S.config.named;
   const off = S.config.busy ? ' disabled' : '';
-  const value = (key, kind) => (kind === 'list' ? (client[key] || []).join(', ') : client[key] ?? '');
+  const value = (key, kind) => (kind === 'list' ? (client[key] || []).join(', ')
+    : kind === 'map' ? Object.entries(client[key] || {}).map(([p, t]) => `${p} = ${t}`).join(', ')
+    : client[key] ?? '');
   return `<form class="named-limits-form" id="limits-form" data-id="${esc(client.id)}" novalidate>
-    <div class="cfg-grid">${LIMITS.map(([key, label, placeholder, kind, help]) => `<div class="field${kind === 'list' ? ' wide' : ''}">
+    <div class="cfg-grid">${LIMITS.map(([key, label, placeholder, kind, help]) => `<div class="field${kind === 'list' || kind === 'map' ? ' wide' : ''}">
       <label for="limit-${key}">${esc(label)}</label>
-      <input id="limit-${key}" name="${key}" type="${kind === 'date' ? 'date' : key === 'addresses' && S.private ? 'password' : kind === 'list' ? 'text' : 'number'}" ${kind === 'int' ? 'min="1" step="1"' : kind === 'num' ? 'min="0.01" step="0.01"' : ''}
+      <input id="limit-${key}" name="${key}" type="${kind === 'date' ? 'date' : key === 'addresses' && S.private ? 'password' : kind === 'list' || kind === 'map' ? 'text' : 'number'}" ${kind === 'int' ? 'min="1" step="1"' : kind === 'num' ? 'min="0.01" step="0.01"' : ''}
         value="${esc(String(value(key, kind)))}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"${off}>
       ${help ? `<small>${esc(help)}</small>` : ''}</div>`).join('')}</div>
     ${n.limitsError ? `<p class="cfg-error" role="alert">${esc(n.limitsError)}</p>` : ''}
@@ -374,11 +378,28 @@ async function saveLimits(form) {
   const list = configGet(['named-clients']) || [];
   const client = list.find((x) => x.id === form.dataset.id);
   if (!client || S.config.busy || namedBlocked()) return;
-  const updated = { id: client.id, label: client.label, key: client.key, ...(client['trust-client-identity'] ? { 'trust-client-identity': true } : {}) };
+  // Start from the client as it is: fields this form doesn't know (now or
+  // later) must survive a limits save, not be dropped by rebuilding it.
+  const updated = configClone(client);
   for (const [key, label, , kind] of LIMITS) {
     const raw = form.elements[key].value.trim();
-    if (!raw) continue;
+    if (!raw) { delete updated[key]; continue; }
     if (kind === 'list') updated[key] = raw.split(',').map((p) => p.trim()).filter(Boolean);
+    else if (kind === 'map') {
+      const map = {};
+      for (const pair of raw.split(',').map((p) => p.trim()).filter(Boolean)) {
+        const at = pair.indexOf('=');
+        const from = at > 0 ? pair.slice(0, at).trim() : '';
+        const to = at > 0 ? pair.slice(at + 1).trim() : '';
+        if (!from || !to) {
+          n.limitsError = `${label}: write each mapping as pattern = model, separated by commas.`;
+          render();
+          return form.ownerDocument.getElementById(`limit-${key}`)?.focus();
+        }
+        map[from] = to;
+      }
+      updated[key] = map;
+    }
     else if (kind === 'date') updated[key] = raw;
     else {
       const num = Number(raw);

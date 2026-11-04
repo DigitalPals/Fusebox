@@ -302,16 +302,28 @@ fn outcome(o: crate::media::Outcome) -> Response {
     }
 }
 
-/// A named client may only use the models its limits allow, media models included.
-fn model_denied(app: &App, headers: &HeaderMap, body: &Value, fallback: &str) -> Option<Response> {
-    let model = body["model"].as_str().filter(|m| !m.is_empty()).unwrap_or(fallback);
-    let denied = crate::policy::check_model(app, headers, model).err()?;
-    Some(outcome(Err((denied.status, formats::error_body(Format::Chat, denied.status, &denied.message)))))
+/// A named client may only use the models its limits allow, media models
+/// included; its model-map rewrites the body's model first, as everywhere.
+fn model_denied(app: &App, headers: &HeaderMap, body: &mut Value, fallback: &str) -> Option<Response> {
+    let model = body["model"].as_str().filter(|m| !m.is_empty()).unwrap_or(fallback).to_string();
+    let admitted = match crate::policy::admit_model(app, headers, &model) {
+        Ok(admitted) => admitted,
+        Err(denied) => {
+            return Some(outcome(Err((
+                denied.status,
+                formats::error_body(Format::Chat, denied.status, &denied.message),
+            ))));
+        }
+    };
+    if admitted.mapped.is_some() {
+        body["model"] = admitted.model.into();
+    }
+    None
 }
 
 async fn image_generations(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Chat, &headers, &body) {
-        Ok(v) => match model_denied(&app, &headers, &v, crate::media::DEFAULT_IMAGE_MODEL) {
+        Ok(mut v) => match model_denied(&app, &headers, &mut v, crate::media::DEFAULT_IMAGE_MODEL) {
             Some(r) => r,
             None => outcome(crate::media::images(app, headers, v, false).await),
         },
@@ -323,7 +335,7 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
     let headers = req.headers().clone();
     let multipart =
         headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("multipart/"));
-    let body = if multipart {
+    let mut body = if multipart {
         let form = match axum::extract::Multipart::from_request(req, &app).await {
             Ok(f) => f,
             Err(e) => return outcome(Err((400, formats::error_body(Format::Chat, 400, &e.body_text())))),
@@ -342,7 +354,7 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
             Err(r) => return *r,
         }
     };
-    if let Some(r) = model_denied(&app, &headers, &body, crate::media::DEFAULT_IMAGE_MODEL) {
+    if let Some(r) = model_denied(&app, &headers, &mut body, crate::media::DEFAULT_IMAGE_MODEL) {
         return r;
     }
     outcome(crate::media::images(app, headers, body, true).await)
@@ -358,7 +370,7 @@ async fn video_create(
         return outcome(Err((404, formats::error_body(Format::Chat, 404, "unknown video endpoint"))));
     }
     match parse_body(&app, Format::Chat, &headers, &body) {
-        Ok(v) => match model_denied(&app, &headers, &v, crate::media::DEFAULT_VIDEO_MODEL) {
+        Ok(mut v) => match model_denied(&app, &headers, &mut v, crate::media::DEFAULT_VIDEO_MODEL) {
             Some(r) => r,
             None => outcome(crate::media::video_create(app, headers, v, &kind).await),
         },
@@ -424,7 +436,7 @@ async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, heade
 
 async fn compact(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Responses, &headers, &body) {
-        Ok(v) => match model_denied(&app, &headers, &v, "") {
+        Ok(mut v) => match model_denied(&app, &headers, &mut v, "") {
             Some(r) => r,
             None => outcome(crate::media::compact(app, headers, v).await),
         },

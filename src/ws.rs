@@ -629,10 +629,13 @@ async fn native_turn(
         return Native::Fallback("global_proxy");
     }
     let (model, suffix) = ir::split_model_suffix(body["model"].as_str().unwrap_or_default());
-    // Model groups and the client's model limits are handled on the HTTP pipeline.
+    // Model groups, mapped models and the client's model limits are handled
+    // on the HTTP pipeline.
+    let admitted = crate::policy::admit_model(app, headers, &model);
     if model.is_empty()
         || cfg.model_groups.contains_key(&model)
-        || crate::policy::check_model(app, headers, &model).is_err()
+        || admitted.as_ref().is_ok_and(|a| a.mapped.is_some())
+        || admitted.is_err()
     {
         return Native::Fallback("model_group_or_policy");
     }

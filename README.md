@@ -341,6 +341,7 @@ named-clients:
     key: fbx_...
     trust-client-identity: false     # default; opt in only for clients allowed to teach shared identities
     models: [claude-*, gpt-6-astra]   # model patterns it may ask for
+    model-map: {claude-opus-*: claude-sonnet-5-5}  # serve another model instead (see below)
     user-agents: [claude-cli/*]       # programs it may use (User-Agent patterns)
     requests-per-minute: 60           # over it: 429 with Retry-After
     tokens-per-day: 5000000           # input, cache writes and output; cache reads don't count
@@ -350,6 +351,8 @@ named-clients:
 ```
 
 Under **Config → Clients → More**, **Allow identity learning** / **Stop identity learning** toggles `trust-client-identity`. Only an authenticated named client with this setting enabled can teach Fusebox Claude Code/Codex releases and Claude runtime profiles. Shared keys and open access cannot learn; recognizing a native client alone does not grant trust. Learned profiles are shared, so enable this only for clients you control. Inspect or reset them under **Config → Connections → Client identities**. See [provider identity](docs/provider-identity.md#trusted-identity-learning).
+
+A client's **model map** (`model-map`, also in its Limits form) rewrites the model it asks for before routing — batch agents can keep asking for Opus and be served Sonnet, without changing their own configuration. Patterns match case-insensitively on the model with any reasoning suffix removed; an exact pattern beats a wildcard, and among wildcards the longest literal wins. The target may be a model group and may carry its own suffix (`gpt-6-astra: "gpt-6-astra-mini(low)"`), which replaces the request's; without one, the request's suffix is kept. The `models` allowlist is checked against the mapped model, and a mapped model is never mapped again. Mapping changes which model answers, not who the request claims to be: client identity and account selection follow the same rules as any other request for that model. Older Fusebox versions refuse a config that uses `model-map`.
 
 Days and months follow the server's time zone. Completed provider attempts update tokens and estimated spend immediately; every 30 seconds, Fusebox reconciles those totals with the usage database. Concurrent requests can still run slightly past a limit. Budget-limited keys receive 503 if accounting is unavailable, incomplete, or more than 90 seconds old, including while the initial totals load. Unknown prices are never counted as zero spend. WebSocket opening handshakes are free; each turn counts toward the request rate. Config, Clients shows each client's use beside its limits, and `GET /api/clients/usage` returns it, with when each key was last used since Fusebox started, the addresses each named key was used from, and which keys and addresses are connected now. A named key used from an address it wasn't used from before sends a notification (`client-new-address`, on by default), as does one refused by its `addresses` list. Where an address comes from behind a proxy is in [Source addresses](docs/source-addresses.md).
 

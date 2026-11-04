@@ -1215,7 +1215,8 @@ mod tests {
 
     #[test]
     fn named_clients_round_trip_in_both_layouts() {
-        let whombat = json!({"id": "whombat-cybex", "label": "Whombat · Cybex BV", "key": "wbgw_secret"});
+        let whombat = json!({"id": "whombat-cybex", "label": "Whombat · Cybex BV", "key": "wbgw_secret",
+            "model-map": {"claude-opus-*": "claude-sonnet-5-5"}});
         let laptop = json!({"id": "laptop", "label": "Laptop", "key": "fbx_laptop"});
         for source in [
             crate::config::template(),
@@ -1227,6 +1228,7 @@ mod tests {
             let (out, cfg) = edit(&source, json!({"named-clients": [whombat]}));
             assert_eq!(cfg.named_clients.len(), 1);
             assert_eq!(cfg.named_clients[0].label, "Whombat · Cybex BV");
+            assert_eq!(cfg.named_clients[0].model_map["claude-opus-*"], "claude-sonnet-5-5");
             assert_eq!(values(&out).unwrap()["named-clients"], json!([whombat]));
             assert!(yaml(&out).unwrap()["named-clients"].is_array(), "named-clients stays at the top level");
             let (out, cfg) = edit(&out, json!({"named-clients": [whombat, laptop]}));

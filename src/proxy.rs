@@ -1054,10 +1054,17 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         app.models.save_clients();
     }
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
-    let (base, _) = ir::split_model_suffix(&raw);
-    if let Err(d) = crate::policy::check_model(&app, &call.headers, &base) {
-        return error_reply(call.format, d.status, &d.message);
+    // A named client's model-map rewrites the request first; its allowlist
+    // then applies to the mapped model. Without a map nothing changes here.
+    let admitted = match crate::policy::admit_model(&app, &call.headers, &raw) {
+        Ok(admitted) => admitted,
+        Err(d) => return error_reply(call.format, d.status, &d.message),
+    };
+    if let Some((client, from)) = &admitted.mapped {
+        tracing::info!(client, from, to = %admitted.model, "model mapped by client");
+        set_model(&mut call, &admitted.model);
     }
+    let (base, _) = ir::split_model_suffix(&admitted.model);
     // Claude Code asks its Haiku model for quick background work (titles, summaries,
     // checks); `background-model` sends those calls elsewhere.
     if let Some(background) = cfg.background_model.as_deref()

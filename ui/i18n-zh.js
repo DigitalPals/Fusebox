@@ -775,6 +775,8 @@
       "Paste a Google Cloud service account key (JSON) with the Vertex AI User role. It is saved to the auth directory.": "粘贴具有 Vertex AI User 角色的 Google Cloud 服务账号密钥（JSON）。它会保存到认证目录。",
       "Paste the full https:// URL the service gave you.": "粘贴服务提供的完整 https:// URL。",
       "Patterns with * wildcards. Empty allows every model.": "可用 * 通配符。留空表示允许所有模型。",
+      "Model map": "模型映射",
+      "Serve another model instead: pattern = model, comma-separated. The target may carry an effort, as in gpt-6-astra = gpt-6-astra-mini(low). Models above are checked after mapping.": "改用另一个模型：模式 = 模型，用逗号分隔。目标可带努力程度，如 gpt-6-astra = gpt-6-astra-mini(low)。上方的模型列表在映射后检查。",
       "Pause": "暂停",
       "Peak day": "峰值日",
       "Pinned sessions": "固定会话",

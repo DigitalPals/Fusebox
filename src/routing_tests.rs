@@ -2537,6 +2537,41 @@ async fn identity_learning_requires_authenticated_opt_in_and_management_reset_is
 }
 
 #[tokio::test]
+async fn a_named_clients_model_map_rewrites_the_request_and_the_allowlist_follows_it() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.named_clients = vec![crate::config::NamedClient {
+        id: "agent".into(),
+        label: "Agent".into(),
+        key: "agent-key".into(),
+        // The requested model is not allowed; the mapped one is.
+        models: vec!["gpt-6-astra".into()],
+        model_map: [("gpt-6.1-sol".to_string(), "gpt-6-astra".to_string())].into_iter().collect(),
+        ..Default::default()
+    }];
+    fixture.app.set_config(cfg);
+    let ask = |key: &str, model: &str| {
+        reqwest::Client::new()
+            .post(format!("{}/v1/responses", fixture.proxy.url))
+            .bearer_auth(key)
+            .json(&json!({"model": model, "input": "question"}))
+    };
+    // The agent's request is served by the mapped model.
+    let response = ask("agent-key", "gpt-6.1-sol").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+    // The same request from a key without a map is untouched.
+    let response = ask("client-one", "gpt-6.1-sol").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+    // A model the agent may not use, mapped or not, is refused before routing.
+    let response = ask("agent-key", "gpt-6.1-terra").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "{}", response.text().await.unwrap());
+    let calls = fixture.mock.calls.lock();
+    assert_eq!(calls.len(), 2, "the refused request never reached the provider");
+    assert_eq!(calls[0].1["model"], "gpt-6-astra", "upstream got the mapped model");
+    assert_eq!(calls[1].1["model"], "gpt-6.1-sol", "unmapped traffic is unchanged");
+}
+
+#[tokio::test]
 async fn oauth_error_markers_do_not_escape_to_downstream_status_or_request_logs() {
     let fixture = Fixture::new(Routing::FillFirst, true).await;
     let token_calls = Arc::new(AtomicU64::new(0));

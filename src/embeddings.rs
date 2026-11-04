@@ -306,21 +306,25 @@ fn failure(error: (u16, Value), completed: bool) -> Failure {
     Failure { error, completed }
 }
 
-pub async fn embeddings(app: Arc<App>, headers: HeaderMap, body: Value) -> Outcome {
+pub async fn embeddings(app: Arc<App>, headers: HeaderMap, mut body: Value) -> Outcome {
     if crate::upstream::residency_requirement(&headers).map_err(|message| fail(400, message))?.is_some() {
         return Err(fail(400, "Codex subscription residency is unavailable on the embeddings endpoint"));
     }
-    let Some(requested) = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty()) else {
+    let Some(requested) = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string) else {
         return Err(fail(400, "`model` is required"));
     };
     if body["input"].is_null() {
         return Err(fail(400, "`input` is required"));
     }
     validate(&body)?;
-    if let Err(d) = crate::policy::check_model(&app, &headers, requested) {
-        return Err(fail(d.status, d.message));
+    let admitted = match crate::policy::admit_model(&app, &headers, &requested) {
+        Ok(admitted) => admitted,
+        Err(d) => return Err(fail(d.status, d.message)),
+    };
+    if admitted.mapped.is_some() {
+        body["model"] = admitted.model.clone().into();
     }
-    let (only, model) = app.pool.route(requested);
+    let (only, model) = app.pool.route(&admitted.model);
     let mut tracker = Tracker::new(&app, Format::Chat, false, "http", &model);
     tracker.client_app(&headers);
     let mut candidates: Vec<Arc<Account>> = app
