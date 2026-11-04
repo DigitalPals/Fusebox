@@ -3,9 +3,16 @@
 //! upstream — method, URL, header names and values, and the body bytes. Any
 //! change to what reaches a provider shows up here as a diff to review.
 //!
+//! Covered: ChatGPT and Claude subscriptions; OpenAI, Anthropic, Gemini,
+//! Moonshot, xAI and Meta API keys; an OpenAI-compatible endpoint. Not yet:
+//! Vertex, Antigravity, Devin, and the Kimi, Grok and Meta sign-ins, whose
+//! requests carry timestamps, random ids or the host name that need
+//! placeholders of their own. Headers are listed sorted; the body is compared
+//! as bytes (shown as UTF-8).
+//!
 //! The goldens live in `tests/golden/upstream/`. After a deliberate change,
 //! rewrite them with `FUSEBOX_UPDATE_GOLDENS=1 cargo test golden_` and review
-//! the diff. Values that differ on every run (generated UUIDs, the recorder's
+//! the diff; a golden no case writes fails the test. Values that differ on every run (generated UUIDs, the recorder's
 //! address) are replaced by numbered placeholders; a placeholder that appears
 //! twice is the same value twice.
 
@@ -143,6 +150,12 @@ enum Account {
     GeminiKey,
     /// An OpenAI-compatible endpoint (Chat Completions wire).
     Compat,
+    /// Moonshot (Kimi) API key, whose wires are Claude Messages and Chat.
+    KimiKey,
+    /// xAI API key.
+    XaiKey,
+    /// Meta API key.
+    MetaKey,
 }
 
 impl Account {
@@ -152,6 +165,9 @@ impl Account {
             Account::ClaudeOAuth | Account::ClaudeKey => "claude-sonnet-4-6",
             Account::GeminiKey => "gemini-3.8-flash",
             Account::Compat => "golden-compat-model",
+            Account::KimiKey => "kimi-k3",
+            Account::XaiKey => "grok-4.7",
+            Account::MetaKey => "muse-spark-1.3",
         }
     }
 }
@@ -204,6 +220,9 @@ async fn golden(account: Account) -> Golden {
         Account::CodexKey => cfg.codex_api_key = vec![key(format!("{url}/v1"))],
         Account::ClaudeKey => cfg.claude_api_key = vec![key(url.clone())],
         Account::GeminiKey => cfg.gemini_api_key = vec![key(url.clone())],
+        Account::KimiKey => cfg.kimi_api_key = vec![key(format!("{url}/v1"))],
+        Account::XaiKey => cfg.xai_api_key = vec![key(format!("{url}/v1"))],
+        Account::MetaKey => cfg.meta_api_key = vec![key(format!("{url}/v1"))],
         Account::Compat => {
             cfg.openai_compatibility = vec![CompatEntry {
                 name: "golden-compat".into(),
@@ -343,6 +362,8 @@ fn render(golden: &Golden, status: u16, reply: &str) -> String {
     if seen.is_empty() {
         return format!("no upstream request; the client got {status}\n{reply}\n");
     }
+    // Fusebox's own version (Kimi's user agent) changes every release.
+    let version = |text: String| text.replace(env!("CARGO_PKG_VERSION"), "<fusebox-version>");
     for capture in seen.iter() {
         out.push_str(&format!("{} {}\n", capture.method, placeholders(&capture.uri, &mut ids)));
         for (name, value) in &capture.headers {
@@ -351,14 +372,23 @@ fn render(golden: &Golden, status: u16, reply: &str) -> String {
             } else {
                 value.replace(&golden.recorder_url, "<upstream>")
             };
-            out.push_str(&format!("{name}: {}\n", placeholders(&value, &mut ids)));
+            out.push_str(&format!("{name}: {}\n", version(placeholders(&value, &mut ids))));
         }
         out.push('\n');
-        out.push_str(&placeholders(&String::from_utf8_lossy(&capture.body), &mut ids));
+        out.push_str(&version(placeholders(&String::from_utf8_lossy(&capture.body), &mut ids)));
         out.push_str("\n\n");
     }
     out.push_str(&format!("client status: {status}\n"));
     out
+}
+
+/// Goldens are rewritten only with FUSEBOX_UPDATE_GOLDENS=1 (not =0, not empty).
+fn updating() -> bool {
+    std::env::var("FUSEBOX_UPDATE_GOLDENS").is_ok_and(|v| v == "1")
+}
+
+fn golden_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/upstream")
 }
 
 async fn run_case(name: &str, account: Account, client: Client, stream: bool) -> Result<(), String> {
@@ -372,8 +402,8 @@ async fn run_case(name: &str, account: Account, client: Client, stream: bool) ->
     let status = response.status().as_u16();
     let reply = response.text().await.unwrap();
     let got = render(&golden, status, &reply);
-    let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/upstream").join(format!("{name}.txt"));
-    if std::env::var_os("FUSEBOX_UPDATE_GOLDENS").is_some() {
+    let file = golden_dir().join(format!("{name}.txt"));
+    if updating() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, &got).unwrap();
         return Ok(());
@@ -404,6 +434,9 @@ fn cases() -> Vec<(String, Account, Client, bool)> {
         ("claude-key", Account::ClaudeKey),
         ("gemini-key", Account::GeminiKey),
         ("compat", Account::Compat),
+        ("kimi-key", Account::KimiKey),
+        ("xai-key", Account::XaiKey),
+        ("meta-key", Account::MetaKey),
     ];
     let clients = [
         ("responses", Client::Responses),
@@ -434,9 +467,17 @@ fn cases() -> Vec<(String, Account, Client, bool)> {
 #[tokio::test]
 async fn golden_upstream_requests_match() {
     let mut failures = Vec::new();
+    let names: Vec<String> = cases().into_iter().map(|(name, ..)| format!("{name}.txt")).collect();
     for (name, account, client, stream) in cases() {
         if let Err(e) = run_case(&name, account, client, stream).await {
             failures.push(e);
+        }
+    }
+    // A golden no case writes any more would otherwise pass unnoticed.
+    for entry in std::fs::read_dir(golden_dir()).unwrap() {
+        let file = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if !names.contains(&file) {
+            failures.push(format!("{file}: no case writes this golden; delete it"));
         }
     }
     assert!(failures.is_empty(), "{} golden(s) differ:\n{}", failures.len(), failures.join("\n"));
@@ -549,9 +590,11 @@ async fn inspection_shows_what_is_sent_and_changes_nothing() {
         let path_shown = inspected["shape"]["path"].as_str().unwrap();
         let native = matches!(
             (client, account),
-            (Client::Responses | Client::CodexCli, Account::CodexOAuth | Account::CodexKey)
-                | (Client::Chat, Account::Compat)
-                | (Client::Messages | Client::ClaudeCode, Account::ClaudeOAuth | Account::ClaudeKey)
+            (
+                Client::Responses | Client::CodexCli,
+                Account::CodexOAuth | Account::CodexKey | Account::KimiKey | Account::XaiKey | Account::MetaKey
+            ) | (Client::Chat, Account::Compat | Account::KimiKey)
+                | (Client::Messages | Client::ClaudeCode, Account::ClaudeOAuth | Account::ClaudeKey | Account::KimiKey)
                 | (Client::Gemini, Account::GeminiKey)
         );
         if path_shown != if native { "passthrough" } else { "translated" } {

@@ -4,7 +4,7 @@ accept-encoding: zstd,gzip,deflate
 content-length: 425
 content-type: application/json
 host: <upstream>
-user-agent: Fusebox/0.13.0
+user-agent: Fusebox/<fusebox-version>
 x-goog-api-key: golden-key
 
 {"contents":[{"role":"user","parts":[{"text":"golden question"}]}],"systemInstruction":{"parts":[{"text":"be brief"}]},"tools":[{"functionDeclarations":[{"name":"lookup","description":"","parametersJsonSchema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}},"generationConfig":{"maxOutputTokens":64,"thinkingConfig":{"includeThoughts":true}}}

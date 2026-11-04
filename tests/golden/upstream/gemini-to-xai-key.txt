@@ -1,0 +1,13 @@
+POST /v1/responses
+accept: text/event-stream
+accept-encoding: zstd,gzip,deflate
+authorization: Bearer golden-key
+content-length: 534
+content-type: application/json
+host: <upstream>
+user-agent: Fusebox/<fusebox-version>
+x-grok-conv-id: <uuid-1>
+
+{"model":"grok-4.7","instructions":"","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"be brief"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"golden question"}]}],"stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"lookup","description":"","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]},"strict":false}],"tool_choice":"auto","max_output_tokens":64}
+
+client status: 200

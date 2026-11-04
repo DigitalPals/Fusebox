@@ -1,0 +1,14 @@
+POST /v1/messages
+accept: application/json
+accept-encoding: zstd,gzip,deflate
+anthropic-version: 2023-06-01
+authorization: Bearer golden-key
+content-length: 227
+content-type: application/json
+host: <upstream>
+user-agent: Fusebox/<fusebox-version>
+x-api-key: golden-key
+
+{"model":"kimi-k3","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":"golden question"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}
+
+client status: 200
