@@ -116,10 +116,12 @@ via the existing updater with qualification + rollback.
 Full verdict text: the delegated Opus 5.5 thread "Opus 5.5: decide Fusebox
 implementation roadmap" (2026-11-04).
 
-## Build status, 2026-11-04 (uncommitted, under review)
+## Build status, 2026-11-04
 
 Waves 0.1–0.4, 1.2, 1.3, 2.1, 2.2 and 5.1–5.3 were built first (Muse); the rest
-followed (Claude Opus 5.5). Nothing is committed or deployed yet.
+followed (Claude Opus 5.5). Committed on main as one commit per item
+(590fc4b…879e583), with the second review's fixes on top; not pushed or
+deployed.
 
 - **1.1** All six clients in #48 reviewed with no protocol change needed;
   identities bumped: Claude Code 2.1.318 (fingerprint `195`, runtime
@@ -133,8 +135,10 @@ followed (Claude Opus 5.5). Nothing is committed or deployed yet.
   serde_yaml 0.9's rules, and writes block YAML itself. A differential run
   against serde_yaml (corpus + 20,000 generated documents) agreed except three
   pinned cases where libyaml was lenient (`KNOWN_DIFFERENCES`); its results
-  are kept as `src/yaml_corpus.json`. The harness with serde_yaml is saved in
-  `target/yaml-swap-20261104/` for the two-commit history the plan asked for.
+  are kept as `src/yaml_corpus.json`. The harness with serde_yaml is in
+  commit dcab7f5; serde_yaml leaves in 40c4308. The second review showed it
+  counted "accepted, but no JSON form" as a refusal; 237edbb redoes it
+  three ways and keeps loading every config serde_yaml loaded.
   `cargo +1.88 check --locked --all-targets` passes.
 - **4.1** `src/golden_tests.rs`: 31 cases (4 client formats × 6 account kinds,
   plus streaming and native Claude Code / Codex CLI), raw upstream bytes in
@@ -161,3 +165,39 @@ URLs have no test seam); Claude's `message_start` server-tool counts are kept;
 aliases can't exceed the YAML nesting limit; and on iOS, outage Live
 Activity passes are serialized and end on sign-out or a server change
 (not compiled yet).
+
+### Second review (Muse Wonder Full, high effort) and fixes
+
+One high, twelve medium, sixteen low. Fixed in the commits after 879e583:
+the YAML parser refused documents serde_yaml accepted (numeric keys, local
+tags, .inf), now kept; inspection follows model-group failover, expands
+continuations read-only, refuses an expired named client, takes 256 MB
+bodies, logs nothing, and redacts configured headers and more body fields;
+the account Test prices its model, sends once (plus one retry after a token
+refresh) and leaves cooling or held-out accounts alone; status, usage-refusal,
+fee-overflow, model-map, count_tokens and dropped-header edges; moving.md
+says which files a move can't lose; goldens add Moonshot, xAI and Meta keys
+and guard their update flag and orphans; property tests reach the parsers
+and resolve defined refs; the iOS tests no longer sign a simulator out.
+
+Left as they are, with reasons:
+- Dropped-header names can be fed by any client key (UA shape is enough):
+  they are evidence to check in a review, not something acted on.
+- iOS lifecycle tests still lack a transport seam; nothing iOS is compiled
+  yet. Build and test on the Mac before the next TestFlight.
+- Only this parser reads what the writer emits in tests; no Go or libyaml
+  reader runs in CI.
+- `usage downgrade` copies rows with the new server-tool metadata keys as
+  they are; an older binary reads them, and only a newer collector sending
+  to an older server would trip its validation.
+- Inspection picks the account a new session would get from `route_order`,
+  not the live picker (latency tie-breaks may differ); it says so.
+- Media and embeddings allowlists match the suffix-stripped model, like
+  inference; `/v1/models` lists real models, not mapped ones.
+- The writer refuses keys over 1024 characters (YAML's implicit-key limit),
+  which only blocks a full rewrite of such a file.
+- Goldens don't cover Vertex, Antigravity, Devin or the Kimi, Grok and Meta
+  sign-ins yet.
+- History: `Clients::admit_status` lands in the model-map commit, one before
+  its caller; the tokio commit's lockfile also re-resolves `windows-sys` for
+  errno and quinn-udp, as cargo did.
