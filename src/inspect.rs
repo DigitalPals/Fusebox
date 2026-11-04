@@ -5,9 +5,9 @@
 //! identifiers redacted), the controls a translation drops, and any refusal.
 //!
 //! Inspecting changes nothing: it sends nothing, refreshes no token, records no
-//! usage, log or metric, takes no routing turn, touches no session assignment
-//! or cooldown, learns no client identity and creates no provider session (a
-//! fixed placeholder stands in for one).
+//! usage, log or metric, takes no routing or group turn, touches no session
+//! assignment, stored response or cooldown, learns no client identity and
+//! creates no provider session (a fixed placeholder stands in for one).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -135,6 +135,11 @@ pub async fn inspect(State(app): State<Arc<App>>, Json(b): Json<InspectBody>) ->
         if let Ok(value) = HeaderValue::from_str(id) {
             headers.insert(crate::usage::capture::CLIENT_HEADER, value);
         }
+        // The client's own scope, so its stored responses (continuations) are found.
+        let key = app.cfg().named_clients.iter().find(|c| c.id == id).map(|c| c.key.clone());
+        if let Ok(scope) = HeaderValue::from_str(&crate::affinity::scope_for_key(key.as_deref())) {
+            headers.insert(crate::affinity::SCOPE_HEADER, scope);
+        }
     }
     let stream = b.stream.unwrap_or(b.body["stream"] == true);
     Json(inspect_call(
@@ -180,6 +185,12 @@ pub(crate) fn inspect_call(app: &App, mut call: Call) -> Value {
     if requested.is_empty() {
         return refuse(out, 400, "`model` is required".into());
     }
+    if let Some(client) = crate::policy::named_client(&cfg, &call.headers)
+        && let Some(last) = client.expires
+        && chrono::Local::now().date_naive() > last
+    {
+        return refuse(out, 401, format!("this key expired on {last}"));
+    }
     let admitted = match crate::policy::admit_model(app, &call.headers, &requested) {
         Ok(admitted) => admitted,
         Err(d) => return refuse(out, d.status, d.message),
@@ -196,23 +207,81 @@ pub(crate) fn inspect_call(app: &App, mut call: Call) -> Value {
         out["background_model"] = background.into();
         crate::proxy::set_model(&mut call, background);
     }
-    if let Some(identity) = crate::affinity::session_identity(&call.headers, &call.body)
-        .or_else(|| crate::affinity::inferred_identity(&call.headers, call.format, &call.body))
+    if let Some(identity) = crate::affinity::session_identity(&call.headers, &call.body) {
+        call.session = Some(identity.key);
+        call.session_source = Some(identity.source);
+    }
+    // A continuation is expanded from stored history, as execution does, without
+    // marking the stored response used.
+    if call.format == Format::Responses
+        && let Some(id) = call.body["previous_response_id"].as_str().map(str::to_string)
+    {
+        match app.sessions.peek_previous(&call.headers, &id, call.session.as_deref()) {
+            Some((session, mut previous)) => {
+                previous.extend(crate::affinity::input_items(&call.body));
+                out["continuation"] = format!("expanded from {} stored input items", previous.len()).into();
+                call.body["input"] = Value::Array(previous.to_values());
+                if let Some(body) = call.body.as_object_mut() {
+                    body.remove("previous_response_id");
+                }
+                if call.session.is_none() {
+                    call.session_source = Some("previous_response_id");
+                }
+                call.session = Some(session);
+            }
+            None => {
+                out["continuation"] =
+                    "not in this Fusebox's stored history (name the client that made it); sent as is".into();
+            }
+        }
+    }
+    if call.session.is_none()
+        && !call.body["previous_response_id"].is_string()
+        && let Some(identity) = crate::affinity::inferred_identity(&call.headers, call.format, &call.body)
     {
         call.session = Some(identity.key);
         call.session_source = Some(identity.source);
     }
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
     let (group_base, _) = ir::split_model_suffix(&raw);
-    if let Some(group) = cfg.model_groups.get(&group_base) {
-        // Without a session a balanced group takes turns; previewing must not take one.
-        let order = crate::proxy::group_order_preview(group, call.session.as_deref());
-        out["group"] = json!({ "name": group_base, "order": order });
-        match order.first() {
-            Some(first) => crate::proxy::set_model(&mut call, first),
-            None => return refuse(out, 404, format!("model group {group_base} lists no models")),
+    let Some(group) = cfg.model_groups.get(&group_base) else { return inspect_model(app, &cfg, &call, out) };
+    // Without a session a balanced group takes turns; previewing must not take one.
+    let order = crate::proxy::group_order_preview(group, call.session.as_deref());
+    out["group"] = json!({ "name": group_base, "order": order });
+    // Execution moves on to the group's next model when one has no account to
+    // take the request; so does the preview.
+    let mut last = refuse(out.clone(), 404, format!("model group {group_base} lists no models"));
+    for (i, model) in order.iter().enumerate() {
+        let mut attempt = Call {
+            format: call.format,
+            body: call.body.clone(),
+            headers: call.headers.clone(),
+            stream: call.stream,
+            transport: call.transport,
+            path_model: call.path_model.clone(),
+            session: call.session.clone(),
+            session_source: call.session_source,
+            routing_selection: None,
+            pinned_account: None,
+        };
+        crate::proxy::set_model(&mut attempt, model);
+        let mut shown = inspect_model(app, &cfg, &attempt, out.clone());
+        shown["group"]["tried"] = json!(order[..=i]);
+        let moves_on = shown["refusal"]["status"].as_u64().is_some_and(|s| s == 404 || s == 429);
+        if !moves_on || i + 1 == order.len() {
+            return shown;
         }
+        last = shown;
     }
+    last
+}
+
+/// Routing and planning for one concrete model.
+fn inspect_model(app: &App, cfg: &crate::config::Config, call: &Call, mut out: Value) -> Value {
+    let refuse = |mut out: Value, status: u16, message: String| {
+        out["refusal"] = refusal(status, message);
+        out
+    };
     let raw = call.path_model.clone().or_else(|| call.body["model"].as_str().map(String::from)).unwrap_or_default();
     let (model, suffix) = ir::split_model_suffix(&raw);
     let suffix_text = raw.trim().strip_prefix(model.as_str()).unwrap_or_default().to_string();
@@ -226,8 +295,8 @@ pub(crate) fn inspect_call(app: &App, mut call: Call) -> Value {
             Ok(ids) => ids,
             Err(message) => return refuse(out, 400, message),
         };
-    let load = app.sessions.account_load(&cfg);
-    let route = app.pool.route_order(&model, &cfg, only.as_ref(), &load);
+    let load = app.sessions.account_load(cfg);
+    let route = app.pool.route_order(&model, cfg, only.as_ref(), &load);
     out["route"] = serde_json::to_value(&route).unwrap_or_default();
     if !excluded.is_empty() {
         let skipped: Vec<&str> =
@@ -261,7 +330,7 @@ pub(crate) fn inspect_call(app: &App, mut call: Call) -> Value {
         stream: call.stream,
         model: &model,
         suffix: suffix.as_ref(),
-        cfg: &cfg,
+        cfg,
         requested_cache: &requested_cache,
         cache_key: cache_key.as_deref(),
         cache_scope,
@@ -278,7 +347,11 @@ pub(crate) fn inspect_call(app: &App, mut call: Call) -> Value {
             out["request"] = json!({
                 "method": "POST",
                 "url": redact_url(&plan.wire.url),
-                "headers": plan.wire.headers.iter().map(|(k, v)| json!([k, redact_header(k, v)])).collect::<Vec<_>>(),
+                "headers": plan.wire.headers.iter().map(|(k, v)| {
+                    // Headers configured on the account may hold anything.
+                    let configured = acct.headers.keys().any(|name| name.eq_ignore_ascii_case(k));
+                    json!([k, if configured { REDACTED.to_string() } else { redact_header(k, v) }])
+                }).collect::<Vec<_>>(),
                 "body": redact_body(&plan.wire.payload),
                 "bytes": plan.wire.payload.len(),
             });
@@ -321,7 +394,13 @@ fn secret_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     matches!(
         name.as_str(),
-        "authorization" | "x-api-key" | "x-goog-api-key" | "cookie" | "chatgpt-account-id" | "x-goog-user-project"
+        "authorization"
+            | "x-api-key"
+            | "x-goog-api-key"
+            | "cookie"
+            | "chatgpt-account-id"
+            | "x-goog-user-project"
+            | "x-grok-conv-id"
     ) || ["token", "secret", "auth", "key", "password", "account", "device"].iter().any(|word| name.contains(word))
 }
 
@@ -372,6 +451,9 @@ const SECRET_FIELDS: &[&str] = &[
     "access_token",
     "refresh_token",
     "id_token",
+    "safety_identifier",
+    "user",
+    "prompt_cache_key",
 ];
 
 fn redact_value(value: &mut Value) {

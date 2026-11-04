@@ -289,7 +289,6 @@ impl From<Vec<Value>> for History {
 }
 
 impl History {
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
     }
@@ -907,6 +906,17 @@ impl Sessions {
             (previous.session.clone(), previous.input.clone())
         };
         Some((session, input))
+    }
+
+    /// `previous` without refreshing the stored response's last use, for inspection.
+    pub fn peek_previous(&self, headers: &HeaderMap, id: &str, session: Option<&str>) -> Option<(String, History)> {
+        let key = digest(&[&client_scope(headers), "response", id]);
+        let registry = self.registry.lock();
+        let previous = registry.responses.get(&key)?;
+        if session.is_some_and(|s| s != previous.session) {
+            return None;
+        }
+        Some((previous.session.clone(), previous.input.clone()))
     }
 
     /// Takes the input by value: the caller's copy becomes the stored history.

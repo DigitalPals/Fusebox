@@ -598,6 +598,10 @@ async fn the_inspect_route_needs_management_auth_and_explains_refusals() {
         .await
         .unwrap();
     assert_eq!(missing["refusal"]["status"], 404, "{missing}");
+    // A pasted request may be as large as a client's (beyond axum's 2 MB default).
+    let long = json!({"body": {"model": "gpt-6-astra", "input": "x".repeat(3 << 20)}});
+    let status = client.post(&url).bearer_auth("fake-management-key").json(&long).send().await.unwrap().status();
+    assert_eq!(status, 200);
     assert!(golden.recorder.seen.lock().is_empty(), "nothing was sent");
 }
 
@@ -676,4 +680,58 @@ async fn inspection_skips_accounts_execution_skips() {
     let seen = golden.recorder.seen.lock();
     let auth = seen[0].headers.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.as_str());
     assert_eq!(auth, Some("Bearer golden-token"), "execution used the subscription too");
+}
+
+#[tokio::test]
+async fn inspection_follows_group_failover_and_expands_continuations() {
+    let golden = golden(Account::CodexKey).await;
+    let mut cfg = (*golden.app.cfg()).clone();
+    let group =
+        crate::config::ModelGroup { models: vec!["golden-unserved".into(), "gpt-6-astra".into()], balance: false };
+    cfg.model_groups.insert("golden-fallback".into(), group);
+    golden.app.set_config(cfg);
+    // The group's first model has no account; execution moves on, and so does the preview.
+    let shown = inspect_chat(&golden.app, "golden-fallback", &[]);
+    assert!(shown.get("refusal").is_none(), "{shown}");
+    assert_eq!(shown["model"], "gpt-6-astra", "{shown}");
+    assert_eq!(shown["group"]["tried"], json!(["golden-unserved", "gpt-6-astra"]), "{shown}");
+
+    // A stored response is expanded into the continuation's input, as when sent.
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", golden.proxy.url))
+        .bearer_auth("client-one")
+        .json(&json!({"model": "gpt-6-astra", "input": "golden first turn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let scope = crate::affinity::scope_for_key(Some("client-one"));
+    let mut headers = HeaderMap::new();
+    headers.insert(crate::affinity::SCOPE_HEADER, scope.parse().unwrap());
+    let call = |body: Value| crate::proxy::Call {
+        format: crate::ir::Format::Responses,
+        body,
+        headers: headers.clone(),
+        stream: false,
+        transport: "inspect",
+        path_model: None,
+        session: None,
+        session_source: None,
+        routing_selection: None,
+        pinned_account: None,
+    };
+    let shown = crate::inspect::inspect_call(
+        &golden.app,
+        call(json!({"model": "gpt-6-astra", "previous_response_id": "resp_golden", "input": "golden second turn"})),
+    );
+    assert!(shown["continuation"].as_str().unwrap().starts_with("expanded"), "{shown}");
+    let body = shown["request"]["body"].to_string();
+    assert!(body.contains("golden first turn") && body.contains("golden second turn"), "{body}");
+    assert!(!body.contains("previous_response_id"), "{body}");
+    let unknown = crate::inspect::inspect_call(
+        &golden.app,
+        call(json!({"model": "gpt-6-astra", "previous_response_id": "resp_unknown", "input": "x"})),
+    );
+    assert!(unknown["continuation"].as_str().unwrap().starts_with("not in"), "{unknown}");
+    assert_eq!(golden.recorder.seen.lock().len(), 1, "only the real first turn was sent");
 }

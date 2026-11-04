@@ -253,6 +253,11 @@ thread_local! {
     static INSPECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Whether the current `prepare` is an inspection's.
+pub(crate) fn is_inspecting() -> bool {
+    INSPECTING.with(std::cell::Cell::get)
+}
+
 /// Runs `f` (a synchronous `prepare`) for an inspection: a request that is never
 /// sent is no evidence of what clients send, so dropped headers aren't recorded.
 pub(crate) fn inspecting<T>(f: impl FnOnce() -> T) -> T {

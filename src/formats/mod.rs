@@ -126,8 +126,10 @@ pub fn preserve_cache_hints(
         return Err("Prompt cache prewarming is only supported by the Responses API".into());
     }
     if let Err(reason) = carry_cache_hints(source, target, original, translated) {
-        // Every attempt of every such request would log this; once per reason is enough.
-        if crate::diagnostics::warn_once(&format!("cache:{reason}"), std::time::Duration::from_secs(600)) {
+        // Every attempt of every such request would log this; once per reason is
+        // enough. An inspection logs nothing.
+        if crate::upstream::is_inspecting() {
+        } else if crate::diagnostics::warn_once(&format!("cache:{reason}"), std::time::Duration::from_secs(600)) {
             tracing::warn!(
                 "dropping explicit prompt cache hints: {reason} (repeats are logged at debug for ten minutes)"
             );
