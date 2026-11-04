@@ -676,10 +676,35 @@ fn meta_oauth(old: &OAuth, minted: &Value) -> OAuth {
     }
 }
 
+/// The account-file fields a Meta mint changes: its tier's name (`subs_tier_name`,
+/// "Muse Code Max Usage") and the opaque tier id it belongs to (`subs_tier_id`).
+/// Meta named the tier when the account signed in, then answered later mints with
+/// a null name and the same id, so a mint without a name never erases the saved
+/// one. It does tie an id-less saved name (signed in before ids were kept) to its id.
+pub(crate) fn meta_tier_fields(old: &OAuth, minted: &Value) -> Vec<(&'static str, Value)> {
+    let text = |k: &str| minted[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let (id, name) = (text("subs_tier_id"), text("subs_tier_name"));
+    let mut out = vec![];
+    if let Some(name) = name {
+        if old.field("subs_tier_name") != Some(name) {
+            out.push(("subs_tier_name", name.into()));
+        }
+        if old.field("subs_tier_id") != id {
+            out.push(("subs_tier_id", id.map_or(Value::Null, Value::from)));
+        }
+    } else if let Some(id) = id
+        && old.field("subs_tier_id").is_none()
+        && old.field("subs_tier_name").is_some()
+    {
+        out.push(("subs_tier_id", id.into()));
+    }
+    out
+}
+
 /// Mints a Meta key under the account's refresh lock and returns the mint
 /// response. Quota polling mints too, so it must never do so behind the refresh
-/// lock's back. Meta hands back the account's same key, so an unchanged key is
-/// not published again (that would rewrite the account file on every poll).
+/// lock's back. Meta hands back the account's same key, so an unchanged key and
+/// tier are not published again (that would rewrite the account file on every poll).
 pub(crate) async fn meta_mint_refresh(app: &App, acct: &Arc<Account>) -> Result<Value> {
     let _guard = acct.refresh_lock.clone().lock_owned().await;
     // A replaced account must not mint with the old allocation's device token.
@@ -699,8 +724,9 @@ pub(crate) async fn meta_mint_refresh(app: &App, acct: &Arc<Account>) -> Result<
     let http = app.http.control_for_account(acct);
     let minted = device::meta_mint(&http, dca).await.map_err(sanitize_custom_error)?;
     let new = meta_oauth(&old, &minted);
-    let same = new.access_token == old.access_token && new.base_url == old.base_url;
-    if !(if same { current() } else { publish_refreshed(acct, new, vec![]) }) {
+    let tier = meta_tier_fields(&old, &minted);
+    let same = new.access_token == old.access_token && new.base_url == old.base_url && tier.is_empty();
+    if !(if same { current() } else { publish_refreshed(acct, new, tier) }) {
         bail!("account identity changed; refresh result discarded");
     }
     Ok(minted)
@@ -816,6 +842,7 @@ async fn refresh_locked(acct: &Arc<Account>, http: reqwest::Client, old: OAuth) 
                 old.field("dca_token").ok_or_else(|| anyhow!("no device token to mint a new key; sign in again"))?;
             let minted = device::meta_mint(&http, dca).await.map_err(sanitize_custom_error)?;
             let new = meta_oauth(&old, &minted);
+            extra.extend(meta_tier_fields(&old, &minted));
             meta_minted = Some(minted);
             new
         }
@@ -1707,5 +1734,127 @@ mod tests {
         for odd in [json!(""), json!("  "), json!(5), json!("a\nb"), json!("x".repeat(41))] {
             assert_eq!(claude_plan_name(&profile(json!({ "plan_display_name": odd }), json!({}))), None);
         }
+    }
+
+    #[test]
+    fn a_meta_tier_name_saved_at_sign_in_shows_until_meta_reports_another_tier() {
+        let directory = Directory::new();
+        let path = directory.0.join("meta-a.json");
+        // Production's file on 2026-11-04: the sign-in mint's name, no tier id yet.
+        std::fs::write(
+            &path,
+            json!({"type":"meta","auth_kind":"oauth","api_key":"k","base_url":"https://api.meta.ai/v1",
+                "dca_token":"test-only","email":"a@example.test","subs_tier_name":"Muse Code Max Usage"})
+            .to_string(),
+        )
+        .unwrap();
+        let app = App::new(
+            Config { auth_dir: directory.0.to_string_lossy().into(), ..Default::default() },
+            directory.0.join("config.yaml"),
+        );
+        let account = app.pool.all()[0].clone();
+        assert_eq!(account.provider, Provider::Meta);
+        let shown = |account: &Account| account.snapshot()["quota"]["plan_name"].as_str().map(String::from);
+        let disk = || serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap();
+        let credential = |account: &Account| match account.cred.read().clone() {
+            Credential::OAuth(o) => o,
+            Credential::ApiKey { .. } => unreachable!(),
+        };
+        // A mint as poll_meta sees it: publish what changed, then read its quota.
+        let mint = |account: &Arc<Account>, minted: Value| {
+            let old = credential(account);
+            let fields = meta_tier_fields(&old, &minted);
+            let wrote = !fields.is_empty();
+            if wrote {
+                assert!(publish_refreshed(account, meta_oauth(&old, &minted), fields));
+            }
+            crate::quota::usage(&mut account.state.lock(), Provider::Meta, &minted);
+            wrote
+        };
+        assert_eq!(shown(&account).as_deref(), Some("Max Usage"), "Meta's product prefix is dropped");
+
+        // Later mints name no tier: the saved name stays and is tied to the mint's id, once.
+        let unnamed =
+            json!({"api_key":"k","is_subs_active":false,"subs_tier_id":"28367280949604159","subs_tier_name":null});
+        assert!(mint(&account, unnamed.clone()));
+        assert_eq!(
+            (disk()["subs_tier_name"].as_str(), disk()["subs_tier_id"].as_str()),
+            (Some("Muse Code Max Usage"), Some("28367280949604159"))
+        );
+        assert!(!mint(&account, unnamed), "an unchanged tier does not rewrite the file");
+        assert_eq!(shown(&account).as_deref(), Some("Max Usage"));
+        crate::quota::observe_meta_frame(
+            &account,
+            &json!({"type":"response.subscription_usage",
+            "subscription":{"tier":"28367280949604159","weekly":{"used_percent":1,"resets_at":4102444800i64}}}),
+        );
+        assert_eq!(shown(&account).as_deref(), Some("Max Usage"));
+
+        // A frame from another tier hides the name instead of showing the old plan.
+        crate::quota::observe_meta_frame(
+            &account,
+            &json!({"type":"response.subscription_usage",
+            "subscription":{"tier":"tier-9","weekly":{"used_percent":1,"resets_at":4102444800i64}}}),
+        );
+        assert_eq!(shown(&account), None);
+        assert!(
+            !mint(&account, json!({"api_key":"k","subs_tier_id":"tier-9","subs_tier_name":null})),
+            "a nameless mint never moves a saved id"
+        );
+        assert_eq!(shown(&account), None);
+
+        // A mint that names the new tier saves both, and the name shows again.
+        assert!(mint(
+            &account,
+            json!({"api_key":"k","subs_tier_id":"tier-9","subs_tier_name":"Muse Code Power Usage"})
+        ));
+        assert_eq!(
+            (disk()["subs_tier_name"].as_str(), disk()["subs_tier_id"].as_str()),
+            (Some("Muse Code Power Usage"), Some("tier-9"))
+        );
+        assert_eq!(shown(&account).as_deref(), Some("Power Usage"));
+        assert_eq!(disk()["api_key"], "k", "the key is kept");
+
+        // A named mint without an id clears the saved id: nothing left to compare.
+        assert!(mint(&account, json!({"api_key":"k","subs_tier_name":"High Usage"})));
+        assert!(disk()["subs_tier_id"].is_null());
+        crate::quota::observe_meta_frame(
+            &account,
+            &json!({"type":"response.subscription_usage",
+            "subscription":{"tier":"tier-1"}}),
+        );
+        assert_eq!(shown(&account).as_deref(), Some("High Usage"), "a name without the prefix is kept whole");
+
+        // Restarting reads the saved name from the file.
+        app.reload_accounts();
+        assert_eq!(shown(&app.pool.all()[0]).as_deref(), Some("High Usage"));
+    }
+
+    #[test]
+    fn meta_tier_fields_write_only_what_a_mint_changes() {
+        let saved = |name: Option<&str>, id: Option<&str>| {
+            let mut o = OAuth::default();
+            if let Some(n) = name {
+                o.raw.insert("subs_tier_name".into(), n.into());
+            }
+            if let Some(i) = id {
+                o.raw.insert("subs_tier_id".into(), i.into());
+            }
+            o
+        };
+        let named = json!({"subs_tier_id":"t1","subs_tier_name":"Muse Code Max Usage"});
+        // Sign-in: nothing saved yet.
+        assert_eq!(
+            meta_tier_fields(&OAuth::default(), &named),
+            vec![("subs_tier_name", json!("Muse Code Max Usage")), ("subs_tier_id", json!("t1"))]
+        );
+        assert!(meta_tier_fields(&saved(Some("Muse Code Max Usage"), Some("t1")), &named).is_empty());
+        // No name saved and none minted: an id alone is not worth keeping.
+        assert!(meta_tier_fields(&OAuth::default(), &json!({"subs_tier_id":"t1","subs_tier_name":null})).is_empty());
+        // Blank names count as none.
+        assert!(
+            meta_tier_fields(&saved(Some("Max"), Some("t1")), &json!({"subs_tier_id":"t2","subs_tier_name":"  "}))
+                .is_empty()
+        );
     }
 }

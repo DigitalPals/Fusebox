@@ -245,11 +245,10 @@ async fn finish(app: &App, provider: Provider, d: &Device, access: &str, v: &Val
             if let Some(t) = expires_at {
                 extra.push(("dca_expired", t.to_rfc3339().into()));
             }
-            for k in ["user_full_name", "subs_tier_name"] {
-                if let Some(s) = minted[k].as_str() {
-                    extra.push((if k == "user_full_name" { "name" } else { "subs_tier_name" }, s.into()));
-                }
+            if let Some(s) = minted["user_full_name"].as_str() {
+                extra.push(("name", s.into()));
             }
+            extra.extend(crate::oauth::meta_tier_fields(&OAuth::default(), &minted));
             format!("meta-{}.json", file_safe(o.email.as_deref().unwrap_or("account")))
         }
     };

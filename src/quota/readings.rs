@@ -348,13 +348,15 @@ pub(super) fn claude(v: &Value) -> Reading {
 /// Meta's subscription snapshot: a short window (300 minutes today) and a weekly
 /// one, each a verbatim used percent (over 100 is valid) and an epoch-seconds
 /// reset. Stream frames carry it as `subscription`; a key mint may carry it as
-/// `subs_usage` (on 3 November 2026 Meta's mint sent none). The tier id is an
-/// opaque number, so only the mint's tier name is kept, as the plan's name.
+/// `subs_usage` (on 3 November 2026 Meta's mint sent none). The tier id (the
+/// frame's `tier`, the mint's `subs_tier_id`) is an opaque number, never a plan;
+/// the tier's name lives in the account file (see `Account::meta_plan_name`).
 pub(super) fn meta(v: &Value) -> Reading {
     let snap = [&v["subscription"], &v["subs_usage"], v]
         .into_iter()
         .find(|s| s["window"].is_object() || s["weekly"].is_object());
-    let mut out = Reading { plan_name: text(&v["subs_tier_name"]), ..Default::default() };
+    let tier = text(&v["subscription"]["tier"]).or_else(|| text(&v["subs_tier_id"]));
+    let mut out = Reading { tier, ..Default::default() };
     let Some(snap) = snap else { return out };
     let window = &snap["window"];
     let mins = number(&window["window_duration_mins"]).filter(|m| *m >= 1.0 && m.fract() == 0.0 && *m < 366.0 * 1440.0);
@@ -581,6 +583,7 @@ mod tests {
         let mut st = crate::accounts::AccountState::default();
         usage(&mut st, Provider::Meta, &meta_frame());
         assert_eq!(st.quota.plan, None, "a tier id is not a plan anyone can read");
+        assert_eq!(st.quota.meta_tier.as_deref(), Some("28367280949604159"));
         assert_eq!(st.quota.five_hour_remaining("muse-wonder-1.0"), Some(97.0));
         assert_eq!(st.quota.weekly_remaining("muse-wonder-1.0"), Some(99.0));
         assert_eq!(st.quota.weekly_reset("muse-wonder-1.0"), ts(4102444800));
@@ -599,7 +602,8 @@ mod tests {
             }}),
         );
         assert_eq!(st.quota.plan, None);
-        assert_eq!(st.quota.plan_name.as_deref(), Some("Power Usage"));
+        assert_eq!(st.quota.plan_name, None, "the tier name is kept in the account file");
+        assert_eq!(st.quota.meta_tier.as_deref(), Some("tier-9"));
         assert_eq!(st.quota.five_hour_remaining("muse-spark-1.3"), Some(60.0));
         assert!(st.quota.exhausted("muse-spark-1.3"), "over-100 weekly use still exhausts");
     }

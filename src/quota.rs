@@ -106,8 +106,10 @@ struct Reading {
     windows: Vec<Window>,
     limits: Vec<Limit>,
     plan: Option<String>,
-    /// The plan's display name when the reading itself carries one (Meta mints).
+    /// The plan's display name when the reading itself carries one (Claude profiles).
     plan_name: Option<String>,
+    /// Meta's opaque subscription tier id, from a mint or a stream frame.
+    tier: Option<String>,
     /// The provider confirms the account has no 5-hour limit.
     no_five_hour: bool,
 }
@@ -152,6 +154,10 @@ pub struct Quota {
     /// starter all leave it alone until then, so their retries don't keep it limited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_wait_until: Option<DateTime<Utc>>,
+    /// The Meta tier id the last mint or stream frame named. It is an opaque number,
+    /// so it only tells whether the tier name saved at sign-in still applies.
+    #[serde(skip)]
+    pub meta_tier: Option<String>,
 }
 
 /// A usage-endpoint call skipped because the provider asked to wait.
@@ -681,7 +687,10 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
-    let Reading { windows, limits, plan, plan_name, no_five_hour } = reading;
+    let Reading { windows, limits, plan, plan_name, tier, no_five_hour } = reading;
+    if tier.is_some() {
+        st.quota.meta_tier = tier;
+    }
     // Only a provider-confirmed absence retires a retained 5-hour window; an omitted one stays.
     let retired = |w: &Window| no_five_hour && w.name == "5h" && w.model.is_none();
     if windows.is_empty() && limits.is_empty() {
@@ -752,11 +761,15 @@ pub fn observe_meta_frame(acct: &Account, v: &Value) {
     if v["type"] != "response.subscription_usage" {
         return;
     }
-    let windows = readings::meta(v).windows;
+    let reading = readings::meta(v);
+    let mut st = acct.state.lock();
+    if reading.tier.is_some() {
+        st.quota.meta_tier = reading.tier;
+    }
+    let windows = reading.windows;
     if windows.is_empty() {
         return;
     }
-    let mut st = acct.state.lock();
     if !st.quota_refreshing {
         st.set_quota(windows, None);
     }
@@ -803,7 +816,7 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         return changed;
     }
     // Banked resets and separate plan reads are Claude/Codex features; Meta's
-    // mint already carries its tier name with every usage reading.
+    // tier comes with its mints and stream frames.
     let reset_stale = matches!(acct.provider, Provider::Claude | Provider::Codex) && app.cfg().banked_resets && {
         let st = acct.state.lock();
         !st.disabled

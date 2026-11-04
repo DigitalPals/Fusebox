@@ -1110,7 +1110,29 @@ impl Account {
         {
             out["quota"]["renewal"] = serde_json::to_value(r).unwrap_or(Value::Null);
         }
+        if self.provider == Provider::Meta
+            && let Some(name) = self.meta_plan_name(&st.quota)
+        {
+            out["quota"]["plan_name"] = name.into();
+        }
         out
+    }
+
+    /// The Meta tier's name as the account file saved it from a mint, without Meta's
+    /// "Muse Code " product prefix ("Max Usage"). Meta's later mints name no tier, so
+    /// the saved name stands until a mint or stream frame reports a different tier id:
+    /// then it is hidden rather than shown for a tier the account left.
+    pub fn meta_plan_name(&self, quota: &crate::quota::Quota) -> Option<String> {
+        let cred = self.cred.read();
+        let Credential::OAuth(o) = &*cred else { return None };
+        let name = o.field("subs_tier_name")?;
+        if let (Some(saved), Some(seen)) = (o.field("subs_tier_id"), quota.meta_tier.as_deref())
+            && saved != seen
+        {
+            return None;
+        }
+        let short = name.strip_prefix("Muse Code ").map(str::trim).filter(|s| !s.is_empty());
+        Some(short.unwrap_or(name).to_string())
     }
 
     /// When the subscription charges next: the provider's date, else the day set by hand.
