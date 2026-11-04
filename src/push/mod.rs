@@ -339,7 +339,7 @@ fn enabled(settings: &Notifications, event: Event) -> bool {
         Event::AccountErrors => settings.account_errors,
         Event::ClientAddress => settings.client_new_address,
         Event::BankedReset => settings.banked_resets,
-        Event::Renewal => settings.renewals,
+        Event::Renewal => settings.renewals || settings.renewals_day_before,
         Event::Quiet => false,
     }
 }
@@ -379,7 +379,10 @@ async fn check(app: &App) {
     }
     let mut send = app.push.track(&current, &accounts, &cfg.notifications);
     if enabled(&cfg.notifications, Event::Renewal) {
-        send.extend(app.push.renewals(&accounts, Utc::now()));
+        let n = &cfg.notifications;
+        let leads: Vec<i64> =
+            [(1, n.renewals_day_before), (2, n.renewals)].into_iter().filter(|l| l.1).map(|l| l.0).collect();
+        send.extend(app.push.renewals(&accounts, Utc::now(), &leads));
     }
     for fault in send {
         notify(app, &fault, faults::badge(&shown)).await;

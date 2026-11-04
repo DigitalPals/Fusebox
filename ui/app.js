@@ -2505,7 +2505,8 @@ function renewalRow(a) {
   if (r.manual) {
     const parts = [dayDate(r.at), daysAway(r.at)];
     if (r.ends) return ['Ends', [...parts, 'cancelled'].join(' · ')];
-    parts.push(r.period || 'monthly', r.estimated ? 'plan changed, check the date' : 'set by you');
+    parts.push(r.period || 'monthly');
+    if (r.estimated) parts.push('plan changed, check the date');
     return ['Renews', parts.join(' · ')];
   }
   if (r.ends) return ['Ends', `${dayDate(r.at)} · in ${left(r.at)} · cancelled`];
@@ -2543,7 +2544,7 @@ function billingFormHTML(a) {
   const seg = (act, value, label, on) => `<button type="button" data-act="${act}" data-id="${id}" data-value="${value}" aria-pressed="${on}">${label}</button>`;
   const note = B.ends
     ? 'Cancelled: it ends when the period paid for runs out, on the first billing day from this date that hasn’t passed.'
-    : `${provName(a)} doesn’t share billing dates. Enter the day of your last or next charge: Fusebox counts on ${yearly ? 'a year' : 'a month'} at a time and reminds you two days ahead.`;
+    : `${provName(a)} doesn’t share billing dates. Enter the day of your last or next charge: Fusebox counts on ${yearly ? 'a year' : 'a month'} at a time and reminds you before each charge.`;
   const changed = a.billing?.plan_changed ? '<small class="warn">The plan changed since this date was set, and a plan change can move the billing day.</small>' : '';
   return `<form class="billing-form" data-form="billing" data-id="${id}" aria-label="Billing date" aria-busy="${!!B.busy}">
     <label class="field"><span>Billing day</span><input id="billing-date" type="date" name="date" value="${esc(B.date || '')}" max="${localDay(yearly ? 12 : 1)}" required ${B.busy ? 'disabled' : ''}></label>

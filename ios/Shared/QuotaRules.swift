@@ -210,7 +210,7 @@ extension Account {
     /// The sign-in card's row for the next charge: ("Renews", "Fri 6 Nov, 10:53 · in 3d 21h ·
     /// monthly"), ("Renews", "about Fri 6 Dec · in 1d 17h · estimated": passed before the next read) or
     /// ("Ends", "Fri 6 Nov · in 3d 21h · cancelled"), as the dashboard writes it. A billing day
-    /// set by hand is a day: ("Renews", "Mon 23 Nov · in 19 days · monthly · set by you") until
+    /// set by hand is a day: ("Renews", "Mon 23 Nov · in 19 days · monthly") until
     /// that day is over.
     public func renewalRow(now: Date = .now) -> (key: String, value: String)? {
         guard let r = quota?.renewal else { return nil }
@@ -222,8 +222,8 @@ extension Account {
             let days = cal.dateComponents([.day], from: cal.startOfDay(for: now), to: start).day ?? 0
             let when = days <= 0 ? "today" : days == 1 ? "tomorrow" : "in \(days) days"
             if r.ends == true { return ("Ends", "\(day) · \(when) · cancelled") }
-            let note = r.estimated == true ? "plan changed, check the date" : "set by you"
-            return ("Renews", [day, when, r.period ?? "monthly", note].joined(separator: " · "))
+            let note = r.estimated == true ? "plan changed, check the date" : nil
+            return ("Renews", [day, when, r.period ?? "monthly", note].compactMap { $0 }.joined(separator: " · "))
         }
         guard r.at > now else { return nil }
         let left = "in \(Fmt.left(r.at, now: now))"

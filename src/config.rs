@@ -291,8 +291,11 @@ pub struct Notifications {
     pub client_new_address: bool,
     /// A new banked reset, one used automatically, needing review, or expired unused.
     pub banked_resets: bool,
-    /// Two days before a ChatGPT subscription charges again, or ends. Claude gives no date.
+    /// Two days before a subscription charges again, or ends: ChatGPT's own date, or the
+    /// billing day set on a Claude or Meta account.
     pub renewals: bool,
+    /// The same reminder a day before; with both on, each date is reminded twice.
+    pub renewals_day_before: bool,
     /// Chat and webhook URLs that get the same notifications (Discord, Slack, Teams,
     /// Telegram, ntfy, or any URL that takes JSON).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -309,6 +312,7 @@ impl Default for Notifications {
             client_new_address: true,
             banked_resets: true,
             renewals: true,
+            renewals_day_before: false,
             webhooks: vec![],
         }
     }
@@ -573,7 +577,8 @@ usage:
 #   account-errors: false      # account errors and runs of failed requests
 #   client-new-address: true   # a named client's key used from a new address, or refused at one
 #   banked-resets: true        # a new reset, one used automatically, needing review, or expired unused
-#   renewals: true             # two days before a ChatGPT subscription charges again, or ends
+#   renewals: true             # two days before a subscription charges again, or ends
+#   renewals-day-before: false # the same a day before
 #   webhooks:                  # the same notifications in chat: Discord, Slack, Teams, Telegram, ntfy or any URL
 #     - https://discord.com/api/webhooks/...
 
@@ -1098,6 +1103,10 @@ mod tests {
         assert!(!Config::parse("notifications:\n  banked-resets: false\n").unwrap().notifications.banked_resets);
         assert!(defaults.notifications.renewals && saved.notifications.renewals);
         assert!(!Config::parse("notifications:\n  renewals: false\n").unwrap().notifications.renewals);
+        assert!(!defaults.notifications.renewals_day_before && !saved.notifications.renewals_day_before);
+        assert!(
+            Config::parse("notifications:\n  renewals-day-before: true\n").unwrap().notifications.renewals_day_before
+        );
         for (text, problem) in [
             ("trusted-proxies: [example.com]\n", "trusted-proxies"),
             ("trusted-proxies: [10.0.0.0/40]\n", "trusted-proxies"),

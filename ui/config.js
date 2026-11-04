@@ -802,7 +802,8 @@ function configNotificationsHTML() {
     ${configSwitch(['notifications', 'account-errors'], 'Account errors', 'An account reports an error, or three or more of its requests fail within an hour.')}
     ${configSwitch(['notifications', 'client-new-address'], 'New client address', 'A client’s key is used from an address it wasn’t used from before, or refused at one its address list doesn’t allow.')}
     ${configSwitch(['notifications', 'banked-resets'], 'Banked resets', 'An account receives a new reset, a reset is used automatically, its outcome needs review, or one expires unused.')}
-    ${configSwitch(['notifications', 'renewals'], 'Subscription renewals', 'Two days before a subscription charges again, or ends after being cancelled: ChatGPT’s own date, or the billing day set on a Claude or Meta account’s page.')}</div>`;
+    ${configSwitch(['notifications', 'renewals'], 'Subscription renewals', 'Two days before a subscription charges again, or ends after being cancelled: ChatGPT’s own date, or the billing day set on a Claude or Meta account’s page.')}
+    ${configSwitch(['notifications', 'renewals-day-before'], 'Subscription renewals, a day before', 'The same reminder one day before the charge or end. With both on, each date is reminded twice.')}</div>`;
 }
 
 // Where a webhook URL delivers, as the server decides it (src/push/webhooks.rs).

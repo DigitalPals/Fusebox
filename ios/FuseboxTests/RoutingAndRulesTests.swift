@@ -183,7 +183,7 @@ struct RulesTests {
         let noon = cal.date(byAdding: .hour, value: 12, to: today)!
         let soon = try #require(account(morning(19)).renewalRow(now: noon))
         #expect(soon.key == "Renews")
-        #expect(soon.value.hasSuffix(" · in 19 days · monthly · set by you"), "\(soon.value)")
+        #expect(soon.value.hasSuffix(" · in 19 days · monthly"), "\(soon.value)")
         #expect(account(morning(0)).renewalRow(now: noon)?.value.contains(" · today · ") == true, "its morning passed, the day did not")
         #expect(account(morning(1), estimated: true).renewalRow(now: noon)?.value.hasSuffix(" · tomorrow · monthly · plan changed, check the date") == true)
         #expect(account(morning(2), ends: true).renewalRow(now: noon)?.value.hasSuffix(" · in 2 days · cancelled") == true)

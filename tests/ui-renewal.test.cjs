@@ -45,10 +45,10 @@ test('a billing day set by hand is a day: shown until it is over, without a time
   // 4 November 2026, 15:00 in Amsterdam; the server keeps a day set by hand as its 09:00.
   const row = load(Date.parse('2026-11-04T14:00:00Z'));
   const manual = (at, extra = {}) => ({ quota: { renewal: { at, estimated: false, ends: false, period: 'monthly', manual: true, ...extra } } });
-  assert.deepEqual([...row(manual('2026-11-23T08:00:00Z'))], ['Renews', 'Mon 23 Nov · in 19 days · monthly · set by you']);
-  assert.deepEqual([...row(manual('2026-11-05T08:00:00Z'))], ['Renews', 'Thu 5 Nov · tomorrow · monthly · set by you']);
-  assert.deepEqual([...row(manual('2026-11-04T08:00:00Z'))], ['Renews', 'Wed 4 Nov · today · monthly · set by you'], 'its morning passed, the day did not');
-  assert.deepEqual([...row(manual('2027-01-15T08:00:00Z', { period: 'yearly' }))], ['Renews', 'Fri 15 Jan · in 72 days · yearly · set by you']);
+  assert.deepEqual([...row(manual('2026-11-23T08:00:00Z'))], ['Renews', 'Mon 23 Nov · in 19 days · monthly']);
+  assert.deepEqual([...row(manual('2026-11-05T08:00:00Z'))], ['Renews', 'Thu 5 Nov · tomorrow · monthly']);
+  assert.deepEqual([...row(manual('2026-11-04T08:00:00Z'))], ['Renews', 'Wed 4 Nov · today · monthly'], 'its morning passed, the day did not');
+  assert.deepEqual([...row(manual('2027-01-15T08:00:00Z', { period: 'yearly' }))], ['Renews', 'Fri 15 Jan · in 72 days · yearly']);
   assert.deepEqual([...row(manual('2026-11-23T08:00:00Z', { estimated: true }))], ['Renews', 'Mon 23 Nov · in 19 days · monthly · plan changed, check the date']);
   assert.deepEqual([...row(manual('2026-11-23T08:00:00Z', { ends: true }))], ['Ends', 'Mon 23 Nov · in 19 days · cancelled']);
   assert.equal(row(manual('2026-11-03T08:00:00Z')), null, 'a day that is over');
