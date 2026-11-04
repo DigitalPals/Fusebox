@@ -7,7 +7,11 @@ import Testing
 /// store guards post-await writes with a generation counter instead of an
 /// identity check. These cover that guard; the delayed-response run against
 /// a stub server stays a manual check on macOS.
-@Suite("AppStore connection generations")
+///
+/// `signOut()` deletes the saved key from the keychain, clears the widget
+/// snapshot and ends Live Activities, so the tests that call it run only on a
+/// simulator that isn't signed in.
+@Suite("AppStore connection generations", .serialized)
 @MainActor
 struct AppStoreLifecycleTests {
     @Test func aWriteFromTheLiveGenerationApplies() {
@@ -30,7 +34,8 @@ struct AppStoreLifecycleTests {
         #expect(applied)
     }
 
-    @Test func signOutDropsLateResultsAndClearsState() {
+    @Test(.enabled(if: Connection.key == nil, "signs out: only on a simulator that isn't signed in"))
+    func signOutDropsLateResultsAndClearsState() {
         let store = AppStore()
         let gen = store.generation
         store.signOut()
@@ -44,7 +49,8 @@ struct AppStoreLifecycleTests {
         #expect(store.loadError == nil)
     }
 
-    @Test func loadsWithoutAConnectionDoNothing() async {
+    @Test(.enabled(if: Connection.key == nil, "signs out: only on a simulator that isn't signed in"))
+    func loadsWithoutAConnectionDoNothing() async {
         let store = AppStore()
         store.signOut()
         await store.refreshAll()

@@ -349,6 +349,7 @@ final class AppStore {
     /// until a warning turns into an error. The list updates at once; the live list confirms it.
     func dismiss(_ fault: Fault) async throws {
         guard let api else { return }
+        let gen = generation
         struct Body: Encodable { var key: String }
         setFaults(faults.filter { $0.key != fault.key }, dismissed: dismissedFaults.filter { $0.key != fault.key } + [fault])
         do {
@@ -356,6 +357,8 @@ final class AppStore {
         } catch let e as APIError where e.status == 404 {
             // It cleared in the meantime: nothing left to dismiss.
         } catch {
+            // A failure for a connection that has since changed isn't this one's to report.
+            guard gen == generation else { return }
             await refreshAll()
             throw error
         }
