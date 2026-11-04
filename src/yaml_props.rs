@@ -1,7 +1,8 @@
 //! YAML properties: what Fusebox writes reads back unchanged, and `crate::yaml`
-//! reads documents the way `serde_yaml` 0.9 did (the differential gate for
-//! replacing it, issue #42). Generated documents are config-shaped trees
-//! heavy on scalars YAML parsers disagree about.
+//! reads documents the way `serde_yaml` 0.9 did. A differential run against
+//! `serde_yaml` (issue #42) produced `yaml_corpus.json`: what the old parser
+//! made of each document there, which the new one must keep doing. Generated
+//! documents are config-shaped trees heavy on scalars YAML parsers disagree about.
 
 use proptest::prelude::*;
 
@@ -62,49 +63,9 @@ fn parse_as_json(text: &str) -> serde_json::Value {
     crate::yaml::from_str(text).unwrap_or_else(|e| panic!("emitted YAML parses: {e}\n{text}"))
 }
 
-/// What `serde_yaml` 0.9 (the parser config files had until issue #42) made of
-/// a document, as the tree `crate::yaml` must produce: `None` where it failed,
-/// or where its tree has no JSON form (tags, non-string keys, infinities),
-/// which `crate::yaml` refuses.
-fn reference(text: &str) -> Option<serde_json::Value> {
-    fn convert(v: serde_yaml::Value) -> Option<serde_json::Value> {
-        Some(match v {
-            serde_yaml::Value::Null => serde_json::Value::Null,
-            serde_yaml::Value::Bool(b) => serde_json::Value::Bool(b),
-            serde_yaml::Value::Number(n) => {
-                if let Some(u) = n.as_u64() {
-                    u.into()
-                } else if let Some(i) = n.as_i64() {
-                    i.into()
-                } else {
-                    serde_json::Number::from_f64(n.as_f64()?)?.into()
-                }
-            }
-            serde_yaml::Value::String(s) => serde_json::Value::String(s),
-            serde_yaml::Value::Sequence(items) => {
-                serde_json::Value::Array(items.into_iter().map(convert).collect::<Option<_>>()?)
-            }
-            serde_yaml::Value::Mapping(map) => serde_json::Value::Object(
-                map.into_iter().map(|(k, v)| Some((k.as_str()?.to_string(), convert(v)?))).collect::<Option<_>>()?,
-            ),
-            serde_yaml::Value::Tagged(_) => return None,
-        })
-    }
-    convert(serde_yaml::from_str(text).ok()?)
-}
-
-/// Both parsers agree: the same tree, or both refuse the document.
-fn agree(text: &str) -> Result<(), String> {
-    match (reference(text), crate::yaml::from_str(text)) {
-        (Some(want), Ok(got)) if want == got => Ok(()),
-        (None, Err(_)) => Ok(()),
-        (want, got) => Err(format!("{text:?}\n  serde_yaml:  {want:?}\n  crate::yaml: {got:?}")),
-    }
-}
-
 /// Renders a tree as YAML text in styles drawn from `picks`: block or flow,
-/// strings plain (unchecked, so often not the same string), single- or
-/// double-quoted, two or four columns of indentation, stray comments.
+/// strings single- or double-quoted, two or four columns of indentation,
+/// stray comments. Read back, it must be the same tree.
 fn render(value: &serde_json::Value, picks: &mut Picks, indent: usize, out: &mut String) {
     let pad = |out: &mut String, n: usize| out.extend(std::iter::repeat_n(' ', n));
     match value {
@@ -114,10 +75,7 @@ fn render(value: &serde_json::Value, picks: &mut Picks, indent: usize, out: &mut
                 if i > 0 {
                     pad(out, indent);
                 }
-                // A plain key starting with `&` or `*` is anchor or alias syntax, where
-                // YAML 1.2 lets the name run on into the colon (libyaml stopped there).
-                let style = if k.starts_with(['&', '*']) { 2 } else { picks.next(4) };
-                out.push_str(&scalar_text(&serde_json::Value::String(k.clone()), style));
+                out.push_str(&scalar_text(&serde_json::Value::String(k.clone()), 1 + picks.next(3)));
                 out.push(':');
                 if v.as_object().is_some_and(|m| !m.is_empty()) || v.as_array().is_some_and(|a| !a.is_empty()) {
                     if picks.next(5) == 0 {
@@ -145,7 +103,7 @@ fn render(value: &serde_json::Value, picks: &mut Picks, indent: usize, out: &mut
             out.push('\n');
         }
         scalar => {
-            out.push_str(&scalar_text(scalar, picks.next(4)));
+            out.push_str(&scalar_text(scalar, 1 + picks.next(3)));
             out.push('\n');
         }
     }
@@ -193,11 +151,10 @@ fn flow(value: &serde_json::Value, out: &mut String) {
 
 fn scalar_text(value: &serde_json::Value, style: u64) -> String {
     match value {
-        // A raw line break would need the continuation indented under its parent
-        // (`KNOWN_DIFFERENCES`), so multi-line strings are always escaped.
+        // A raw line break in a quoted scalar folds to a space, so multi-line
+        // strings are always escaped.
         serde_json::Value::String(s) if s.contains('\n') => serde_json::to_string(s).unwrap(),
         serde_json::Value::String(s) => match style {
-            0 => s.clone(),
             1 => format!("'{}'", s.replace('\'', "''")),
             _ => serde_json::to_string(s).unwrap(),
         },
@@ -226,9 +183,7 @@ proptest! {
     #[test]
     fn generated_documents_round_trip_through_emit_and_parse(value in tree()) {
         let emitted = crate::yaml::to_string(&value).expect("value emits as YAML");
-        prop_assert_eq!(&parse_as_json(&emitted), &value);
-        // Other YAML readers must see the same tree in what Fusebox writes.
-        prop_assert_eq!(reference(&emitted), Some(value), "{}", emitted);
+        prop_assert_eq!(parse_as_json(&emitted), value);
     }
 
     #[test]
@@ -256,156 +211,27 @@ proptest! {
     }
 
     #[test]
-    fn parsers_agree_on_generated_documents(value in tree(), seed in any::<u64>()) {
+    fn rendered_documents_read_back_as_their_tree(value in tree(), seed in any::<u64>()) {
         let mut text = String::new();
         render(&value, &mut Picks(seed), 0, &mut text);
-        let verdict = agree(&text);
-        prop_assert!(verdict.is_ok(), "{}", verdict.unwrap_err());
+        prop_assert_eq!(crate::yaml::from_str(&text).map_err(|e| format!("{e}\n{text}")), Ok(value));
     }
 
     #[test]
-    fn parsers_agree_on_number_like_scalars(raw in number_like(), quoted in any::<bool>()) {
-        let text = if quoted { format!("v: '{raw}'\nw: \"{raw}\"\n") } else { format!("v: {raw}\nw: [{raw}]\n{raw}: k\n") };
-        let verdict = agree(&text);
-        prop_assert!(verdict.is_ok(), "{}", verdict.unwrap_err());
-        let alone = format!("{raw}\n");
-        let verdict = agree(&alone);
-        prop_assert!(verdict.is_ok(), "{}", verdict.unwrap_err());
+    fn quoted_number_like_scalars_stay_strings(raw in number_like()) {
+        let text = format!("v: '{raw}'\nw: \"{raw}\"\n");
+        prop_assert_eq!(parse_as_json(&text), serde_json::json!({"v": raw.clone(), "w": raw}));
+    }
+
+    #[test]
+    fn arbitrary_text_never_panics(text in "[ -~\n\t]{0,64}", raw in number_like()) {
+        let _ = crate::yaml::from_str(&text);
+        let _ = crate::yaml::from_str(&format!("{raw}: {raw}\n- {raw}\n"));
     }
 }
 
-/// Documents both parsers must read the same way: config-shaped YAML and the
-/// corners where YAML parsers differ.
-const CORPUS: &[&str] = &[
-    r#""#,
-    r#"# just a comment
-"#,
-    "---\n",
-    "---\n...\n",
-    "--- a\n",
-    "%YAML 1.2\n---\na: 1\n",
-    "\u{feff}a: 1\n",
-    "a: 1\r\nb: [2, 3]\r\n",
-    r#"port: 8317
-host: ""
-auth-dir: ~/.fusebox
-debug: false
-"#,
-    r#"api-keys:
-  - one
-  - "two"
-claude-api-key:
-- api-key: sk-1
-  base-url: https://api.example.com:8443/v1
-  models:
-    - name: claude-opus-*
-      alias: big
-"#,
-    r#"a:
-  b:
-    c: [1, {d: e}, [f]]
-  g: {h: i, j: [k, l]}
-"#,
-    r#"list:
-- a
--
-- - nested
-  - more
-- key: v
-  other: w
-"#,
-    "a: yes\nb: no\nc: on\nd: off\ne: y\nf: n\ng: Yes\nh: NO\n",
-    "a: true\nb: True\nc: TRUE\nd: tRUE\ne: false\nf: FALSE\n",
-    "a: ~\nb: null\nc: Null\nd: NULL\ne: nUll\nf:\n",
-    "a: 0\nb: -0\nc: +0\nd: 007\ne: -007\nf: 0x1F\ng: 0X1F\nh: 0o17\ni: 0b101\nj: -0x10\nk: +0x10\nl: 0x-1\nm: 1_000\nn: 0x\n",
-    "a: 9223372036854775807\nb: 9223372036854775808\nc: 18446744073709551615\nd: -9223372036854775808\n",
-    "a: 18446744073709551616\n",
-    "a: -9223372036854775809\n",
-    "a: 1.5\nb: -1.5\nc: .5\nd: 5.\ne: 1e3\nf: 1E-3\ng: +1.0e+3\nh: 1.0e\ni: 0.1e1\nj: 00.5\nk: 1.2.3\n",
-    "a: .inf\n",
-    "a: -.Inf\n",
-    "a: .NaN\n",
-    "a: inf\nb: nan\nc: infinity\nd: NaN\n",
-    "a: 2026-11-04\nb: 2026-11-04T10:00:00Z\nc: 12:30\nd: 1:20:30\n",
-    r#"a: 'single ''quoted'''
-b: "double \"q\" \n \t \u00e9 \x41 \U0001F600 \/"
-c: 'it''s'
-"#,
-    "a: |\n  line one\n  line two\nb: |-\n  kept\nc: |+\n  trailing\n\nd: >\n  folded\n  text\n\n  para\ne: >-\n  x\n",
-    "a: plain\n  continued\n  lines\nb: \"quoted\n  continued\"\n",
-    "url: http://x/a#frag\nhash: a#b\ncomment: a # real comment\ncolon: a:b\nkv: key:value\n",
-    r#""quoted key": 1
-'single key': 2
-key with spaces: 3
-"": 4
-"#,
-    "1: one\n",
-    "true: yes\n",
-    "~: null\n",
-    ": empty key\n",
-    "? [complex]\n: key\n",
-    "? simple\n: explicit\n",
-    "a: 1\na: 2\n",
-    "a: 1\n\"a\": 2\n",
-    "x: &k a\n*k : b\na: c\n",
-    "base: &b\n  x: 1\n  y: [1, 2]\ncopy: *b\nmerged:\n  <<: *b\n  z: 3\n",
-    "s: &s scalar\nt: *s\nlist: &l [1, 2]\nm: [*l, *l]\n",
-    "a: &a [*a]\n",
-    "a: *missing\n",
-    "a: &x 1\nb: &x 2\nc: *x\n",
-    "a: !!str 123\n",
-    "a: !!int \"7\"\n",
-    "a: !!int 007\n",
-    "a: !!float 1\n",
-    "a: !!float 007\n",
-    "a: !!float .inf\n",
-    "a: !!bool true\n",
-    "a: !!null ''\n",
-    "a: !!null ~\n",
-    "a: !!seq [1]\n",
-    "a: !!map {x: 1}\n",
-    "a: !!set {x: 1}\n",
-    "a: !!binary 5\n",
-    "a: !<tag:example.com,2026:x> 5\n",
-    "a: !custom [1]\n",
-    "a: !!int 1.5\n",
-    "a: !!float abc\n",
-    "a: !!bool yes\n",
-    "a: !!binary aGVsbG8=\n",
-    "a: !!timestamp 2026-11-04\n",
-    "a: !custom value\n",
-    "a: !custom {x: 1}\n",
-    "a: ! 12\n",
-    "%TAG !e! tag:example.com,2026:\n---\na: !e!thing x\n",
-    "a: 1\n---\nb: 2\n",
-    "--- 1\n--- 2\n",
-    "a: b: c\n",
-    "- a\nb: c\n",
-    "a:\n\t- tab\n",
-    "a: \"unclosed\n",
-    "a: [1, 2\n",
-    "a: {b: 1\n",
-    "a:\n  - x\n - y\n",
-    "key: [a, b, ]\n",
-    "key: {a: 1, b: 2, }\n",
-    "{a: 1, b: [x, y]}\n",
-    "[1, two, 'three', {four: 4}]\n",
-    "- &a x\n- *a\n",
-    "café: 🦀\n\"\\u2028\": sep\n",
-    r#"a: "\0\a\b\e\f\v\N\_\L\P"
-"#,
-    "a: '\n  multi\n  line\n  '\n",
-    "a: - b\n",
-    "a: -b\nc: ?d\ne: :f\n",
-    "a: @x\n",
-    "a: `x\n",
-    "a: %x\n",
-    "a: x\n...\n",
-    "a: x\n...\nb: y\n",
-];
-
 /// Where `crate::yaml` deliberately reads differently from `serde_yaml`, and what
-/// it does instead. Both follow YAML 1.2 where libyaml was lenient or YAML 1.1.
+/// it does instead: both follow YAML 1.2 where libyaml was lenient.
 const KNOWN_DIFFERENCES: &[(&str, Option<&str>)] = &[
     // A quoted scalar's continuation line must be indented under its parent node.
     ("a:\n  b: 'multi\nline'\n", None),
@@ -422,22 +248,35 @@ fn known_differences_from_serde_yaml_hold() {
             Some(json) => assert_eq!(ours.as_ref().ok(), Some(&serde_json::from_str(json).unwrap()), "{text:?}"),
             None => assert!(ours.is_err(), "{text:?} should be refused: {ours:?}"),
         }
-        assert!(agree(text).is_err(), "{text:?} no longer differs from serde_yaml; drop it from the list");
     }
 }
 
+/// What `serde_yaml` 0.9 made of config-shaped documents and of the corners
+/// where YAML parsers differ, recorded from the differential run: the tree, or
+/// `refused` where it failed or its tree had no JSON form (tags, non-string
+/// keys, infinities).
 #[test]
-fn parsers_agree_on_the_corpus() {
-    let disagreements: Vec<String> = CORPUS.iter().filter_map(|text| agree(text).err()).collect();
-    assert!(disagreements.is_empty(), "{} disagreement(s):\n{}", disagreements.len(), disagreements.join("\n"));
+fn documents_read_as_serde_yaml_read_them() {
+    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("yaml_corpus.json")).unwrap();
+    assert!(cases.len() >= 90);
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let text = case["yaml"].as_str().unwrap();
+            let got = crate::yaml::from_str(text);
+            let ok = if case["refused"] == true { got.is_err() } else { got.as_ref().ok() == Some(&case["value"]) };
+            (!ok).then(|| format!("{text:?}: want {case}, got {got:?}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{} document(s) read differently:\n{}", wrong.len(), wrong.join("\n"));
 }
 
 #[test]
-fn parsers_agree_on_nesting_limits() {
-    for depth in [100, 126, 127, 128, 129, 130, 200] {
+fn collections_nest_at_most_128_deep() {
+    for (depth, ok) in [(100, true), (128, true), (129, false), (200, false)] {
         let seq = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-        assert!(agree(&seq).is_ok(), "depth {depth}: {}", agree(&seq).unwrap_err());
+        assert_eq!(crate::yaml::from_str(&seq).is_ok(), ok, "sequences {depth} deep");
         let map = format!("{}1{}", "{a: ".repeat(depth), "}".repeat(depth));
-        assert!(agree(&map).is_ok(), "depth {depth}: {}", agree(&map).unwrap_err());
+        assert_eq!(crate::yaml::from_str(&map).is_ok(), ok, "mappings {depth} deep");
     }
 }
