@@ -39,9 +39,13 @@ mod quota;
 #[cfg(test)]
 mod routing_tests;
 mod schema;
+#[cfg(test)]
+mod schema_props;
 mod server;
 mod source;
 mod sse;
+#[cfg(test)]
+mod sse_props;
 mod state;
 mod stream_limits;
 mod tls;
@@ -51,6 +55,8 @@ mod usage;
 mod vertex;
 mod window_starter;
 mod ws;
+#[cfg(test)]
+mod yaml_props;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

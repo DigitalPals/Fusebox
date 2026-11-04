@@ -13,6 +13,8 @@ pub mod responses;
 mod cache_translation_tests;
 #[cfg(test)]
 mod efficiency_tests;
+#[cfg(test)]
+mod props;
 
 use std::borrow::Cow;
 
