@@ -27,6 +27,47 @@ fn any_json() -> impl Strategy<Value = Value> {
     })
 }
 
+/// A body shaped like the format's own: its entry keys present, with
+/// arbitrary content under them, so the parsers get past their first checks.
+fn wire_shaped(format: Format) -> BoxedStrategy<Value> {
+    let role = proptest::sample::select(vec!["system", "developer", "user", "assistant", "tool", "model", "function"]);
+    let kind = proptest::sample::select(vec![
+        "text",
+        "image",
+        "image_url",
+        "input_text",
+        "output_text",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "message",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "custom",
+    ]);
+    let part = (kind, any_json(), any_json()).prop_map(|(kind, a, b)| {
+        json!({"type": kind, "text": a, "content": b, "id": "x", "name": "lookup", "input": a, "arguments": "{}",
+            "call_id": "c", "tool_use_id": "c", "source": b, "functionCall": {"name": "f", "args": a}})
+    });
+    let turn = (role, proptest::collection::vec(part, 0..3), any_json()).prop_map(|(role, parts, extra)| {
+        json!({"role": role, "content": parts, "parts": parts, "tool_calls": extra, "type": "message"})
+    });
+    let turns = proptest::collection::vec(turn, 0..4);
+    match format {
+        Format::Chat => (turns, any_json()).prop_map(|(t, tools)| json!({"model": "m", "messages": t, "tools": tools})).boxed(),
+        Format::Responses => (turns, any_json(), any_json())
+            .prop_map(|(t, instructions, tools)| json!({"model": "m", "input": t, "instructions": instructions, "tools": tools}))
+            .boxed(),
+        Format::Claude => (turns, any_json(), any_json())
+            .prop_map(|(t, system, tools)| json!({"model": "m", "max_tokens": 16, "system": system, "messages": t, "tools": tools}))
+            .boxed(),
+        Format::Gemini => (turns, any_json(), any_json())
+            .prop_map(|(t, system, tools)| json!({"contents": t, "systemInstruction": system, "tools": tools}))
+            .boxed(),
+    }
+}
+
 fn format() -> impl Strategy<Value = Format> {
     prop_oneof![Just(Format::Chat), Just(Format::Responses), Just(Format::Claude), Just(Format::Gemini)]
 }
@@ -109,6 +150,16 @@ proptest! {
     }
 
     #[test]
+    fn parsing_wire_shaped_json_never_panics((format, body) in format().prop_flat_map(|f| (Just(f), wire_shaped(f)))) {
+        // Past the entry checks, through turns, parts and tools: an error, never a panic.
+        if let Ok(req) = super::parse_request(format, &body) {
+            for target in [Format::Chat, Format::Responses, Format::Claude, Format::Gemini] {
+                let _ = build(target, &req);
+            }
+        }
+    }
+
+    #[test]
     fn parse_build_reaches_a_fixed_point(
         format in format(),
         system in "[a-zA-Z0-9 ]{0,24}",
@@ -116,7 +167,8 @@ proptest! {
         max_tokens in proptest::option::of(1u64..4096),
     ) {
         let body = client_body(format, &system, &turns, max_tokens);
-        let Ok(req) = super::parse_request(format, &body) else { return Ok(()) };
+        // Every body generated here is valid; failing to parse one is a bug.
+        let req = super::parse_request(format, &body).map_err(|e| TestCaseError::fail(format!("{e}: {body}")))?;
         // Parsing normalizes: blank turns drop and consecutive same-role
         // turns merge, so the first reparsing may still change the shape.
         // After that the built body must be a fixed point — anything else

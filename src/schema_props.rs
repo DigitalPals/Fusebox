@@ -60,8 +60,46 @@ fn schema() -> impl Strategy<Value = Value> {
     })
 }
 
+/// A schema whose root defines `Thing` and refers to it (directly, or from a
+/// property), where the definition may refer to itself.
+fn schema_with_defs() -> impl Strategy<Value = Value> {
+    (schema(), schema(), any::<bool>()).prop_map(|(def, body, direct)| {
+        let mut root = match body {
+            Value::Object(map) => map,
+            other => serde_json::Map::from_iter([("items".to_string(), other)]),
+        };
+        if direct {
+            root.insert("$ref".into(), "#/$defs/Thing".into());
+        } else {
+            root.insert("properties".into(), serde_json::json!({"thing": {"$ref": "#/$defs/Thing"}}));
+        }
+        root.insert("$defs".into(), serde_json::json!({"Thing": def}));
+        Value::Object(root)
+    })
+}
+
+/// Whether any object in `value` still has `"$ref": target`.
+fn refers_to(value: &Value, target: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.get("$ref").and_then(Value::as_str) == Some(target) || map.values().any(|v| refers_to(v, target))
+        }
+        Value::Array(items) => items.iter().any(|v| refers_to(v, target)),
+        _ => false,
+    }
+}
+
 proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+
+    #[test]
+    fn inline_only_resolves_every_defined_reference(value in schema_with_defs()) {
+        let once = crate::schema::inline_only(&value);
+        prop_assert!(once.get("$defs").is_none(), "{}", once);
+        // Resolved, or (recursion) replaced by a placeholder: never left dangling.
+        prop_assert!(!refers_to(&once, "#/$defs/Thing"), "{}", once);
+        prop_assert_eq!(crate::schema::inline_only(&once), once);
+    }
 
     #[test]
     fn clean_tool_is_idempotent(value in schema(), validated in any::<bool>()) {
