@@ -525,6 +525,50 @@ async fn streams_that_fail_or_stall_before_content_move_to_the_next_account() {
 }
 
 #[tokio::test]
+async fn the_last_account_left_is_not_benched_for_a_stall() {
+    let s = setup(|cfg, _| {
+        cfg.codex_api_key[0].priority = 10;
+        cfg.first_token_timeout_seconds = 1;
+    })
+    .await;
+    for account in ["a", "b"] {
+        s.mock.acts.lock().insert((account.into(), "gpt-slow".into()), Act::Stall);
+    }
+    let (status, _) = ask(&s, "client", "gpt-slow", &[]).await;
+    assert_eq!(status, 504);
+    let account = |label: &str| s.app.pool.all().into_iter().find(|x| x.label == label).unwrap();
+    let (a, b) = (account("a"), account("b"));
+    // `a` stalled while `b` was free, so it sits out; `b` was the last one left, so it
+    // stays in and only shows the stall.
+    assert!(a.cooling_until("gpt-slow").is_some());
+    assert!(a.paused_by_stall("gpt-slow"));
+    assert!(b.cooling_until("gpt-slow").is_none());
+    assert!(b.snapshot()["last_error"].as_str().unwrap().contains("sent nothing"), "{}", b.snapshot());
+    // The client's retry reaches `b` again instead of a made-up rate limit.
+    s.mock.acts.lock().remove(&("b".to_string(), "gpt-slow".to_string()));
+    assert_eq!(ask(&s, "client", "gpt-slow", &[]).await, (200, "b:gpt-slow".into()));
+
+    // With `b` out for a sign-in, `a`'s stall is what keeps the model away: a 503 that
+    // says so, with the wait, rather than "rate limited".
+    b.cool(None, chrono::Utc::now() + chrono::Duration::minutes(5), "401: unauthorized");
+    let calls = s.mock.calls.lock().len();
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/responses", s.proxy.url))
+        .bearer_auth("client")
+        .json(&json!({"model":"gpt-slow","stream":true,"input":"hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    let wait: u64 = resp.headers()["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
+    let body: Value = resp.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("gpt-slow stalled") && !message.contains("rate limited"), "{body}");
+    assert_eq!(s.mock.calls.lock().len(), calls, "no upstream call");
+}
+
+#[tokio::test]
 async fn named_client_limits_are_enforced() {
     let s = setup(|cfg, _| {
         cfg.api_keys.clear();

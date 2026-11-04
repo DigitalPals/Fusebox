@@ -486,6 +486,9 @@ pub struct AccountState {
     /// The `cooldowns` deadlines a rate limit set: waits a client may be told. `cool` and
     /// `refuse` share the map, so a deadline counts only while it is the one recorded here.
     pub limit_pauses: HashMap<String, DateTime<Utc>>,
+    /// The `cooldowns` deadlines a stalled upstream set (`stall`), kept like `limit_pauses`:
+    /// a deadline counts only while it is the one recorded here.
+    pub stall_pauses: HashMap<String, DateTime<Utc>>,
     /// The refusal pausing the whole account, if one does (see [`Refusal`]).
     pub refusal: Option<Refusal>,
     /// Confirmed subscription exhaustion, distinct from temporary rate limits. A
@@ -962,12 +965,24 @@ impl Account {
     }
 
     /// Pauses the account (or one model) for a problem that stays shown until a
-    /// request succeeds: sign-in, permission, a stalled upstream.
+    /// request succeeds, such as a sign-in or permission problem (stalls use `stall`).
     pub fn cool(&self, model: Option<&str>, until: DateTime<Utc>, reason: &str) {
         let mut st = self.state.lock();
         let key = model.unwrap_or("*");
         st.cooldowns.insert(key.to_string(), until);
         st.limit_pauses.remove(key);
+        st.set_error(reason);
+    }
+
+    /// Pauses a model whose upstream sent nothing before the first-token deadline, so its
+    /// next requests go to another account. The error stays until a request succeeds.
+    pub fn stall(&self, model: &str, until: DateTime<Utc>, reason: &str) {
+        let mut st = self.state.lock();
+        let now = Utc::now();
+        st.stall_pauses.retain(|_, t| *t > now);
+        st.cooldowns.insert(model.to_string(), until);
+        st.limit_pauses.remove(model);
+        st.stall_pauses.insert(model.to_string(), until);
         st.set_error(reason);
     }
 
@@ -1000,8 +1015,8 @@ impl Account {
     }
 
     /// Whether only rate limits, spent quota or a quota check keep `model` off this account,
-    /// so its return is a wait a client may be told. A sign-in, permission or stalled-upstream
-    /// pause (`cool`) is not one, nor is a refusal. Both share `cooldowns` with rate limits:
+    /// so its return is a wait a client may be told. A sign-in or permission pause (`cool`)
+    /// is not one, nor is a refusal or a stalled upstream (`stall`). All share `cooldowns` with rate limits:
     /// a rate limit is the deadline `rate_limit` recorded in `limit_pauses`.
     pub fn paused_by_limit(&self, model: &str) -> bool {
         let st = self.state.lock();
@@ -1009,6 +1024,18 @@ impl Account {
         ["*", model]
             .into_iter()
             .all(|key| st.cooldowns.get(key).is_none_or(|t| *t <= now || st.limit_pauses.get(key) == Some(t)))
+    }
+
+    /// Whether a stalled upstream (`stall`) keeps `model` off this account, with nothing
+    /// but rate limits or spent quota besides: a short wait that is no rate limit.
+    pub fn paused_by_stall(&self, model: &str) -> bool {
+        let st = self.state.lock();
+        let now = Utc::now();
+        let live = |key: &str| st.cooldowns.get(key).filter(|t| **t > now);
+        let stalled = |key: &str| live(key).is_some_and(|t| st.stall_pauses.get(key) == Some(t));
+        let limited = |key: &str| live(key).is_some_and(|t| st.limit_pauses.get(key) == Some(t));
+        ["*", model].iter().any(|key| stalled(key))
+            && ["*", model].iter().all(|key| live(key).is_none() || stalled(key) || limited(key))
     }
 
     pub fn quota_epoch(&self) -> u64 {

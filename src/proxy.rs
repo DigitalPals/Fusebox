@@ -742,6 +742,8 @@ enum Dry {
     Refused(u16, String),
     /// A rate limit, spent quota or a quota check, until then.
     Limit(chrono::DateTime<Utc>),
+    /// A stalled upstream, until then: no rate limit, but a short wait worth telling.
+    Stalled(chrono::DateTime<Utc>),
     /// Anything else, such as a sign-in or permission pause: not a wait to advertise.
     Other,
 }
@@ -764,15 +766,53 @@ fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclud
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
         None if a.paused_by_limit(model) => Dry::Limit(until),
+        None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
+}
+
+/// Whether an account outside `exclude` could take `model` right now.
+fn another_account_free(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclude: &[String]) -> bool {
+    app.pool.all().into_iter().any(|a| {
+        let disabled = a.state.lock().disabled;
+        !exclude.contains(&a.id)
+            && !disabled
+            && !a.held_out()
+            && app.pool.resolve_account(&a, model, only).is_some()
+            && a.cooling_until(model).is_none()
+    })
+}
+
+/// How long a stalled account sits out the model, when another account can take it.
+const STALL_PAUSE_MINUTES: i64 = 2;
+
+/// An account whose upstream stalled sits out the model while another account can take
+/// it. With none free, a pause would only turn the client's retries into errors when this
+/// account may well answer them, so the stall is just shown on the account. True if paused.
+fn bench_stalled(
+    app: &App,
+    acct: &Account,
+    model: &str,
+    only: Option<&crate::accounts::Only>,
+    unreachable: &[String],
+    message: &str,
+) -> bool {
+    let exclude: Vec<String> = std::iter::once(acct.id.clone()).chain(unreachable.iter().cloned()).collect();
+    if another_account_free(app, model, only, &exclude) {
+        acct.stall(model, Utc::now() + Duration::minutes(STALL_PAUSE_MINUTES), message);
+        true
+    } else {
+        acct.state.lock().set_error(message);
+        false
+    }
 }
 
 /// The answer for a request left without an account. A 429 tells when the next account
 /// is back if a rate limit, spent quota or a quota check is all that keeps it away: within
 /// a minute as Retry-After; later with no header, which clients would sleep through for
 /// hours, and to OpenAI clients as `usage_limit_reached` with `resets_at`. A sign-in or
-/// permission pause is no wait. With `refusals`, a refusal only the owner can fix (a
+/// permission pause is no wait. A stalled upstream is no rate limit either: a 503 says so,
+/// with Retry-After for the wait (at most a minute, told again on the next try). With `refusals`, a refusal only the owner can fix (a
 /// used-up API credit balance) is given instead while it keeps the next account away.
 #[allow(clippy::too_many_arguments)]
 fn no_account_left(
@@ -790,6 +830,13 @@ fn no_account_left(
     }
     match dry_pool(app, model, only, exclude) {
         Some(Dry::Refused(status, message)) if refusals => (status, formats::error_body(format, status, &message)),
+        Some(Dry::Stalled(until)) => {
+            let wait = seconds_until(until);
+            let message = format!(
+                "the upstream for {model} stalled (it sent nothing before the first-token deadline); next try in {wait}s"
+            );
+            (503, with_retry_after(formats::error_body(format, 503, &message), wait.min(ADVERTISED_WAIT_LIMIT)))
+        }
         Some(Dry::Limit(until)) => {
             let wait = seconds_until(until);
             if wait <= ADVERTISED_WAIT_LIMIT {
@@ -1781,9 +1828,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             let msg = stalled_message(first_token);
             tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
+            let benched = bench_stalled(&app, &acct, &model, only.as_ref(), &residency_excluded, &msg);
             tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
-                "upstream sent nothing before the first-token deadline; trying another account");
-            acct.cool(Some(&model), Utc::now() + Duration::minutes(2), &msg);
+                benched, "upstream sent nothing before the first-token deadline; trying another account");
             app.broadcast("accounts", Value::Null);
             tried.push(acct.id.clone());
             last_error = Some((504, formats::error_body(call.format, 504, &msg)));
@@ -2068,12 +2115,12 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     }
                     let msg = stalled_message(first_token);
                     tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_stalled"));
+                    let benched = bench_stalled(&app, &acct, &model, only.as_ref(), &residency_excluded, &msg);
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
-                        "upstream stream stayed silent past the first-token deadline; trying another account");
+                        benched, "upstream stream stayed silent past the first-token deadline; trying another account");
                     if let Some(c) = tracker.usage_tap() {
                         c.headers(&HeaderMap::new(), 504);
                     }
-                    acct.cool(Some(&model), Utc::now() + Duration::minutes(2), &msg);
                     app.broadcast("accounts", Value::Null);
                     tried.push(acct.id.clone());
                     last_error = Some((504, formats::error_body(call.format, 504, &msg)));
@@ -3005,6 +3052,23 @@ mod tests {
         clear();
         account.cool(Some(model), soon, "upstream sent nothing within 120s");
         assert!(!account.paused_by_limit(model));
+        assert!(!account.paused_by_stall(model), "only `stall` marks a stall");
+        clear();
+        // A stall is no rate limit, but a wait of its own, also next to a rate limit.
+        account.stall(model, soon, "upstream sent nothing within 120s");
+        assert!(!account.paused_by_limit(model));
+        assert!(account.paused_by_stall(model));
+        account.rate_limit("other-model", soon, "429: slow down");
+        assert!(account.paused_by_stall(model));
+        // A later pause of another kind replaces it.
+        account.cool(Some(model), soon + Duration::seconds(5), "403: forbidden");
+        assert!(!account.paused_by_stall(model));
+        clear();
+        account.stall(model, soon, "upstream sent nothing within 120s");
+        account.cool(None, soon, "401: unauthorized");
+        assert!(!account.paused_by_stall(model), "a sign-in pause is no wait");
+        clear();
+        account.cool(Some(model), soon, "upstream sent nothing within 120s");
         // Nor is a rate limit stacked on one.
         account.rate_limit(model, soon, "429: slow down");
         account.cool(None, Utc::now() + Duration::minutes(10), "403: forbidden");
