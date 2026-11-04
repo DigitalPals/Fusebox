@@ -58,12 +58,12 @@ pub enum Reply {
 type PreparationKey = (String, String, Format, String);
 type PreparationCache = Option<(PreparationKey, Arc<WireRequest>)>;
 
-struct WireRequest {
-    url: String,
-    headers: Vec<(String, String)>,
-    payload: bytes::Bytes,
-    policy: crate::cache::Policy,
-    names: HashMap<String, String>,
+pub(crate) struct WireRequest {
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) payload: bytes::Bytes,
+    pub(crate) policy: crate::cache::Policy,
+    pub(crate) names: HashMap<String, String>,
 }
 
 /// The same upstream value feeds accounting and sanitized cache diagnostics.
@@ -1384,6 +1384,333 @@ async fn execute_models(app: Arc<App>, mut call: Call) -> Reply {
     last.unwrap_or_else(|| error_reply(call.format, 404, &format!("model group {base} lists no models")))
 }
 
+/// Accounts that sit a request out before routing: all but Codex subscriptions
+/// when the client asked for a Codex residency, and Kimi and Meta for a remote
+/// compaction (Codex asks for it by provider, not model, and they can't compact).
+/// `Err` when every account that could serve a compaction is one that can't.
+/// Reads only, so inspection uses it too.
+pub(crate) fn ineligible_accounts(
+    app: &App,
+    format: Format,
+    body: &Value,
+    model: &str,
+    only: Option<&crate::accounts::Only>,
+    residency: bool,
+) -> Result<Vec<String>, String> {
+    let mut excluded: Vec<String> = if residency {
+        app.pool
+            .all()
+            .into_iter()
+            .filter(|a| a.provider != Provider::Codex || !a.is_oauth())
+            .map(|a| a.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if format == Format::Responses
+        && body["input"].as_array().is_some_and(|items| items.iter().any(|i| i["type"] == "compaction_trigger"))
+    {
+        let serving: Vec<_> = app
+            .pool
+            .all()
+            .into_iter()
+            .filter(|a| {
+                let disabled = a.state.lock().disabled;
+                !excluded.contains(&a.id)
+                    && !disabled
+                    && !a.held_out()
+                    && app.pool.resolve_account(a, model, only).is_some()
+            })
+            .collect();
+        let cannot = |a: &Account| matches!(a.provider, Provider::Kimi | Provider::Meta);
+        if !serving.is_empty() && serving.iter().all(|a| cannot(a)) {
+            return Err(format!(
+                "{model} can't compact a Codex conversation remotely: Kimi and Meta don't support it. Point Codex at this model through a model provider entry of its own with `capabilities.remote_compaction = \"unsupported\"`, so Codex compacts locally"
+            ));
+        }
+        excluded.extend(serving.iter().filter(|a| cannot(a)).map(|a| a.id.clone()));
+    }
+    Ok(excluded)
+}
+
+/// The wire an attempt on one account uses, decided before anything is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AttemptShape {
+    /// The client's own format is one of the provider's wires: its body is sent as it came.
+    pub(crate) passthrough: bool,
+    /// The wire the provider is spoken to in.
+    pub(crate) native: Format,
+    /// Always when translating (the answer is re-rendered), and for Codex subscriptions.
+    pub(crate) upstream_stream: bool,
+    pub(crate) devin: bool,
+}
+
+/// What stays the same on every attempt of one request.
+pub(crate) struct PlanInput<'a> {
+    pub(crate) format: Format,
+    pub(crate) body: &'a Value,
+    pub(crate) headers: &'a HeaderMap,
+    pub(crate) stream: bool,
+    /// The canonical model the client asked for, without its reasoning suffix.
+    pub(crate) model: &'a str,
+    pub(crate) suffix: Option<&'a Reasoning>,
+    pub(crate) cfg: &'a crate::config::Config,
+    pub(crate) requested_cache: &'a crate::cache::Requested,
+    pub(crate) cache_key: Option<&'a str>,
+    pub(crate) cache_scope: &'static str,
+    /// The client asked for a Codex residency.
+    pub(crate) residency: bool,
+}
+
+/// Translation work the attempts of one request share.
+#[derive(Default)]
+pub(crate) struct PlanMemo {
+    parsed: Option<Request>,
+    shortened: Option<(Request, HashMap<String, String>)>,
+}
+
+/// What one attempt sends.
+pub(crate) struct Plan {
+    pub(crate) shape: AttemptShape,
+    pub(crate) wire: WireRequest,
+    /// Generation controls a translation dropped; `None` when passed through.
+    pub(crate) control_downgrades: Option<Vec<&'static str>>,
+}
+
+/// Why a request can't be sent on this account, and what the client is told.
+pub(crate) struct Refusal {
+    pub(crate) status: u16,
+    pub(crate) body: Value,
+    pub(crate) message: String,
+    /// The cache policy that refused it, when the cache hints did.
+    pub(crate) cache_policy: Option<crate::cache::Policy>,
+    /// Controls the translation had already dropped.
+    pub(crate) control_downgrades: Option<Vec<&'static str>>,
+}
+
+impl Refusal {
+    fn new(format: Format, status: u16, message: impl Into<String>) -> Box<Self> {
+        let message = message.into();
+        Box::new(Self {
+            status,
+            body: formats::error_body(format, status, &message),
+            message,
+            cache_policy: None,
+            control_downgrades: None,
+        })
+    }
+}
+
+/// Records a refusal on the request's log and answers it.
+fn refuse(tracker: &mut Tracker, refusal: Refusal) -> Reply {
+    if let Some(dropped) = refusal.control_downgrades {
+        note_downgrades(tracker, dropped);
+    }
+    if let Some(policy) = refusal.cache_policy {
+        tracker.cache_policy(policy);
+    }
+    tracker.finish(refusal.status, &Usage::default(), Some(refusal.message));
+    Reply::Error(refusal.status, refusal.body)
+}
+
+fn note_downgrades(tracker: &mut Tracker, dropped: Vec<&'static str>) {
+    for reason in &dropped {
+        if crate::diagnostics::warn_once(reason, std::time::Duration::from_secs(600)) {
+            tracing::warn!(request_id = tracker.log.id, reason, "translated generation control dropped");
+        }
+    }
+    tracker.log.control_downgrades = dropped;
+}
+
+/// How a request goes to this account, or why it can't. Reads nothing but its inputs.
+pub(crate) fn attempt_shape(input: &PlanInput, acct: &Account) -> Result<AttemptShape, Box<Refusal>> {
+    let provider = acct.provider;
+    if input.residency && (provider != Provider::Codex || !acct.is_oauth()) {
+        let message = "Requested Codex residency requires a Codex subscription route; this route cannot honor it";
+        return Err(Refusal::new(input.format, 400, message));
+    }
+    if input.body["previous_response_id"].is_string()
+        && ((provider == Provider::Codex && acct.is_oauth()) || !provider.wires().contains(&Format::Responses))
+    {
+        let message =
+            "Previous response is unavailable; resend the full conversation input without previous_response_id";
+        return Err(Box::new(Refusal {
+            status: 400,
+            body: json!({"error":{"message":message,"type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}),
+            message: message.into(),
+            cache_policy: None,
+            control_downgrades: None,
+        }));
+    }
+    let devin = provider == Provider::Devin;
+    // Freeform (custom) tools only exist on OpenAI's own Responses backends.
+    let custom_tools = input.format == Format::Responses
+        && input.body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["type"] == "custom"));
+    let passthrough = provider.wires().contains(&input.format) && (!custom_tools || native_custom_tools(provider));
+    let native = if passthrough { input.format } else { provider.wires().first().copied().unwrap_or(Format::Chat) };
+    let upstream_stream = !passthrough || input.stream || (provider == Provider::Codex && acct.is_oauth());
+    Ok(AttemptShape { passthrough, native, upstream_stream, devin })
+}
+
+/// The exact request one attempt sends to `acct`: URL, headers and body bytes,
+/// or the refusal the client gets instead. It neither sends nor records
+/// anything: the caller logs the outcome, and passes in the provider session
+/// it chose, so planning never creates one.
+pub(crate) fn plan_attempt(
+    input: &PlanInput,
+    acct: &Account,
+    upstream_model: &str,
+    provider_session: &str,
+    memo: &mut PlanMemo,
+) -> Result<Plan, Box<Refusal>> {
+    let shape = attempt_shape(input, acct)?;
+    let AttemptShape { passthrough, native, upstream_stream, devin } = shape;
+    let provider = acct.provider;
+    let cfg = input.cfg;
+    let format = input.format;
+    let mut names = HashMap::new();
+    let mut body = if passthrough {
+        let mut b = input.body.clone();
+        if let Some(r) = input.suffix {
+            apply_native_reasoning(native, &mut b, r, upstream_model);
+        }
+        b
+    } else {
+        if memo.parsed.is_none() {
+            let body = if format == Format::Gemini {
+                let mut body = input.body.clone();
+                body["model"] = input.model.into();
+                std::borrow::Cow::Owned(body)
+            } else {
+                std::borrow::Cow::Borrowed(input.body)
+            };
+            let mut r = formats::parse_request(format, &body).map_err(|e| Refusal::new(format, 400, e))?;
+            if input.suffix.is_some() {
+                r.reasoning = input.suffix.cloned();
+            }
+            memo.parsed = Some(r);
+        }
+        let original = memo.parsed.as_ref().unwrap();
+        let req = if native != Format::Claude && has_long_tool_names(original) {
+            let (req, mapping) = memo.shortened.get_or_insert_with(|| {
+                let mut req = original.clone();
+                let mapping = shorten_tool_names(&mut req);
+                (req, mapping)
+            });
+            names = mapping.clone();
+            &*req
+        } else {
+            original
+        };
+        let hoisted = (devin || !matches!(native, Format::Chat | Format::Responses))
+            .then(|| formats::hoist_instructions(req))
+            .flatten();
+        let req = hoisted.as_ref().unwrap_or(req);
+        if native == Format::Claude
+            && !devin
+            && let Err(message) = formats::claude::validate_thinking_budget(req, upstream_model)
+        {
+            return Err(Refusal::new(format, 400, message));
+        }
+        match native {
+            _ if devin => crate::devin::build_request(req, upstream_model),
+            Format::Claude => formats::claude::build_request(req, upstream_model),
+            Format::Responses => formats::responses::build_request(
+                req,
+                upstream_model,
+                &formats::responses::BuildOpts {
+                    chatgpt_backend: provider == Provider::Codex && acct.is_oauth(),
+                    custom_tools: native_custom_tools(provider),
+                    default_reasoning: provider == Provider::Codex,
+                },
+            ),
+            Format::Gemini => formats::gemini::build_request(req, upstream_model),
+            Format::Chat => formats::chat::build_request(req, upstream_model),
+        }
+    };
+    let control_downgrades = (!passthrough).then(|| {
+        let openai =
+            provider == Provider::Codex && (upstream_model.starts_with("gpt-5") || upstream_model.starts_with("gpt-6"));
+        let mut dropped = formats::generation_controls(&mut body, native, openai, cfg.translation.allow_service_tier);
+        let verbosity_requested = format == Format::Chat && input.body["verbosity"].is_string()
+            || format == Format::Responses && input.body["text"]["verbosity"].is_string();
+        if verbosity_requested && !matches!(native, Format::Chat | Format::Responses) {
+            dropped.push("verbosity_unsupported");
+        }
+        if matches!(format, Format::Chat | Format::Responses)
+            && input.body["service_tier"].is_string()
+            && !matches!(native, Format::Chat | Format::Responses)
+        {
+            dropped.push("service_tier_not_enabled");
+        }
+        dropped
+    });
+    let rejected = |body: &Value, reason: &str, downgrade: Option<String>| {
+        let mut policy =
+            crate::cache::Policy::for_request(input.requested_cache, body, native, input.cache_scope, downgrade);
+        policy.applied = "rejected";
+        policy.key_scope = "not_sent";
+        let mut refusal = Refusal::new(format, 400, reason);
+        refusal.cache_policy = Some(policy);
+        refusal.control_downgrades = control_downgrades.clone();
+        refusal
+    };
+    let cache_downgrade = if passthrough {
+        None
+    } else {
+        match formats::preserve_cache_hints(format, native, input.body, &mut body) {
+            Ok(downgrade) => downgrade,
+            Err(message) => return Err(rejected(&body, &message, Some(message.clone()))),
+        }
+    };
+    if let Some(reason) = &cache_downgrade
+        && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject
+    {
+        return Err(rejected(&body, reason, cache_downgrade.clone()));
+    }
+    if native == Format::Claude
+        && !devin
+        && let Err(message) = formats::claude::validate_native_thinking_budget(&body, upstream_model)
+    {
+        let mut refusal = Refusal::new(format, 400, message);
+        refusal.control_downgrades = control_downgrades;
+        return Err(refusal);
+    }
+    let requested = input.requested_cache;
+    let cache_defaults = passthrough
+        || (!requested.explicit_mode && !requested.markers)
+        || (cache_downgrade.is_some()
+            && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
+            && requested.markers);
+    let prepared = upstream::prepare(
+        &Target {
+            acct,
+            cfg,
+            client_headers: input.headers,
+            model: upstream_model,
+            wire: native,
+            passthrough,
+            stream: upstream_stream,
+            count_tokens: false,
+            cache_key: input.cache_key,
+            cache_defaults,
+            provider_session: Some(provider_session),
+        },
+        body,
+    );
+    let mut policy =
+        crate::cache::Policy::for_request(requested, &prepared.body, native, input.cache_scope, cache_downgrade);
+    if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
+        policy.key_scope = input.cache_scope;
+    }
+    let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
+    Ok(Plan {
+        shape,
+        wire: WireRequest { url: prepared.url, headers: prepared.headers, payload: payload.into(), policy, names },
+        control_downgrades,
+    })
+}
+
 async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> Reply {
     let cfg = app.cfg();
     let residency = upstream::residency_requirement(&call.headers).ok().flatten();
@@ -1403,46 +1730,16 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     tracker.latency_context = cfg.latency_routing.then(|| crate::latency::Context::new(&call.body, call.transport));
 
     let mut preparation_cache: PreparationCache = None;
-    let mut parsed: Option<Request> = None;
-    let mut shortened: Option<(Request, HashMap<String, String>)> = None;
+    let mut memo = PlanMemo::default();
     let mut tried: Vec<String> = Vec::new();
-    let mut residency_excluded: Vec<_> = if residency.is_some() {
-        app.pool
-            .all()
-            .into_iter()
-            .filter(|a| a.provider != Provider::Codex || !a.is_oauth())
-            .map(|a| a.id.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    // Codex asks for remote compaction by provider, not model, and Kimi and Meta can't
-    // compact: their accounts sit out such a request rather than fail it.
-    if call.format == Format::Responses
-        && call.body["input"].as_array().is_some_and(|items| items.iter().any(|i| i["type"] == "compaction_trigger"))
-    {
-        let serving: Vec<_> = app
-            .pool
-            .all()
-            .into_iter()
-            .filter(|a| {
-                let disabled = a.state.lock().disabled;
-                !residency_excluded.contains(&a.id)
-                    && !disabled
-                    && !a.held_out()
-                    && app.pool.resolve_account(a, &model, only.as_ref()).is_some()
-            })
-            .collect();
-        let cannot = |a: &Account| matches!(a.provider, Provider::Kimi | Provider::Meta);
-        if !serving.is_empty() && serving.iter().all(|a| cannot(a)) {
-            let message = format!(
-                "{model} can't compact a Codex conversation remotely: Kimi and Meta don't support it. Point Codex at this model through a model provider entry of its own with `capabilities.remote_compaction = \"unsupported\"`, so Codex compacts locally"
-            );
-            tracker.finish(400, &Usage::default(), Some(message.clone()));
-            return error_reply(call.format, 400, &message);
-        }
-        residency_excluded.extend(serving.iter().filter(|a| cannot(a)).map(|a| a.id.clone()));
-    }
+    let residency_excluded =
+        match ineligible_accounts(&app, call.format, &call.body, &model, only.as_ref(), residency.is_some()) {
+            Ok(ids) => ids,
+            Err(message) => {
+                tracker.finish(400, &Usage::default(), Some(message.clone()));
+                return error_reply(call.format, 400, &message);
+            }
+        };
     let mut refreshed: Vec<String> = Vec::new();
     let mut last_error: Option<(u16, Value)> = None;
     let mut retry_same: Option<String> = None;
@@ -1598,30 +1895,23 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
 
         let quota_epoch = acct.quota_epoch();
         let provider = acct.provider;
-        if residency.is_some() && (provider != Provider::Codex || !acct.is_oauth()) {
-            let message = "Requested Codex residency requires a Codex subscription route; this route cannot honor it";
-            tracker.finish(400, &Usage::default(), Some(message.into()));
-            return error_reply(call.format, 400, message);
-        }
-        if call.body["previous_response_id"].is_string()
-            && ((provider == Provider::Codex && acct.is_oauth()) || !provider.wires().contains(&Format::Responses))
-        {
-            let msg =
-                "Previous response is unavailable; resend the full conversation input without previous_response_id";
-            tracker.finish(400, &Usage::default(), Some(msg.into()));
-            return Reply::Error(
-                400,
-                json!({"error":{"message":msg,"type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}),
-            );
-        }
-        let devin = provider == Provider::Devin;
-        // Freeform (custom) tools only exist on OpenAI's own Responses backends.
-        let custom_tools = call.format == Format::Responses
-            && call.body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["type"] == "custom"));
-        let passthrough = provider.wires().contains(&call.format) && (!custom_tools || native_custom_tools(provider));
-        let native = if passthrough { call.format } else { provider.wires().first().copied().unwrap_or(Format::Chat) };
-        // Upstream streaming: always when translating (we re-render), and for Codex OAuth.
-        let upstream_stream = !passthrough || call.stream || (provider == Provider::Codex && acct.is_oauth());
+        let input = PlanInput {
+            format: call.format,
+            body: &call.body,
+            headers: &call.headers,
+            stream: call.stream,
+            model: &model,
+            suffix: suffix.as_ref(),
+            cfg: &cfg,
+            requested_cache: &requested_cache,
+            cache_key: cache_key.as_deref(),
+            cache_scope,
+            residency: residency.is_some(),
+        };
+        let AttemptShape { passthrough, native, upstream_stream, devin } = match attempt_shape(&input, &acct) {
+            Ok(shape) => shape,
+            Err(refusal) => return refuse(&mut tracker, *refusal),
+        };
         let provider_session =
             app.sessions.provider_session(call.session.as_deref(), &acct, cfg.provider_session_idle_seconds);
         let preparation_key = (
@@ -1638,185 +1928,17 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         {
             cached.clone()
         } else {
-            let mut names = HashMap::new();
-            let mut body = if passthrough {
-                let mut b = call.body.clone();
-                if let Some(r) = &suffix {
-                    apply_native_reasoning(native, &mut b, r, &upstream_model);
-                }
-                b
-            } else {
-                if parsed.is_none() {
-                    let body = if call.format == Format::Gemini {
-                        let mut body = call.body.clone();
-                        body["model"] = model.clone().into();
-                        std::borrow::Cow::Owned(body)
-                    } else {
-                        std::borrow::Cow::Borrowed(&call.body)
-                    };
-                    match formats::parse_request(call.format, &body) {
-                        Ok(mut r) => {
-                            if suffix.is_some() {
-                                r.reasoning = suffix.clone();
-                            }
-                            parsed = Some(r);
-                        }
-                        Err(e) => {
-                            tracker.finish(400, &Usage::default(), Some(e.clone()));
-                            return error_reply(call.format, 400, &e);
-                        }
-                    }
-                }
-                let original = parsed.as_ref().unwrap();
-                let req = if native != Format::Claude && has_long_tool_names(original) {
-                    let (req, mapping) = shortened.get_or_insert_with(|| {
-                        let mut req = original.clone();
-                        let mapping = shorten_tool_names(&mut req);
-                        (req, mapping)
-                    });
-                    names = mapping.clone();
-                    &*req
-                } else {
-                    original
-                };
-                let hoisted = (devin || !matches!(native, Format::Chat | Format::Responses))
-                    .then(|| formats::hoist_instructions(req))
-                    .flatten();
-                let req = hoisted.as_ref().unwrap_or(req);
-                if native == Format::Claude
-                    && !devin
-                    && let Err(message) = formats::claude::validate_thinking_budget(req, &upstream_model)
-                {
-                    tracker.finish(400, &Usage::default(), Some(message.clone()));
-                    return error_reply(call.format, 400, &message);
-                }
-                match native {
-                    _ if devin => crate::devin::build_request(req, &upstream_model),
-                    Format::Claude => formats::claude::build_request(req, &upstream_model),
-                    Format::Responses => formats::responses::build_request(
-                        req,
-                        &upstream_model,
-                        &formats::responses::BuildOpts {
-                            chatgpt_backend: provider == Provider::Codex && acct.is_oauth(),
-                            custom_tools: native_custom_tools(provider),
-                            default_reasoning: provider == Provider::Codex,
-                        },
-                    ),
-                    Format::Gemini => formats::gemini::build_request(req, &upstream_model),
-                    Format::Chat => formats::chat::build_request(req, &upstream_model),
-                }
+            let plan = match plan_attempt(&input, &acct, &upstream_model, &provider_session, &mut memo) {
+                Ok(plan) => plan,
+                Err(refusal) => return refuse(&mut tracker, *refusal),
             };
-            if !passthrough {
-                let openai = provider == Provider::Codex
-                    && (upstream_model.starts_with("gpt-5") || upstream_model.starts_with("gpt-6"));
-                let mut dropped =
-                    formats::generation_controls(&mut body, native, openai, cfg.translation.allow_service_tier);
-                let verbosity_requested = call.format == Format::Chat && call.body["verbosity"].is_string()
-                    || call.format == Format::Responses && call.body["text"]["verbosity"].is_string();
-                if verbosity_requested && !matches!(native, Format::Chat | Format::Responses) {
-                    dropped.push("verbosity_unsupported");
-                }
-                if matches!(call.format, Format::Chat | Format::Responses)
-                    && call.body["service_tier"].is_string()
-                    && !matches!(native, Format::Chat | Format::Responses)
-                {
-                    dropped.push("service_tier_not_enabled");
-                }
-                tracker.log.control_downgrades = dropped.clone();
-                for reason in dropped {
-                    if crate::diagnostics::warn_once(reason, std::time::Duration::from_secs(600)) {
-                        tracing::warn!(request_id = tracker.log.id, reason, "translated generation control dropped");
-                    }
-                }
-            }
-            let cache_downgrade = if passthrough {
-                None
-            } else {
-                match formats::preserve_cache_hints(call.format, native, &call.body, &mut body) {
-                    Ok(downgrade) => downgrade,
-                    Err(message) => {
-                        let mut policy = crate::cache::Policy::for_request(
-                            &requested_cache,
-                            &body,
-                            native,
-                            cache_scope,
-                            Some(message.clone()),
-                        );
-                        policy.applied = "rejected";
-                        policy.key_scope = "not_sent";
-                        tracker.cache_policy(policy);
-                        tracker.finish(400, &Usage::default(), Some(message.clone()));
-                        return error_reply(call.format, 400, &message);
-                    }
-                }
-            };
-            if let Some(reason) = &cache_downgrade
-                && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Reject
-            {
-                let mut policy = crate::cache::Policy::for_request(
-                    &requested_cache,
-                    &body,
-                    native,
-                    cache_scope,
-                    cache_downgrade.clone(),
-                );
-                policy.applied = "rejected";
-                policy.key_scope = "not_sent";
-                tracker.cache_policy(policy);
-                tracker.finish(400, &Usage::default(), Some(reason.clone()));
-                return error_reply(call.format, 400, reason);
-            }
-            if native == Format::Claude
-                && !devin
-                && let Err(message) = formats::claude::validate_native_thinking_budget(&body, &upstream_model)
-            {
-                tracker.finish(400, &Usage::default(), Some(message.clone()));
-                return error_reply(call.format, 400, &message);
-            }
-            let cache_defaults = passthrough
-                || (!requested_cache.explicit_mode && !requested_cache.markers)
-                || (cache_downgrade.is_some()
-                    && cfg.prompt_cache.on_incompatible == crate::cache::Incompatible::Automatic
-                    && requested_cache.markers);
-
-            let prepared = upstream::prepare(
-                &Target {
-                    acct: &acct,
-                    cfg: &cfg,
-                    client_headers: &call.headers,
-                    model: &upstream_model,
-                    wire: native,
-                    passthrough,
-                    stream: upstream_stream,
-                    count_tokens: false,
-                    cache_key: cache_key.as_deref(),
-                    cache_defaults,
-                    provider_session: Some(&provider_session),
-                },
-                body,
-            );
-            let mut cache_policy = crate::cache::Policy::for_request(
-                &requested_cache,
-                &prepared.body,
-                native,
-                cache_scope,
-                cache_downgrade,
-            );
-            if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
-                cache_policy.key_scope = cache_scope;
+            if let Some(dropped) = plan.control_downgrades {
+                note_downgrades(&mut tracker, dropped);
             }
             if cfg.debug {
                 tracing::debug!(provider = provider.as_str(), "upstream request prepared");
             }
-
-            let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
-            let wire = Arc::new(WireRequest {
-                url: prepared.url,
-                headers: prepared.headers,
-                payload: payload.into(),
-                policy: cache_policy,
-                names,
-            });
+            let wire = Arc::new(plan.wire);
             preparation_cache = Some((preparation_key, wire.clone()));
             wire
         };
@@ -2154,7 +2276,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         }
         acct.record_ok();
         let account = acct.label.clone();
-        let req = Arc::new(parsed.take().unwrap_or_default());
+        let req = Arc::new(memo.parsed.take().unwrap_or_default());
 
         let unwrap = provider == Provider::Antigravity;
         // Limits follow the resolved upstream model, as in `bootstrap`; a client alias
