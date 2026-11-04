@@ -226,8 +226,33 @@ pub fn residency_requirement(headers: &HeaderMap) -> Result<Option<String>, Stri
     Ok(requirement)
 }
 
+/// Header names a genuine client sent that Fusebox drops are recorded (names
+/// only) as evidence for client-compatibility reviews: a header a new client
+/// release adds would otherwise vanish silently for all production traffic.
+/// Expected drops are not recorded: anything `forwardable` already excludes
+/// (auth, hop-by-hop, forwarding, Fusebox's own), the transport headers
+/// Fusebox sets itself, and names the client's `Connection` header nominated.
+fn note_dropped(provider: Provider, recorded_as: Option<&'static str>, nominated: &HashSet<String>, name: &str) {
+    let Some(recorded_as) = recorded_as else { return };
+    if nominated.contains(name) || !forwardable(name) || matches!(name, "content-type" | "accept") {
+        return;
+    }
+    if crate::clients::note_dropped_header(recorded_as, name) {
+        tracing::info!(
+            provider = provider.as_str(),
+            header = name,
+            "client header is not forwarded upstream; recorded for the compatibility review"
+        );
+    }
+}
+
 fn inbound_headers(provider: Provider, cfg: Option<&Config>, client: &HeaderMap) -> Vec<(String, String)> {
     let nominated = connection_headers(client);
+    let recorded_as = match provider {
+        Provider::Claude if crate::clients::is_claude_code(client) => Some(crate::clients::CLAUDE_CODE),
+        Provider::Codex if crate::clients::is_codex(client) => Some(crate::clients::CODEX),
+        _ => None,
+    };
     let extensions = cfg.and_then(|cfg| cfg.upstream_header_allowlist.get(provider.as_str()));
     client
         .iter()
@@ -253,6 +278,7 @@ fn inbound_headers(provider: Provider, cfg: Option<&Config>, client: &HeaderMap)
                 return Some((name.to_string(), value.to_string()));
             }
             tracing::debug!(provider = provider.as_str(), header = name, "dropping upstream header");
+            note_dropped(provider, recorded_as, &nominated, name);
             None
         })
         .collect()
@@ -1172,6 +1198,40 @@ mod tests {
 
     fn get_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn dropped_genuine_client_header_names_are_recorded_without_changing_forwarding() {
+        crate::clients::reset();
+        let genuine = request_headers(&[
+            ("user-agent", CC_USER_AGENT),
+            ("anthropic-beta", "some-beta"),
+            ("x-novel-claude-header", "SECRET-VALUE"),
+            ("x-forwarded-for", "203.0.113.7"),
+            ("x-fusebox-session", "abc"),
+            ("authorization", "Bearer SECRET"),
+            ("content-type", "application/json"),
+            ("accept", "text/event-stream"),
+        ]);
+        let forwarded = inbound_headers(Provider::Claude, None, &genuine);
+        // Forwarding is exactly what it was: the novel header still drops.
+        assert!(get_header(&forwarded, "x-novel-claude-header").is_none());
+        assert_eq!(get_header(&forwarded, "anthropic-beta"), Some("some-beta"));
+        // Only the novel name is recorded; expected drops are not, and no
+        // value is kept anywhere in the snapshot.
+        let dropped = crate::clients::dropped_headers();
+        assert_eq!(
+            dropped.get(crate::clients::CLAUDE_CODE).map(|v| v.as_slice()),
+            Some(["x-novel-claude-header".to_string()].as_slice())
+        );
+        assert!(!format!("{:?}", crate::clients::snapshot()).contains("SECRET"));
+
+        // The same headers from a client that is not Claude Code record nothing.
+        crate::clients::reset();
+        let stranger = request_headers(&[("user-agent", "curl/8.0"), ("x-novel-claude-header", "v")]);
+        let _ = inbound_headers(Provider::Claude, None, &stranger);
+        assert!(crate::clients::dropped_headers().is_empty());
+        crate::clients::reset();
     }
 
     fn oauth_account(provider: Provider) -> std::sync::Arc<Account> {

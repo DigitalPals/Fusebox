@@ -13,6 +13,17 @@ do not keep generating work. All intervening releases after the last review stil
 need inspection. A failed channel check prevents all issue changes. This is a
 review queue, not an automated claim that an unreviewed release is incompatible.
 
+Fusebox forwards Claude Code and Codex client headers only through allowlists,
+so a header a new client release adds is dropped until a review allows it. The
+*names* (never values) of headers genuine Claude Code/Codex requests sent that
+were dropped are recorded — at most 32 per client, for the life of the process —
+and shown as `dropped_headers` in `GET /api/client-identities`; the reset
+endpoint clears them. A review starts by checking that list: a name appearing
+there after a client upgrade is evidence the release sends something new.
+Forwarding one is a deliberate change (one header per commit), usually through
+the `upstream-header-allowlist` config escape hatch for operators who need it
+before a release allows it by default.
+
 ## 2026-10-24 identity hardening
 
 Fusebox 0.9.0 addresses the identity boundaries described in the

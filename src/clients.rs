@@ -14,7 +14,7 @@
 //! A release that changes the request shape still needs a code change; the
 //! identity tests in `upstream` catch that.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::HeaderMap;
 use parking_lot::RwLock;
@@ -62,6 +62,9 @@ struct State {
     configured: BTreeMap<&'static str, String>,
     /// Claude Code's runtime headers from its newest release seen, with that version.
     profile: Option<Profile>,
+    /// Names (never values) of headers genuine Claude Code/Codex requests sent
+    /// that the upstream allowlists dropped; evidence for client reviews.
+    dropped_headers: BTreeMap<&'static str, BTreeSet<String>>,
 }
 
 #[cfg(not(test))]
@@ -442,6 +445,36 @@ pub fn restore(saved: &BTreeMap<String, String>) {
     }
 }
 
+/// At most this many dropped header names are kept per client, each at most
+/// 64 bytes, for the life of the process.
+const MAX_DROPPED_HEADERS: usize = 32;
+
+/// Records the *name* of a header a genuine client's request carried that the
+/// upstream allowlists will not forward. Values are never read. Returns true
+/// the first time a name is recorded, so the caller can log it once. Only
+/// Claude Code and Codex requests are recorded; naming here never teaches the
+/// shared identity profile (that stays behind trusted-client observation).
+pub fn note_dropped_header(client: &'static str, name: &str) -> bool {
+    if !matches!(client, CLAUDE_CODE | CODEX) || name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    if state().read().dropped_headers.get(client).is_some_and(|names| names.contains(name)) {
+        return false;
+    }
+    let mut state = state().write();
+    let names = state.dropped_headers.entry(client).or_default();
+    if names.len() >= MAX_DROPPED_HEADERS {
+        return false;
+    }
+    names.insert(name.to_string())
+}
+
+/// The dropped header names recorded per client, for management inspection.
+#[cfg(test)]
+pub fn dropped_headers() -> BTreeMap<&'static str, Vec<String>> {
+    state().read().dropped_headers.iter().map(|(client, names)| (*client, names.iter().cloned().collect())).collect()
+}
+
 fn provenance(observation: &Observation) -> serde_json::Value {
     serde_json::json!({"kind": "trusted-named-client", "source": observation.source})
 }
@@ -483,7 +516,9 @@ pub fn snapshot() -> serde_json::Value {
             "profile": profile,
         })
     }).collect();
-    serde_json::json!({"clients": clients, "profile_policy": "matching-release-or-builtin"})
+    let dropped: BTreeMap<_, _> =
+        state.dropped_headers.iter().map(|(client, names)| (*client, names.iter().collect::<Vec<_>>())).collect();
+    serde_json::json!({"clients": clients, "profile_policy": "matching-release-or-builtin", "dropped_headers": dropped})
 }
 
 /// Clear learned releases and runtime profiles, retaining operator configuration.
@@ -492,6 +527,7 @@ pub fn reset() {
     let mut state = state().write();
     state.seen.clear();
     state.profile = None;
+    state.dropped_headers.clear();
 }
 
 /// Claude Code's user agent, for Fusebox's own requests to Anthropic and for cloaking.
@@ -957,6 +993,23 @@ mod tests {
         assert_eq!(cc["profile"]["values"]["x-stainless-runtime"], "node");
         assert_eq!(snapshot["clients"][1]["provenance"]["kind"], "builtin");
         assert_eq!(snapshot["clients"].as_array().unwrap().len(), CONFIGURABLE.len());
+    }
+
+    #[test]
+    fn dropped_header_recording_is_bounded_and_client_scoped() {
+        reset();
+        assert!(note_dropped_header(CLAUDE_CODE, "x-one"));
+        assert!(!note_dropped_header(CLAUDE_CODE, "x-one"), "recorded once");
+        assert!(!note_dropped_header(GROK, "x-one"), "only Claude Code and Codex are recorded");
+        assert!(!note_dropped_header(CODEX, &"x".repeat(65)), "names are capped at 64 bytes");
+        for i in 0..1000 {
+            note_dropped_header(CLAUDE_CODE, &format!("x-flood-{i}"));
+        }
+        let dropped = dropped_headers();
+        assert_eq!(dropped[CLAUDE_CODE].len(), 32, "per-client cap holds against floods");
+        assert!(!dropped.contains_key(CODEX));
+        reset();
+        assert!(dropped_headers().is_empty(), "reset clears the recorded names");
     }
 
     #[test]
