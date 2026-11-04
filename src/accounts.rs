@@ -740,6 +740,9 @@ pub struct Account {
     pub aliases: Vec<OAuthAlias>,
     /// Higher goes first; lower priorities only take over (the file's or key's `priority`).
     pub priority: i32,
+    /// The billing day set by hand (the file's `billing`), for subscriptions whose
+    /// provider gives no date.
+    pub billing: Option<crate::quota::Billing>,
 }
 
 /// `gemini-3-8-flash` -> `gemini-3.8-flash`, `gpt-6-1-sol` -> `gpt-6.1-sol`
@@ -1070,7 +1073,7 @@ impl Account {
             Credential::OAuth(o) => ("oauth", o.expires_at.map(|t| t.to_rfc3339()), o.email.clone()),
             Credential::ApiKey { .. } => ("api-key", None, None),
         };
-        serde_json::json!({
+        let mut out = serde_json::json!({
             "id": self.id,
             "provider": self.provider,
             "label": self.label,
@@ -1093,7 +1096,34 @@ impl Account {
             "banked_resets": st.banked_resets,
             "window_starter": st.window_starter,
             "models": self.public_models(),
-        })
+            "takes_billing": self.takes_billing(),
+            "billing": self.billing.as_ref().map(|b| serde_json::json!({
+                "date": b.date,
+                "period": b.period,
+                "ends": b.ends,
+                "plan_changed": b.plan_changed(st.quota.plan.as_deref()),
+            })),
+        });
+        // A billing day set by hand shows as the renewal wherever the provider's would.
+        if st.quota.renewal.is_none()
+            && let Some(r) = self.renewal(&st.quota)
+        {
+            out["quota"]["renewal"] = serde_json::to_value(r).unwrap_or(Value::Null);
+        }
+        out
+    }
+
+    /// When the subscription charges next: the provider's date, else the day set by hand.
+    pub fn renewal(&self, quota: &crate::quota::Quota) -> Option<crate::quota::Renewal> {
+        quota.renewal.clone().or_else(|| self.billing.as_ref().map(|b| b.renewal(quota.plan.as_deref())))
+    }
+
+    /// Sign-ins whose provider gives no billing date, so one can be set by hand. ChatGPT
+    /// gives its own.
+    pub fn takes_billing(&self) -> bool {
+        self.path.is_some()
+            && matches!(self.provider, Provider::Claude | Provider::Meta)
+            && matches!(&*self.cred.read(), Credential::OAuth(o) if !o.raw.contains_key("service_account"))
     }
 }
 
@@ -1260,6 +1290,7 @@ struct Spec {
     aliases: Vec<OAuthAlias>,
     extra: Vec<String>,
     priority: i32,
+    billing: Option<crate::quota::Billing>,
     /// Why this account can't be used as it is (a credential file's invalid proxy).
     problem: Option<String>,
 }
@@ -1332,6 +1363,7 @@ fn collect(cfg: &Config) -> (Vec<Spec>, Option<std::io::Error>) {
             excluded,
             aliases,
             priority: priority.unwrap_or(0),
+            billing: map.get("billing").and_then(|v| serde_json::from_value(v.clone()).ok()),
             problem,
             extra: for_provider(&cfg.extra_models, provider),
             id: format!("file:{name}"),
@@ -1379,6 +1411,7 @@ fn collect(cfg: &Config) -> (Vec<Spec>, Option<std::io::Error>) {
                 aliases: vec![],
                 extra: for_provider(&cfg.extra_models, provider),
                 priority: e.priority,
+                billing: None,
                 problem: None,
             });
         }
@@ -1402,6 +1435,7 @@ fn collect(cfg: &Config) -> (Vec<Spec>, Option<std::io::Error>) {
                 aliases: vec![],
                 extra: vec![],
                 priority: c.priority,
+                billing: None,
                 problem: None,
             });
         }
@@ -1424,6 +1458,7 @@ fn collect(cfg: &Config) -> (Vec<Spec>, Option<std::io::Error>) {
                 aliases: vec![],
                 extra: vec![],
                 priority: c.priority,
+                billing: None,
                 problem: None,
             });
         }
@@ -1638,7 +1673,8 @@ impl Pool {
                     && prev.excluded == s.excluded
                     && prev.aliases == s.aliases
                     && prev.extra == s.extra
-                    && prev.priority == s.priority;
+                    && prev.priority == s.priority
+                    && prev.billing == s.billing;
                 if same_shape {
                     let mut st = prev.state.lock();
                     st.disabled = s.disabled || s.problem.is_some();
@@ -1740,6 +1776,7 @@ impl Pool {
                 excluded: s.excluded,
                 aliases: s.aliases,
                 priority: s.priority,
+                billing: s.billing,
             }));
         }
         // Another program (CLIProxyAPI itself) may be rewriting a credential file
@@ -3165,6 +3202,7 @@ claude-api-key:
             excluded: vec![],
             aliases,
             priority: 0,
+            billing: None,
         };
         let renamed = acct(vec![a(false)]);
         assert_eq!(renamed.resolve("opus").as_deref(), Some("claude-opus-5-5"));

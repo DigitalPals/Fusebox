@@ -598,7 +598,7 @@ fn views(app: &App) -> Vec<AccountView> {
                         (s.name.clone(), s.model.clone(), points)
                     })
                     .collect(),
-                renewal: st.quota.renewal.as_ref().and_then(|r| r.next(now)),
+                renewal: a.renewal(&st.quota).and_then(|r| r.next(now)),
             }
         })
         .collect()

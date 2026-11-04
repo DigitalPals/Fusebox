@@ -48,14 +48,12 @@ fn reminder(a: &AccountView, next: crate::quota::NextRenewal, key: String, now: 
         _ => format!("on {}", at.format("%A")),
     };
     let day = at.format("%A %-d %B");
+    // A day set by hand has no time of day.
+    let time = if next.manual { String::new() } else { format!(" at {}", at.format("%H:%M")) };
     let (verb, summary, detail) = if next.ends {
-        (
-            "ends",
-            format!("Ends {day}"),
-            format!("The subscription was cancelled and ends {day} at {}.", at.format("%H:%M")),
-        )
+        ("ends", format!("Ends {day}"), format!("The subscription was cancelled and ends {day}{time}."))
     } else {
-        ("renews", format!("Renews {day}"), format!("Charges again {day} at {}.", at.format("%H:%M")))
+        ("renews", format!("Renews {day}"), format!("Charges again {day}{time}."))
     };
     Fault {
         key,
@@ -107,7 +105,7 @@ mod tests {
     }
 
     fn renews(at: DateTime<Utc>) -> Option<NextRenewal> {
-        Some(NextRenewal { at, estimated: false, ends: false })
+        Some(NextRenewal { at, estimated: false, ends: false, manual: false })
     }
 
     #[test]
@@ -141,8 +139,8 @@ mod tests {
         let now = Utc::now();
         let at = now + Span::hours(20);
         let accounts = [
-            account("moved-on", Some(NextRenewal { at, estimated: true, ends: false })),
-            account("cancelled", Some(NextRenewal { at, estimated: false, ends: true })),
+            account("moved-on", Some(NextRenewal { at, estimated: true, ends: false, manual: false })),
+            account("cancelled", Some(NextRenewal { at, estimated: false, ends: true, manual: false })),
         ];
         let sent = push.renewals(&accounts, now);
         assert_eq!(sent.len(), 1, "a date moved on without a read is no reminder");
@@ -161,5 +159,23 @@ mod tests {
         assert_eq!(title(24), "Codex subscription renews tomorrow");
         let day = (now + Span::hours(47)).with_timezone(&Local).format("%A").to_string();
         assert_eq!(title(47), format!("Codex subscription renews on {day}"));
+    }
+
+    #[test]
+    fn a_day_set_by_hand_is_reminded_without_a_time() {
+        let temp = temp();
+        let push = Push::load(&temp.0);
+        let now = Utc::now();
+        let at = now + Span::hours(30);
+        let mut claude = account("claude", Some(NextRenewal { at, estimated: false, ends: false, manual: true }));
+        claude.group_name = "Claude".into();
+        let sent = push.renewals(&[claude], now);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].title.starts_with("Claude subscription renews "), "{}", sent[0].title);
+        let day = at.with_timezone(&Local).format("%A %-d %B");
+        assert_eq!(sent[0].detail.as_deref(), Some(format!("Charges again {day}.").as_str()));
+        // Set before a plan change: the day may have moved, so no reminder.
+        let unsure = account("unsure", Some(NextRenewal { at, estimated: true, ends: false, manual: true }));
+        assert!(push.renewals(&[unsure], now).is_empty());
     }
 }

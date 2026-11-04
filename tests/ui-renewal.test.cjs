@@ -21,8 +21,10 @@ function load(now) {
   const context = { Intl, Date: FixedDate, URLSearchParams };
   vm.createContext(context);
   vm.runInContext(`${usage}\n${piece('function left(', '// Compact quota countdown')}\n${piece('const clock =', '// Within a day')}\n`
-    + `${piece('function renewalRow(', 'function detSigninHTML(')}\nthis.renewalRow = renewalRow;`, context);
-  return context.renewalRow;
+    + `${piece('function renewalOf(', '// The renewal row, with a way')}\n${piece('function renewalLineHTML(', 'function detSigninHTML(')}\n`
+    + 'this.renewalRow = renewalRow; this.renewalLineHTML = renewalLineHTML;', context);
+  context.esc = (v) => String(v);
+  return Object.assign(context.renewalRow, { line: context.renewalLineHTML });
 }
 
 test('the sign-in card says when a subscription charges next, or ends', () => {
@@ -36,4 +38,25 @@ test('the sign-in card says when a subscription charges next, or ends', () => {
   assert.deepEqual([...row(quota({ at: '2026-11-06T09:53:56Z', estimated: false, ends: true }))],
     ['Ends', 'Fri 6 Nov · in 3d 21h · cancelled']);
   for (const a of [{}, quota(null), quota({ at: '2026-11-01T00:00:00Z' }), quota({ at: 'soon' })]) assert.equal(row(a), null);
+});
+
+test('a billing day set by hand is a day: shown until it is over, without a time', () => {
+  process.env.TZ = 'Europe/Amsterdam';
+  // 4 November 2026, 15:00 in Amsterdam; the server keeps a day set by hand as its 09:00.
+  const row = load(Date.parse('2026-11-04T14:00:00Z'));
+  const manual = (at, extra = {}) => ({ quota: { renewal: { at, estimated: false, ends: false, period: 'monthly', manual: true, ...extra } } });
+  assert.deepEqual([...row(manual('2026-11-23T08:00:00Z'))], ['Renews', 'Mon 23 Nov · in 19 days · monthly · set by you']);
+  assert.deepEqual([...row(manual('2026-11-05T08:00:00Z'))], ['Renews', 'Thu 5 Nov · tomorrow · monthly · set by you']);
+  assert.deepEqual([...row(manual('2026-11-04T08:00:00Z'))], ['Renews', 'Wed 4 Nov · today · monthly · set by you'], 'its morning passed, the day did not');
+  assert.deepEqual([...row(manual('2027-01-15T08:00:00Z', { period: 'yearly' }))], ['Renews', 'Fri 15 Jan · in 72 days · yearly · set by you']);
+  assert.deepEqual([...row(manual('2026-11-23T08:00:00Z', { estimated: true }))], ['Renews', 'Mon 23 Nov · in 19 days · monthly · plan changed, check the date']);
+  assert.deepEqual([...row(manual('2026-11-23T08:00:00Z', { ends: true }))], ['Ends', 'Mon 23 Nov · in 19 days · cancelled']);
+  assert.equal(row(manual('2026-11-03T08:00:00Z')), null, 'a day that is over');
+  // Once a cancelled subscription has ended the server sends no renewal; the file's date says when.
+  assert.deepEqual([...row({ quota: {}, billing: { date: '2026-11-01', ends: true } })], ['Ended', 'Sun 1 Nov · cancelled']);
+  // The overview's line comes in the last days only.
+  assert.match(row.line(manual('2026-11-05T08:00:00Z')), />Renews tomorrow</);
+  assert.match(row.line(manual('2026-11-06T08:00:00Z', { ends: true })), />Ends in 2 days</);
+  assert.equal(row.line(manual('2026-11-07T08:00:00Z')), '');
+  assert.equal(row.line({}), '');
 });

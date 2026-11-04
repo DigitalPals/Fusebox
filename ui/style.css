@@ -816,6 +816,10 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
 .kv > :last-child { text-align: right; min-width: 0; overflow-wrap: anywhere; }
 .kv.col { flex-direction: column; gap: 4px; }
 .kv.col > :last-child { text-align: left; }
+.billing-form { display: flex; flex-direction: column; gap: 10px; padding: 10px 0 12px; border-top: 1px solid var(--line); }
+.billing-form small { display: block; font-size: 12.5px; text-wrap: pretty; }
+.billing-form input[type="date"] { max-width: 220px; }
+.billing-segs, .billing-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .chipset { display: flex; flex-wrap: wrap; gap: 4px; }
 .sess { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-top: 1px solid var(--line); }
 .sess-top { display: flex; align-items: center; gap: 10px; font-size: 13px; min-width: 0; }

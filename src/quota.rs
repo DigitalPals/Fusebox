@@ -19,7 +19,7 @@ mod readings;
 mod renewal;
 mod saved;
 
-pub use renewal::{Next as NextRenewal, Renewal};
+pub use renewal::{Billing, Next as NextRenewal, Period as BillingPeriod, Renewal};
 
 pub use readings::{FiveHour, claude_five_hour};
 pub use saved::{FILE as SAVED_FILE, Saved};

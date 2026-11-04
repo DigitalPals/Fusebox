@@ -48,6 +48,7 @@ const S = {
   faultList: null, // the server's faults (live "faults"); null until the first arrives
   dismissedFaults: 0, // how many of the menu's faults are dismissed (live "faults")
   activity: {}, // account id -> { series, sessions, at, fetched }
+  billing: null, // the billing form being edited: { id, date, period, ends, busy, error }
   load: null, // account id -> { in_flight, sessions } for busy accounts; null while disconnected
   live: 'connecting',
   paused: false,
@@ -750,7 +751,8 @@ function refreshViews() {
     patch('ov-other', ovOtherHTML);
     patch('recent', recentHTML);
   } else if (S.route === 'accounts') {
-    if (S.sub) patch('det-root', detailBodyHTML);
+    // An open billing form keeps its date picker: it repaints itself.
+    if (S.sub) { if (S.billing?.id !== S.sub) patch('det-root', detailBodyHTML); }
     else { patch('acct-head', accountHeadHTML); patch('acct-filters', acctFiltersHTML); patch('acct-timeline', resetTimelineHTML); patch('acct-list', accountListHTML); }
   } else if (S.route === 'usage') {
     usageAccountsChanged();
@@ -1394,7 +1396,7 @@ function ovSubsHTML() {
       return `<div class="item click" data-open="${esc(a.id)}">
         <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div>${statusHTML(a, 7)}</div>
         <div class="meters indent">${meterRowsHTML(a)}</div>
-        <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
+        <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
       </div>`;
     }).join('');
     return `<div class="sec-head"><div class="stack"><h2 class="h-sec">Subscriptions</h2><span class="meta" data-subs-meta="short">${esc(subsMeta(true))}</span></div>${quotaControlsHTML(true, false)}</div>
@@ -1406,7 +1408,7 @@ function ovSubsHTML() {
       <span class="c-idx idx">${String(i + 1).padStart(2, '0')}</span>
       <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div></div>
       ${metersHTML(a)}
-      <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}</div>
+      <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}</div>
       <span class="c-req r">${fmt(a.counters.requests)}</span>
       <div class="c-last c-now" data-now="${esc(a.id)}">${nowHTML(a)}</div>
     </div>`;
@@ -1934,7 +1936,7 @@ function drawerHTML(a) {
       ${banked && (count || ['pending', 'unknown'].includes(banked.operation?.status)) ? `<div class="notice"><div class="cell2"><span style="font-size:13px">${esc(bankedLabel(a))}</span><span class="small dim">${esc(bankedPolicyText(a))}</span></div><button class="btn sm" type="button" data-act="banked-details" data-id="${esc(a.id)}" aria-haspopup="dialog">Reset details</button></div>` : ''}
       ${accountErrorHTML(a)}
       <div class="block"><span class="label">Since start</span><div class="figs" id="drawer-since">${drawerSinceHTML()}</div></div>
-      <div class="block" style="gap:6px"><span class="label">Sign-in</span><span class="fg2" style="font-size:13px">${esc(signinLine(a))}</span></div>
+      <div class="block" style="gap:6px"><span class="label">Sign-in</span><span class="fg2" style="font-size:13px">${esc(signinLine(a))}</span>${renewalOf(a) ? `<span class="fg2" style="font-size:13px">${esc(renewalRow(a).join(' '))}</span>` : ''}</div>
       <div class="block" style="gap:0" id="drawer-reqs">${drawerRequestsHTML()}</div>
     </div>
     <div class="drawer-foot">${drawerActionsHTML(a)}</div>
@@ -2475,12 +2477,37 @@ async function setPriority(id, priority) {
   } catch (e) { toast(e.message); }
 }
 
-// When a ChatGPT subscription charges next, or ends when cancelled (src/quota/renewal.rs).
-// Claude gives no billing date. A date that passed before the next read is moved on a
-// month and marked estimated.
-function renewalRow(a) {
+// When a subscription charges next, or ends when cancelled (src/quota/renewal.rs): the date
+// ChatGPT gives, or a billing day set by hand where the provider gives none (Claude, Meta).
+// A ChatGPT date that passed before the next read is moved on a period and marked estimated.
+// A day set by hand (`manual`) has no time: it stays the next charge until the day is over,
+// and is an estimate only once the plan changed since it was set.
+function renewalOf(a) {
   const r = a.quota?.renewal;
-  if (!(Date.parse(r?.at) > Date.now())) return null;
+  const at = Date.parse(r?.at);
+  if (!at) return null;
+  const until = r.manual ? new Date(at).setHours(24, 0, 0, 0) : at;
+  return until > Date.now() ? r : null;
+}
+
+// Whole local days until `iso`: "today", "tomorrow", "in 19 days".
+function daysAway(iso) {
+  const n = Math.round((new Date(iso).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5);
+  return n <= 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`;
+}
+
+function renewalRow(a) {
+  const r = renewalOf(a);
+  if (!r) {
+    const b = a.billing;
+    return b?.ends ? ['Ended', `${dayDate(`${b.date}T12:00:00`)} · cancelled`] : null;
+  }
+  if (r.manual) {
+    const parts = [dayDate(r.at), daysAway(r.at)];
+    if (r.ends) return ['Ends', [...parts, 'cancelled'].join(' · ')];
+    parts.push(r.period || 'monthly', r.estimated ? 'plan changed, check the date' : 'set by you');
+    return ['Renews', parts.join(' · ')];
+  }
   if (r.ends) return ['Ends', `${dayDate(r.at)} · in ${left(r.at)} · cancelled`];
   const parts = [r.estimated ? `about ${dayDate(r.at)}` : `${dayDate(r.at)}, ${hm(r.at)}`, `in ${left(r.at)}`];
   if (r.estimated) parts.push('estimated');
@@ -2488,20 +2515,102 @@ function renewalRow(a) {
   return ['Renews', parts.join(' · ')];
 }
 
+// The renewal row, with a way to set the billing day where the provider gives none.
+function billingRowHTML(a) {
+  if (S.billing?.id === a.id) return billingFormHTML(a);
+  const row = renewalRow(a);
+  // A date the provider gives (ChatGPT's) isn't overridden.
+  const editable = a.takes_billing && (!a.quota?.renewal || a.quota.renewal.manual);
+  const button = (label, aria) => `<button class="linkbtn" type="button" data-act="billing-edit" data-id="${esc(a.id)}"${aria ? ` aria-label="${aria}"` : ''}>${label}</button>`;
+  if (!row) return editable ? `<div class="kv"><span>Renews</span><span>${button('Set billing date')}</span></div>` : '';
+  return `<div class="kv"><span>${row[0]}</span><span>${esc(row[1])}${editable ? ` · ${button('Change', 'Change billing date')}` : ''}</span></div>`;
+}
+
+// Today in the browser's time zone, `months` on, as a date input's value.
+function localDay(months = 0) {
+  const d = new Date();
+  d.setMonth(d.getMonth() + months);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Only Claude Pro is sold yearly; Max, Ultra and Meta's plans are monthly only.
+const yearlyBilling = (a) => a.provider === 'claude' && (a.quota?.plan === 'pro' || a.billing?.period === 'yearly');
+
+function billingFormHTML(a) {
+  const B = S.billing;
+  const id = esc(a.id);
+  const yearly = B.period === 'yearly';
+  const seg = (act, value, label, on) => `<button type="button" data-act="${act}" data-id="${id}" data-value="${value}" aria-pressed="${on}">${label}</button>`;
+  const note = B.ends
+    ? 'Cancelled: it ends when the period paid for runs out, on the first billing day from this date that hasn’t passed.'
+    : `${provName(a)} doesn’t share billing dates. Enter the day of your last or next charge: Fusebox counts on ${yearly ? 'a year' : 'a month'} at a time and reminds you two days ahead.`;
+  const changed = a.billing?.plan_changed ? '<small class="warn">The plan changed since this date was set, and a plan change can move the billing day.</small>' : '';
+  return `<form class="billing-form" data-form="billing" data-id="${id}" aria-label="Billing date" aria-busy="${!!B.busy}">
+    <label class="field"><span>Billing day</span><input id="billing-date" type="date" name="date" value="${esc(B.date || '')}" max="${localDay(yearly ? 12 : 1)}" required ${B.busy ? 'disabled' : ''}></label>
+    <div class="billing-segs">${yearlyBilling(a) ? `<div class="seg" role="group" aria-label="Billed">${seg('billing-period', 'monthly', 'Monthly', !yearly)}${seg('billing-period', 'yearly', 'Yearly', yearly)}</div>` : ''}<div class="seg" role="group" aria-label="Subscription">${seg('billing-ends', '0', 'Renews', !B.ends)}${seg('billing-ends', '1', 'Cancelled', !!B.ends)}</div></div>
+    <small class="meta">${esc(note)}</small>${changed}
+    ${B.error ? `<small class="err" role="alert">${esc(B.error)}</small>` : ''}
+    <div class="billing-actions"><button class="btn sm primary" type="submit" ${B.busy ? 'disabled' : ''}>${B.busy ? 'Saving…' : 'Save'}</button><button class="btn sm" type="button" data-act="billing-cancel" data-id="${id}">Cancel</button>${a.billing ? `<button class="btn sm danger" type="button" data-act="billing-clear" data-id="${id}" ${B.busy ? 'disabled' : ''}>Remove date</button>` : ''}</div>
+  </form>`;
+}
+
+function editBilling(id) {
+  const a = accountById(id);
+  if (!a) return;
+  const b = a.billing;
+  S.billing = { id, date: b?.date || '', period: b?.period === 'yearly' && yearlyBilling(a) ? 'yearly' : 'monthly', ends: !!b?.ends, busy: false, error: '' };
+  patch('det-root', detailBodyHTML);
+  $('#billing-date')?.focus();
+}
+
+function closeBilling() {
+  const id = S.billing?.id;
+  S.billing = null;
+  patch('det-root', detailBodyHTML);
+  if (id) $(`[data-act="billing-edit"][data-id="${CSS.escape(id)}"]`)?.focus();
+}
+
+// Saves the billing day (or removes it, without a date) in the account's credential file.
+async function saveBilling(id, date) {
+  const B = S.billing;
+  if (!B || B.id !== id || B.busy) return;
+  Object.assign(B, { busy: true, error: '' });
+  patch('det-root', detailBodyHTML);
+  try {
+    const body = date ? { date, period: B.period, ends: B.ends } : { date: null };
+    await api(`/accounts/${encodeURIComponent(id)}/billing`, { method: 'POST', body: JSON.stringify(body) });
+    toast(!date ? 'Billing date removed' : B.ends ? 'Saved: the subscription ends then' : 'Billing date saved');
+    closeBilling();
+    refreshAccounts();
+  } catch (e) {
+    if (S.billing !== B) return toast(e.message);
+    Object.assign(B, { busy: false, error: e.message });
+    patch('det-root', detailBodyHTML);
+    $('#billing-date')?.focus();
+  }
+}
+
+// "Renews tomorrow" under a subscription's status in the last days before a charge.
+function renewalLineHTML(a) {
+  const r = renewalOf(a);
+  if (!r || new Date(r.at).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0) > 2 * 864e5) return '';
+  return `<span class="subs-line" title="${esc(renewalRow(a).join(': '))}">${r.ends ? 'Ends' : 'Renews'} ${daysAway(r.at)}</span>`;
+}
+
 function detSigninHTML(a) {
   const pad = mob() ? '12px 14px 4px' : '18px 20px 8px';
   const rows = [['Method', authName(a)]];
   if (planName(a)) rows.push(['Plan', `${provName(a)} ${planName(a)}`]);
-  const renewal = renewalRow(a);
-  if (renewal) rows.push(renewal);
+  const after = [];
   if (a.kind === 'oauth' && a.expires_at) {
     const secs = (Date.parse(a.expires_at) - Date.now()) / 1000;
-    rows.push(['Token', secs > 0 ? `valid ${span(secs)} · refreshes on its own` : 'expired · refreshes on its own']);
+    after.push(['Token', secs > 0 ? `valid ${span(secs)} · refreshes on its own` : 'expired · refreshes on its own']);
   }
   const models = (a.models || []).slice(0, 24);
   const more = (a.models || []).length - models.length;
+  const kv = (list) => list.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${esc(v)}</span></div>`).join('');
   return `<section class="card" style="padding:${pad}" aria-label="Sign-in"><span class="label">Sign-in</span>
-    <div style="margin-top:10px">${rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${esc(v)}</span></div>`).join('')}
+    <div style="margin-top:10px">${kv(rows)}${billingRowHTML(a)}${kv(after)}
       <div class="kv col"><span>Stored in</span><span class="mono fg2" style="font-size:12px;word-break:break-all">${esc(storedIn(a))}</span></div>
       <div class="kv col" style="gap:6px"><span>Serves</span><span class="chipset">${models.map((m) => `<span class="idchip static">${esc(m)}</span>`).join('')}${more > 0 ? `<span class="idchip static">+${more} more</span>` : ''}${models.length ? '' : '<span class="dim">No models</span>'}</span></div></div>
     ${canSignIn(a) ? `<button class="btn" type="button" data-act="signin-again" data-id="${esc(a.id)}" style="margin:8px 0;${mob() ? 'width:100%;height:44px' : ''}">Sign in again</button>` : ''}</section>`;
@@ -3906,6 +4015,15 @@ document.addEventListener('click', (e) => {
       patch('acct-timeline', resetTimelineHTML);
       return patch('acct-list', accountListHTML);
     case 'priority': return setPriority(id, Number(el.dataset.value));
+    case 'billing-edit': return editBilling(id);
+    case 'billing-cancel': return closeBilling();
+    case 'billing-clear': return saveBilling(id, null);
+    case 'billing-period': case 'billing-ends':
+      if (!S.billing) return;
+      if (act === 'billing-period') S.billing.period = el.dataset.value;
+      else S.billing.ends = el.dataset.value === '1';
+      patch('det-root', detailBodyHTML);
+      return $(`[data-act="${act}"][data-value="${el.dataset.value}"]`)?.focus();
     case 'filter-session':
       e.stopPropagation();
       S.reqSess = id;
@@ -4009,7 +4127,9 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('input', (e) => {
-  if (e.target.id === 'req-filter') {
+  if (e.target.id === 'billing-date' && S.billing) {
+    S.billing.date = e.target.value;
+  } else if (e.target.id === 'req-filter') {
     S.filter = e.target.value;
     S.openReq = null;
     const base = visibleRequests();
@@ -4112,6 +4232,7 @@ document.addEventListener('submit', async (e) => {
   if (kind === 'paste') return submitPaste(form);
   if (kind === 'key') return submitKey(form);
   if (kind === 'add-model') return submitAddModel(form);
+  if (kind === 'billing') return saveBilling(form.dataset.id, form.elements.date.value);
   if (kind === 'vertex') return submitVertex(form);
   if (kind === 'unlock') {
     S.key = form.elements.key.value.trim();

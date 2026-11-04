@@ -421,6 +421,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/window-starter", post(start_window))
         .route("/accounts/{id}/activity", get(account_activity))
         .route("/accounts/{id}/priority", post(set_priority))
+        .route("/accounts/{id}/billing", post(set_billing))
         .route("/clients/usage", get(client_usage))
         .route("/client-identities", get(client_identities))
         .route("/client-identities/reset", post(reset_client_identities))
@@ -1603,6 +1604,61 @@ async fn set_priority(State(app): State<Arc<App>>, Path(id): Path<String>, Json(
     ok()
 }
 
+#[derive(Deserialize)]
+struct BillingBody {
+    /// A day it charges or charged; none clears it.
+    date: Option<chrono::NaiveDate>,
+    #[serde(default)]
+    period: crate::quota::BillingPeriod,
+    /// Cancelled: it ends when the period paid for runs out.
+    #[serde(default)]
+    ends: bool,
+}
+
+/// The billing day of a subscription whose provider gives none (Claude, Meta), kept in
+/// its credential file as `billing`, with the plan it was set on.
+async fn set_billing(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<BillingBody>) -> Response {
+    use crate::quota::{Billing, BillingPeriod};
+    use chrono::Datelike;
+    let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
+    if !acct.takes_billing() {
+        let why = if acct.provider == Provider::Codex {
+            "ChatGPT gives its own billing date"
+        } else {
+            "Only Claude and Meta subscriptions take a billing date"
+        };
+        return err(StatusCode::BAD_REQUEST, why);
+    }
+    if b.period == BillingPeriod::Yearly && acct.provider != Provider::Claude {
+        return err(StatusCode::BAD_REQUEST, "Only Claude Pro is billed yearly");
+    }
+    let today = chrono::Local::now().date_naive();
+    let value = match b.date {
+        None => None,
+        Some(date) => {
+            let latest = today.checked_add_months(chrono::Months::new(b.period.months())).unwrap_or(today);
+            if date > latest {
+                let most = if b.period == BillingPeriod::Yearly { "a year" } else { "a month" };
+                return err(StatusCode::BAD_REQUEST, format!("The next charge is at most {most} away"));
+            }
+            if date.year() < 2000 {
+                return err(StatusCode::BAD_REQUEST, "That date is too long ago");
+            }
+            let plan = acct.state.lock().quota.plan.clone();
+            Some(json!(Billing::new(date, b.period, b.ends, plan, today)))
+        }
+    };
+    let Some(path) = &acct.path else { return err(StatusCode::BAD_REQUEST, "This account has no credential file") };
+    app.suppress_reload();
+    let saving = acct.pending_oauth_save.lock();
+    if let Err(e) = crate::accounts::set_file_field(path, "billing", value) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the billing date: {e}"));
+    }
+    drop(saving);
+    app.reload_accounts();
+    ok()
+}
+
 /// Normal priority (0) is no `priority` line at all, as in a file that never set one.
 fn set_entry_priority(entry: &mut Value, priority: i32) {
     if let Some(o) = entry.as_object_mut() {
@@ -1778,6 +1834,81 @@ mod tests {
                 0o600
             );
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_billing_day_set_by_hand_is_kept_in_the_file_and_shown_as_the_renewal() {
+        let dir = std::env::temp_dir().join(format!("fusebox-billing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, body: Value| std::fs::write(dir.join(name), body.to_string()).unwrap();
+        file("claude-a.json", json!({"type":"claude","access_token":"a","refresh_token":"b","email":"a@example.test"}));
+        file("codex-c.json", json!({"type":"codex","access_token":"c","refresh_token":"d","email":"c@example.test"}));
+        file("meta-m.json", json!({"type":"meta","api_key":"m","refresh_token":"r","email":"m@example.test"}));
+        let app = App::new(
+            Config {
+                auth_dir: dir.to_string_lossy().into(),
+                claude_api_key: vec![crate::config::KeyEntry { api_key: "k".into(), ..Default::default() }],
+                ..Default::default()
+            },
+            dir.join("config.yaml"),
+        );
+        let by = |file: &str| app.pool.all().into_iter().find(|a| a.id == format!("file:{file}")).unwrap();
+        let key = app.pool.all().into_iter().find(|a| a.path.is_none()).unwrap();
+        app.pool.get("file:claude-a.json").unwrap().state.lock().quota.plan = Some("pro".into());
+        let set = |id: String, body: Value| {
+            let app = app.clone();
+            async move {
+                let body: BillingBody = serde_json::from_value(body).unwrap();
+                set_billing(State(app), Path(id), Json(body)).await.status()
+            }
+        };
+        let today = chrono::Local::now().date_naive();
+        let date = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+        let soon = today + chrono::Duration::days(10);
+        assert_eq!(set(by("claude-a.json").id.clone(), json!({ "date": date(soon) })).await, StatusCode::OK);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("claude-a.json")).unwrap()).unwrap();
+        assert_eq!(saved["billing"], json!({ "date": date(soon), "period": "monthly", "plan": "pro" }));
+        assert_eq!(saved["refresh_token"], "b", "the rest of the file is kept");
+        let shown = by("claude-a.json").snapshot();
+        assert_eq!(shown["takes_billing"], true);
+        assert_eq!(shown["billing"]["plan_changed"], false);
+        let renewal = &shown["quota"]["renewal"];
+        assert_eq!((renewal["manual"].as_bool(), renewal["estimated"].as_bool()), (Some(true), Some(false)));
+        let at = chrono::DateTime::parse_from_rfc3339(renewal["at"].as_str().unwrap()).unwrap();
+        assert_eq!(at.with_timezone(&chrono::Local).date_naive(), soon);
+        // A plan change keeps the day but makes it an estimate to check.
+        by("claude-a.json").state.lock().quota.plan = Some("max_5x".into());
+        let shown = by("claude-a.json").snapshot();
+        assert_eq!(
+            (shown["billing"]["plan_changed"].as_bool(), shown["quota"]["renewal"]["estimated"].as_bool()),
+            (Some(true), Some(true))
+        );
+        // Yearly is Claude Pro's alone, and a date is at most one period away.
+        let year = today + chrono::Duration::days(200);
+        assert_eq!(set(by("claude-a.json").id.clone(), json!({ "date": date(year) })).await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            set(by("claude-a.json").id.clone(), json!({ "date": date(year), "period": "yearly" })).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            set(by("meta-m.json").id.clone(), json!({ "date": date(soon), "period": "yearly" })).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            set(by("meta-m.json").id.clone(), json!({ "date": date(soon), "ends": true })).await,
+            StatusCode::OK
+        );
+        assert_eq!(by("meta-m.json").snapshot()["quota"]["renewal"]["ends"], true);
+        // ChatGPT and API keys give no file to keep it in, or a date of their own.
+        assert_eq!(set(by("codex-c.json").id.clone(), json!({ "date": date(soon) })).await, StatusCode::BAD_REQUEST);
+        assert_eq!(set(key.id.clone(), json!({ "date": date(soon) })).await, StatusCode::BAD_REQUEST);
+        assert_eq!(by("codex-c.json").snapshot()["takes_billing"], false);
+        // Clearing it leaves no field behind.
+        assert_eq!(set(by("claude-a.json").id.clone(), json!({ "date": null })).await, StatusCode::OK);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("claude-a.json")).unwrap()).unwrap();
+        assert!(saved.get("billing").is_none());
+        assert!(by("claude-a.json").snapshot()["quota"].get("renewal").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

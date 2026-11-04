@@ -172,6 +172,24 @@ struct RulesTests {
         #expect(Account(id: "a", provider: "codex", label: "u", quota: ended).renewalRow(now: before) == nil)
     }
 
+    @Test func renewalRowSetByHand() throws {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: .now)
+        let morning = { (days: Int) in cal.date(byAdding: .hour, value: 9, to: cal.date(byAdding: .day, value: days, to: today)!)! }
+        func account(_ at: Date, estimated: Bool = false, ends: Bool = false) -> Account {
+            let renewal = Renewal(at: at, estimated: estimated, ends: ends, period: "monthly", manual: true)
+            return Account(id: "c", provider: "claude", label: "u", quota: Quota(windows: [], renewal: renewal))
+        }
+        let noon = cal.date(byAdding: .hour, value: 12, to: today)!
+        let soon = try #require(account(morning(19)).renewalRow(now: noon))
+        #expect(soon.key == "Renews")
+        #expect(soon.value.hasSuffix(" · in 19 days · monthly · set by you"), "\(soon.value)")
+        #expect(account(morning(0)).renewalRow(now: noon)?.value.contains(" · today · ") == true, "its morning passed, the day did not")
+        #expect(account(morning(1), estimated: true).renewalRow(now: noon)?.value.hasSuffix(" · tomorrow · monthly · plan changed, check the date") == true)
+        #expect(account(morning(2), ends: true).renewalRow(now: noon)?.value.hasSuffix(" · in 2 days · cancelled") == true)
+        #expect(account(morning(-1)).renewalRow(now: noon) == nil, "a day that is over")
+    }
+
     @Test func routingSentence() throws {
         let r = try decode([RequestLog].self, "requests")
         let reused = try #require(r.first { $0.routingReason == "session_reused" })

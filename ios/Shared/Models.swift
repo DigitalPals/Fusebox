@@ -195,11 +195,13 @@ public struct Renewal: Codable, Sendable, Equatable {
     public var at: Date
     public var estimated: Bool?
     public var ends: Bool?
-    /// "monthly", "yearly"; Claude doesn't say.
+    /// "monthly", "yearly".
     public var period: String?
+    /// A billing day set by hand (Claude, Meta): a day without a time, `at` its morning.
+    public var manual: Bool?
 
-    public init(at: Date, estimated: Bool? = nil, ends: Bool? = nil, period: String? = nil) {
-        self.at = at; self.estimated = estimated; self.ends = ends; self.period = period
+    public init(at: Date, estimated: Bool? = nil, ends: Bool? = nil, period: String? = nil, manual: Bool? = nil) {
+        self.at = at; self.estimated = estimated; self.ends = ends; self.period = period; self.manual = manual
     }
 }
 
