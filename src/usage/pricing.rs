@@ -243,6 +243,11 @@ impl Catalogue {
             return snapshot;
         };
         snapshot.rate = Some(rate.clone());
+        if o.provider == "meta" && model.starts_with("muse-wonder-full") {
+            // Subscription-only, so Meta publishes no price; the catalogue uses Wonder's.
+            snapshot.assumptions.push("wonder_full_priced_at_wonder_rate".into());
+            snapshot.partial = true;
+        }
         if o.source == "codex" && o.source_event_id.starts_with("counter:") {
             snapshot.partial = true;
             if o.numeric_metadata.get("per_request_usage") != Some(&1) {
@@ -418,6 +423,9 @@ impl Catalogue {
             } else {
                 Speed::Standard
             }
+        } else if o.provider == "meta" {
+            // Muse has one speed; T3 records its usage as standard.
+            Speed::Standard
         } else {
             o.requested_speed().unwrap_or_else(|| Speed::from_tier(o.service_tier.as_deref()))
         };
@@ -431,6 +439,8 @@ impl Catalogue {
         snapshot.assumptions.push(
             if o.provider == "anthropic" {
                 "reported_claude_speed"
+            } else if o.provider == "meta" {
+                "single_speed_model"
             } else if o.requested_speed().is_some() {
                 "requested_speed"
             } else {
@@ -477,7 +487,7 @@ impl Catalogue {
         snapshot.cost_nanos = sum
             .and_then(|sum| sum.checked_mul(n)?.checked_add(d / 2)?.checked_div(d))
             .and_then(|cost| i64::try_from(cost).ok());
-        snapshot.partial |= o.provider != "anthropic" && o.requested_speed().is_none();
+        snapshot.partial |= !matches!(o.provider.as_str(), "anthropic" | "meta") && o.requested_speed().is_none();
         snapshot.backdated = snapshot.cost_nanos.is_some()
             && rate.effective_from.is_none()
             && date_ms(&self.verified_at).is_ok_and(|v| o.event_at_ms < v);
@@ -596,6 +606,48 @@ mod t3_tests {
 }
 
 #[cfg(test)]
+mod meta_t3_tests {
+    use super::*;
+    use crate::usage::types::Tokens;
+
+    fn muse(model: &str, tokens: [Option<u64>; 4]) -> Snapshot {
+        let mut o = Observation::new("proxy", "muse".into(), "meta", date_ms("2026-11-04").unwrap());
+        o.actual_model = Some(model.into());
+        o.completeness = if tokens.iter().all(Option::is_some) { "complete" } else { "partial" }.into();
+        let [input, cache_read, cache_write, output] = tokens;
+        o.tokens = Tokens { input, cache_read, cache_write, output, reasoning: Some(0), ..Default::default() };
+        Catalogue::load(None).unwrap().price(&o)
+    }
+
+    #[test]
+    fn muse_models_price_at_meta_rates_with_wonder_full_labelled_an_estimate() {
+        // Token counts from production Muse Code requests on 2026-11-04.
+        let spark = muse("muse-spark-1.3", [Some(3048), Some(15217), Some(0), Some(431)]);
+        assert_eq!(spark.cost_nanos, Some(3048 * 1250 + 15217 * 150 + 431 * 4250));
+        assert_eq!(spark.basis, "t3_current_rate_equivalent");
+        assert!(!spark.partial, "{:?}", spark.assumptions);
+        assert!(spark.assumptions.contains(&"single_speed_model".into()));
+        for model in ["muse-spark-1.1", "muse-spark-1.2"] {
+            assert_eq!(muse(model, [Some(3048), Some(15217), Some(0), Some(431)]).cost_nanos, spark.cost_nanos);
+        }
+        let contributor = muse("muse-spark-1.3-contributor", [Some(3048), Some(15217), Some(0), Some(431)]);
+        assert_eq!(contributor.cost_nanos, Some(3048 * 100 + 15217 * 2 + 431 * 200));
+
+        let tokens = [Some(457), Some(129_524), Some(0), Some(390)];
+        let full = muse("muse-wonder-full-1.0", tokens);
+        assert_eq!(full.cost_nanos, Some(457 * 4000 + 129_524 * 200 + 390 * 20_000));
+        assert_eq!(full.cost_nanos, muse("muse-wonder-1.0", tokens).cost_nanos);
+        assert!(full.partial && full.assumptions.contains(&"wonder_full_priced_at_wonder_rate".into()));
+        assert!(!muse("muse-wonder-1.0", tokens).partial);
+        assert_eq!(muse("muse-wonder-full-1.0-contributor", tokens).basis, "unknown_model");
+
+        // Requests stored before cache writes were counted have no input; they stay unpriced.
+        let old = muse("muse-wonder-full-1.0", [None, Some(129_524), None, Some(390)]);
+        assert_eq!((old.cost_nanos, old.basis.as_str()), (None, "missing_tokens"));
+    }
+}
+
+#[cfg(test)]
 mod tier_tests {
     use super::*;
     use crate::usage::types::Tokens;
@@ -623,7 +675,7 @@ mod tier_tests {
         o
     }
     #[test]
-    fn wonder_standard_prices_cache_reads_without_a_context_premium_or_full_price() {
+    fn wonder_standard_prices_cache_reads_without_a_context_premium_and_full_as_an_estimate() {
         let c = Catalogue::provider_fixture();
         let mut o = event("meta", "muse-wonder-1.0");
         o.service_tier = Some("standard".into());
@@ -633,7 +685,13 @@ mod tier_tests {
         assert_eq!(c.price(&o).cost_nanos, Some(6_040_000));
         o.tokens.input = Some(1_000_000);
         assert_eq!(c.price(&o).cost_nanos, Some(4_002_040_000));
-        for model in ["muse-wonder-full-1.0", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"] {
+        let wonder = c.price(&o);
+        assert!(!wonder.partial && wonder.assumptions.is_empty());
+        o.actual_model = Some("muse-wonder-full-1.0".into());
+        let full = c.price(&o);
+        assert_eq!(full.cost_nanos, wonder.cost_nanos);
+        assert!(full.partial && full.assumptions.contains(&"wonder_full_priced_at_wonder_rate".into()));
+        for model in ["muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"] {
             o.actual_model = Some(model.into());
             assert_eq!(c.price(&o).basis, "unknown_model");
             assert!(c.price(&o).cost_nanos.is_none());

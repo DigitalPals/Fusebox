@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Compile the supported model families using T3 Code 0.1.3 pricing rules.
+"""Compile the supported model families using T3 Code's pricing rules (0.1.3, plus
+its 2026-11-01 maker-first rule for bare model names).
 
 Accepts LiteLLM's public document or T3's cached {fetchedAtMs, document} wrapper.
 No runtime network dependency. Keep the input hash and date with the release.
@@ -13,6 +14,8 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
+# LiteLLM prefixes for the model makers' own APIs, as in T3's usagePricing.ts.
+FIRST_PARTY = {"anthropic", "deepseek", "gemini", "meta", "mistral", "openai", "xai"}
 SOURCE = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 
@@ -43,18 +46,23 @@ def rate_table(document):
         multiple = specific.get("fast") if isinstance(specific, dict) else None
         fast = tuple(n * Fraction(str(multiple)) for n in standard) if isinstance(multiple, (int, float)) and multiple > 0 else token_rates(entry, "_priority", standard)
         table[name.strip().lower()] = (standard, fast, token_rates(entry, "_ultrafast", standard))
+    # A bare name takes the maker's own price over a cloud's or reseller's (T3 #28004);
+    # entries of the same standing must agree, or the name stays unpriced.
     candidates = {}
     for name, rate in table.items():
         bare = name.rsplit("/", 1)[-1]
         if bare == name or bare in table:
             continue
-        if bare not in candidates:
-            candidates[bare] = rate
-        elif candidates[bare] is not None:
-            held = candidates[bare]
-            merged = (held[0], held[1] or rate[1], held[2] or rate[2])
-            candidates[bare] = merged if held[0] == rate[0] and all(rate[i] is None or rate[i] == merged[i] for i in (1, 2)) else None
-    table.update({name: rate for name, rate in candidates.items() if rate is not None})
+        first_party = name.split("/", 1)[0] in FIRST_PARTY
+        held = candidates.get(bare)
+        if held is None or (first_party and not held[1]):
+            candidates[bare] = (rate, first_party)
+        elif held[0] is not None and first_party == held[1]:
+            old = held[0]
+            merged = (old[0], old[1] or rate[1], old[2] or rate[2])
+            agree = old[0] == rate[0] and all(rate[i] is None or rate[i] == merged[i] for i in (1, 2))
+            candidates[bare] = (merged if agree else None, first_party)
+    table.update({name: rate for name, (rate, _) in candidates.items() if rate is not None})
     return table
 
 

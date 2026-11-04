@@ -120,7 +120,7 @@ is selected implicitly.
 Catalog `2026-10-27.2` retains Terra's rates and adds Wonder Standard's official
 [pricing](https://dev.meta.ai/docs/pricing-rate-limits): $4/M input,
 $0.20/M cached input, and $20/M output, with no long-context premium.
-Full has no published pay-as-you-go price and remains unpriced. Native web
+Full has no published pay-as-you-go price and remains unpriced. (Since catalogue `t3-2026-11-04.1`, Full is estimated at Wonder's rate and labelled `wonder_full_priced_at_wonder_rate`.) Native web
 search is billed separately; tool charges are not represented by these text
 token rates. The dedicated image, transcription and segmentation APIs remain
 outside this text-model correction.
