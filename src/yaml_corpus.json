@@ -202,15 +202,24 @@
   },
   {
     "yaml": "a: .inf\n",
-    "refused": true
+    "value": {
+      "a": ".inf"
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
   },
   {
     "yaml": "a: -.Inf\n",
-    "refused": true
+    "value": {
+      "a": "-.Inf"
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
   },
   {
     "yaml": "a: .NaN\n",
-    "refused": true
+    "value": {
+      "a": ".NaN"
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
   },
   {
     "yaml": "a: inf\nb: nan\nc: infinity\nd: NaN\n",
@@ -276,15 +285,21 @@
   },
   {
     "yaml": "1: one\n",
-    "refused": true
+    "value": {
+      "1": "one"
+    }
   },
   {
     "yaml": "true: yes\n",
-    "refused": true
+    "value": {
+      "true": "yes"
+    }
   },
   {
     "yaml": "~: null\n",
-    "refused": true
+    "value": {
+      "null": null
+    }
   },
   {
     "yaml": ": empty key\n",
@@ -292,7 +307,9 @@
   },
   {
     "yaml": "? [complex]\n: key\n",
-    "refused": true
+    "value": {
+      "[\"complex\"]": "key"
+    }
   },
   {
     "yaml": "? simple\n: explicit\n",
@@ -408,7 +425,10 @@
   },
   {
     "yaml": "a: !!float .inf\n",
-    "refused": true
+    "value": {
+      "a": ".inf"
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
   },
   {
     "yaml": "a: !!bool true\n",
@@ -464,7 +484,13 @@
   },
   {
     "yaml": "a: !custom [1]\n",
-    "refused": true
+    "value": {
+      "a": {
+        "custom": [
+          1
+        ]
+      }
+    }
   },
   {
     "yaml": "a: !!int 1.5\n",
@@ -492,15 +518,29 @@
   },
   {
     "yaml": "a: !custom value\n",
-    "refused": true
+    "value": {
+      "a": {
+        "custom": "value"
+      }
+    }
   },
   {
     "yaml": "a: !custom {x: 1}\n",
-    "refused": true
+    "value": {
+      "a": {
+        "custom": {
+          "x": 1
+        }
+      }
+    }
   },
   {
     "yaml": "a: ! 12\n",
-    "refused": true
+    "value": {
+      "a": {
+        "!": 12
+      }
+    }
   },
   {
     "yaml": "%TAG !e! tag:example.com,2026:\n---\na: !e!thing x\n",
@@ -642,5 +682,82 @@
   {
     "yaml": "a: x\n...\nb: y\n",
     "refused": true
+  },
+  {
+    "yaml": "statuses:\n  429: retry\n  500: fail\n",
+    "value": {
+      "statuses": {
+        "429": "retry",
+        "500": "fail"
+      }
+    }
+  },
+  {
+    "yaml": "a:\n  1.5: x\n  0x1F: y\n  true: z\n  ~: n\n",
+    "value": {
+      "a": {
+        "1.5": "x",
+        "31": "y",
+        "true": "z",
+        "null": "n"
+      }
+    }
+  },
+  {
+    "yaml": "a: !env HOME\n",
+    "value": {
+      "a": {
+        "env": "HOME"
+      }
+    }
+  },
+  {
+    "yaml": "a: !env [1, 2]\n",
+    "value": {
+      "a": {
+        "env": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "yaml": "a: !env {x: 1}\n",
+    "value": {
+      "a": {
+        "env": {
+          "x": 1
+        }
+      }
+    }
+  },
+  {
+    "yaml": "a: !!int 18446744073709551616\n",
+    "refused": true
+  },
+  {
+    "yaml": "a: 123456789012345678901234567890123456789012\n",
+    "value": {
+      "a": 1.2345678901234568e+41
+    }
+  },
+  {
+    "yaml": "a: -.inf\nb: .NaN\nc: +.inf\n",
+    "value": {
+      "a": "-.inf",
+      "b": ".NaN",
+      "c": "+.inf"
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
+  },
+  {
+    "yaml": "ignored:\n  limit: .inf\n",
+    "value": {
+      "ignored": {
+        "limit": ".inf"
+      }
+    },
+    "kept": "serde_yaml accepted it; its tree has no JSON form"
   }
 ]

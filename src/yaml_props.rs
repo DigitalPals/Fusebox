@@ -238,6 +238,8 @@ const KNOWN_DIFFERENCES: &[(&str, Option<&str>)] = &[
     ("a:\n  b: \"multi\nline\"\n", None),
     // Anchor names may contain `:` (libyaml stopped at it).
     ("&a: b\n", Some(r#""b""#)),
+    // A bare tag in a flow list (libyaml refused it; a block value took it).
+    ("a: [!t]\n", Some(r#"{"a": [{"t": null}]}"#)),
 ];
 
 #[test]
@@ -252,9 +254,11 @@ fn known_differences_from_serde_yaml_hold() {
 }
 
 /// What `serde_yaml` 0.9 made of config-shaped documents and of the corners
-/// where YAML parsers differ, recorded from the differential run: the tree, or
-/// `refused` where it failed or its tree had no JSON form (tags, non-string
-/// keys, infinities).
+/// where YAML parsers differ, recorded from a run against it: `refused` where
+/// it failed, the tree where it gave the same one, and, marked `kept`, the tree
+/// this parser makes where serde_yaml accepted a document whose tree has no
+/// JSON form (tags, non-string keys, infinities). Every document that loaded
+/// before still loads.
 #[test]
 fn documents_read_as_serde_yaml_read_them() {
     let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("yaml_corpus.json")).unwrap();
