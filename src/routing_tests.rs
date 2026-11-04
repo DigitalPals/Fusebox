@@ -2537,6 +2537,60 @@ async fn identity_learning_requires_authenticated_opt_in_and_management_reset_is
 }
 
 #[tokio::test]
+async fn the_account_test_is_pinned_and_reports_its_own_failure() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    let client = reqwest::Client::new();
+    let test = |id: &str| client.post(format!("{}/api/accounts/{}/test", fixture.proxy.url, id)).send();
+    // Account a is refused upstream; the result is a's failure, and the
+    // healthy account b is never tried in its place.
+    fixture.mock.mode.store(6, std::sync::atomic::Ordering::Relaxed); // a: 401
+    let response = test("file:a.json").await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let failed: Value = response.json().await.unwrap();
+    assert_eq!(failed["ok"], false, "{failed}");
+    assert_eq!(failed["status"], 401, "{failed}");
+    assert!(
+        fixture.mock.calls.lock().iter().all(|(account, _, _)| account == "a"),
+        "only the pinned account was called: {:?}",
+        fixture.mock.calls.lock()
+    );
+    // A healthy account answers, and the per-minute guard refuses a repeat.
+    fixture.mock.mode.store(0, std::sync::atomic::Ordering::Relaxed);
+    let response = test("file:b.json").await.unwrap();
+    let passed: Value = response.json().await.unwrap();
+    assert_eq!(passed["ok"], true, "{passed}");
+    assert!(!passed["model"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(test("file:b.json").await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(test("nobody.json").await.unwrap().status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_account_test_reaches_a_prefixed_account_under_force_model_prefix() {
+    let fixture = Fixture::new(Routing::FillFirst, true).await;
+    // Its own account file: the per-minute test guard is keyed by account id.
+    std::fs::write(
+        fixture.directory.join("prefixed.json"),
+        json!({"type":"codex", "access_token":"prefixed", "email":"prefixed", "prefix":"team",
+            "base_url":format!("{}/v1", fixture.provider.url)})
+        .to_string(),
+    )
+    .unwrap();
+    let mut cfg = fixture.cfg.clone();
+    cfg.force_model_prefix = true;
+    fixture.app.set_config(cfg);
+    fixture.app.reload_accounts();
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/accounts/file:prefixed.json/test", fixture.proxy.url))
+        .send()
+        .await
+        .unwrap();
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(result["model"].as_str().unwrap().starts_with("team/"), "{result}");
+    assert!(fixture.mock.calls.lock().iter().all(|(account, _, _)| account == "prefixed"), "only it was called");
+}
+
+#[tokio::test]
 async fn client_key_status_is_pool_level_counts_as_nothing_and_refuses_collectors() {
     let fixture = Fixture::new(Routing::FillFirst, true).await;
     let mut cfg = fixture.cfg.clone();

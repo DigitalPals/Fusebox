@@ -327,6 +327,7 @@ async fn codex_stream_errors_and_capacity_waits_are_logged_without_messages() {
         session: None,
         session_source: None,
         routing_selection: None,
+        pinned_account: None,
     };
     assert!(matches!(execute(app.clone(), call(true)).await, Reply::Error(500, _)));
     assert!(matches!(execute(app.clone(), call(false)).await, Reply::Error(429, _)));

@@ -420,6 +420,7 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/accounts/{id}/quota/refresh", post(refresh_quota))
         .route("/accounts/{id}/window-starter", post(start_window))
         .route("/accounts/{id}/activity", get(account_activity))
+        .route("/accounts/{id}/test", post(test_account))
         .route("/accounts/{id}/priority", post(set_priority))
         .route("/accounts/{id}/billing", post(set_billing))
         .route("/clients/usage", get(client_usage))
@@ -1011,6 +1012,143 @@ async fn refresh_account(State(app): State<Arc<App>>, Path(id): Path<String>) ->
         }
         Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
+}
+
+/// When each account was last tested from the dashboard (one test a minute).
+static ACCOUNT_TESTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The account's cheapest listed model at bundled list prices; unpriced
+/// models fall back to the usual small-model names, then alphabetical.
+fn cheapest_model(acct: &crate::accounts::Account) -> Option<String> {
+    let models = acct.public_models();
+    let provider = match acct.provider {
+        Provider::Claude => "anthropic",
+        Provider::Codex => "openai",
+        Provider::Meta => "meta",
+        _ => acct.provider.as_str(),
+    };
+    let priced = models.iter().filter_map(|model| {
+        let mut o = crate::usage::types::Observation::new(
+            "proxy",
+            "account-test-pricing".into(),
+            provider,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        o.actual_model = Some(model.clone());
+        o.completeness = "complete".into();
+        o.tokens.input = Some(1000);
+        o.tokens.output = Some(1000);
+        crate::usage::pricing::Catalogue::bundled_catalogue()
+            .and_then(|c| c.price(&o).cost_nanos)
+            .map(|cost| (cost, model))
+    });
+    if let Some((_, model)) = priced.min() {
+        return Some(model.clone());
+    }
+    let small = |m: &String| {
+        let m = m.to_ascii_lowercase();
+        ["mini", "haiku", "flash", "lite", "nano", "small"].iter().any(|s| m.contains(s))
+    };
+    models.iter().find(|m| small(m)).cloned().or_else(|| models.iter().min().cloned())
+}
+
+/// Sends one tiny request pinned to this account — no failover, so the
+/// result says whether *this* sign-in works. It is a real request: recorded
+/// like the playground and may start a 5-hour window, which the drawer says.
+async fn test_account(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    incoming: axum::http::HeaderMap,
+) -> Response {
+    use futures::StreamExt as _;
+    let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
+    if acct.state.lock().disabled {
+        return err(StatusCode::CONFLICT, "this account is disabled; enable it to test it");
+    }
+    {
+        let mut tests = ACCOUNT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if tests.get(&id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60)) {
+            return err(StatusCode::TOO_MANY_REQUESTS, "tested just now; wait a minute between tests");
+        }
+        tests.insert(id.clone(), std::time::Instant::now());
+    }
+    let Some(model) = cheapest_model(&acct) else {
+        return err(StatusCode::CONFLICT, "this account serves no models to test with");
+    };
+    // A prefixed account is reached as `prefix/model`, the only way it serves
+    // anything when `force-model-prefix` is on.
+    let model = match acct.prefix.as_deref().filter(|p| !p.is_empty()) {
+        Some(prefix) => format!("{prefix}/{model}"),
+        None => model,
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    if let Some(source) = incoming.get(crate::source::HEADER) {
+        headers.insert(crate::source::HEADER, source.clone());
+    }
+    let scope = crate::affinity::scope_for_key(Some("fusebox-dashboard-account-test"));
+    if let (Ok(scope), Ok(client)) =
+        (axum::http::HeaderValue::from_str(&scope), axum::http::HeaderValue::from_str("dashboard"))
+    {
+        headers.insert(crate::affinity::SCOPE_HEADER, scope);
+        headers.insert(crate::usage::capture::CLIENT_HEADER, client);
+    }
+    headers.insert(axum::http::header::USER_AGENT, axum::http::HeaderValue::from_static("fusebox-account-test"));
+    let call = crate::proxy::Call {
+        format: crate::ir::Format::Chat,
+        body: json!({
+            "model": model, "max_tokens": 16, "stream": true,
+            "messages": [{ "role": "user", "content": "Reply with the word ok." }],
+        }),
+        headers,
+        stream: true,
+        transport: "http",
+        path_model: None,
+        session: None,
+        session_source: None,
+        routing_selection: None,
+        pinned_account: Some(acct.clone()),
+    };
+    let started = std::time::Instant::now();
+    let (ok, status, text, error) = match crate::proxy::execute(app.clone(), call).await {
+        crate::proxy::Reply::Json(v) => {
+            (true, 200, v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string(), Value::Null)
+        }
+        crate::proxy::Reply::Stream { mut frames, .. } => {
+            let mut text = String::new();
+            let mut error = Value::Null;
+            let collect = async {
+                while let Some(frame) = frames.next().await {
+                    let Ok(v) = serde_json::from_str::<Value>(&frame.data) else { continue };
+                    if !v["error"].is_null() {
+                        error = v["error"].clone();
+                    }
+                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                        text.push_str(delta);
+                    }
+                }
+            };
+            if tokio::time::timeout(std::time::Duration::from_secs(120), collect).await.is_err() && error.is_null() {
+                error = json!({"message": "the test timed out after 120 seconds"});
+            }
+            (error.is_null(), if error.is_null() { 200 } else { 502 }, text, error)
+        }
+        crate::proxy::Reply::Error(status, body) => (false, status, String::new(), body["error"].clone()),
+    };
+    let message = if error.is_null() {
+        Value::Null
+    } else {
+        error["message"].as_str().map_or_else(|| json!(error.to_string()), |m| json!(m))
+    };
+    Json(json!({
+        "ok": ok,
+        "status": status,
+        "model": model,
+        "ms": started.elapsed().as_millis() as u64,
+        "reply": text.trim().chars().take(120).collect::<String>(),
+        "error": message,
+    }))
+    .into_response()
 }
 
 async fn reset_account(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {

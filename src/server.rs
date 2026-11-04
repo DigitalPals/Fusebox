@@ -419,6 +419,7 @@ async fn run(app: Arc<App>, format: Format, headers: HeaderMap, body: Bytes) -> 
         session: None,
         session_source: None,
         routing_selection: None,
+        pinned_account: None,
     };
     reply(format, proxy::execute(app, call).await, false)
 }
@@ -579,6 +580,7 @@ pub async fn playground(
         session: None,
         session_source: None,
         routing_selection: None,
+        pinned_account: None,
     };
     reply(Format::Chat, proxy::execute(app, call).await, false)
 }
@@ -635,6 +637,7 @@ async fn completions(State(app): State<Arc<App>>, headers: HeaderMap, body: Byte
         session: None,
         session_source: None,
         routing_selection: None,
+        pinned_account: None,
     };
     match proxy::execute(app, call).await {
         Reply::Json(v) => {
@@ -733,6 +736,7 @@ async fn gemini(
         session: None,
         session_source: None,
         routing_selection: None,
+        pinned_account: None,
     };
     reply(Format::Gemini, proxy::execute(app, call).await, json_array)
 }

@@ -539,6 +539,7 @@ async fn turn(
         session: sess.key.clone(),
         session_source: sess.source,
         routing_selection: sess.pending_selection.take(),
+        pinned_account: None,
     };
     match proxy::execute(app.clone(), call).await {
         Reply::Stream { mut frames, .. } => {

@@ -42,6 +42,9 @@ pub struct Call {
     pub session_source: Option<&'static str>,
     /// A native WebSocket selection made before falling back to this pipeline.
     pub routing_selection: Option<crate::affinity::Selected>,
+    /// Pin the call to one account with no failover. Only the dashboard's
+    /// account test sets this; no client request can reach it.
+    pub pinned_account: Option<Arc<Account>>,
 }
 
 pub enum Reply {
@@ -1359,6 +1362,7 @@ async fn execute_models(app: Arc<App>, mut call: Call) -> Reply {
             session: call.session.clone(),
             session_source: call.session_source,
             routing_selection: if i == 0 { call.routing_selection.clone() } else { None },
+            pinned_account: call.pinned_account.clone(),
         };
         set_model(&mut attempt, model);
         let mut reply = execute_inner(app.clone(), attempt, &mut budget).await;
@@ -1445,7 +1449,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
     let mut pending_selection = call.routing_selection;
     // Same-account retries for blips (capacity errors, soft rate limits).
     let mut soft_tries: HashMap<String, u32> = HashMap::new();
-    let attempts = (cfg.request_retry as usize).clamp(1, MAX_ACCOUNTS);
+    // A pinned call (the dashboard's account test) gets exactly one account:
+    // its failure is the answer, never a reason to try another account.
+    let attempts = if call.pinned_account.is_some() { 1 } else { (cfg.request_retry as usize).clamp(1, MAX_ACCOUNTS) };
     let first_token =
         (cfg.first_token_timeout_seconds > 0).then(|| std::time::Duration::from_secs(cfg.first_token_timeout_seconds));
     let inferred = call.session_source == Some(crate::affinity::INFERRED_SOURCE);
@@ -1482,6 +1488,17 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
         // create an assignment for every request that arrives without a session.
         let picked = if let Some(retry) = retry {
             Ok(retry)
+        } else if let Some(pinned) = &call.pinned_account {
+            match app.pool.resolve_account(pinned, &model, only.as_ref()) {
+                Some(m) => Ok(crate::affinity::Selected {
+                    account: pinned.clone(),
+                    model: m,
+                    strategy: cfg.routing,
+                    reason: "pinned_test",
+                    previous_account: None,
+                }),
+                None => Err((404, format!("that account doesn't serve model `{model}`"))),
+            }
         } else if cfg.session_affinity && call.session.is_some() && call.session_source != Some("generated_response") {
             app.sessions.pick_session_with_context(
                 &app.pool,

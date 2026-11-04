@@ -42,6 +42,7 @@ const S = {
   accounts: null,
   requests: [],
   requestsFull: false, // S.requests holds the whole log, not only the newest few
+  acctTest: null, // {id, running, result} of the account drawer Test button
   models: [],
   routes: null,
   routesStale: true, // account or model changes since S.routes was fetched
@@ -1974,7 +1975,13 @@ function drawerActionsHTML(a) {
   if (S.confirm === a.id) {
     return `<span class="meta grow">Remove ${esc(acctLabel(a))}?</span><button class="btn ghost" type="button" data-act="cancel-delete">Keep</button><button class="btn danger" type="button" data-act="delete" data-id="${esc(a.id)}" style="border-color:var(--err-btn-line)">Remove</button>`;
   }
+  const tested = S.acctTest && S.acctTest.id === a.id ? S.acctTest : null;
+  const result = tested && tested.result ? (tested.result.ok
+    ? `<span class="meta" role="status">Replied “${esc(tested.result.reply || 'ok')}” in ${ms(tested.result.ms)} · ${esc(tested.result.model)}</span>`
+    : `<span class="meta warn" role="status">HTTP ${tested.result.status} · ${esc(tested.result.error || 'failed')}</span>`) : '';
   return `${a.kind === 'oauth' ? `<button class="btn" type="button" data-act="refresh" data-id="${esc(a.id)}">Refresh</button>` : ''}
+    <button class="btn" type="button" data-act="test" data-id="${esc(a.id)}" ${a.disabled || tested?.running ? 'disabled' : ''} title="Sends one small request to this account only — no other account is tried. It counts against quota and may start a 5-hour window.">${tested?.running ? 'Testing…' : 'Test'}</button>
+    ${result}
     <button class="btn" type="button" data-act="toggle" data-id="${esc(a.id)}">${a.disabled ? 'Enable' : 'Disable'}</button>
     <span class="grow"></span><button class="btn danger" type="button" data-act="confirm-delete" data-id="${esc(a.id)}">Remove</button>`;
 }
@@ -3913,6 +3920,21 @@ async function accountAction(act, id) {
   refreshAccounts();
 }
 
+// One tiny request pinned to this account (no failover), so the drawer can
+// say whether this sign-in itself answers. The result stays in the drawer.
+async function testAccount(id) {
+  S.acctTest = { id, running: true, result: null };
+  refreshViews();
+  try {
+    const result = await api(`/accounts/${encodeURIComponent(id)}/test`, { method: 'POST' });
+    S.acctTest = { id, running: false, result };
+  } catch (e) {
+    S.acctTest = { id, running: false, result: { ok: false, status: e.status || 0, error: e.message } };
+  }
+  refreshViews();
+  refreshAccounts();
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -4117,6 +4139,9 @@ document.addEventListener('click', (e) => {
       e.stopPropagation();
       if (act === 'reset') toast('Cooldowns cleared');
       return accountAction(act, id);
+    case 'test':
+      e.stopPropagation();
+      return testAccount(id);
     case 'clear-error':
       e.stopPropagation();
       return clearAccountError(id);
