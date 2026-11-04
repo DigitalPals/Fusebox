@@ -1,0 +1,26 @@
+POST /v1/messages?beta=true
+accept: text/event-stream
+accept-encoding: zstd,gzip,deflate
+anthropic-beta: claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05
+anthropic-dangerous-direct-browser-access: true
+anthropic-version: 2023-06-01
+authorization: Bearer golden-token
+content-length: 795
+content-type: application/json
+host: <upstream>
+user-agent: claude-cli/2.1.318 (external, cli)
+x-app: cli
+x-claude-code-session-id: <uuid-1>
+x-client-request-id: <uuid-2>
+x-stainless-arch: arm64
+x-stainless-lang: js
+x-stainless-os: MacOS
+x-stainless-package-version: 0.128.0
+x-stainless-retry-count: 0
+x-stainless-runtime: node
+x-stainless-runtime-version: v26.12.1
+x-stainless-timeout: 600
+
+{"model":"claude-sonnet-4-6","max_tokens":64,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.318.a37; cc_entrypoint=cli;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>\nbe brief\n</system-reminder>"},{"type":"text","text":"golden question"}]}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],"stream":true,"cache_control":{"type":"ephemeral"},"metadata":{"user_id":"{\"device_id\":\"<hex64-3>\",\"account_uuid\":\"golden-account\",\"session_id\":\"<uuid-1>\"}"}}
+
+client status: 200

@@ -1,0 +1,19 @@
+POST /v1/messages?beta=true
+accept: text/event-stream
+accept-encoding: zstd,gzip,deflate
+anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,oauth-2025-04-20
+anthropic-version: 2023-06-01
+authorization: Bearer golden-token
+content-length: 453
+content-type: application/json
+host: <upstream>
+user-agent: claude-cli/2.1.318 (external, cli)
+x-app: cli
+x-claude-code-session-id: <uuid-1>
+x-client-request-id: <uuid-2>
+x-stainless-package-version: 0.128.0
+x-stainless-runtime-version: v26.12.1
+
+{"model":"claude-sonnet-4-6","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":"golden question"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],"stream":true,"metadata":{"user_id":"{\"device_id\":\"<hex64-3>\",\"account_uuid\":\"golden-account\",\"session_id\":\"<uuid-1>\"}"}}
+
+client status: 200

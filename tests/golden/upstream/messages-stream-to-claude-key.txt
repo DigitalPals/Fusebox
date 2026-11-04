@@ -1,0 +1,14 @@
+POST /v1/messages
+accept: text/event-stream
+accept-encoding: zstd,gzip,deflate
+anthropic-version: 2023-06-01
+content-length: 251
+content-type: application/json
+host: <upstream>
+user-agent: golden-client/1.0
+x-api-key: golden-key
+x-client-request-id: <uuid-1>
+
+{"model":"claude-sonnet-4-6","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":"golden question"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],"stream":true}
+
+client status: 200

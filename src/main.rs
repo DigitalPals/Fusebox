@@ -21,6 +21,8 @@ mod embeddings;
 mod feature_tests;
 mod files;
 mod formats;
+#[cfg(test)]
+mod golden_tests;
 mod ir;
 mod json_size;
 mod latency;

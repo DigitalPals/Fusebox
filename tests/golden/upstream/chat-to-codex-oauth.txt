@@ -1,0 +1,16 @@
+POST /v1/responses
+accept: text/event-stream
+accept-encoding: zstd,gzip,deflate
+authorization: Bearer golden-token
+chatgpt-account-id: golden-account
+content-length: 603
+content-type: application/json
+host: <upstream>
+originator: codex-tui
+session-id: <uuid-1>
+user-agent: codex-tui/0.166.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.166.0)
+version: 0.166.0
+
+{"model":"gpt-6-astra","stream":true,"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"be brief"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"golden question"}]}],"tools":[{"type":"function","name":"lookup","description":"","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]},"strict":false}],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":"auto"},"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"<uuid-2>"}
+
+client status: 200

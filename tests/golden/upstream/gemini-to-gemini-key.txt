@@ -1,0 +1,12 @@
+POST /v1beta/models/gemini-3.8-flash:generateContent
+accept: */*
+accept-encoding: zstd,gzip,deflate
+content-length: 301
+content-type: application/json
+host: <upstream>
+user-agent: Fusebox/0.13.0
+x-goog-api-key: golden-key
+
+{"systemInstruction":{"parts":[{"text":"be brief"}]},"contents":[{"role":"user","parts":[{"text":"golden question"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}],"generationConfig":{"maxOutputTokens":64}}
+
+client status: 200

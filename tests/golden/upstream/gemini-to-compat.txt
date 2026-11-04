@@ -1,0 +1,12 @@
+POST /v1/chat/completions
+accept: */*
+accept-encoding: zstd,gzip,deflate
+authorization: Bearer golden-key
+content-length: 379
+content-type: application/json
+host: <upstream>
+user-agent: Fusebox/0.13.0
+
+{"model":"golden-compat-model","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"golden question"}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"lookup","description":"","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}],"tool_choice":"auto","max_tokens":64}
+
+client status: 200

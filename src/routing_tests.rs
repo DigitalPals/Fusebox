@@ -318,12 +318,12 @@ async fn mock_ws(State(mock): State<Arc<Mock>>, headers: HeaderMap, upgrade: Web
     }).into_response()
 }
 
-struct Server {
-    url: String,
+pub(crate) struct Server {
+    pub(crate) url: String,
     task: tokio::task::JoinHandle<()>,
 }
 
-async fn serve(router: axum::Router) -> Server {
+pub(crate) async fn serve(router: axum::Router) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
