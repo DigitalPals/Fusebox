@@ -10,7 +10,9 @@ const policy = { mode: 'off', accounts: [], model: 'claude-haiku-4-5-20251001', 
 function piece(name) {
   const at = app.indexOf(name);
   assert.ok(at >= 0);
-  return app.slice(at, app.indexOf('\n}\n', at) + 2);
+  const end = app.indexOf('\n}\n', at);
+  assert.ok(end > at, `app.js no longer ends ${name}`);
+  return app.slice(at, end + 2);
 }
 function load(extra = {}) {
   const ctx = { S: { accounts: [], config: { values: { 'window-starter': structuredClone(policy) }, errors: {}, secrets: {} } },

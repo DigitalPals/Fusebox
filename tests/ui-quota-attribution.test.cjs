@@ -13,6 +13,7 @@ function piece(start) {
   const at = app.indexOf(start);
   assert.ok(at >= 0, `app.js no longer has ${start}`);
   const end = start.startsWith('function') ? app.indexOf('\n}\n', at) + 2 : app.indexOf('\n', at);
+  assert.ok(end > at, `app.js no longer ends ${start}`);
   return app.slice(at, end);
 }
 

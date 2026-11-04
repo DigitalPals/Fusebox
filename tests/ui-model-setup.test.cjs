@@ -8,7 +8,9 @@ const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
 function piece(start) {
   const at = source.indexOf(start);
   assert.ok(at >= 0, start);
-  return source.slice(at, start.startsWith('function') ? source.indexOf('\n}\n', at) + 2 : source.indexOf(';\n', at) + 1);
+  const end = start.startsWith('function') ? source.indexOf('\n}\n', at) + 2 : source.indexOf(';\n', at) + 1;
+  assert.ok(end > at, `app.js no longer ends ${start}`);
+  return source.slice(at, end);
 }
 const known = { id: 'team/coding', capabilities: { context_window: 128000, max_output_tokens: 16000, input_modalities: ['text', 'image'], tool_calling: true }, codex_catalog: true };
 const unknown = { id: 'budget/plain' };

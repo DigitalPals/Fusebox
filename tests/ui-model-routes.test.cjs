@@ -5,9 +5,14 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
+function between(start, end) {
+  const at = source.indexOf(start), to = source.indexOf(end, at);
+  assert.ok(at >= 0 && to > at, `app.js no longer has ${start} .. ${end}`);
+  return source.slice(at, to);
+}
 
 test('model check messages distinguish pending checks, completed results and recent checks', async () => {
-  const checkCode = source.slice(source.indexOf('async function checkModels('), source.indexOf('async function removeModel('));
+  const checkCode = between('async function checkModels(', 'async function removeModel(');
   const pending = 'Some accounts are still being checked; results will appear automatically.';
   for (const [reply, expected] of [
     [{ asked: 0, in_progress: 2, new: [] }, pending],
@@ -30,7 +35,7 @@ test('model check messages distinguish pending checks, completed results and rec
     assert.equal(patches, 1);
   }
 });
-const code = source.slice(source.indexOf('const routeSteps ='), source.indexOf('function failuresByModel()'));
+const code = between('const routeSteps =', 'function failuresByModel()');
 function dashboard(models, routes, accounts) {
   let routeReads = 0;
   const context = { S: { models, routes: { models: new Proxy(routes, { get(target, key) { routeReads++; return target[key]; } }) }, accounts },
@@ -83,7 +88,10 @@ test('large ragged families visit each model route a fixed number of times', () 
 
 test('a route step held out until a sign-in says so, even when the account shows no error', () => {
   const start = source.indexOf('function routeStepText(');
-  const fn = source.slice(start, source.indexOf('\n}\n', start) + 3);
+  assert.ok(start >= 0, 'app.js no longer has routeStepText');
+  const fnEnd = source.indexOf('\n}\n', start);
+  assert.ok(fnEnd > start, 'app.js no longer ends routeStepText');
+  const fn = source.slice(start, fnEnd + 3);
   const context = { acctState: () => ({ cls: 'ok' }), when: () => '', hm: () => '', windowOf: () => null, quotaOf: () => null };
   vm.createContext(context);
   vm.runInContext(fn, context);

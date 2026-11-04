@@ -6,7 +6,9 @@ const vm = require('node:vm');
 
 // Exercise the dashboard's actual live request handler without a browser/DOM.
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
-const handler = source.slice(source.indexOf('function onRequest(log) {'), source.indexOf('// ---------------------------------------------------------------- render'));
+const handlerAt = source.indexOf('function onRequest(log) {'), handlerTo = source.indexOf('// ---------------------------------------------------------------- render', handlerAt);
+assert.ok(handlerAt >= 0 && handlerTo > handlerAt, 'app.js no longer has onRequest .. render');
+const handler = source.slice(handlerAt, handlerTo);
 
 function dashboard() {
   const S = {

@@ -7,9 +7,9 @@ const vm = require('node:vm');
 // Config, Clients: the clients and shared keys lists, run from the dashboard's own sources.
 const source = fs.readFileSync(path.join(__dirname, '../ui/config.js'), 'utf8');
 const app = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
-const line = (start) => app.slice(app.indexOf(start), app.indexOf('\n', app.indexOf(start)));
+const line = (start) => { const at = app.indexOf(start); assert.ok(at >= 0, `app.js no longer has ${start}`); const to = app.indexOf('\n', at); assert.ok(to > at, `app.js no longer ends ${start}`); return app.slice(at, to); };
 // A whole top-level function from app.js, up to its closing brace.
-const fn = (name) => { const at = app.indexOf(`function ${name}(`); return app.slice(at, app.indexOf('\n}\n', at) + 2); };
+const fn = (name) => { const at = app.indexOf(`function ${name}(`); assert.ok(at >= 0, `app.js no longer has function ${name}`); const to = app.indexOf('\n}\n', at); assert.ok(to > at, `app.js no longer ends function ${name}`); return app.slice(at, to + 2); };
 const helpers = [line("const esc = (v) =>"), line("const HIDDEN = '"), line('const secret = (key) =>'), line('const copyBtn = (text, label, note) =>'),
   fn('ago'), line('const liveAgo = (iso) =>')].join('\n');
 

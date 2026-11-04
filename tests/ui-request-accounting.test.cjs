@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
-const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
+const section = (start, end) => { const at = source.indexOf(start), to = source.indexOf(end, at); assert.ok(at >= 0 && to > at, `app.js no longer has ${start} .. ${end}`); return source.slice(at, to); };
 const code = [
   section('function onRequest(log) {', '// ---------------------------------------------------------------- render'),
   section('function figuresHTML() {', 'const ROUTING_TEXT = {'),

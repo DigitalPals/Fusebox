@@ -6,7 +6,10 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname,'../ui/app.js'),'utf8');
 function piece(start) {
   const at = source.indexOf(start);
-  return source.slice(at, start.startsWith('function') ? source.indexOf('\n}\n',at)+2 : source.indexOf(';\n',at)+1);
+  assert.ok(at >= 0, `app.js no longer has ${start}`);
+  const end = start.startsWith('function') ? source.indexOf('\n}\n',at)+2 : source.indexOf(';\n',at)+1;
+  assert.ok(end > at, `app.js no longer ends ${start}`);
+  return source.slice(at, end);
 }
 function load() {
   const ctx = { S:{quotaDisplay:'remaining'}, when:()=> 'tomorrow', meterHTML:(q)=>`<meter>${q.remaining}</meter>` };

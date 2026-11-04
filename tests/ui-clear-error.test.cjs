@@ -8,7 +8,9 @@ const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
 function piece(start) {
   const at = source.indexOf(start);
   assert.ok(at >= 0, start);
-  return source.slice(at, source.indexOf('\n}\n', at) + 2);
+  const end = source.indexOf('\n}\n', at);
+  assert.ok(end > at, `app.js no longer ends ${start}`);
+  return source.slice(at, end + 2);
 }
 function dashboard() {
   const a = { id: 'file:claude-user@example.test.json', label: 'Test account', provider: 'claude',

@@ -13,7 +13,9 @@ function load() {
     when: () => '22 Oct 17:00',
   };
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('function hasBankedResets'), source.indexOf('\nfunction syncResetModal')), context);
+  const at = source.indexOf('function hasBankedResets'), to = source.indexOf('\nfunction syncResetModal', at);
+  assert.ok(at >= 0 && to > at, 'app.js no longer has hasBankedResets .. syncResetModal');
+  vm.runInContext(source.slice(at, to), context);
   return (s) => vm.runInContext(s, context);
 }
 const account = {

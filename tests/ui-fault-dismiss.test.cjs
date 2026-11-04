@@ -12,6 +12,7 @@ function piece(start) {
   const at = source.indexOf(start);
   assert.ok(at >= 0, `app.js no longer has ${start}`);
   const end = start.startsWith('function') || start.startsWith('async function') ? source.indexOf('\n}\n', at) + 2 : source.indexOf('\n', at);
+  assert.ok(end > at, `app.js no longer ends ${start}`);
   return source.slice(at, end);
 }
 

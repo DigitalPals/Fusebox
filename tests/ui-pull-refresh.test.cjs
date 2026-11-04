@@ -5,8 +5,13 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
-const code = source.slice(source.indexOf('// ---------------------------------------------------------------- page refresh\n'), source.indexOf('// ---------------------------------------------------------------- routing + timers'));
-const unload = source.slice(source.indexOf("window.addEventListener('beforeunload'"), source.indexOf("window.addEventListener('storage'"));
+function section(start, end) {
+  const at = source.indexOf(start), to = source.indexOf(end, at);
+  assert.ok(at >= 0 && to > at, `app.js no longer has ${start} .. ${end}`);
+  return source.slice(at, to);
+}
+const code = section('// ---------------------------------------------------------------- page refresh\n', '// ---------------------------------------------------------------- routing + timers');
+const unload = section("window.addEventListener('beforeunload'", "window.addEventListener('storage'");
 
 function dashboard(options = {}) {
   const listeners = new Map();
