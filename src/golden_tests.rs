@@ -412,6 +412,11 @@ async fn run_case(name: &str, account: Account, client: Client, stream: bool) ->
     if want == got {
         return Ok(());
     }
+    if want.replace("\r\n", "\n") == got {
+        return Err(format!(
+            "{name}: the golden has CRLF line endings; check tests/golden out with LF (.gitattributes)"
+        ));
+    }
     let line = want
         .lines()
         .zip(got.lines())

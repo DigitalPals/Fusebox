@@ -1,0 +1,3 @@
+# Goldens are exact captures of upstream requests, compared byte for byte: keep them
+# LF on every platform (a Windows checkout would otherwise turn them into CRLF).
+tests/golden/** text eol=lf
