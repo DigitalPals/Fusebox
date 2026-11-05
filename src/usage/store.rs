@@ -3,6 +3,10 @@ use super::{pricing::Catalogue, types::Observation};
 use crate::zone::{LocalDates, Zone};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, LocalResult, NaiveDate, Utc};
+#[cfg(test)]
+pub(crate) use client_totals::build as build_client_totals;
+pub(crate) use client_totals::start as client_totals_start;
+pub(crate) use codec::register as register_functions;
 pub(crate) use codec::{Documents, decode as decode_document};
 use rusqlite::{Connection, OptionalExtension, params, types::Value as SqlValue};
 use serde::Deserialize;
@@ -17,6 +21,7 @@ use std::{
     },
 };
 use tokio::sync::{OnceCell, Semaphore, mpsc, oneshot};
+mod client_totals;
 mod codec;
 mod compact;
 mod dashboard;
@@ -292,6 +297,9 @@ impl Store {
         let startup_repriced = if byte_limit.is_none() { reprice(&mut conn)? } else { 0 };
         if startup_repriced > 0 {
             tracing::info!(repriced = startup_repriced, "repaired usage price estimates; previous snapshots retained");
+        }
+        if byte_limit.is_none() {
+            client_totals::ensure(&mut conn)?;
         }
         let (tx, mut rx) = mpsc::channel(queue_capacity);
         let (historical_dropped,historical_rejected,historical_errors,prior_unclosed):(u64,u64,u64,u64)=conn.query_row("SELECT COALESCE(SUM(dropped),0),COALESCE(SUM(rejected),0),COALESCE(SUM(writer_errors),0),COALESCE(SUM(clean=0),0) FROM usage_writer_sessions",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;

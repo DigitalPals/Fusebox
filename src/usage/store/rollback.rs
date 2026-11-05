@@ -41,6 +41,8 @@ pub fn rollback_copy(database: &Path, to: &Path) -> Result<Value> {
             |r| r.get(0),
         )?;
         let tx = conn.transaction()?;
+        // This legacy copy cannot keep triggers depending on usage_document.
+        client_totals::remove(&tx)?;
         let mut decoder = codec::Decoder::new(&tx);
         let mut cursor = 0_i64;
         loop {

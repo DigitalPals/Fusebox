@@ -4,7 +4,7 @@
 //! Request rates are counted here. Tokens and spend come from the usage database every
 //! 30 seconds, plus what finished since, so a burst can't run far past a limit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,11 +21,40 @@ use crate::usage::{store::Store, types::Observation};
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
 const MAX_AGE: Duration = Duration::from_secs(90);
 
-/// Each named client's tokens today and spend this month, from the proxy's records. The
-/// time index is named because without `ANALYZE` statistics SQLite prefers the `source`
-/// equality: it then reads every proxy row ever recorded to keep this month's, which took
-/// 5 s on production (2 GB, 522k rows) and held the writer and the spend lock with it.
-const RECONCILE_TOTALS: &str = "SELECT client_id,
+/// Whole UTC hours come from transactionally maintained raw-observation totals.
+/// At fractional-hour local midnights, scan only the two short boundary fragments.
+/// The day fragment excludes the month fragment so a month's first day counts once.
+/// Naming the raw time index also avoids the historical source-index planner trap.
+const RECONCILE_TOTALS: &str = "WITH bounds AS (
+    SELECT (?1+3599999)/3600000*3600000 AS day_ceil,(?2+3599999)/3600000*3600000 AS month_ceil
+  ), fragments AS (
+    SELECT client_id,
+       CASE WHEN bucket_ms >= day_ceil THEN tokens ELSE 0 END AS tokens_today,
+       cost_nanos,
+       CASE WHEN bucket_ms >= day_ceil THEN unknown_tokens ELSE 0 END AS unknown_tokens,
+       unpriced
+    FROM usage_client_totals,bounds WHERE bucket_ms >= month_ceil
+    UNION ALL
+    SELECT client_id,
+       CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END,
+       COALESCE(cost_nanos,0),
+       CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
+           AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END,
+       CASE WHEN cost_nanos IS NULL AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END
+    FROM usage_observations INDEXED BY usage_event_time
+    WHERE source='proxy' AND client_id IS NOT NULL AND event_at_ms >= ?2 AND event_at_ms < (SELECT month_ceil FROM bounds)
+    UNION ALL
+    SELECT client_id,COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0),0,
+       CASE WHEN (input IS NULL OR cache_write IS NULL OR output IS NULL)
+           AND (COALESCE(input,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0)+COALESCE(output,0)>0 OR json_extract(usage_document(payload),'$.status') < 400) THEN 1 ELSE 0 END,
+       0
+    FROM usage_observations INDEXED BY usage_event_time
+    WHERE source='proxy' AND client_id IS NOT NULL
+       AND event_at_ms >= MAX(?1,(SELECT month_ceil FROM bounds)) AND event_at_ms < (SELECT day_ceil FROM bounds)
+  ) SELECT client_id,SUM(tokens_today),SUM(cost_nanos),SUM(unknown_tokens),SUM(unpriced) FROM fragments GROUP BY client_id";
+
+#[cfg(test)]
+const RAW_RECONCILE_TOTALS: &str = "SELECT client_id,
        SUM(CASE WHEN event_at_ms >= ?1 THEN COALESCE(input,0)+COALESCE(cache_write,0)+COALESCE(output,0) ELSE 0 END),
        SUM(COALESCE(cost_nanos,0)),
        SUM(CASE WHEN event_at_ms >= ?1 AND (input IS NULL OR cache_write IS NULL OR output IS NULL)
@@ -88,7 +117,10 @@ struct Pending {
 impl Spends {
     /// A period change requires a fresh database snapshot before budget admission.
     fn roll(&mut self) {
-        let today = Local::now().date_naive();
+        self.roll_at(Local::now().date_naive());
+    }
+
+    fn roll_at(&mut self, today: NaiveDate) {
         match self.day {
             Some(day) if day == today => {}
             Some(day) => {
@@ -270,16 +302,19 @@ impl Clients {
         let Some(id) = &o.client_id else { return };
         // A WebSocket is admitted once; each turn that finishes shows it is still in use.
         self.touch(id);
-        let now = Local::now();
-        let (day_ms, month_ms) = period_starts(now);
-        if o.event_at_ms < month_ms {
-            return;
-        }
         let t = &o.tokens;
         let tokens =
             counted_tokens(t.input.unwrap_or(0).saturating_add(t.cache_write.unwrap_or(0)), t.output.unwrap_or(0));
         let chargeable = o.status.is_some_and(|s| s < 400) || tokens > 0 || t.cache_read.unwrap_or(0) > 0;
         let price = store.and_then(|s| s.price(o).cost_nanos).map(|n| n.max(0) as u64);
+        // Read the period after acquiring the mutex: a completion can cross
+        // midnight while waiting for another short publication/record.
+        let mut s = self.spend.lock();
+        let now = Local::now();
+        let (day_ms, month_ms) = period_starts(now);
+        if o.event_at_ms < month_ms {
+            return;
+        }
         let totals = Totals {
             tokens_today: if o.event_at_ms >= day_ms { tokens } else { 0 },
             cost_nanos: price.unwrap_or(0),
@@ -290,8 +325,7 @@ impl Clients {
             ),
             unpriced: u64::from(chargeable && price.is_none()),
         };
-        let mut s = self.spend.lock();
-        s.roll();
+        s.roll_at(now.date_naive());
         s.by_client.entry(id.clone()).or_default().add(totals);
         if store.is_some_and(Store::accounting_available) {
             s.pending.insert(
@@ -305,14 +339,35 @@ impl Clients {
         self.spend.lock().available = false;
     }
 
-    /// Runs on the database worker, so it must stay quick: the lock covers both queries and
-    /// replacement, and named-client requests wait for it;
-    /// record-before-enqueue prevents concurrent completions from being lost or doubled.
+    /// Runs on the database worker. The snapshot query holds no request mutex.
+    /// Record-before-enqueue means every row in the snapshot was registered first;
+    /// merging *current* pending records while publishing also preserves completions
+    /// registered during the query. Acknowledgments use that same SQLite snapshot;
+    /// no SQL or transaction completion runs under the request mutex.
+    #[cfg(test)]
     fn reconcile(&self, conn: &mut rusqlite::Connection) -> anyhow::Result<()> {
-        let mut s = self.spend.lock();
-        let now = Local::now();
+        self.reconcile_before(conn, Instant::now() + Duration::from_secs(10))
+    }
+
+    fn reconcile_before(&self, conn: &mut rusqlite::Connection, deadline: Instant) -> anyhow::Result<()> {
+        self.reconcile_with_clock(conn, Local::now, deadline)
+    }
+
+    fn reconcile_with_clock(
+        &self,
+        conn: &mut rusqlite::Connection,
+        mut clock: impl FnMut() -> DateTime<Local>,
+        deadline: Instant,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(Instant::now() < deadline, "client usage refresh expired");
+        let started = Instant::now();
+        let now = clock();
         let (day_ms, month_ms) = period_starts(now);
         let tx = conn.transaction()?;
+        // Whole-hour totals exist only from where the table starts; never read a
+        // month before it as if it were empty.
+        let from = crate::usage::store::client_totals_start(&tx)?;
+        anyhow::ensure!(month_ms >= from, "client usage totals start after this month began");
         let mut totals = {
             let mut stmt = tx.prepare(RECONCILE_TOTALS)?;
             let rows = stmt.query_map([day_ms, month_ms], |r| {
@@ -328,29 +383,49 @@ impl Clients {
             })?;
             rows.collect::<Result<HashMap<_, _>, _>>()?
         };
-        let mut acknowledged = Vec::new();
+        // The SQL above has already established the snapshot. Any completion
+        // registered after this copy cannot be in it: registration precedes
+        // enqueue. The writer also cannot execute another queued job mid-call.
+        let pending: Vec<_> = self
+            .spend
+            .lock()
+            .pending
+            .iter()
+            .map(|(event, p)| (event.clone(), p.origin.clone(), p.event_at_ms))
+            .collect();
+        let mut acknowledged = HashSet::new();
         {
             let mut stmt = tx.prepare("SELECT EXISTS(SELECT 1 FROM usage_observations WHERE source='proxy' AND origin_id=?1 AND source_event_id=?2)")?;
-            for (event, p) in &s.pending {
-                if p.event_at_ms < month_ms || stmt.query_row([&p.origin, event], |r| r.get::<_, bool>(0))? {
-                    acknowledged.push(event.clone());
-                } else {
-                    let mut delta = p.totals;
-                    if p.event_at_ms < day_ms {
-                        delta.tokens_today = 0;
-                        delta.unknown_tokens = 0;
-                    }
-                    totals.entry(p.client.clone()).or_default().add(delta);
+            for (event, origin, at) in pending {
+                if at < month_ms || stmt.query_row([&origin, &event], |r| r.get::<_, bool>(0))? {
+                    acknowledged.insert(event);
                 }
             }
         }
         tx.commit()?;
-        for event in acknowledged {
-            s.pending.remove(&event);
-        }
+        let mut s = self.spend.lock();
+        // Store::call does not cancel queued/running jobs when its caller times
+        // out. Such a job must never re-enable budget admission afterward.
+        anyhow::ensure!(Instant::now() < deadline, "client usage refresh expired");
+        // Never publish an old period over records that rolled while SQL ran.
+        anyhow::ensure!(clock().date_naive() == now.date_naive(), "client usage period changed during refresh");
+        // Merge the live map, including records registered while acknowledgments
+        // ran. Keep unacknowledged completions until a later durable snapshot.
+        s.pending.retain(|event, p| {
+            if p.event_at_ms < month_ms || acknowledged.contains(event) {
+                return false;
+            }
+            let mut delta = p.totals;
+            if p.event_at_ms < day_ms {
+                delta.tokens_today = 0;
+                delta.unknown_tokens = 0;
+            }
+            totals.entry(p.client.clone()).or_default().add(delta);
+            true
+        });
         s.day = Some(now.date_naive());
         s.by_client = totals;
-        s.refreshed = Some(Instant::now());
+        s.refreshed = Some(started);
         s.available = true;
         Ok(())
     }
@@ -515,7 +590,10 @@ pub async fn refresh(app: &App) {
         return;
     };
     let clients = app.clients.clone();
-    let result = tokio::time::timeout(Duration::from_secs(10), store.call(move |conn| clients.reconcile(conn))).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result =
+        tokio::time::timeout(Duration::from_secs(10), store.call(move |conn| clients.reconcile_before(conn, deadline)))
+            .await;
     if !matches!(result, Ok(Ok(()))) || !store.accounting_available() {
         app.clients.unavailable();
         tracing::warn!("could not establish client usage totals; budget-limited keys are unavailable");
@@ -530,6 +608,10 @@ pub async fn refresher(app: Arc<App>) {
         refresh(&app).await;
     }
 }
+
+#[cfg(test)]
+#[path = "policy/reconcile_tests.rs"]
+mod reconcile_tests;
 
 #[cfg(test)]
 mod tests {
@@ -691,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_reads_this_month_through_the_time_index() {
+    async fn reconciliation_reads_hourly_totals_and_only_time_indexed_edges() {
         let dir = std::env::temp_dir().join(format!("fusebox-policy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("usage.sqlite3"), 64, 90, None).unwrap();
@@ -703,7 +785,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(plan.contains("USING INDEX usage_event_time (event_at_ms>?)"), "{plan}");
+        assert!(plan.contains("USING PRIMARY KEY (bucket_ms>?)"), "{plan}");
+        assert!(plan.contains("USING INDEX usage_event_time (event_at_ms>? AND event_at_ms<?)"), "{plan}");
         store.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }

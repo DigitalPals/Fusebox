@@ -302,6 +302,7 @@ pub fn compact(path: &Path) -> Result<Value> {
     ensure!(path.is_file(), "there is no usage database at {}", path.display());
     let _lock = lock(path, true)?;
     let mut conn = Connection::open(path)?;
+    codec::register(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     migrate(&mut conn)?;
     let before = file_bytes(path);
@@ -332,6 +333,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     ensure!(path.is_file(), "there is no usage database at {}", path.display());
     let _lock = lock(path, true)?;
     let mut conn = Connection::open(path)?;
+    codec::register(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     ensure!(version == VERSION, "the usage database is at schema {version}; downgrade starts from {VERSION}");
@@ -408,6 +410,7 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     for trigger in rollup::TRIGGERS.into_iter().chain(rollup::ENTRYPOINT_TRIGGERS) {
         tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
     }
+    client_totals::remove(&tx)?;
     tx.execute_batch(&format!(
         "DROP TABLE IF EXISTS usage_entrypoint_rollup;
          DROP TABLE IF EXISTS usage_entrypoints;

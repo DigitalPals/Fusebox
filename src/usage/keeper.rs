@@ -172,6 +172,7 @@ pub fn estimate_cache(database: &Path, origin: &str, apply: bool) -> Result<Valu
     }
     let flags = if apply { OpenFlags::SQLITE_OPEN_READ_WRITE } else { OpenFlags::SQLITE_OPEN_READ_ONLY };
     let mut conn = Connection::open_with_flags(database, flags)?;
+    store::register_functions(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     if conn.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))? != APPLICATION_ID
         || conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? != VERSION
@@ -290,6 +291,7 @@ pub fn import(database: &Path, input_database: &Path, origin: &str, apply: bool)
     source.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
     let mode = if apply { OpenFlags::SQLITE_OPEN_READ_WRITE } else { OpenFlags::SQLITE_OPEN_READ_ONLY };
     let mut destination = Connection::open_with_flags(database, mode)?;
+    store::register_functions(&destination)?;
     destination.busy_timeout(Duration::from_secs(5))?;
     if destination.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))? != APPLICATION_ID
         || destination.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? != VERSION

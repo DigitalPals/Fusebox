@@ -392,6 +392,7 @@ async fn cache_estimate_rejects_incompatible_evidence_and_rolls_back_the_batch()
     f.add(2, true);
     f.run(true);
     let c = Connection::open(&f.destination).unwrap();
+    store::register_functions(&c).unwrap();
     c.execute("UPDATE usage_observations SET payload=json_set(payload,'$.parser_version','unverified-parser') WHERE id=(SELECT max(id) FROM usage_observations)",[]).unwrap();
     assert!(estimate_cache(&f.destination, ORIGIN, true).is_err());
     assert_eq!(
