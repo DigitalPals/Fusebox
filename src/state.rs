@@ -168,8 +168,14 @@ impl App {
     }
 
     pub fn broadcast(&self, kind: &str, data: impl Serialize) {
+        /// `{"type":…,"data":…}`, written straight from `data` instead of through a `Value` tree.
+        #[derive(Serialize)]
+        struct Message<'a, T> {
+            r#type: &'a str,
+            data: T,
+        }
         if self.live.receiver_count() > 0 {
-            let msg = serde_json::json!({ "type": kind, "data": data }).to_string();
+            let msg = serde_json::to_string(&Message { r#type: kind, data }).expect("live messages serialize");
             let _ = self.live.send(msg);
             // Every path that changes the model list (config, sign-ins, discovery)
             // already announces account changes; tell dashboards about models only

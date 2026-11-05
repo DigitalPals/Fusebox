@@ -2,3 +2,8 @@
 # Fusebox uses JSON, WAL, backups and progress hooks, but no full-text or spatial
 # virtual tables. Keep bundled SQLite's other defaults on every build target.
 LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE"
+# Bundled C (SQLite, zstd, ring) needs no unwind tables: Rust panics never unwind
+# through it (extern "C" aborts, and rusqlite catches panics in its callbacks). It
+# saves about 0.15 MB; backtraces and DWARF profilers just stop at C frames, in every
+# profile. cc adds it after any general CFLAGS.
+CFLAGS_x86_64_unknown_linux_gnu = "-fno-asynchronous-unwind-tables"

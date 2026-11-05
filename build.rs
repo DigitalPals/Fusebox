@@ -2,7 +2,7 @@
 //! `FUSEBOX_COMMIT` in the build environment wins (Docker builds have no .git); a build
 //! outside a git checkout says `unknown`.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{fs, io::Write, path::PathBuf};
 
 use flate2::{Compression, GzBuilder};
@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 fn main() {
     build_assets();
+    link_args();
     println!("cargo:rerun-if-env-changed=FUSEBOX_COMMIT");
     println!("cargo:rerun-if-changed=.git/HEAD");
     if let Ok(head) = std::fs::read_to_string(".git/HEAD")
@@ -38,6 +39,77 @@ fn main() {
             println!("cargo:rustc-env=FUSEBOX_VERSION={version}");
         }
     }
+}
+
+/// Release binaries for x86-64 Linux (glibc) pack their relative relocations and fold
+/// identical functions, as the published ones always did: about 1.2 MB smaller, with less
+/// memory written at startup and no change in speed. It is set here rather than on each
+/// build command so that every release build gets it, whatever builds it.
+///
+/// Only where it works: an empty program is first linked with the same compiler, flags and
+/// linker (only lld is sure to fold functions), and on a native build it is run, since
+/// packed relocations need glibc 2.36 where the binary runs. A cross build can't run it,
+/// so there the target's glibc is taken to be 2.36 or newer, as for the published builds.
+/// `FUSEBOX_PLAIN_LINK=1` keeps the toolchain's own settings, for a binary that must run on
+/// an older glibc than the one it is built on.
+fn link_args() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let triple = target.to_uppercase().replace('-', "_");
+    for var in ["FUSEBOX_PLAIN_LINK", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    for setting in ["LINKER", "RUSTFLAGS"] {
+        println!("cargo:rerun-if-env-changed=CARGO_TARGET_{triple}_{setting}");
+    }
+    println!("cargo:rerun-if-changed=.cargo/config.toml");
+    let env = |name: &str| std::env::var(name).unwrap_or_default();
+    if env("CARGO_CFG_TARGET_ARCH") != "x86_64"
+        || env("CARGO_CFG_TARGET_OS") != "linux"
+        || env("CARGO_CFG_TARGET_ENV") != "gnu"
+        || env("PROFILE") != "release"
+        || !matches!(env("FUSEBOX_PLAIN_LINK").as_str(), "" | "0")
+    {
+        return;
+    }
+    let args = ["-Wl,-z,pack-relative-relocs", "-Wl,--icf=all"];
+    if link_probe(&args) {
+        for arg in args {
+            println!("cargo:rustc-link-arg-bins={arg}");
+        }
+    } else {
+        println!(
+            "cargo:warning=linking with the toolchain's defaults: its linker or glibc can't pack relocations and fold functions (FUSEBOX_PLAIN_LINK=1 silences this)"
+        );
+    }
+}
+
+/// Links an empty program the way the binary will be linked, plus `args`, and on a native
+/// build runs it. True when both work.
+fn link_probe(args: &[&str]) -> bool {
+    let env = |name: &str| std::env::var(name).unwrap_or_default();
+    let (Some(rustc), Some(out)) = (std::env::var_os("RUSTC"), std::env::var_os("OUT_DIR")) else {
+        return false;
+    };
+    let dir = PathBuf::from(out).join("link-probe");
+    let (source, program) = (dir.join("probe.rs"), dir.join("probe"));
+    if fs::create_dir_all(&dir).and_then(|()| fs::write(&source, "fn main() {}\n")).is_err() {
+        return false;
+    }
+    let mut link = Command::new(rustc);
+    link.args(["--crate-name", "link_probe", "--crate-type", "bin", "--edition", "2021", "--target"]);
+    link.arg(env("TARGET")).arg("-o").arg(&program).arg(&source);
+    // In Cargo's order: its configured linker first, so a `-C linker` in RUSTFLAGS wins.
+    if let Some(linker) = std::env::var_os("RUSTC_LINKER") {
+        let mut flag = std::ffi::OsString::from("-Clinker=");
+        flag.push(linker);
+        link.arg(flag);
+    }
+    link.args(env("CARGO_ENCODED_RUSTFLAGS").split('\x1f').filter(|flag| !flag.is_empty()));
+    link.args(args.iter().map(|arg| format!("-Clink-arg={arg}")));
+    let succeeds = |command: &mut Command| {
+        command.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
+    };
+    succeeds(&mut link) && (env("HOST") != env("TARGET") || succeeds(&mut Command::new(&program)))
 }
 
 /// Keep only compressed text in the executable. Hashes identify each negotiated

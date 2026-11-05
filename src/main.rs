@@ -61,6 +61,7 @@ mod ws;
 mod yaml;
 #[cfg(test)]
 mod yaml_props;
+mod zone;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

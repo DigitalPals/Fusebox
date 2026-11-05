@@ -105,7 +105,7 @@ fn update_group<T: Default>(groups: &mut BTreeMap<Option<String>, T>, key: &Opti
 
 /// Everything one summary accumulates, fed by rollup buckets and by entry rows alike.
 struct Summary {
-    tz: Tz,
+    dates: LocalDates,
     totals: Metrics,
     matched: i64,
     history_only: i64,
@@ -117,9 +117,9 @@ struct Summary {
 }
 
 impl Summary {
-    fn new(tz: Tz) -> Self {
+    fn new(tz: Zone) -> Self {
         Self {
-            tz,
+            dates: LocalDates::new(tz),
             totals: Metrics::default(),
             matched: 0,
             history_only: 0,
@@ -172,10 +172,7 @@ impl Summary {
             let history = row.get::<_, bool>(1)?;
             self.history_only += i64::from(history);
             self.weak_identity += i64::from(history && row.get::<_, bool>(2)?);
-            let date = DateTime::from_timestamp_millis(row.get(3)?)
-                .context("usage timestamp out of bounds")?
-                .with_timezone(&self.tz)
-                .date_naive();
+            let date = self.dates.date(row.get(3)?).context("usage timestamp out of bounds")?;
             let dims: [Option<String>; 4] = [row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?];
             let mut amounts = [None; 10];
             for (i, amount) in amounts.iter_mut().enumerate() {
@@ -203,10 +200,7 @@ impl Summary {
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         while let Some(row) = rows.next()? {
             read::check()?;
-            let date = DateTime::from_timestamp_millis(row.get(0)?)
-                .context("usage timestamp out of bounds")?
-                .with_timezone(&self.tz)
-                .date_naive();
+            let date = self.dates.date(row.get(0)?).context("usage timestamp out of bounds")?;
             let dims = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
             let tokens: [Option<i64>; 4] = [row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?];
             let basis = row.get_ref(9)?.as_str()?.trim_start_matches("local_override:");
@@ -240,15 +234,8 @@ impl Summary {
             read::check()?;
             let bucket: i64 = row.get(0)?;
             let first = bucket * rollup::BUCKET_MS;
-            let tz = self.tz;
-            let local = |ms: i64| -> Result<NaiveDate> {
-                Ok(DateTime::from_timestamp_millis(ms)
-                    .context("usage timestamp out of bounds")?
-                    .with_timezone(&tz)
-                    .date_naive())
-            };
-            let date = local(first)?;
-            if local(first + rollup::BUCKET_MS - 1)? != date {
+            let date = self.dates.date(first).context("usage timestamp out of bounds")?;
+            if self.dates.date(first + rollup::BUCKET_MS - 1).context("usage timestamp out of bounds")? != date {
                 return Ok(false);
             }
             let dims: [Option<String>; 4] = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
@@ -282,7 +269,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     let r = range(q)?;
     let (where_sql, values) = filter(q, &r, "o");
     let everything = "usage_entries o INDEXED BY usage_entries_event_time";
-    let mut summary = Summary::new(r.tz);
+    let mut summary = Summary::new(r.tz.clone());
     // Rollups hold proxy entries only; a filter for another source reads entries.
     let buckets = rollup::whole_buckets(r.start, r.end)
         .filter(|_| use_rollups && q.source.as_deref().is_none_or(|s| s == "proxy"));
@@ -301,7 +288,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
         // Proxy entries in the partial buckets at either end of the range.
         for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
             if low < high {
-                let edge = Range { start: low, end: high, tz: r.tz };
+                let edge = Range { start: low, end: high, tz: r.tz.clone() };
                 let (edge_sql, edge_values) = filter(q, &edge, "o");
                 summary.scan(conn, everything, &format!("{edge_sql} AND o.source='proxy'"), &edge_values)?;
             }
@@ -317,7 +304,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
             )?;
         }
     } else {
-        summary = Summary::new(r.tz);
+        summary = Summary::new(r.tz.clone());
         if q.source.as_deref().is_some_and(|s| s != "proxy") {
             if !filtered {
                 let sql = format!("{where_sql} AND o.source<>'proxy'");
@@ -410,12 +397,8 @@ fn entrypoints_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<V
     let r = range(q)?;
     let mut groups: BTreeMap<String, Calls> = BTreeMap::new();
     let mut days: BTreeMap<(NaiveDate, String), Calls> = BTreeMap::new();
-    let date = |ms: i64| -> Result<NaiveDate> {
-        Ok(DateTime::from_timestamp_millis(ms)
-            .context("usage timestamp out of bounds")?
-            .with_timezone(&r.tz)
-            .date_naive())
-    };
+    let dates = std::cell::RefCell::new(LocalDates::new(r.tz.clone()));
+    let date = |ms: i64| -> Result<NaiveDate> { dates.borrow_mut().date(ms).context("usage timestamp out of bounds") };
     // Imports never name an entrypoint.
     if q.source.as_deref().is_none_or(|s| s == "proxy") {
         let (where_sql, values) = filter(q, &r, "o");
@@ -508,7 +491,8 @@ fn entrypoints_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<V
             if complete {
                 for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
                     if low < high {
-                        let (edge_sql, edge_values) = filter(q, &Range { start: low, end: high, tz: r.tz }, "o");
+                        let (edge_sql, edge_values) =
+                            filter(q, &Range { start: low, end: high, tz: r.tz.clone() }, "o");
                         entries(&mut groups, &mut days, &edge_sql, &edge_values)?;
                     }
                 }
@@ -639,7 +623,7 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
             )?;
             for (low, high) in [(r.start, first * rollup::BUCKET_MS), (last * rollup::BUCKET_MS, r.end)] {
                 if low < high {
-                    let (sql, values) = raw(&Range { start: low, end: high, tz: r.tz });
+                    let (sql, values) = raw(&Range { start: low, end: high, tz: r.tz.clone() });
                     collect_facets(conn, &sql, &values, &mut facets)?;
                 }
             }

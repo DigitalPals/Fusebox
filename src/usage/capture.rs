@@ -190,9 +190,15 @@ impl RequestUsage {
         status: Option<u16>,
         fallback: Option<&Usage>,
         logical_final: bool,
-    ) -> Option<Observation> {
+    ) -> Option<Finished<'_>> {
         let c = self.current.take()?;
-        let o = c.snapshot(status, fallback, logical_final);
+        // The last holder of the capture takes its observation; while a stream still
+        // holds it, this takes a copy, as it always did.
+        let observation = match Arc::try_unwrap(c.0) {
+            Ok(captured) => captured.into_inner().observation,
+            Err(shared) => shared.lock().observation.clone(),
+        };
+        let o = finalized(observation, status, fallback, logical_final);
         // Register before enqueueing: reconciliation must never see a database row
         // whose in-memory completion has not been registered yet.
         if let Some(clients) = &self.clients {
@@ -212,10 +218,31 @@ impl RequestUsage {
                 }
             }
         }
-        if let Some(store) = &self.store {
-            store.enqueue(o.clone());
+        // Queued once the caller has read it, still after the registration above.
+        Some(Finished { observation: Some(o), store: self.store.as_ref() })
+    }
+}
+
+/// A finished attempt's observation, for the caller to read. It goes onto the store's
+/// queue when dropped, so it is never copied.
+pub struct Finished<'a> {
+    observation: Option<Observation>,
+    store: Option<&'a Store>,
+}
+
+impl std::ops::Deref for Finished<'_> {
+    type Target = Observation;
+
+    fn deref(&self) -> &Observation {
+        self.observation.as_ref().expect("taken only when dropped")
+    }
+}
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        if let (Some(store), Some(observation)) = (self.store, self.observation.take()) {
+            store.enqueue(observation);
         }
-        Some(o)
     }
 }
 

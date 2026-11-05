@@ -559,13 +559,13 @@ async fn replay_lifecycle_counts_respect_raw_date_and_client_filters() {
     a.logical_request_id = Some("one".into());
     a.attempt_id = Some("one".into());
     a.client_id = Some("client-one".into());
-    a.event_at_ms = boundary("2026-10-05T10:00:00Z", chrono_tz::UTC).unwrap();
+    a.event_at_ms = boundary("2026-10-05T10:00:00Z", &crate::zone::Zone::utc()).unwrap();
     let mut b = a.clone();
     b.source_event_id = "second-day".into();
     b.logical_request_id = Some("two".into());
     b.attempt_id = Some("two".into());
     b.client_id = Some("client-two".into());
-    b.event_at_ms = boundary("2026-10-06T10:00:00Z", chrono_tz::UTC).unwrap();
+    b.event_at_ms = boundary("2026-10-06T10:00:00Z", &crate::zone::Zone::utc()).unwrap();
     store.call(move |c| insert_batch(c, &[a, b])).await.unwrap();
     let value = store.reference_summary(all()).await.unwrap();
     assert_eq!(value["trend"].as_array().unwrap().len(), 2);
@@ -727,7 +727,7 @@ async fn assert_dashboard_matches(store: &Store, q: Query) {
 async fn unpriced_reasons_separate_missing_evidence_from_rates_with_source_deduplication() {
     let p = path("unpriced-reasons");
     let store = Store::open(&p, 64, 3650, None).unwrap();
-    let at = boundary("2026-10-01T12:00:00Z", chrono_tz::UTC).unwrap();
+    let at = boundary("2026-10-01T12:00:00Z", &crate::zone::Zone::utc()).unwrap();
     let mut priced = event("proxy", "priced");
     priced.event_at_ms = at;
     priced.response_id = Some("shared-priced-response".into());
@@ -804,7 +804,7 @@ async fn dashboard_matches_full_summary_with_overlap_revisions_filters_and_fresh
     let mut records = Vec::new();
     for i in 0..40 {
         let mut o = event(["proxy", "codex", "claude_code"][i % 3], &format!("dashboard-{i}"));
-        o.event_at_ms = boundary("2026-10-01T22:00:00Z", chrono_tz::UTC).unwrap() + i as i64 * 3_600_000;
+        o.event_at_ms = boundary("2026-10-01T22:00:00Z", &crate::zone::Zone::utc()).unwrap() + i as i64 * 3_600_000;
         o.provider = if i % 2 == 0 { "anthropic" } else { "openai" }.into();
         o.actual_model =
             if i % 5 == 0 { None } else { Some(if i % 2 == 0 { "claude-sonnet-4-6" } else { "gpt-6.1-sol" }.into()) };
@@ -864,7 +864,7 @@ async fn dashboard_matches_full_summary_with_overlap_revisions_filters_and_fresh
         before["combined"]["totals"]["observations"].as_i64().unwrap() + 1
     );
     assert_dashboard_matches(&store, base.clone()).await;
-    store.purge(boundary("2026-10-03T00:00:00Z", chrono_tz::UTC).unwrap()).await.unwrap();
+    store.purge(boundary("2026-10-03T00:00:00Z", &crate::zone::Zone::utc()).unwrap()).await.unwrap();
     assert_dashboard_matches(&store, base).await;
     assert!(store.dashboard(Query { timezone: Some("invalid".into()), ..all() }).await.is_err());
     store.shutdown().await.unwrap();
@@ -876,7 +876,7 @@ async fn dashboard_groups_dst_days_and_bounds_facets_and_breakdowns() {
     let mut records = Vec::new();
     for i in 0..520 {
         let mut o = event("proxy", &format!("dst-{i}"));
-        o.event_at_ms = boundary("2026-03-28T22:30:00Z", chrono_tz::UTC).unwrap() + i * 900_000;
+        o.event_at_ms = boundary("2026-03-28T22:30:00Z", &crate::zone::Zone::utc()).unwrap() + i * 900_000;
         o.actual_model = Some(format!("unknown-{i:03}"));
         o.account_id = Some(format!("account-{i:03}"));
         o.client_id = Some(format!("client-{i:03}"));
@@ -1055,7 +1055,7 @@ fn anthropic(source: &str, id: &str, response: Option<&str>, at: &str) -> Observ
     o.provider = "anthropic".into();
     o.actual_model = Some("claude-sonnet-4-6".into());
     o.response_id = response.map(Into::into);
-    o.event_at_ms = boundary(at, chrono_tz::UTC).unwrap();
+    o.event_at_ms = boundary(at, &crate::zone::Zone::utc()).unwrap();
     o
 }
 #[tokio::test]
@@ -1072,7 +1072,7 @@ async fn combined_set_counts_shared_response_once_and_proxy_wins() {
     p3.account_id = Some("acct".into());
     let c3 = anthropic("claude_code", "c3", Some("r3"), "2026-10-02T00:00:30Z");
     let mut weak = event("codex", "weak");
-    weak.event_at_ms = boundary("2026-10-02T12:00:00Z", chrono_tz::UTC).unwrap();
+    weak.event_at_ms = boundary("2026-10-02T12:00:00Z", &crate::zone::Zone::utc()).unwrap();
     let key = association_key(&p1);
     store.call(move |c| insert_batch(c, &[p1, c1, c2, p3, c3, weak])).await.unwrap();
     // Root cause: the account-scoped proxy key and the imported key both survive.
@@ -1098,7 +1098,7 @@ async fn combined_set_counts_shared_response_once_and_proxy_wins() {
     let acct = account.iter().find(|a| a["id"] == "acct").unwrap();
     assert_eq!((acct["observations"].as_i64(), acct["provider"].as_str()), (Some(2), Some("anthropic")));
     let first = combined["proxy_first_event_at_ms"].as_i64().unwrap();
-    assert_eq!(first, boundary("2026-10-01T10:00:00Z", chrono_tz::UTC).unwrap());
+    assert_eq!(first, boundary("2026-10-01T10:00:00Z", &crate::zone::Zone::utc()).unwrap());
     // The imported copy after midnight is still matched to the proxy row before it.
     let late = store.reference_summary(range("2026-10-02", "2026-10-03")).await.unwrap();
     assert_eq!(late["combined"]["totals"]["observations"], 1);
@@ -1120,9 +1120,9 @@ async fn combined_trend_groups_by_provider_and_model_across_dst() {
     // Amsterdam moves from CET (+1) to CEST (+2) at 2026-03-29T01:00Z.
     let a = anthropic("claude_code", "a", Some("ra"), "2026-03-28T22:30:00Z");
     let mut b = event("proxy", "b");
-    b.event_at_ms = boundary("2026-03-28T23:30:00Z", chrono_tz::UTC).unwrap();
+    b.event_at_ms = boundary("2026-03-28T23:30:00Z", &crate::zone::Zone::utc()).unwrap();
     let mut c = event("codex", "c");
-    c.event_at_ms = boundary("2026-03-29T21:30:00Z", chrono_tz::UTC).unwrap();
+    c.event_at_ms = boundary("2026-03-29T21:30:00Z", &crate::zone::Zone::utc()).unwrap();
     let d = anthropic("proxy", "d", Some("rd"), "2026-03-29T22:30:00Z");
     store.call(move |conn| insert_batch(conn, &[a, b, c, d])).await.unwrap();
     let base = json!({"start":"2026-03-27","end":"2026-04-01","timezone":"Europe/Amsterdam"});
@@ -1175,7 +1175,7 @@ async fn combined_observations_report_matched_sources_and_origin_label() {
     let mut c2 = anthropic("claude_code", "c2", Some("r2"), "2026-10-01T11:00:00Z");
     c2.origin_id = origin;
     let mut weak = event("codex", "weak");
-    weak.event_at_ms = boundary("2026-10-01T12:00:00Z", chrono_tz::UTC).unwrap();
+    weak.event_at_ms = boundary("2026-10-01T12:00:00Z", &crate::zone::Zone::utc()).unwrap();
     store.call(move |c| insert_batch(c, &[p1, c1, copy, c2, weak])).await.unwrap();
     let base = json!({"start":"2026-10-01","end":"2026-10-02","timezone":"UTC"});
     assert_eq!(store.details(query(base.clone())).await.unwrap()["total"], 5);
@@ -1313,7 +1313,7 @@ async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
     proxy.inference_geo = Some("global".into());
     old.push(proxy);
     let mut counter = event("codex", "counter:old");
-    counter.event_at_ms = boundary("2026-03-01T12:00:00Z", chrono_tz::UTC).unwrap();
+    counter.event_at_ms = boundary("2026-03-01T12:00:00Z", &crate::zone::Zone::utc()).unwrap();
     old.push(counter);
     let current = event("proxy", "current");
     store.call(move |c| insert_legacy(c, &old)).await.unwrap();

@@ -29,7 +29,7 @@ fn temp(name: &str) -> TempDb {
 const DAY: &str = "2026-10-20";
 
 fn call(source: &str, id: &str, provider: &str, entrypoint: Option<&str>, at: &str) -> Observation {
-    let mut o = Observation::new(source, id.into(), provider, boundary(at, chrono_tz::UTC).unwrap());
+    let mut o = Observation::new(source, id.into(), provider, boundary(at, &crate::zone::Zone::utc()).unwrap());
     o.actual_model = Some(if provider == "anthropic" { "claude-sonnet-4-6" } else { "gpt-6.1-sol" }.into());
     o.account_id = Some("account-1".into());
     o.response_id = Some(format!("response-{id}"));
@@ -195,7 +195,7 @@ async fn a_release_without_entrypoints_keeps_the_rollup_exact() {
             // when it purges, and never touches usage_entrypoints.
             let unlabelled = call("proxy", "older", "anthropic", None, "2026-10-20T16:00:00Z");
             insert_batch(c, &[unlabelled])?;
-            let cut = boundary("2026-10-20T09:00:00Z", chrono_tz::UTC)?;
+            let cut = boundary("2026-10-20T09:00:00Z", &crate::zone::Zone::utc())?;
             c.execute("DELETE FROM usage_observations WHERE event_at_ms<?1", [cut])?;
             c.execute("DELETE FROM usage_entries WHERE event_at_ms<?1", [cut])?;
             assert_exact(c)?;
@@ -214,7 +214,7 @@ async fn a_release_without_entrypoints_keeps_the_rollup_exact() {
         .unwrap();
     assert_eq!(store.dashboard(day()).await.unwrap(), store.dashboard_scan(day()).await.unwrap());
     // This release's purge removes the labels of what it purges.
-    let cut = boundary("2026-10-20T12:00:00Z", chrono_tz::UTC).unwrap();
+    let cut = boundary("2026-10-20T12:00:00Z", &crate::zone::Zone::utc()).unwrap();
     store.purge(cut).await.unwrap();
     store
         .call(move |c| {

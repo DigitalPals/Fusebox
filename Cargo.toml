@@ -16,19 +16,21 @@ anyhow = "1"
 arc-swap = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 async-stream = "0.3"
-axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+# Axum's defaults minus `form`, `matched-path` and `original-uri`, which nothing reads.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tower-log", "tracing", "ws", "macros", "multipart"] }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 bcrypt = "0.19"
 bytes = "1"
-chrono-tz = "0.10"
 rusqlite = { version = "0.37", features = ["bundled", "backup", "functions", "hooks"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 fs2 = "0.4"
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 hex = "0.4"
+# The tz database, bundled as compact TZif data (see src/zone.rs).
+jiff = { version = "0.2.39", default-features = false, features = ["std", "tzdb-bundle-always"] }
 http-body-util = "0.1"
 open = "5"
 parking_lot = "0.12"
@@ -40,7 +42,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
+# `full` without processes and stdio, which nothing uses (axum-server still turns on `fs`).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "parking_lot"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }

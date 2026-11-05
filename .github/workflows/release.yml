@@ -66,12 +66,16 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-            cargo rustc --release --locked --bin fusebox --target ${{ matrix.target }} -- \
-              -C link-arg=-Wl,-z,pack-relative-relocs -C link-arg=-Wl,--icf=all
-          else
-            cargo build --release --locked --target ${{ matrix.target }}
-          fi
+          # Dependency sources are named by crate rather than by this runner's paths:
+          # shorter panic and log locations, and a smaller binary.
+          cargo fetch --locked --target ${{ matrix.target }}
+          for src in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/; do
+            if [[ -d "$src" ]]; then
+              export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$src="
+            fi
+          done
+          # build.rs adds x86-64 Linux's link settings; the next step checks them.
+          cargo build --release --locked --target ${{ matrix.target }}
       - name: Check Linux release
         if: contains(matrix.target, 'linux-gnu')
         shell: bash

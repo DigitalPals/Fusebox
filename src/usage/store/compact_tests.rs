@@ -43,7 +43,7 @@ const START: &str = "2026-03-27T00:00:00Z";
 /// off bucket boundaries across the Amsterdam DST change on 29 March.
 fn journal(seed: u64, count: usize) -> Vec<Observation> {
     let mut rng = Lcg(seed);
-    let base = boundary(START, chrono_tz::UTC).unwrap();
+    let base = boundary(START, &crate::zone::Zone::utc()).unwrap();
     let mut out = Vec::new();
     for i in 0..count {
         let source = match rng.next(10) {
@@ -229,7 +229,7 @@ async fn rollups_match_a_full_scan_through_inserts_purges_suppression_and_repric
     // More evidence for the same responses, then a purge through the middle of a bucket.
     let records = journal(8, 600);
     store.call(move |c| insert_batch(c, &records)).await.unwrap();
-    let cut = boundary("2026-03-27T09:07:30Z", chrono_tz::UTC).unwrap();
+    let cut = boundary("2026-03-27T09:07:30Z", &crate::zone::Zone::utc()).unwrap();
     store.purge(cut).await.unwrap();
     // Repricing rewrites entries in place through delete and insert.
     store
@@ -259,7 +259,7 @@ async fn sums_beyond_64_bits_fall_back_to_the_exact_scan() {
     let store = Store::open(&p, 64, 3650, None).unwrap();
     let mut records = journal(3, 50);
     // 200 maximal responses in one bucket: their cost passes the 64-bit range.
-    let at = boundary("2026-03-28T12:01:00Z", chrono_tz::UTC).unwrap();
+    let at = boundary("2026-03-28T12:01:00Z", &crate::zone::Zone::utc()).unwrap();
     for i in 0..200 {
         let mut o = Observation::new("proxy", format!("huge-{i}"), "openai", at + i);
         o.actual_model = Some("gpt-6-astra".into());

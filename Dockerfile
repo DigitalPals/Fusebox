@@ -10,11 +10,11 @@ COPY .cargo .cargo
 RUN mkdir src \
  && printf 'fn main() {}\n' > src/main.rs \
  && printf 'fn main() {}\n' > build.rs
-RUN case "$(uname -m)" in \
-      x86_64) cargo rustc --release --locked --bin fusebox -- \
-        -C link-arg=-Wl,-z,pack-relative-relocs -C link-arg=-Wl,--icf=all ;; \
-      *) cargo build --release --locked ;; \
-    esac \
+# Dependency sources are named by crate rather than by their path here (shorter panic
+# and log locations, a smaller binary); both stages pass the same flags.
+RUN cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')" \
+ && export RUSTFLAGS="$(for src in "$CARGO_HOME"/registry/src/*/; do printf -- '--remap-path-prefix=%s= ' "$src"; done)" \
+ && cargo build --release --locked \
  && rm -rf target/release/fusebox target/release/fusebox.d \
       target/release/deps/fusebox-* target/release/build/fusebox-* \
       target/release/.fingerprint/fusebox-*
@@ -26,15 +26,13 @@ COPY ui ui
 # Stamp the commit after dependency compilation (the context has no .git).
 ARG FUSEBOX_COMMIT=""
 ENV FUSEBOX_COMMIT=${FUSEBOX_COMMIT}
-# On x86-64, Rust links with lld: pack relative relocations (Debian 12's glibc
+# On x86-64, build.rs has Rust's lld pack relative relocations (Debian 12's glibc
 # supports RELR) and fold identical functions. Other architectures keep their
 # usual linker settings.
-RUN case "$(uname -m)" in \
-      x86_64) cargo rustc --release --locked --bin fusebox -- \
-        -C link-arg=-Wl,-z,pack-relative-relocs -C link-arg=-Wl,--icf=all ;; \
-      *) cargo build --release --locked ;; \
-    esac \
- && target/release/fusebox --version
+RUN export RUSTFLAGS="$(for src in "$CARGO_HOME"/registry/src/*/; do printf -- '--remap-path-prefix=%s= ' "$src"; done)" \
+ && cargo build --release --locked \
+ && target/release/fusebox --version \
+ && if [ "$(uname -m)" = x86_64 ]; then readelf --dynamic target/release/fusebox | grep -q '(RELR)'; fi
 # CLIProxyAPI's image runs ./CLIProxyAPI from /CLIProxyAPI and keeps sign-ins in
 # /root/.cli-proxy-api; keep both paths working.
 RUN mkdir -p /out/CLIProxyAPI /out/root/.cli-proxy-api \

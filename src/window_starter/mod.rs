@@ -78,7 +78,7 @@ impl Config {
                 && self.model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c)),
             "Window starter model must be a native Claude model name, without a group, prefix or options"
         );
-        self.timezone.parse::<chrono_tz::Tz>().context("Choose a valid IANA window starter timezone")?;
+        crate::zone::Zone::parse(&self.timezone).context("Choose a valid IANA window starter timezone")?;
         ensure!(
             !self.weekdays.is_empty()
                 && self.weekdays.len() <= 7
@@ -101,12 +101,13 @@ impl Config {
             Mode::Off => false,
             Mode::Always => true,
             Mode::WorkingHours => {
-                let (Ok(tz), Some(start), Some(end)) =
-                    (self.timezone.parse::<chrono_tz::Tz>(), clock(&self.start), clock(&self.end))
-                else {
+                let (Some(local), Some(start), Some(end)) = (
+                    crate::zone::Zone::parse(&self.timezone).ok().and_then(|tz| tz.local(now)),
+                    clock(&self.start),
+                    clock(&self.end),
+                ) else {
                     return false;
                 };
-                let local = now.with_timezone(&tz);
                 let time = local.hour() * 60 + local.minute();
                 let day = local.weekday().number_from_monday();
                 if start < end {

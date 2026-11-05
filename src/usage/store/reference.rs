@@ -4,7 +4,6 @@
 //! reference outside release builds so tests continue to verify exact dashboard
 //! totals, source conflicts, request/attempt identities, and deduplication.
 use super::*;
-use chrono::Offset;
 
 const AGG: &str = "COUNT(*),COUNT(DISTINCT logical_request_id),COUNT(DISTINCT COALESCE(attempt_id,source||':'||source_event_id)),usage_sum(cost_nanos),SUM(cost_nanos IS NULL),SUM(completeness='partial'),SUM(completeness='missing'),usage_sum(input),usage_sum(cache_read),usage_sum(cache_write),usage_sum(write_5m),usage_sum(write_1h),usage_sum(output),usage_sum(reasoning),SUM(input IS NULL),SUM(cache_read IS NULL),SUM(cache_write IS NULL),SUM(output IS NULL),SUM(reasoning IS NULL),SUM(pricing_partial=1),SUM(logical_request_id IS NULL),COUNT(cost_nanos),COUNT(input),COUNT(cache_read),COUNT(cache_write),COUNT(write_5m),COUNT(write_1h),COUNT(output),COUNT(reasoning),usage_sum(write_30m),usage_sum(write_12h),COUNT(write_30m),COUNT(write_12h)";
 fn aggregate(conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<Value> {
@@ -58,14 +57,8 @@ fn aggregate_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Val
     )
 }
 fn local_date_expression(r: &Range) -> Result<String> {
-    let offset_at = |ms| -> Result<i32> {
-        Ok(DateTime::from_timestamp_millis(ms)
-            .context("range timestamp out of bounds")?
-            .with_timezone(&r.tz)
-            .offset()
-            .fix()
-            .local_minus_utc())
-    };
+    let mut offsets = LocalDates::new(r.tz.clone());
+    let mut offset_at = |ms| -> Result<i32> { offsets.offset_seconds(ms).context("range timestamp out of bounds") };
     let mut offset = offset_at(r.start)?;
     let mut clauses = String::new();
     let mut previous = r.start;

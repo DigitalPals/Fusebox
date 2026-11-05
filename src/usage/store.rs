@@ -1,8 +1,8 @@
 //! Durable metadata-only usage journal and deterministic, conservative accounting.
 use super::{pricing::Catalogue, types::Observation};
+use crate::zone::{LocalDates, Zone};
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use chrono::{DateTime, LocalResult, NaiveDate, TimeZone, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, LocalResult, NaiveDate, Utc};
 pub(crate) use codec::{Documents, decode as decode_document};
 use rusqlite::{Connection, OptionalExtension, params, types::Value as SqlValue};
 use serde::Deserialize;
@@ -1100,34 +1100,34 @@ fn purge_conn(conn: &mut Connection, before_ms: i64) -> Result<Value> {
 struct Range {
     start: i64,
     end: i64,
-    tz: Tz,
+    tz: Zone,
 }
-fn boundary(value: &str, tz: Tz) -> Result<i64> {
+fn boundary(value: &str, tz: &Zone) -> Result<i64> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
         return Ok(dt.timestamp_millis());
     }
     let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").context("range must be RFC3339 or local YYYY-MM-DD")?;
-    match tz.from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap()) {
-        LocalResult::Single(v) => Ok(v.timestamp_millis()),
-        LocalResult::Ambiguous(a, b) => Ok(a.min(b).timestamp_millis()),
+    match tz.midnight(date) {
+        LocalResult::Single(v) => Ok(v),
+        LocalResult::Ambiguous(a, b) => Ok(a.min(b)),
         LocalResult::None => bail!("local midnight does not exist in selected timezone; use RFC3339"),
     }
 }
 fn range(q: &Query) -> Result<Range> {
-    let tz: Tz = q.timezone.as_deref().unwrap_or("UTC").parse().context("invalid IANA timezone")?;
-    let today = Utc::now().with_timezone(&tz).date_naive();
+    let tz = Zone::parse(q.timezone.as_deref().unwrap_or("UTC")).context("invalid IANA timezone")?;
+    let today = tz.local(Utc::now()).context("invalid IANA timezone")?.date();
     let start = q
         .start
         .as_deref()
-        .map(|v| boundary(v, tz))
+        .map(|v| boundary(v, &tz))
         .transpose()?
-        .unwrap_or(boundary(&(today - chrono::Duration::days(29)).to_string(), tz)?);
+        .unwrap_or(boundary(&(today - chrono::Duration::days(29)).to_string(), &tz)?);
     let end = q
         .end
         .as_deref()
-        .map(|v| boundary(v, tz))
+        .map(|v| boundary(v, &tz))
         .transpose()?
-        .unwrap_or(boundary(&(today + chrono::Duration::days(1)).to_string(), tz)?);
+        .unwrap_or(boundary(&(today + chrono::Duration::days(1)).to_string(), &tz)?);
     if end <= start || end.saturating_sub(start) > MAX_QUERY_DAYS * 86_400_000 {
         bail!("range must be positive and no longer than 3660 days");
     }

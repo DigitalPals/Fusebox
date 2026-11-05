@@ -5,6 +5,38 @@ For the latest matching-source baseline and efficiency implementation, see the
 16,606,928 to 15,783,216 bytes (4.96%) with opt-level 3 and panic unwinding retained.
 The measurements below document earlier optimization passes.
 
+## 5 November 2026
+
+A council review traced the jump from 17 MB to 20.2 MB in production deploys
+mostly to their build command: from 23 October they ran a plain `cargo build`
+without the link flags the published builds pass. The link flags moved into
+`build.rs`, so every release build gets them. Measured on one source snapshot
+with rustc 1.96.1:
+
+| Build | Executable bytes |
+| --- | ---: |
+| Plain `cargo build --release` before | 20,364,808 |
+| The same with the published link flags | 19,110,448 |
+| Plain `cargo build --release` after | 18,057,296 |
+
+- **Link flags in `build.rs`:** 1.25 MB, mostly the 1.1 MB of `.rela.dyn` that
+  packed relocations replace.
+- **Time zones from jiff instead of chrono-tz:** `.data.rel.ro` went from 1.31 MB
+  to 0.30 MB. chrono-tz kept a pointer per transition, which the loader relocated
+  at every start; jiff keeps the tz database as compact TZif data (`src/zone.rs`).
+  The bundled data is newer (2026e instead of 2025b), so days move where the
+  rules changed, such as America/Vancouver from 1 November 2026 and Morocco
+  (Africa/Casablanca, Africa/El_Aaiun) from 20 September 2026. Update it with
+  `cargo update -p jiff-tzdb`.
+- **No unwind tables for bundled C** (`.cargo/config.toml`): 146 KB.
+- **Dependency sources remapped** to crate-relative paths in the release
+  workflow and Docker build: 57 KB, and no build machine paths in the binary.
+- Unused axum, tokio and futures features are off.
+
+Proxy CPU per request, latency, usage imports and dashboard reads were measured
+against the previous build in alternating runs and did not get slower; memory at
+rest is about 1 MB lower.
+
 The production executable measured on 2026-10-07 was 17,653,576 bytes
 (17.65 MB, 16.84 MiB), SHA-256
 `266da33eec9595c700df0afb927d29f6e7ff9c213356ee826dfb03e1a571f760`.
@@ -68,16 +100,24 @@ compression stack. This avoids linking duplicate Rust implementations without
 removing protocols, native TLS roots, or support for older Zstandard streams.
 The native Zstandard library remains the same version.
 
-Linux x86-64 release archives and Docker images also pack relative relocations
-using RELR. The flag is passed only to the final executable, keeping dependency
-compilation and other platforms' linker settings unchanged. The release workflow
-checks both the ELF relocation tags and the glibc compatibility marker, and runs
-the executable before packaging it.
-
-Ordinary source builds retain their platform's normal linker behavior:
+Release builds for Linux x86-64 (glibc) pack relative relocations using RELR and
+fold identical functions. `build.rs` adds both flags to the final executable only,
+so dependencies, debug builds and other platforms keep their linker settings. It
+first links an empty program with the same compiler, flags and linker and, on a
+native build, runs it; where either fails (a linker other than lld, or a glibc
+older than 2.36) the build keeps the toolchain's defaults and prints a warning.
+The release workflow checks the ELF relocation tags and the glibc compatibility
+marker, the Docker build checks the tags, and both run the executable.
 
 ```sh
 cargo build --release --locked
+```
+
+To keep the toolchain's own link settings, for example for a binary that must
+run on an older glibc than the one it is built on:
+
+```sh
+FUSEBOX_PLAIN_LINK=1 cargo build --release --locked
 ```
 
 For the optional size-first build:
@@ -87,31 +127,22 @@ cargo build --profile compact --locked
 target/compact/fusebox --version
 ```
 
-To reproduce the packed Linux x86-64 build on a supported GNU toolchain:
+The compact profile inherits the same link settings. To check a Linux x86-64
+build:
 
 ```sh
-cargo rustc --release --locked --bin fusebox -- \
-  -C link-arg=-Wl,-z,pack-relative-relocs
-readelf --dynamic target/release/fusebox
-readelf --version-info target/release/fusebox
+readelf --dynamic target/release/fusebox | grep RELR
+readelf --version-info target/release/fusebox | grep GLIBC_ABI_DT_RELR
 target/release/fusebox --version
 ```
 
-To combine the compact profile with RELR:
-
-```sh
-cargo rustc --profile compact --locked --bin fusebox -- \
-  -C link-arg=-Wl,-z,pack-relative-relocs
-target/compact/fusebox --version
-```
-
-GNU binutils 2.38 or a compatible linker is required for this x86 flag. RELR
+Rust's own lld, the default linker for this target since Rust 1.90, takes both
+flags; GNU ld packs relocations from 2.38 but can't fold functions. RELR
 requires glibc 2.36 or newer; the build environment may impose newer requirements
 through other symbols. In particular, the local Debian 13 artifact requires
 glibc 2.39, independently of RELR. The Docker build and the Linux release
 archives compile on Debian 12, so they run on Debian 12's glibc 2.36. Linux
-ARM64, macOS, and Windows do not receive the x86 linker flag. Avoid adding it
-to global `RUSTFLAGS` for cross-platform source builds.
+ARM64, macOS, and Windows do not receive the x86 linker flags.
 
 Panic unwinding remains enabled. Aborting on any task panic would change the
 proxy's failure behavior. All providers, compression formats, HTTP/2, SOCKS,
@@ -148,9 +179,8 @@ relocations, the trims were:
   identical. `--icf=safe` saved nothing, because rustc emits no
   address-significance table. Rust does not promise distinct function
   addresses, and the folded build passed all 12 real-process acceptance checks.
-  The flag needs lld, which Rust uses by default on x86-64 Linux since 1.90, so
-  it is passed only in the Docker build and the x86-64 Linux release, like the
-  relocation flag.
+  The flag needs lld, which Rust uses by default on x86-64 Linux since 1.90;
+  `build.rs` adds it with the relocation flag where a test link shows it works.
 
 Two trims were measured and left out. Switching `idna` to its smaller-sounding
 `unicode-rs` backend made this binary 0.7% larger, and dropping clap's colours
@@ -167,12 +197,8 @@ difference beyond noise:
 
 No run dropped or rejected a usage observation.
 
-To build the default Linux x86-64 package locally:
-
-```sh
-cargo rustc --release --locked --bin fusebox -- \
-  -C link-arg=-Wl,-z,pack-relative-relocs -C link-arg=-Wl,--icf=all
-```
+`cargo build --release --locked` builds the default Linux x86-64 package
+locally; `build.rs` adds both link flags.
 
 ## Reproducing comparisons
 

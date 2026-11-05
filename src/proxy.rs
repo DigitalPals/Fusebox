@@ -491,11 +491,13 @@ impl Tracker {
             if let Some(o) = &captured {
                 performance.attempt(o, self.log.transport);
             }
-            performance.request(&self.log, captured.as_ref(), self.prepared_ms, self.headers_ms);
+            performance.request(&self.log, captured.as_deref(), self.prepared_ms, self.headers_ms);
         }
         self.app.stats.record(&self.log);
+        crate::diagnostics::record(&self.log, captured.as_deref(), failure.as_ref());
+        // Queue the observation before dashboards hear of the request, as it always was.
+        drop(captured);
         self.app.broadcast("request", &self.log);
-        crate::diagnostics::record(&self.log, captured.as_ref(), failure.as_ref());
     }
 }
 
@@ -2328,8 +2330,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 return collect_passthrough(body, native, tracker, call.format, event_limit).await;
             }
             let resp = resp.take().expect("response");
-            let text = match resp.text().await {
-                Ok(text) => text,
+            let body = match resp.bytes().await {
+                Ok(body) => body,
                 Err(e) => {
                     tracker.diagnostic_failure(crate::diagnostics::Failure::http("upstream_body_read", &e));
                     let message = format!("upstream response read failed: {e}");
@@ -2337,10 +2339,10 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     return error_reply(call.format, 502, &message);
                 }
             };
-            let mut v: Value = match serde_json::from_str(&text) {
+            let mut v: Value = match json_or_text(body) {
                 Ok(v) => v,
                 // An unlabelled stream after all: rebuild the final object from it.
-                Err(_) if text.contains("data:") => {
+                Err(text) if text.contains("data:") => {
                     let body = futures::stream::once(async move { Ok(bytes::Bytes::from(text)) });
                     return collect_passthrough(Box::pin(body), native, tracker, call.format, event_limit).await;
                 }
@@ -2582,22 +2584,22 @@ fn full_events(
 ) -> EventStream {
     let rename = renamer(names);
     Box::pin(async_stream::stream! {
-        let text = match resp.text().await {
-            Ok(text) => text,
+        let body = match resp.bytes().await {
+            Ok(body) => body,
             Err(e) => {
                 if let Some(c) = &usage_tap.usage { c.failure(crate::diagnostics::Failure::http("upstream_body_read", &e)); }
                 yield Event::Error { status: 502, message: format!("upstream response read failed: {e}") };
                 return;
             }
         };
-        let evs = match serde_json::from_str::<Value>(&text) {
+        let evs = match json_or_text(body) {
             Ok(v) => {
                 observe_quota_value(&acct, &model, &v);
                 usage_tap.wire(&v);
                 checked_full_events(native, &v)
             }
             // Mislabelled stream: decode it as SSE after all.
-            Err(_) => {
+            Err(text) => {
                 let mut dec = SseDecoder::with_limit(event_limit);
                 let mut parser = formats::parser(native);
                 let mut out = Vec::new();
@@ -2613,6 +2615,49 @@ fn full_events(
             yield rename(ev);
         }
     })
+}
+
+/// A response body as JSON, parsed straight from its bytes; or, when it isn't JSON, its
+/// text, with invalid UTF-8 replaced as reading it as text always did. Valid UTF-8 fails as
+/// text exactly as it failed as bytes, so only text that the replacement changed is parsed
+/// again, and the bytes become the text without a copy where they can.
+fn json_or_text(body: bytes::Bytes) -> Result<Value, String> {
+    if let Ok(value) = serde_json::from_slice(&body) {
+        return Ok(value);
+    }
+    match String::from_utf8(Vec::from(body)) {
+        Ok(text) => Err(text),
+        Err(invalid) => {
+            let text = String::from_utf8_lossy(invalid.as_bytes()).into_owned();
+            drop(invalid);
+            serde_json::from_str(&text).map_err(|_| text)
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_or_text_tests {
+    use super::json_or_text;
+
+    /// What reading the body as text, then parsing that text, always gave.
+    fn as_text_did(body: &[u8]) -> Result<serde_json::Value, String> {
+        let text = String::from_utf8_lossy(body).into_owned();
+        serde_json::from_str(&text).map_err(|_| text)
+    }
+
+    #[test]
+    fn matches_the_text_path() {
+        for body in [
+            &b"{\"a\":[1,2.5,\"x\"]}"[..],
+            b"data: {\"type\":\"response.completed\"}\n\n",
+            b"{\"a\":\"caf\xe9\"}",
+            b"\xff\xfe not json",
+            b"{\"a\": 1",
+            b"",
+        ] {
+            assert_eq!(json_or_text(bytes::Bytes::copy_from_slice(body)), as_text_did(body), "{body:?}");
+        }
+    }
 }
 
 fn renamer(names: HashMap<String, String>) -> impl Fn(Event) -> Event + Send {
