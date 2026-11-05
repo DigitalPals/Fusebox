@@ -226,7 +226,9 @@ pub struct Plan {
     pub message: &'static str,
 }
 
-pub fn plan(acct: &Account, cfg: &Config) -> Option<Plan> {
+/// `shared`: another enabled subscription of the same provider exists. With none, being
+/// first for new work means nothing, so the plan does not say so.
+pub fn plan(acct: &Account, cfg: &Config, shared: bool) -> Option<Plan> {
     if !cfg.banked_resets || account_id(acct).is_err() {
         return None;
     }
@@ -239,7 +241,7 @@ pub fn plan(acct: &Account, cfg: &Config) -> Option<Plan> {
     Some(Plan {
         expires_at,
         expiry_redeem_at: expires_at - chrono::Duration::hours(EXPIRY_REDEEM_HOURS),
-        prioritized: prioritized && !st.disabled,
+        prioritized: prioritized && shared && !st.disabled,
         auto_redeem: auto,
         due: auto && decision(cfg, &st.quota, inv, now).is_some(),
         message: if auto {

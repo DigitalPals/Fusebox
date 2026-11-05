@@ -699,14 +699,21 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
 
 async fn accounts(State(app): State<Arc<App>>) -> Json<Value> {
     let cfg = app.cfg();
+    let all = app.pool.all();
+    // Enabled subscriptions per provider: "prioritized" only means something beside another.
+    let mut enabled = std::collections::HashMap::<crate::accounts::Provider, usize>::new();
+    for a in &all {
+        if !a.state.lock().disabled {
+            *enabled.entry(a.provider).or_default() += 1;
+        }
+    }
     Json(Value::Array(
-        app.pool
-            .all()
-            .iter()
+        all.iter()
             .map(|a| {
                 let mut snapshot = a.snapshot();
+                let shared = enabled.get(&a.provider).copied().unwrap_or(0) > 1;
                 snapshot["banked_reset_plan"] =
-                    serde_json::to_value(crate::banked_resets::plan(a, &cfg)).unwrap_or_default();
+                    serde_json::to_value(crate::banked_resets::plan(a, &cfg, shared)).unwrap_or_default();
                 snapshot["quota_attribution"] = attribution_json(&a.state.lock().attribution, &cfg);
                 snapshot["window_starter_supported"] = json!(crate::window_starter::supported(a));
                 snapshot["window_starter_selected"] = json!(cfg.window_starter.selected(a));

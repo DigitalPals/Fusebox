@@ -162,7 +162,7 @@ fn automatic_policy_uses_weekly_consumption_until_the_expiry_deadline() {
     let mut usage = expiring_usage(100.0, 100.0, 120);
     usage["cedar_ember"]["grants"][0]["ends_at"] = Value::Null;
     assert!(!due(usage), "an unknown expiry cannot authorize expiry-based spending");
-    assert!(plan(&acct, &cfg).unwrap().auto_redeem);
+    assert!(plan(&acct, &cfg, true).unwrap().auto_redeem);
 }
 
 #[test]
@@ -205,7 +205,9 @@ async fn expiry_redemption_uses_fresh_inventory_without_requiring_usage() {
     let (temp, app, acct, mut mock) = automatic_fixture(0.0, 0.0, 1);
     mock.usage.as_object_mut().unwrap().remove("five_hour");
     mock.usage.as_object_mut().unwrap().remove("seven_day");
-    let plan = plan(&acct, &app.cfg()).unwrap();
+    assert!(plan(&acct, &app.cfg(), true).unwrap().prioritized, "an expiring reset puts it first beside others");
+    assert!(!plan(&acct, &app.cfg(), false).unwrap().prioritized, "the only subscription is not called prioritized");
+    let plan = plan(&acct, &app.cfg(), true).unwrap();
     assert!(plan.due);
     assert_eq!(plan.expiry_redeem_at, plan.expires_at - chrono::Duration::hours(1));
     let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
