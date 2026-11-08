@@ -159,10 +159,11 @@ impl Summary {
     /// One pass over entry rows, as the summary always worked.
     fn scan(&mut self, conn: &Connection, table: &str, where_sql: &str, values: &[SqlValue]) -> Result<()> {
         let client = dimension("client_id", "o");
+        let matched = history::proxy_matched(conn, "o")?;
         // Match against the entire journal, including proxy evidence outside this range/filter.
         // Only scalar accounting columns are read; no payload or pricing JSON is parsed.
         let mut statement = conn.prepare_cached(&format!(
-            "SELECT CASE WHEN o.source='proxy' THEN 0 ELSE EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy') END,
+            "SELECT CASE WHEN o.source='proxy' THEN 0 ELSE {matched} END,
              o.source<>'proxy',COALESCE(o.response_id,'')='',o.event_at_ms,o.provider,o.model,o.account_id,{client},
              o.cost_nanos,o.input,o.cache_read,o.cache_write,o.write_5m,o.write_1h,o.output,o.reasoning,o.write_30m,o.write_12h,o.completeness,o.pricing_partial
              FROM {table} WHERE {where_sql}"
@@ -195,12 +196,12 @@ impl Summary {
     /// Apply the same global source deduplication as the main accounting scan.
     fn unpriced_reasons(&mut self, conn: &Connection, where_sql: &str, values: &[SqlValue]) -> Result<()> {
         let client = dimension("client_id", "o");
+        let matched = history::proxy_matched(conn, "o")?;
         let mut statement = conn.prepare_cached(&format!(
             "SELECT o.event_at_ms,o.provider,o.model,o.account_id,{client},
              o.input,o.cache_read,o.cache_write,o.output,o.pricing_basis
              FROM usage_entries o WHERE o.cost_nanos IS NULL AND {where_sql}
-             AND (o.source='proxy' OR NOT EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association
-                  WHERE p.association_key=o.association_key AND p.source='proxy'))"
+             AND (o.source='proxy' OR NOT {matched})"
         ))?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         while let Some(row) = rows.next()? {

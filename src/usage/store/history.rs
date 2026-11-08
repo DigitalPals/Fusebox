@@ -13,11 +13,30 @@
 //! number from `usage_history_dims`, which holds every combination once: the names
 //! are most of a row's size, and a few hundred combinations cover years of buckets.
 //!
+//! Two short lists keep the totals from counting a response twice when a record of
+//! it lands after its totals were kept. `usage_history_matches` holds the responses
+//! of proxy entries kept here whose imported copy is a record or may still arrive,
+//! so that copy stays matched (see `proxy_matched`). `usage_history_responses` holds
+//! the canonical keys of entries kept here, so a later record of the same response
+//! is not stored again (see `kept_responses`). A copy lands within `COPY_WINDOW_MS`
+//! of its response, so both lists drop what is older than that before the cutoff,
+//! unless the imported copy is still a record.
+//!
 //! A purge can also move an entry forward: when a newer record shares its key, the
 //! rebuilt entry is that one, still counted where it is, so the old one is not kept
 //! here. Records never come back into a period kept as totals (see `floor`), so
 //! nothing is counted twice. The tables sit beside the schema-5 layout, without
 //! triggers: releases that don't know them leave them alone.
+//!
+//! What totals cannot do, by design:
+//! - A range that starts or ends inside a 15-minute bucket of the kept period counts
+//!   the buckets that start inside it, whole. Days and months are exact.
+//! - A kept import that a proxy entry matched keeps only that it was matched, not its
+//!   amounts. When an explicit deletion or `totals-retention-days` removes the proxy
+//!   entry's bucket but not the import's, that response no longer counts. Only the
+//!   calls within seconds of that cutoff can be affected.
+//! - The combined records list stops at the boundary: an import whose proxy entry is
+//!   kept as totals is counted there, but not listed.
 use super::rollup::{AMOUNTS, BUCKET_MS};
 use super::*;
 use std::collections::BTreeMap;
@@ -25,15 +44,27 @@ use std::collections::BTreeMap;
 /// Unpriced reasons in column order (`u0`..`u4`), as the summary names them.
 pub(super) const REASONS: [&str; 5] =
     ["missing_usage", "incomplete_usage", "invalid_usage", "unknown_model", "unsupported_pricing"];
-const FACTS: [&str; 3] = ["usage_history", "usage_history_entrypoints", "usage_history_facets"];
-/// Every table and index the kept totals use, for measuring them.
-pub(super) const OBJECTS: [&str; 5] = [
+const FACTS: [&str; 5] = [
     "usage_history",
     "usage_history_entrypoints",
     "usage_history_facets",
+    "usage_history_matches",
+    "usage_history_responses",
+];
+/// Every table and index the kept totals use, for measuring them.
+pub(super) const OBJECTS: [&str; 7] = [
+    "usage_history",
+    "usage_history_entrypoints",
+    "usage_history_facets",
+    "usage_history_matches",
+    "usage_history_responses",
     "usage_history_dims",
     "sqlite_autoindex_usage_history_dims_1",
 ];
+/// How far apart in time two records of one response can be: a proxy call and its
+/// imported copy, or a retry recorded again. A long streamed response ends minutes
+/// after it starts; six hours leaves room for clocks and slow writers.
+pub(super) const COPY_WINDOW_MS: i64 = 6 * 3_600_000;
 /// Indexes of input, cache read, cache write and output in `AMOUNTS`: the tokens
 /// whose absence makes usage missing or incomplete.
 const REQUIRED: [usize; 4] = [1, 2, 3, 6];
@@ -75,18 +106,65 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
            observations INTEGER NOT NULL,partial INTEGER NOT NULL,missing INTEGER NOT NULL,pricing_partial INTEGER NOT NULL,
            {numbers},PRIMARY KEY(bucket,dim)) WITHOUT ROWID;
          CREATE TABLE IF NOT EXISTS usage_history_facets(bucket INTEGER NOT NULL,dim INTEGER NOT NULL,
-           observations INTEGER NOT NULL,PRIMARY KEY(bucket,dim)) WITHOUT ROWID;"
+           observations INTEGER NOT NULL,PRIMARY KEY(bucket,dim)) WITHOUT ROWID;
+         CREATE TABLE IF NOT EXISTS usage_history_matches(association_key TEXT PRIMARY KEY,bucket INTEGER NOT NULL)
+           WITHOUT ROWID;
+         CREATE TABLE IF NOT EXISTS usage_history_responses(canonical_key TEXT PRIMARY KEY,bucket INTEGER NOT NULL)
+           WITHOUT ROWID;"
     ))?;
     Ok(())
 }
 
 /// Collector outboxes keep no totals: they only forward records.
 pub(super) fn exists(conn: &Connection) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_history')",
-        [],
-        |r| r.get(0),
-    )?)
+    table(conn, "usage_history")
+}
+
+/// Each list is checked on its own: a database can carry the totals of a build that
+/// had not added that list yet.
+fn table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |r| r.get(0))?)
+}
+
+/// SQL that is true when a proxy entry has the response of the import `alias`: a live
+/// entry, or one kept only as totals (see `usage_history_matches`). A proxy call and
+/// its copy a few seconds apart can fall on either side of a purge's cutoff.
+pub(super) fn proxy_matched(conn: &Connection, alias: &str) -> Result<String> {
+    let live = format!(
+        "EXISTS(SELECT 1 FROM usage_entries live INDEXED BY usage_entries_association
+          WHERE live.association_key={alias}.association_key AND live.source='proxy')"
+    );
+    Ok(if table(conn, "usage_history_matches")? {
+        format!(
+            "({live} OR EXISTS(SELECT 1 FROM usage_history_matches kept WHERE kept.association_key={alias}.association_key))"
+        )
+    } else {
+        live
+    })
+}
+
+/// The positions of `observations` whose response is already kept as totals. Storing
+/// them would count it a second time. A record more than `COPY_WINDOW_MS` past
+/// `floor` is no copy of one, so only the records just past the floor are looked up.
+pub(super) fn kept_responses(
+    conn: &Connection,
+    floor: i64,
+    observations: &[Observation],
+) -> Result<std::collections::BTreeSet<usize>> {
+    let mut kept = std::collections::BTreeSet::new();
+    let near = |o: &Observation| (floor..floor.saturating_add(COPY_WINDOW_MS)).contains(&o.event_at_ms);
+    if !observations.iter().any(near) || !table(conn, "usage_history_responses")? {
+        return Ok(kept);
+    }
+    let mut statement =
+        conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM usage_history_responses WHERE canonical_key=?1)")?;
+    for (i, o) in observations.iter().enumerate() {
+        if near(o) && statement.query_row([canonical_key(o)], |r| r.get::<_, bool>(0))? {
+            kept.insert(i);
+        }
+    }
+    Ok(kept)
 }
 
 /// The earliest time a record may be stored at: before it, records were deleted,
@@ -114,6 +192,8 @@ pub(super) fn stage(tx: &Connection, before: i64) -> Result<bool> {
     if !exists(tx)? {
         return Ok(false);
     }
+    // Totals from a build without every list get the missing ones.
+    ensure(tx)?;
     tx.execute_batch(&format!(
         "DROP TABLE IF EXISTS temp.usage_purged;
          CREATE TEMP TABLE usage_purged(bucket INTEGER NOT NULL,canonical_key TEXT NOT NULL,association_key TEXT NOT NULL,
@@ -274,14 +354,14 @@ pub(super) fn seal(tx: &Connection, before: i64) -> Result<()> {
         let mut statement = tx.prepare(&format!(
             "SELECT p.bucket,{},{},p.provider,p.model,p.account_id,p.client,p.source,p.entrypoint,p.weak,p.completeness,
                p.pricing_partial,p.pricing_basis,
-               p.source<>'proxy' AND (
-                 EXISTS(SELECT 1 FROM usage_entries x WHERE x.association_key=p.association_key AND x.source='proxy')
+               p.source<>'proxy' AND ({}
                  OR EXISTS(SELECT 1 FROM temp.usage_purged x WHERE x.association_key=p.association_key AND x.source='proxy')),
                {}
              FROM temp.usage_purged p
              WHERE NOT EXISTS(SELECT 1 FROM usage_entries e WHERE e.canonical_key=p.canonical_key)",
             dims_sql("p", "p.client", "p.source", "NULL"),
             dims_sql("p", "p.client", "'proxy'", "p.entrypoint"),
+            proxy_matched(tx, "p")?,
             AMOUNTS.map(|c| format!("p.{c}")).join(",")
         ))?;
         let mut rows = statement.query([])?;
@@ -324,6 +404,39 @@ pub(super) fn seal(tx: &Connection, before: i64) -> Result<()> {
     }
     upsert(tx, "usage_history", true, kept)?;
     upsert(tx, "usage_history_entrypoints", false, entrypoints)?;
+    // The lists that keep later records of these responses from counting again (see
+    // the module docs). Both keep what lies within a copy's reach of the cutoff;
+    // a proxy entry's response also stays while its imported copy is a record.
+    let recent = before.saturating_sub(COPY_WINDOW_MS).div_euclid(BUCKET_MS);
+    let import = "EXISTS(SELECT 1 FROM usage_observations x INDEXED BY usage_association
+                    WHERE x.association_key={key} AND x.source<>'proxy')";
+    let kept = "NOT EXISTS(SELECT 1 FROM usage_entries e WHERE e.canonical_key=p.canonical_key)";
+    tx.execute(
+        &format!(
+            "INSERT INTO usage_history_matches(association_key,bucket)
+             SELECT p.association_key,MAX(p.bucket) FROM temp.usage_purged p
+             WHERE p.source='proxy' AND {kept} AND (p.bucket>=?1 OR {})
+             GROUP BY 1 ON CONFLICT(association_key) DO UPDATE SET bucket=MAX(bucket,excluded.bucket)",
+            import.replace("{key}", "p.association_key")
+        ),
+        [recent],
+    )?;
+    tx.execute(
+        &format!(
+            "DELETE FROM usage_history_matches WHERE bucket<?1 AND NOT {}",
+            import.replace("{key}", "usage_history_matches.association_key")
+        ),
+        [recent],
+    )?;
+    tx.execute(
+        &format!(
+            "INSERT INTO usage_history_responses(canonical_key,bucket)
+             SELECT p.canonical_key,MAX(p.bucket) FROM temp.usage_purged p WHERE p.bucket>=?1 AND {kept}
+             GROUP BY 1 ON CONFLICT(canonical_key) DO UPDATE SET bucket=MAX(bucket,excluded.bucket)"
+        ),
+        [recent],
+    )?;
+    tx.execute("DELETE FROM usage_history_responses WHERE bucket<?1", [recent])?;
     tx.execute_batch("DROP TABLE temp.usage_purged;")?;
     tx.execute(
         "INSERT INTO usage_meta(key,value) VALUES('totals_before_ms',?1) ON CONFLICT(key)

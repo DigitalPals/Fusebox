@@ -1013,6 +1013,8 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let watermark = history::floor(conn)?;
+    // Records of responses already kept as totals are purged too; see `history`.
+    let kept = history::kept_responses(conn, watermark, observations)?;
     // Read before the savepoint: its first statement must be the write, or a commit
     // by another connection in between turns the upgrade into SQLITE_BUSY_SNAPSHOT.
     let mut documents = Documents::new(conn)?;
@@ -1021,8 +1023,8 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
     let mut inserted = 0;
     let mut duplicates = 0;
     let mut purged = 0;
-    for o in observations {
-        if o.event_at_ms < watermark {
+    for (i, o) in observations.iter().enumerate() {
+        if o.event_at_ms < watermark || kept.contains(&i) {
             purged += 1;
             continue;
         }
@@ -1205,10 +1207,8 @@ fn dimension(column: &str, alias: &str) -> String {
 /// Combined accounting: one entry per provider response. An imported entry is dropped when
 /// any proxy entry shares its association key, even outside the range, so the trusted
 /// proxy evidence wins and a pair split across local midnight still counts once.
-fn combined(where_sql: &str) -> String {
-    format!(
-        "{where_sql} AND (o.source='proxy' OR NOT EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy'))"
-    )
+fn combined(conn: &Connection, where_sql: &str) -> Result<String> {
+    Ok(format!("{where_sql} AND (o.source='proxy' OR NOT {})", history::proxy_matched(conn, "o")?))
 }
 /// Labels belong to one reader's SQLite snapshot. Cache missing collectors too,
 /// but retain nothing between requests so enrollment and renames stay visible.
@@ -1297,7 +1297,7 @@ fn details(conn: &mut Connection, q: &Query) -> Result<Value> {
             "usage_entries o INDEXED BY usage_entries_event_time",
             " JOIN usage_observations x ON x.id=o.id",
             "x",
-            combined(&where_sql),
+            combined(conn, &where_sql)?,
         )
     } else {
         ("usage_observations o INDEXED BY usage_event_time", "", "o", where_sql)

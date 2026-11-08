@@ -427,6 +427,8 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
         "usage_history_dims",
         "usage_history_entrypoints",
         "usage_history_facets",
+        "usage_history_matches",
+        "usage_history_responses",
         "usage_observations",
         "usage_suppressed",
         "usage_event_time",

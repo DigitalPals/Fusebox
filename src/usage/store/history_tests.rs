@@ -452,3 +452,140 @@ async fn record_bytes() {
         .unwrap()
     );
 }
+
+/// A proxy call and its imported copy a few seconds apart, the purge between them:
+/// the response counts once and its copy stays matched, whichever side goes first,
+/// until both are gone.
+#[tokio::test]
+async fn a_call_and_its_import_split_by_the_cutoff_count_once() {
+    let p = temp("straddle");
+    let store = Store::open(&p, 16, 3650, None).unwrap();
+    let pair = |id: &str, proxy_at: &str, import_at: &str| {
+        let mut proxy = call("proxy", &format!("{id}-proxy"), "anthropic", at(proxy_at));
+        proxy.account_id = Some("acct-a".into());
+        proxy.response_id = Some(format!("msg-{id}"));
+        let mut import = call("claude_code", &format!("{id}-import"), "anthropic", at(import_at));
+        import.response_id = proxy.response_id.clone();
+        [proxy, import]
+    };
+    // Proxy before the cutoff, import after; then the reverse.
+    let mut records = pair("a", "2026-10-02T09:59:55Z", "2026-10-02T10:00:05Z").to_vec();
+    records.extend(pair("b", "2026-10-02T12:00:05Z", "2026-10-02T11:59:55Z"));
+    store.call(move |c| insert_batch(c, &records)).await.unwrap();
+    let month = queries().pop().unwrap();
+    let totals = |store: &Store| {
+        let (store, month) = (store.clone(), month.clone());
+        async move {
+            let totals = store.dashboard(month.clone()).await.unwrap()["combined"]["totals"].clone();
+            let scan = store.dashboard_scan(month.clone()).await.unwrap()["combined"]["totals"].clone();
+            assert_eq!(scan, totals, "the full scan disagrees");
+            let listed =
+                store.details(Query { view: Some("combined".into()), ..month }).await.unwrap()["total"].clone();
+            (totals["observations"].as_i64().unwrap(), totals["matched"].as_i64().unwrap(), listed)
+        }
+    };
+    assert_eq!(totals(&store).await, (2, 2, json!(2)));
+    let unchanged = store.dashboard(month.clone()).await.unwrap()["combined"]["totals"].clone();
+    for cutoff in ["2026-10-02T10:00:00Z", "2026-10-02T12:00:00Z"] {
+        retain(&store, at(cutoff)).await;
+        let (calls, matched, _) = totals(&store).await;
+        assert_eq!((calls, matched), (2, 2), "after a purge at {cutoff}");
+    }
+    assert_eq!(store.dashboard(month.clone()).await.unwrap()["combined"]["totals"], unchanged);
+    // Once both sides are gone, nothing is left to match.
+    retain(&store, at("2026-10-03T00:00:00Z")).await;
+    assert_eq!(totals(&store).await, (2, 2, json!(0)));
+    assert_eq!(store.dashboard(month.clone()).await.unwrap()["combined"]["totals"], unchanged);
+    let left: i64 =
+        store.call(|c| Ok(c.query_row("SELECT COUNT(*) FROM usage_history_matches", [], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(left, 0);
+    store.shutdown().await.unwrap();
+}
+
+/// An explicit purge deletes the proxy call for good: its import then counts, once.
+#[tokio::test]
+async fn an_explicit_purge_lets_the_surviving_import_count() {
+    let p = temp("straddle-explicit");
+    let store = Store::open(&p, 16, 3650, None).unwrap();
+    let mut proxy = call("proxy", "a-proxy", "anthropic", at("2026-10-02T09:59:55Z"));
+    proxy.account_id = Some("acct-a".into());
+    proxy.response_id = Some("msg-a".into());
+    let mut import = call("claude_code", "a-import", "anthropic", at("2026-10-02T10:00:05Z"));
+    import.response_id = proxy.response_id.clone();
+    store.call(move |c| insert_batch(c, &[proxy, import])).await.unwrap();
+    retain(&store, at("2026-10-02T10:00:00Z")).await;
+    store.purge(at("2026-10-02T10:00:00Z")).await.unwrap();
+    let totals = store.dashboard(queries().pop().unwrap()).await.unwrap()["combined"]["totals"].clone();
+    assert_eq!((totals["observations"].clone(), totals["matched"].clone()), (json!(1), json!(0)));
+    store.shutdown().await.unwrap();
+}
+
+/// Records that arrive after their response was kept as totals: the proxy call's
+/// imported copy stays matched, and another record of the same response is purged.
+/// The lists that remember those responses empty once a copy is out of reach.
+#[tokio::test]
+async fn records_arriving_after_their_response_is_kept_count_once() {
+    let p = temp("late");
+    let store = Store::open(&p, 16, 3650, None).unwrap();
+    let mut proxy = call("proxy", "a-proxy", "anthropic", at("2026-10-02T09:59:55Z"));
+    proxy.account_id = Some("acct-a".into());
+    proxy.response_id = Some("msg-a".into());
+    let mut import = call("claude_code", "a-import", "anthropic", at("2026-10-02T10:00:05Z"));
+    import.response_id = proxy.response_id.clone();
+    let mut again = proxy.clone();
+    again.source_event_id = "a-proxy-again".into();
+    again.event_at_ms = at("2026-10-02T10:00:10Z");
+    let first = proxy.clone();
+    store.call(move |c| insert_batch(c, &[first])).await.unwrap();
+    let month = queries().pop().unwrap();
+    let totals = |store: &Store| {
+        let (store, month) = (store.clone(), month.clone());
+        async move {
+            let totals = store.dashboard(month.clone()).await.unwrap()["combined"]["totals"].clone();
+            assert_eq!(store.dashboard_scan(month).await.unwrap()["combined"]["totals"], totals);
+            totals
+        }
+    };
+    let mut expected = totals(&store).await;
+    expected["matched"] = json!(1);
+    retain(&store, at("2026-10-02T10:00:00Z")).await;
+    let result = store.call(move |c| insert_batch(c, &[import, again])).await.unwrap();
+    assert_eq!((result["inserted"].clone(), result["purged"].clone()), (json!(1), json!(1)));
+    assert_eq!(totals(&store).await, expected);
+    retain(&store, at("2026-10-03T00:00:00Z")).await;
+    assert_eq!(totals(&store).await, expected);
+    let left: (i64, i64) = store
+        .call(|c| {
+            Ok(c.query_row(
+                "SELECT (SELECT COUNT(*) FROM usage_history_matches),(SELECT COUNT(*) FROM usage_history_responses)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(left, (0, 0));
+    store.shutdown().await.unwrap();
+}
+
+/// Totals written by a build without the lists that keep later records from
+/// counting again: reads and inserts work, as they did then.
+#[tokio::test]
+async fn totals_without_the_later_lists_still_read() {
+    let p = temp("no-lists");
+    let store = Store::open(&p, 16, 3650, None).unwrap();
+    store.call(|c| insert_batch(c, &traffic())).await.unwrap();
+    retain(&store, at("2026-10-04T00:00:00Z")).await;
+    let month = queries().pop().unwrap();
+    let before = store.dashboard(month.clone()).await.unwrap()["combined"]["totals"].clone();
+    store
+        .call(|c| Ok(c.execute_batch("DROP TABLE usage_history_matches; DROP TABLE usage_history_responses;")?))
+        .await
+        .unwrap();
+    assert_eq!(store.dashboard(month.clone()).await.unwrap()["combined"]["totals"], before);
+    store.details(Query { view: Some("combined".into()), ..month }).await.unwrap();
+    let late = call("proxy", "late", "anthropic", at("2026-10-04T00:00:01Z"));
+    store.call(move |c| insert_batch(c, &[late])).await.unwrap();
+    retain(&store, at("2026-10-05T00:00:00Z")).await;
+    store.shutdown().await.unwrap();
+}

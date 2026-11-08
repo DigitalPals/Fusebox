@@ -253,11 +253,11 @@ fn combined_summary(
     values: &[SqlValue],
     date_expression: &str,
 ) -> Result<Value> {
-    let set = combined(where_sql);
+    let set = combined(conn, where_sql)?;
     let params = || rusqlite::params_from_iter(values);
     let mut totals = aggregate(conn, "usage_entries", &set, values)?;
     let (history_only, weak_identity): (i64, i64) = conn.query_row(&format!("SELECT COALESCE(SUM(o.source<>'proxy'),0),COALESCE(SUM(o.source<>'proxy' AND COALESCE(o.response_id,'')=''),0) FROM usage_entries o INDEXED BY usage_entries_event_time WHERE {set}"),params(),|r|Ok((r.get(0)?,r.get(1)?)))?;
-    let matched: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM usage_entries o INDEXED BY usage_entries_event_time WHERE {where_sql} AND o.source<>'proxy' AND EXISTS(SELECT 1 FROM usage_entries p INDEXED BY usage_entries_association WHERE p.association_key=o.association_key AND p.source='proxy')"),params(),|r|r.get(0))?;
+    let matched: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM usage_entries o INDEXED BY usage_entries_event_time WHERE {where_sql} AND o.source<>'proxy' AND {}", history::proxy_matched(conn, "o")?),params(),|r|r.get(0))?;
     totals["history_only"] = json!(history_only);
     totals["matched"] = json!(matched);
     totals["weak_identity"] = json!(weak_identity);
