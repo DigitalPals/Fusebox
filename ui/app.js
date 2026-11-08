@@ -3083,6 +3083,14 @@ function cachePolicyHTML(r) {
   return `<div class="why-text"><span class="label">Prompt cache</span>${reported}${policy}</div>`;
 }
 
+// Controls Fusebox took off a request before sending it (`control_downgrades`).
+const DROPPED_CONTROL = {
+  speed_fast_subscription: 'Fast mode: sent at standard speed (subscription without fast mode)',
+  speed_fast_unsupported_model: 'Fast mode: sent at standard speed (model has no fast mode)',
+  service_tier_not_enabled: 'Service tier', verbosity_unsupported: 'Verbosity', prefill_unsupported: 'Assistant prefill',
+};
+const droppedText = (r) => (r.control_downgrades || []).map((d) => DROPPED_CONTROL[d] || d).join(' · ');
+
 function reqItemHTML(r) {
   const open = S.openReq === r.id;
   const err = errLineText(r);
@@ -3102,6 +3110,7 @@ function reqItemHTML(r) {
         <div><span>Session</span><span class="mono" title="${esc(r.session_id || '')}">${esc(r.session_id ? r.session_id.slice(0, 8) : 'none')}</span></div>
         ${r.source ? `<div><span>Source</span><span class="mono">${esc(sourceText(r.source))}</span></div>` : ''}
         ${r.key_label ? `<div><span>Key</span><span>${esc(keyText(r.key_label))}</span></div>` : ''}
+        ${droppedText(r) ? `<div><span>Dropped</span><span>${esc(droppedText(r))}</span></div>` : ''}
         <div class="why-ft"><span>Latency</span><span class="mono">${ms(r.ttft_ms)} to first token</span></div>
         <div class="why-tok"><span>Tokens</span><span class="mono">${requestTokensHTML(r)}</span></div>
       </div>
@@ -3127,6 +3136,7 @@ function reqMobileHTML(r) {
     ${open ? `<div class="m-why"><p>${esc(whySentence(r))}</p><span class="meta" style="font-size:12px">${esc(client)} · <span class="mono">${esc(endpoint)}</span></span>
       ${r.source || r.key_label ? `<span class="meta" style="font-size:12px">${r.source ? `From <span class="mono">${esc(sourceText(r.source))}</span>` : ''}${r.source && r.key_label ? ' · ' : ''}${r.key_label ? `key ${esc(keyText(r.key_label))}` : ''}</span>` : ''}
       <span class="meta" style="font-size:12px">First token ${ms(r.ttft_ms)} · ${requestTokensHTML(r)}</span>
+      ${droppedText(r) ? `<span class="meta" style="font-size:12px">Dropped: ${esc(droppedText(r))}</span>` : ''}
       ${cachePolicyHTML(r)}
       <div class="acts">${acct ? `<button class="btn" type="button" data-act="open-acc" data-id="${esc(acct.id)}">Open account</button>` : ''}${r.session_id ? `<button class="btn" type="button" data-act="filter-session" data-id="${esc(r.session_id)}">Session ${esc(r.session_id.slice(0, 8))}</button>` : ''}</div></div>` : ''}
   </div>`;

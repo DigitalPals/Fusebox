@@ -65,6 +65,10 @@ pub struct Config {
     pub codex_websockets: bool,
     /// Rewrite non-Claude-Code requests on Claude OAuth accounts so they look like Claude Code.
     pub claude_cloak: bool,
+    /// Send Claude fast mode (`speed: "fast"`) to subscription accounts as asked. Off by
+    /// default: subscriptions bill fast mode to usage credits only, and without credits
+    /// Anthropic refuses it with a 429, so Fusebox sends those requests at standard speed.
+    pub claude_subscription_fast_mode: bool,
     /// Check Claude and ChatGPT subscriptions for banked rate-limit resets and allow
     /// spending them from the dashboard. Off by default: it uses unofficial endpoints.
     pub banked_resets: bool,
@@ -467,6 +471,7 @@ impl Default for Config {
             stream_limits: Default::default(),
             codex_websockets: true,
             claude_cloak: true,
+            claude_subscription_fast_mode: false,
             banked_resets: false,
             banked_reset_policy: Default::default(),
             window_starter: Default::default(),
@@ -553,6 +558,7 @@ stream-limits:
   pre-output-timeout-seconds: 0 # optional combined headers/first-event deadline; expiry is terminal
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
+claude-subscription-fast-mode: false # pass fast mode to Claude subscriptions (needs usage credits)
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
 window-starter:
   mode: off                # off | always | working-hours; sends small subscription requests

@@ -263,6 +263,56 @@ fn codex_401s_log_the_token_age_and_time_left_only() {
     }
 }
 
+/// Claude refusals log the limit that refused them (`log_claude_refusal`): rate-limit
+/// headers with plain values, the error type and known phrases, never message text.
+#[test]
+fn claude_refusals_log_limits_and_phrases_without_messages() {
+    if run_in_isolated_process("claude_refusals_log_limits_and_phrases_without_messages") {
+        return;
+    }
+    let buffer = LogBuffer::default();
+    tracing::subscriber::set_global_default(buffer.subscriber()).unwrap();
+    let app = app();
+    let acct = app.pool.all().remove(0);
+    let headers: reqwest::header::HeaderMap = [
+        ("anthropic-ratelimit-unified-status", "rejected"),
+        ("anthropic-ratelimit-unified-overage-disabled-reason", "out_of_credits"),
+        ("anthropic-ratelimit-unified-note", "Bearer FAKE_HEADER_MARKER"),
+        ("request-id", "FAKE_REQUEST_MARKER"),
+        ("retry-after", "60"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (reqwest::header::HeaderName::from_static(name), value.parse().unwrap()))
+    .collect();
+    let private = "FAKE_MESSAGE_MARKER https://private.test/?key=secret";
+    let refusal = json!({"type":"error","error":{"type":"rate_limit_error",
+        "message":format!("Fast mode needs usage credits. {private}")}});
+    log_claude_refusal(7, &acct, 429, true, &headers, &refusal.to_string());
+    let odd = json!({"type":"error","error":{"type":"FAKE TYPE MARKER","message":private}});
+    log_claude_refusal(8, &acct, 400, true, &reqwest::header::HeaderMap::new(), &odd.to_string());
+    log_claude_refusal(9, &acct, 429, false, &reqwest::header::HeaderMap::new(), private);
+    let journal = buffer.text();
+    let line = |id: &str| journal.lines().find(|line| line.contains(&format!("request_id={id} "))).unwrap();
+    for field in [
+        "Claude refusal",
+        "status=429",
+        "fast=true",
+        "error_type=rate_limit_error",
+        "mentions=fast_mode,usage_credits",
+        "anthropic-ratelimit-unified-note=redacted",
+        "anthropic-ratelimit-unified-overage-disabled-reason=out_of_credits",
+        "anthropic-ratelimit-unified-status=rejected",
+        "retry-after=60",
+    ] {
+        assert!(line("7").contains(field), "missing {field}: {journal}");
+    }
+    assert!(line("8").contains("status=400") && line("8").contains("error_type=unknown"), "{journal}");
+    assert!(line("9").contains("fast=false") && line("9").contains("error_type=unknown"), "{journal}");
+    for secret in ["FAKE_", "Bearer", "https://", "key=secret", "request-id"] {
+        assert!(!journal.contains(secret), "journal exposed {secret}: {journal}");
+    }
+}
+
 #[tokio::test]
 async fn codex_stream_errors_and_capacity_waits_are_logged_without_messages() {
     use axum::response::IntoResponse;

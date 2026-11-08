@@ -2269,6 +2269,92 @@ async fn token_count_fallback_marks_estimates_and_ignores_base64_size() {
 }
 
 #[tokio::test]
+async fn claude_fast_mode_reaches_a_subscription_at_standard_speed_unless_enabled() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.clear();
+    cfg.claude_api_key =
+        vec![KeyEntry { api_key: "a".into(), base_url: Some(fixture.provider.url.clone()), ..Default::default() }];
+    let mut logs = 0;
+    for enabled in [false, true] {
+        cfg.claude_subscription_fast_mode = enabled;
+        fixture.app.set_config(cfg.clone());
+        let acct =
+            fixture.app.pool.all().into_iter().find(|a| a.provider == crate::accounts::Provider::Claude).unwrap();
+        *acct.cred.write() = crate::accounts::Credential::OAuth(crate::accounts::OAuth {
+            access_token: "a".into(),
+            refresh_token: "unused".into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            base_url: Some(fixture.provider.url.clone()),
+            email: None,
+            account_id: None,
+            project_id: None,
+            raw: Default::default(),
+        });
+        acct.state.lock().credential_identity = acct.cred.read().identity(acct.provider);
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/messages", fixture.proxy.url))
+            .header("x-api-key", "client-one")
+            .header("anthropic-beta", "fast-mode-2026-02-01")
+            .json(&json!({"model":"claude-opus-5-5","max_tokens":16,"speed":"fast",
+                "messages":[{"role":"user","content":"question"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "enabled={enabled}");
+        let (account, sent, _) = fixture.mock.calls.lock().last().unwrap().clone();
+        assert_eq!(account, "a");
+        assert_eq!(sent.get("speed"), enabled.then(|| json!("fast")).as_ref(), "enabled={enabled}: {sent}");
+        let beta = fixture.mock.headers.lock().last().unwrap().1["anthropic-beta"].to_str().unwrap().to_string();
+        assert!(beta.contains("fast-mode-2026-02-01"), "the beta flag stays: {beta}");
+        logs += 1;
+        let log = fixture.logs(logs).await.pop().unwrap();
+        let dropped: &[&str] = if enabled { &[] } else { &["speed_fast_subscription"] };
+        assert_eq!(log.control_downgrades, dropped, "enabled={enabled}");
+        assert!(acct.exhausted_until("claude-opus-5-5").is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_fast_request_moved_from_a_subscription_to_an_api_key_reports_no_downgrade() {
+    let fixture = Fixture::new(Routing::FillFirst, false).await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.clear();
+    cfg.claude_api_key = ["a", "b"]
+        .map(|key| KeyEntry { api_key: key.into(), base_url: Some(fixture.provider.url.clone()), ..Default::default() })
+        .to_vec();
+    fixture.app.set_config(cfg);
+    let subscription =
+        fixture.app.pool.all().into_iter().find(|a| a.provider == crate::accounts::Provider::Claude).unwrap();
+    *subscription.cred.write() = crate::accounts::Credential::OAuth(crate::accounts::OAuth {
+        access_token: "a".into(),
+        refresh_token: "unused".into(),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        base_url: Some(fixture.provider.url.clone()),
+        email: None,
+        account_id: None,
+        project_id: None,
+        raw: Default::default(),
+    });
+    subscription.state.lock().credential_identity = subscription.cred.read().identity(subscription.provider);
+    fixture.mock.mode.store(2, Ordering::Relaxed); // account a answers 429
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/messages", fixture.proxy.url))
+        .header("x-api-key", "client-one")
+        .json(&json!({"model":"claude-opus-5-5","max_tokens":16,"speed":"fast",
+            "messages":[{"role":"user","content":"question"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let calls = fixture.mock.calls.lock().clone();
+    let sent: Vec<_> = calls.iter().map(|(account, body, _)| (account.as_str(), body.get("speed").cloned())).collect();
+    assert_eq!(sent, [("a", None), ("b", Some(json!("fast")))], "the subscription got standard speed, the key fast");
+    let log = fixture.logs(1).await.pop().unwrap();
+    assert!(log.control_downgrades.is_empty(), "the answering attempt dropped nothing: {:?}", log.control_downgrades);
+}
+
+#[tokio::test]
 async fn translated_cache_intent_survives_oauth_cloak_for_each_incompatible_policy() {
     use crate::cache::Incompatible;
     let fixture = Fixture::new(Routing::RoundRobin, false).await;

@@ -191,6 +191,16 @@ correlation ID when absent. Generated Claude profiles discard unrelated SDK
 runtime/helper headers while keeping caller beta flags and explicit safe
 extensions.
 
+Claude fast mode (`speed: "fast"`) is billed to usage credits only on a
+subscription. Without credits Anthropic refuses it with a 429 that reads like a
+spent account, so OAuth requests go at standard speed unless
+`claude-subscription-fast-mode: true`. The same applies on every account to
+models without fast mode (anything but Opus 5.5, Opus 5 and, until 2026-11-30, Opus 4.8). The
+`fast-mode` beta flag is kept, and the request log lists the change under
+`control_downgrades`. Pricing follows the speed Claude reports. Fusebox reads
+`anthropic-ratelimit-unified-reset` only for a subscription window, never for
+the `overage` claim (the monthly billing boundary), and caps it at a week.
+
 Codex recognizes supported CLI, Desktop and custom app-server attribution with
 validated release syntax and consistent fields. Native attribution can remain
 even when that client is not trusted to teach a shared identity. Subscription

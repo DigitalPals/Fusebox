@@ -411,6 +411,11 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
     let path = if t.count_tokens { "/v1/messages/count_tokens" } else { "/v1/messages" };
     let url = if oauth { format!("{base}{path}?beta=true") } else { format!("{base}{path}") };
     body["model"] = t.model.into();
+    if claude_speed_downgrade(t.acct, t.cfg, t.model, &body).is_some()
+        && let Some(object) = body.as_object_mut()
+    {
+        object.remove("speed");
+    }
     strip_foreign_thinking(&mut body);
     crate::formats::claude::normalize_disabled_thinking(&mut body, t.model);
 
@@ -511,6 +516,30 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
     headers.push(("content-type".into(), "application/json".into()));
     headers.push(("accept".into(), if t.stream { "text/event-stream" } else { "application/json" }.into()));
     Prepared { url, headers, body, raw: None }
+}
+
+/// Why Claude fast mode (`speed: "fast"`) comes off a request to this account, if it does;
+/// the request then goes at standard speed. A subscription bills fast mode to usage
+/// credits only, and without them Anthropic refuses it with a 429 that reads like a spent
+/// account, so subscriptions get it only with `claude-subscription-fast-mode`. Only
+/// Opus 5.5, Opus 5 and Opus 4.8 have fast mode; other models refuse the field. The
+/// `fast-mode` beta flag stays, as on Claude Code's own standard-speed retries.
+pub fn claude_speed_downgrade(acct: &Account, cfg: &Config, model: &str, body: &Value) -> Option<&'static str> {
+    if body.get("speed").and_then(Value::as_str) != Some("fast") {
+        return None;
+    }
+    if !claude_fast_model(model, chrono::Utc::now()) {
+        return Some("speed_fast_unsupported_model");
+    }
+    (acct.is_oauth() && !cfg.claude_subscription_fast_mode).then_some("speed_fast_subscription")
+}
+
+/// Models Anthropic runs in fast mode at `now`. Opus 4.8 loses it on 2026-11-30, when the
+/// API starts refusing fast requests for it.
+fn claude_fast_model(model: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let model = model.to_ascii_lowercase();
+    let opus_4_8_until = chrono::DateTime::from_timestamp(1_795_996_800, 0).unwrap_or_default(); // 2026-11-30 UTC
+    model.starts_with("claude-opus-5") || (model.starts_with("claude-opus-4-8") && now < opus_4_8_until)
 }
 
 /// Keep native beta formatting and unknown provider flags; append only missing requirements.
@@ -1545,6 +1574,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn claude_fast_mode_goes_at_standard_speed_on_subscriptions_unless_enabled() {
+        let fast = |model: &str| json!({"model": model, "speed": "fast", "messages": []});
+        for native in [false, true] {
+            for cloak in [false, true] {
+                for count_tokens in [false, true] {
+                    let headers = request_headers(&[
+                        ("user-agent", if native { CC_USER_AGENT } else { "third-party/1.0" }),
+                        ("anthropic-beta", "fast-mode-2026-02-01"),
+                    ]);
+                    let send = |acct: &Account, cfg: &Config, model: &str| {
+                        let mut target = test_target(acct, cfg, &headers);
+                        target.model = model;
+                        target.count_tokens = count_tokens;
+                        prepare(&target, fast(model))
+                    };
+                    let subscription = oauth_account(Provider::Claude);
+                    let api_key = claude_account();
+                    let default = Config { claude_cloak: cloak, ..Default::default() };
+                    let enabled = Config { claude_subscription_fast_mode: true, ..default.clone() };
+                    let case = format!("native={native} cloak={cloak} count_tokens={count_tokens}");
+
+                    let standard = send(&subscription, &default, "claude-opus-5-5");
+                    assert!(standard.body.get("speed").is_none(), "{case}");
+                    let beta = get_header(&standard.headers, "anthropic-beta").unwrap_or_default();
+                    assert!(beta.contains("fast-mode-2026-02-01"), "{case}: the beta flag stays: {beta}");
+                    for (acct, cfg) in [(&subscription, &enabled), (&api_key, &default)] {
+                        for model in ["claude-opus-5-5", "claude-opus-5"] {
+                            assert_eq!(send(acct, cfg, model).body["speed"], "fast", "{case} {model}");
+                        }
+                    }
+                    for acct in [&subscription, &api_key] {
+                        for model in ["claude-sonnet-5-5", "claude-haiku-4-5-20251001", "claude-opus-4-7"] {
+                            assert!(send(acct, &enabled, model).body.get("speed").is_none(), "{case} {model}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_speed_downgrade_names_why_and_leaves_other_speeds_alone() {
+        let subscription = oauth_account(Provider::Claude);
+        let api_key = claude_account();
+        let cfg = Config::default();
+        let fast = json!({"speed": "fast"});
+        assert_eq!(
+            claude_speed_downgrade(&subscription, &cfg, "claude-opus-5-5", &fast),
+            Some("speed_fast_subscription")
+        );
+        assert_eq!(
+            claude_speed_downgrade(&api_key, &cfg, "claude-sonnet-5-5", &fast),
+            Some("speed_fast_unsupported_model")
+        );
+        assert_eq!(claude_speed_downgrade(&api_key, &cfg, "claude-opus-5-5", &fast), None);
+        let day = |date: &str| chrono::DateTime::parse_from_rfc3339(date).unwrap().with_timezone(&chrono::Utc);
+        assert!(claude_fast_model("claude-opus-4-8", day("2026-11-29T23:59:59Z")));
+        assert!(!claude_fast_model("claude-opus-4-8", day("2026-11-30T00:00:00Z")));
+        assert!(claude_fast_model("claude-opus-5-5", day("2027-06-01T00:00:00Z")));
+        for body in [json!({}), json!({"speed": "standard"}), json!({"speed": 1})] {
+            assert_eq!(claude_speed_downgrade(&subscription, &cfg, "claude-sonnet-5-5", &body), None);
+        }
+        let prepared = prepare(
+            &Target { model: "claude-opus-5-5", ..test_target(&subscription, &cfg, &HeaderMap::new()) },
+            json!({"speed": "standard", "messages": []}),
+        );
+        assert_eq!(prepared.body["speed"], "standard");
     }
 
     #[test]

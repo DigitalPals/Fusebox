@@ -531,8 +531,14 @@ fn validate(values: &Value, changes: &Map<String, Value>) -> Result<()> {
                     serde_json::from_value(value.clone()).context("Invalid window-starter")?;
                 policy.validate()?;
             }
-            "codex-websockets" | "claude-cloak" | "banked-resets" | "session-affinity" | "force-model-prefix"
-            | "debug" | "latency-routing" => {
+            "codex-websockets"
+            | "claude-cloak"
+            | "claude-subscription-fast-mode"
+            | "banked-resets"
+            | "session-affinity"
+            | "force-model-prefix"
+            | "debug"
+            | "latency-routing" => {
                 ensure!(value.is_boolean(), "{field}: use a boolean")
             }
             "notifications" => ensure!(

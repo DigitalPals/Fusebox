@@ -23,7 +23,7 @@ const CONFIG_KEY_SECTION = {
   routing: 'routing', 'five-hour-reserve-percent': 'routing', 'banked-reset-policy': 'routing', 'window-starter': 'routing', 'request-retry': 'routing', 'session-affinity': 'routing',
   'session-affinity-idle-seconds': 'routing', 'provider-session-idle-seconds': 'routing', 'force-model-prefix': 'routing', 'first-token-timeout-seconds': 'routing',
   'model-groups': 'routing', 'background-model': 'routing', 'prompt-cache': 'routing', 'latency-routing': 'routing', 'translation': 'routing', 'embeddings': 'connections', 'stream-limits': 'connections', 'request-limits': 'connections', 'log-format': 'diagnostics',
-  'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'banked-resets': 'connections',
+  'proxy-url': 'connections', 'codex-websockets': 'connections', 'claude-cloak': 'connections', 'claude-subscription-fast-mode': 'connections', 'banked-resets': 'connections',
   'oauth-model-alias': 'models', 'oauth-excluded-models': 'models', 'extra-models': 'models', 'model-capabilities': 'models', notifications: 'notifications', debug: 'diagnostics',
 };
 const CONFIG_OAUTH = [['claude', 'Claude'], ['codex', 'Codex'], ['antigravity', 'Antigravity'], ['kimi', 'Kimi'], ['xai', 'Grok'], ['meta', 'Meta'], ['devin', 'Devin'], ['vertex', 'Vertex AI']];
@@ -795,6 +795,7 @@ function configConnectionsHTML() {
     <div class="cfg-divider wide"></div>
     ${configSwitch(['codex-websockets'], 'Native Codex websockets', 'Keep a native upstream websocket connection for clients using Codex over websockets.')}
     ${configSwitch(['claude-cloak'], 'Claude Code compatibility', 'Make requests through Claude OAuth accounts resemble Claude Code requests for other clients.')}
+    ${configSwitch(['claude-subscription-fast-mode'], 'Fast mode on Claude subscriptions', 'Send Claude fast mode requests to subscription accounts as asked. Subscriptions bill fast mode to usage credits only, so turn this on only when every Claude account has them. Off: Fusebox sends those requests at standard speed.')}
     ${clientIdentitiesHTML()}
     ${configSwitch(['banked-resets'], 'Banked resets', 'Show saved Claude and ChatGPT limit resets beside each subscription and let you spend them. Checks every 30 minutes through unofficial provider endpoints.')}
     <div class="cfg-divider wide"></div>

@@ -32,6 +32,19 @@ test('cache details show requested and effective policy safely on desktop and mo
   assert.doesNotMatch(d.run('reqItemHTML(S.requests[0])'), /Prompt cache/);
 });
 
+test('dropped controls, such as fast mode sent at standard speed, show on desktop and mobile', () => {
+  const d = dashboard();
+  d.record(200, 'complete', 10);
+  d.S.requests[0].control_downgrades = ['speed_fast_subscription', '<b>unknown</b>'];
+  for (const render of ['reqItemHTML', 'reqMobileHTML']) {
+    const html = d.run(`${render}(S.requests[0])`);
+    assert.match(html, /Dropped.*Fast mode: sent at standard speed \(subscription without fast mode\) · &lt;b&gt;unknown&lt;\/b&gt;/);
+    assert.doesNotMatch(html, /<b>/);
+  }
+  delete d.S.requests[0].control_downgrades;
+  assert.doesNotMatch(d.run('reqItemHTML(S.requests[0])'), /Dropped/);
+});
+
 function dashboard() {
   const S = {
     requests: [], fresh: new Map(), activity: {}, route: 'none', openReq: 1,

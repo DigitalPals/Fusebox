@@ -64,6 +64,8 @@ pub(crate) struct WireRequest {
     pub(crate) payload: bytes::Bytes,
     pub(crate) policy: crate::cache::Policy,
     pub(crate) names: HashMap<String, String>,
+    /// Whether the body sent asks for Claude fast mode (`speed: "fast"`).
+    pub(crate) fast: bool,
 }
 
 /// The same upstream value feeds accounting and sanitized cache diagnostics.
@@ -565,8 +567,13 @@ fn reset_after(headers: &reqwest::header::HeaderMap, body: &str) -> Option<chron
     if let Some(s) = h("retry-after").and_then(|s| s.parse::<i64>().ok()) {
         return Some(Utc::now() + Duration::seconds(s.clamp(1, 6 * 3600)));
     }
-    if let Some(ts) = h("anthropic-ratelimit-unified-reset").and_then(|s| s.parse::<i64>().ok()) {
-        return chrono::DateTime::from_timestamp(ts, 0);
+    // The reset of Claude's representative limit, unless that limit is the paid overage:
+    // its reset is the monthly billing boundary, not the subscription window's.
+    let overage =
+        h("anthropic-ratelimit-unified-representative-claim").is_some_and(|c| c.eq_ignore_ascii_case("overage"));
+    if !overage && let Some(ts) = h("anthropic-ratelimit-unified-reset").and_then(|s| s.parse::<i64>().ok()) {
+        // No subscription window is longer than a week.
+        return chrono::DateTime::from_timestamp(ts, 0).map(|t| t.min(Utc::now() + Duration::days(7)));
     }
     let v: Value = serde_json::from_str(body).ok()?;
     let e = &v["error"];
@@ -693,6 +700,59 @@ fn capacity_retry_after(status: u16, headers: &reqwest::header::HeaderMap, body:
 /// Whole seconds until `until`, rounded up, at least one.
 fn seconds_until(until: chrono::DateTime<Utc>) -> u64 {
     ((until - Utc::now()).num_milliseconds().max(1) as u64).div_ceil(1000)
+}
+
+/// Which limit refused a Claude request, for the journal: the five-hour or weekly window,
+/// paid overage, or fast mode without usage credits. It logs the rate-limit headers, the
+/// error type and which known phrases the message uses, never the message itself.
+pub(crate) fn log_claude_refusal(
+    request_id: u64,
+    acct: &Account,
+    status: u16,
+    fast: bool,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) {
+    let parsed: Value = serde_json::from_str(body).unwrap_or_default();
+    let error_type = parsed["error"]["type"].as_str().filter(|t| plain_value(t)).unwrap_or("unknown");
+    let message = error_message(body).to_ascii_lowercase();
+    let mentions: Vec<&str> = [
+        ("fast mode", "fast_mode"),
+        ("speed", "speed"),
+        ("usage credits", "usage_credits"),
+        ("extra usage", "extra_usage"),
+        ("overage", "overage"),
+    ]
+    .into_iter()
+    .filter(|(phrase, _)| message.contains(phrase))
+    .map(|(_, mention)| mention)
+    .collect();
+    tracing::info!(request_id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)), status, fast,
+        error_type = %error_type, mentions = %mentions.join(","), limits = %claude_limit_headers(headers), "Claude refusal");
+}
+
+/// Claude's rate-limit headers, as sorted `name=value` pairs for the log. A value other
+/// than a short plain token (a number, status, time or reason code) is `redacted`.
+fn claude_limit_headers(headers: &reqwest::header::HeaderMap) -> String {
+    let mut pairs: Vec<String> = headers
+        .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            name.len() <= 80
+                && (name.starts_with("anthropic-ratelimit-") || name == "retry-after" || name == "x-should-retry")
+        })
+        .map(|(name, value)| {
+            let value = value.to_str().ok().filter(|v| plain_value(v)).unwrap_or("redacted");
+            format!("{name}={value}")
+        })
+        .collect();
+    pairs.sort();
+    pairs.join(" ")
+}
+
+/// A short token safe to log: letters, digits and `._:+-`, at most 64 bytes.
+fn plain_value(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:+-".contains(&b))
 }
 
 /// The provider's own Retry-After in seconds, for logs.
@@ -1494,7 +1554,8 @@ pub(crate) struct PlanMemo {
 pub(crate) struct Plan {
     pub(crate) shape: AttemptShape,
     pub(crate) wire: WireRequest,
-    /// Generation controls a translation dropped; `None` when passed through.
+    /// Generation controls dropped: by a translation, or Claude fast mode on an account
+    /// that can't run it (`upstream::claude_speed_downgrade`). `None` when nothing could be.
     pub(crate) control_downgrades: Option<Vec<&'static str>>,
 }
 
@@ -1524,9 +1585,7 @@ impl Refusal {
 
 /// Records a refusal on the request's log and answers it.
 fn refuse(tracker: &mut Tracker, refusal: Refusal) -> Reply {
-    if let Some(dropped) = refusal.control_downgrades {
-        note_downgrades(tracker, dropped);
-    }
+    note_downgrades(tracker, refusal.control_downgrades.unwrap_or_default());
     if let Some(policy) = refusal.cache_policy {
         tracker.cache_policy(policy);
     }
@@ -1537,7 +1596,7 @@ fn refuse(tracker: &mut Tracker, refusal: Refusal) -> Reply {
 fn note_downgrades(tracker: &mut Tracker, dropped: Vec<&'static str>) {
     for reason in &dropped {
         if crate::diagnostics::warn_once(reason, std::time::Duration::from_secs(600)) {
-            tracing::warn!(request_id = tracker.log.id, reason, "translated generation control dropped");
+            tracing::warn!(request_id = tracker.log.id, reason, "generation control dropped");
         }
     }
     tracker.log.control_downgrades = dropped;
@@ -1649,7 +1708,7 @@ pub(crate) fn plan_attempt(
             Format::Chat => formats::chat::build_request(req, upstream_model),
         }
     };
-    let control_downgrades = (!passthrough).then(|| {
+    let mut control_downgrades = (!passthrough).then(|| {
         let openai =
             provider == Provider::Codex && (upstream_model.starts_with("gpt-5") || upstream_model.starts_with("gpt-6"));
         let mut dropped = formats::generation_controls(&mut body, native, openai, cfg.translation.allow_service_tier);
@@ -1666,6 +1725,12 @@ pub(crate) fn plan_attempt(
         }
         dropped
     });
+    // Only a native Claude body can carry `speed`: translation has no field for it.
+    if provider == Provider::Claude
+        && let Some(reason) = upstream::claude_speed_downgrade(acct, cfg, upstream_model, &body)
+    {
+        control_downgrades.get_or_insert_with(Vec::new).push(reason);
+    }
     let rejected = |body: &Value, reason: &str, downgrade: Option<String>| {
         let mut policy =
             crate::cache::Policy::for_request(input.requested_cache, body, native, input.cache_scope, downgrade);
@@ -1724,10 +1789,18 @@ pub(crate) fn plan_attempt(
     if prepared.headers.iter().any(|(name, _)| name == "x-grok-conv-id") {
         policy.key_scope = input.cache_scope;
     }
+    let fast = prepared.body.get("speed").and_then(Value::as_str) == Some("fast");
     let payload = prepared.raw.unwrap_or_else(|| serde_json::to_vec(&prepared.body).unwrap_or_default());
     Ok(Plan {
         shape,
-        wire: WireRequest { url: prepared.url, headers: prepared.headers, payload: payload.into(), policy, names },
+        wire: WireRequest {
+            url: prepared.url,
+            headers: prepared.headers,
+            payload: payload.into(),
+            policy,
+            names,
+            fast,
+        },
         control_downgrades,
     })
 }
@@ -1953,9 +2026,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 Ok(plan) => plan,
                 Err(refusal) => return refuse(&mut tracker, *refusal),
             };
-            if let Some(dropped) = plan.control_downgrades {
-                note_downgrades(&mut tracker, dropped);
-            }
+            // A new plan's reasons replace the last account's, even when it dropped nothing.
+            note_downgrades(&mut tracker, plan.control_downgrades.unwrap_or_default());
             if cfg.debug {
                 tracing::debug!(provider = provider.as_str(), "upstream request prepared");
             }
@@ -2062,6 +2134,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             let msg = error_message(&text);
             tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                 status, failure_kind = crate::diagnostics::failure_kind(status, Some(&msg)), "upstream rejected request");
+            if provider == Provider::Claude && (status == 429 || prepared.fast) {
+                log_claude_refusal(tracker.log.id, &acct, status, prepared.fast, &headers, &text);
+            }
             let client_body = if passthrough {
                 serde_json::from_str(&text).unwrap_or_else(|_| formats::error_body(call.format, status, &msg))
             } else {
@@ -3063,6 +3138,65 @@ pub fn estimate_tokens(body: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn upstream_headers(pairs: &[(&'static str, String)]) -> reqwest::header::HeaderMap {
+        pairs
+            .iter()
+            .map(|(name, value)| (reqwest::header::HeaderName::from_static(name), value.parse().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn claude_overage_reset_is_never_taken_for_a_cooldown() {
+        const CLAIM: &str = "anthropic-ratelimit-unified-representative-claim";
+        const RESET: &str = "anthropic-ratelimit-unified-reset";
+        let now = Utc::now().timestamp();
+        let month = (now + 20 * 86_400).to_string();
+        // Paid overage resets at the monthly billing boundary, not with a subscription window.
+        let overage = upstream_headers(&[(CLAIM, "overage".into()), (RESET, month.clone())]);
+        assert_eq!(reset_after(&overage, ""), None);
+        let five_hour = upstream_headers(&[(CLAIM, "five_hour".into()), (RESET, (now + 7200).to_string())]);
+        assert_eq!(reset_after(&five_hour, "").map(|t| t.timestamp()), Some(now + 7200));
+        // No subscription window runs longer than a week.
+        let unclaimed = reset_after(&upstream_headers(&[(RESET, month)]), "").unwrap();
+        assert!(unclaimed > Utc::now() + Duration::days(6) && unclaimed <= Utc::now() + Duration::days(7));
+        let retry = upstream_headers(&[("retry-after", "30".into()), (CLAIM, "overage".into())]);
+        assert!(reset_after(&retry, "").is_some_and(|t| t <= Utc::now() + Duration::seconds(30)));
+
+        // Without a window reading, an overage refusal pauses the model briefly.
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "test".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let acct = pool.all().remove(0);
+        let refusal = r#"{"type":"error","error":{"type":"rate_limit_error","message":"weekly limit"}}"#;
+        assert!(quota_exhausted(&acct, "claude-opus-5-5", 429, refusal));
+        mark_quota_exhausted(&acct, "claude-opus-5-5", &overage, refusal);
+        let until = acct.exhausted_until("claude-opus-5-5").unwrap();
+        assert!(until <= Utc::now() + Duration::minutes(5), "{until}");
+    }
+
+    #[test]
+    fn claude_limit_headers_list_only_rate_limit_names_and_values() {
+        let headers = upstream_headers(&[
+            ("anthropic-ratelimit-unified-status", "rejected".into()),
+            ("anthropic-ratelimit-unified-overage-disabled-reason", "out_of_credits".into()),
+            ("retry-after", "60".into()),
+            ("x-should-retry", "true".into()),
+            ("anthropic-ratelimit-unified-note", "Bearer sk-secret https://private.test/?key=secret".into()),
+            ("request-id", "req_secret".into()),
+            ("set-cookie", "session=secret".into()),
+        ]);
+        assert_eq!(
+            claude_limit_headers(&headers),
+            "anthropic-ratelimit-unified-note=redacted \
+             anthropic-ratelimit-unified-overage-disabled-reason=out_of_credits \
+             anthropic-ratelimit-unified-status=rejected retry-after=60 x-should-retry=true"
+        );
+    }
 
     #[test]
     fn continuation_deltas_are_bounded_with_or_without_named_sse_events() {

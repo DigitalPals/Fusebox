@@ -374,6 +374,7 @@ session-affinity-idle-seconds: 86400 # forget assignments after a day without re
 provider-session-idle-seconds: 1800 # fresh provider identity after 30 minutes idle; 1–86400
 codex-websockets: true        # native WebSocket relay to ChatGPT
 claude-cloak: true            # present non-Claude-Code clients as Claude Code on OAuth accounts
+claude-subscription-fast-mode: false # send Claude fast mode to subscriptions only with usage credits
 banked-resets: false          # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
 tls:                          # serve HTTPS directly (or put a proxy in front, see below)
   enable: false
