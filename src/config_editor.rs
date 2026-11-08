@@ -825,7 +825,11 @@ pub fn restart_fields(startup: &Config, current: &Config) -> Vec<&'static str> {
     {
         fields.push("HTTPS");
     }
-    if serde_json::to_value(&startup.usage).ok() != serde_json::to_value(&current.usage).ok() {
+    // The size warning is read live; every other usage setting is the writer's.
+    let storage = |c: &Config| {
+        serde_json::to_value(crate::usage::types::UsageConfig { warn_database_mb: 0, ..c.usage.clone() }).ok()
+    };
+    if storage(startup) != storage(current) {
         fields.push("usage storage");
     }
     if startup.debug != current.debug {
@@ -1082,6 +1086,12 @@ mod tests {
         assert!(restart_fields(&startup, &startup).is_empty());
         current.proxy_protocol_port = 8319;
         assert!(restart_fields(&startup, &current).contains(&"PROXY protocol port"));
+        // The size warning applies at once; how long usage is kept needs the writer restarted.
+        let mut usage = startup.clone();
+        usage.usage.warn_database_mb = 4096;
+        assert!(restart_fields(&startup, &usage).is_empty());
+        usage.usage.totals_retention_days = 3650;
+        assert_eq!(restart_fields(&startup, &usage), ["usage storage"]);
     }
 
     #[test]

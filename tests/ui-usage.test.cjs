@@ -694,3 +694,55 @@ test('a failed entrypoints read only leaves out their card and tab', async () =>
   assert.equal(d.run('USAGE_PARTS.entrypoints()'), '');
   assert.doesNotMatch(d.run('usageBreakdownHTML()'), />Entrypoint </);
 });
+
+test('long ranges chart by month, with a day toggle, and kept totals read like any other day', () => {
+  assert.deepEqual(helpers.months(['2026-09-29', '2026-09-30', '2026-10-01', '2027-01-02']), ['2026-09', '2026-10', '2027-01']);
+  assert.deepEqual(helpers.byMonth([{ date: '2026-10-05', group: 'a', observations: 1 }]), [{ date: '2026-10', group: 'a', observations: 1 }]);
+  assert.equal(helpers.monthLabel('2027-01'), 'Jan 2027');
+  const d = dashboard();
+  const trend = [
+    { date: '2026-09-12', group: 'anthropic', observations: 4, estimated_cost_nanos: 3e9 },
+    { date: '2026-10-05', group: 'anthropic', observations: 9, estimated_cost_nanos: 9e9 },
+    { date: '2026-10-20', group: 'openai', observations: 1, estimated_cost_nanos: 2e9 },
+    { date: '2027-01-02', group: 'anthropic', observations: 2, estimated_cost_nanos: 1e9 },
+  ];
+  // Records exist from Oct 4 on; earlier days are kept totals. The proxy began Sep 12.
+  d.seed({ preset: 'custom', range: { start: '2026-08-01', end: '2027-01-03', through: '2027-01-02' }, timezone: 'UTC',
+    summary: { combined: { trend, totals: { observations: 16, estimated_cost_nanos: 15e9 }, proxy_first_event_at_ms: Date.UTC(2026, 8, 12, 7), summarized_before_ms: Date.UTC(2026, 9, 4, 7, 7) } } });
+  let html = d.run('usageChartHTML()');
+  assert.match(html, /BY MONTH/);
+  assert.match(html, /Peak month · Oct 2026/);
+  assert.equal(d.run('usageChartData().series.length'), 6);
+  assert.equal(d.run('JSON.stringify(usageChartData().series.map((m) => m.cost))'), JSON.stringify([0, 3e9, 11e9, 0, 0, 1e9]));
+  assert.match(html, />Aug &#39;26</); assert.match(html, />Sep</); assert.match(html, />Jan &#39;27</);
+  assert.match(html, /aria-label="Sep 2026: \$3\.00/);
+  // August is wholly before the proxy; September is not, though it began mid-month.
+  d.run('Usage.hoverDay = "2026-08"');
+  assert.match(d.run('usageChartHTML()'), /Before the proxy was set up · history only/);
+  d.run('Usage.hoverDay = "2026-09"');
+  assert.doesNotMatch(d.run('usageChartHTML()'), /Before the proxy was set up/);
+  assert.match(d.run('usageCostHTML()'), /Before Sun Oct 4, calls are kept as totals/);
+  // Bars per day on request; the choice only shows when a range spans more than a month.
+  d.run('Usage.period = "day"; Usage.hoverDay = null');
+  html = d.run('usageChartHTML()');
+  assert.match(html, /BY DAY/);
+  assert.equal(d.run('usageChartData().series.length'), 155);
+  assert.match(html, /data-usage-act="period" data-value="day" aria-pressed="true"/);
+  d.seed({ range: { start: '2026-10-05', end: '2026-10-21', through: '2026-10-20' } });
+  html = d.run('usageChartHTML()');
+  assert.match(html, /BY DAY/);
+  assert.doesNotMatch(html, /data-usage-act="period"/);
+  assert.doesNotMatch(d.run('usageCostHTML()'), /kept as totals/, 'a range of stored records has no note');
+});
+
+test('the twelve-month preset and custom dates reach back past a year', () => {
+  const d = dashboard();
+  d.seed({ preset: '365', range: helpers.range(365) });
+  assert.equal(d.run('usageRangeLabel()'), 'Last 12 months');
+  assert.equal(d.run('usagePeriod()'), 'month');
+  assert.match(d.run('usageHeadHTML()'), /data-value="365" aria-pressed="true">12 months/);
+  d.seed({ preset: 'custom' });
+  const today = d.run('usageToday()');
+  const min = d.run('usageHeadHTML()').match(/name="start" value="[^"]*" min="([^"]+)"/)[1];
+  assert.equal(min, helpers.shift(today, -3650));
+});

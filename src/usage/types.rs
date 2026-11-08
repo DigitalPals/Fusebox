@@ -288,7 +288,10 @@ pub fn valid_label(s: &str) -> Result<(), String> {
 pub struct UsageConfig {
     pub enabled: bool,
     pub database: Option<String>,
+    /// How long each request's record is kept.
     pub retention_days: u32,
+    /// How long the 15-minute totals of deleted records are kept; 0 keeps them for good.
+    pub totals_retention_days: u32,
     pub queue_capacity: usize,
     pub pricing_overrides: Option<String>,
     /// A fault says so when the database grows past this many MiB; 0 turns it off.
@@ -300,6 +303,7 @@ impl Default for UsageConfig {
             enabled: true,
             database: None,
             retention_days: 90,
+            totals_retention_days: 0,
             queue_capacity: 1024,
             pricing_overrides: None,
             warn_database_mb: 2048,

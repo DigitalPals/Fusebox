@@ -29,7 +29,7 @@ pub(super) const AMOUNTS: [&str; 10] = [
     "write_12h",
 ];
 
-fn client(alias: &str) -> String {
+pub(super) fn client(alias: &str) -> String {
     format!("COALESCE({alias}.client_id,CASE WHEN {alias}.origin_id LIKE 'collector:%' THEN {alias}.origin_id END)")
 }
 
@@ -37,7 +37,7 @@ fn entry_dims(alias: &str) -> String {
     format!("json_array({alias}.provider,{alias}.model,{alias}.account_id,{})", client(alias))
 }
 
-fn facet_dims(alias: &str) -> String {
+pub(super) fn facet_dims(alias: &str) -> String {
     format!("json_array({alias}.provider,{alias}.model,{alias}.account_id,{},{alias}.source)", client(alias))
 }
 

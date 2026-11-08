@@ -49,6 +49,11 @@ impl Metrics {
     }
     /// Adds a rollup bucket: the same result as adding each of its entries.
     fn merge(&mut self, counts: [i64; 4], known: &[i64; 10], sums: &[i64; 10]) {
+        self.merge_kept(counts, known, &sums.map(Some));
+    }
+    /// Adds a bucket of kept totals, where a sum past 64 bits (None) can no longer
+    /// be recomputed from entries and is reported out of range.
+    fn merge_kept(&mut self, counts: [i64; 4], known: &[i64; 10], sums: &[Option<i64>; 10]) {
         self.observations += counts[0];
         self.partial += counts[1];
         self.missing += counts[2];
@@ -57,7 +62,7 @@ impl Metrics {
             if known[i] > 0 {
                 self.known[i] += known[i];
                 if !self.overflow[i] {
-                    self.sums[i] = self.sums[i].unwrap_or(0).checked_add(i128::from(sums[i]));
+                    self.sums[i] = sums[i].and_then(|n| self.sums[i].unwrap_or(0).checked_add(i128::from(n)));
                     self.overflow[i] = self.sums[i].is_none();
                 }
             }
@@ -203,18 +208,7 @@ impl Summary {
             let date = self.dates.date(row.get(0)?).context("usage timestamp out of bounds")?;
             let dims = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
             let tokens: [Option<i64>; 4] = [row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?];
-            let basis = row.get_ref(9)?.as_str()?.trim_start_matches("local_override:");
-            let reason = if tokens.iter().all(Option::is_none) {
-                "missing_usage"
-            } else if tokens.iter().any(Option::is_none) {
-                "incomplete_usage"
-            } else if basis == "invalid_tokens" {
-                "invalid_usage"
-            } else if basis == "unknown_model" {
-                "unknown_model"
-            } else {
-                "unsupported_pricing"
-            };
+            let reason = history::unpriced_reason(tokens, row.get_ref(9)?.as_str()?);
             self.add(date, &dims, |metrics| *metrics.unpriced_reasons.entry(reason).or_default() += 1);
         }
         Ok(())
@@ -252,6 +246,66 @@ impl Summary {
             self.add(date, &dims, |m| m.merge(counts, &known, &sums));
         }
         Ok(true)
+    }
+}
+
+impl Summary {
+    /// Adds the totals kept after their records were deleted (see `history`). They
+    /// hold nothing a live read also counts, so every path adds them the same way.
+    /// `entrypoint` reads the entrypoint totals, for one entrypoint's calls.
+    fn kept(&mut self, conn: &Connection, q: &Query, r: &Range, entrypoint: bool) -> Result<()> {
+        // Imports name no entrypoint.
+        if !history::exists(conn)? || entrypoint && q.source.as_deref().is_some_and(|s| s != "proxy") {
+            return Ok(());
+        }
+        let (where_sql, values) = rollup::filter(q, history::buckets(r.start, r.end), !entrypoint, entrypoint);
+        let (table, extra) = if entrypoint {
+            ("usage_history_entrypoints", "'proxy',0,0")
+        } else {
+            ("usage_history", "source,matched,weak")
+        };
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT bucket,provider,model,account_id,client,{extra},observations,partial,missing,pricing_partial,
+               k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,u0,u1,u2,u3,u4 FROM {} WHERE {where_sql}",
+            history::named(table)
+        ))?;
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            read::check()?;
+            self.matched += row.get::<_, i64>(6)?;
+            let counts: [i64; 4] = [row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?];
+            if counts[0] <= 0 {
+                continue;
+            }
+            let date =
+                self.dates.date(row.get::<_, i64>(0)? * rollup::BUCKET_MS).context("usage timestamp out of bounds")?;
+            let dims: [Option<String>; 4] = [row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?];
+            let mut known = [0_i64; 10];
+            let mut sums = [None; 10];
+            for i in 0..METRICS.len() {
+                known[i] = row.get(12 + i)?;
+                if let rusqlite::types::ValueRef::Integer(n) = row.get_ref(22 + i)? {
+                    sums[i] = Some(n);
+                }
+            }
+            let mut reasons = [0_i64; 5];
+            for (i, reason) in reasons.iter_mut().enumerate() {
+                *reason = row.get(32 + i)?;
+            }
+            if row.get_ref(5)?.as_str()? != "proxy" {
+                self.history_only += counts[0];
+                self.weak_identity += row.get::<_, i64>(7)?;
+            }
+            self.add(date, &dims, |m| {
+                m.merge_kept(counts, &known, &sums);
+                for (reason, count) in history::REASONS.iter().zip(reasons) {
+                    if count > 0 {
+                        *m.unpriced_reasons.entry(reason).or_default() += count;
+                    }
+                }
+            });
+        }
+        Ok(())
     }
 }
 
@@ -315,6 +369,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
         }
     }
     summary.unpriced_reasons(conn, &where_sql, &values)?;
+    summary.kept(conn, q, &r, filtered)?;
     let Summary { totals, matched, history_only, weak_identity, trends, breakdowns, mut client_models, .. } = summary;
     let mut totals = totals.value();
     totals["matched"] = json!(matched);
@@ -340,6 +395,12 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     let proxy_first: Option<i64> = conn
         .query_row("SELECT event_at_ms FROM usage_observations INDEXED BY usage_event_time WHERE source='proxy' ORDER BY event_at_ms LIMIT 1",[],|r|r.get(0))
         .optional()?;
+    // Records are deleted after retention; the proxy began with its oldest kept totals.
+    let proxy_first = match (history::first_proxy(conn)?, proxy_first) {
+        (Some(kept), Some(first)) => Some(kept.min(first)),
+        (kept, first) => kept.or(first),
+    };
+    let summarized_before = history::summarized_before(conn)?;
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |row| row.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
     let stack = q.stack.as_deref().unwrap_or("provider");
@@ -352,7 +413,7 @@ fn summary_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<Value
     read::check()?;
     Ok(json!({"range":{"start":r.start,"end":r.end,"timezone":r.tz.to_string()},
         "combined":{"basis":"One entry per provider response. Imported entries that share a response ID with a proxy entry are excluded.",
-            "totals":totals,"proxy_first_event_at_ms":proxy_first,"stack":stack,
+            "totals":totals,"proxy_first_event_at_ms":proxy_first,"summarized_before_ms":summarized_before,"stack":stack,
             "trend":trends[usize::from(stack=="model")],"trends":{"provider":trends[0],"model":trends[1]},"breakdowns":out},
         "facets":facets,
         "pricing":{"version":catalogue.version,"verified_at":catalogue.verified_at,
@@ -503,6 +564,39 @@ fn entrypoints_with(conn: &Connection, q: &Query, use_rollups: bool) -> Result<V
             days.clear();
             entries(&mut groups, &mut days, &where_sql, &values)?;
         }
+        if history::exists(conn)? {
+            let (sql, values) = rollup::filter(q, history::buckets(r.start, r.end), false, true);
+            let mut statement = conn.prepare_cached(&format!(
+                "SELECT bucket,entrypoint,observations,partial,missing,pricing_partial,k0,s0,k1,s1,k6,s6 FROM {} WHERE {sql}",
+                history::named("usage_history_entrypoints")
+            ))?;
+            let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+            while let Some(row) = rows.next()? {
+                read::check()?;
+                let day = date(row.get::<_, i64>(0)? * rollup::BUCKET_MS)?;
+                let mut numbers = [0_i128; 10];
+                for (i, number) in numbers.iter_mut().enumerate() {
+                    *number = match row.get_ref(2 + i)? {
+                        rusqlite::types::ValueRef::Integer(n) => i128::from(n),
+                        rusqlite::types::ValueRef::Real(n) => n as i128,
+                        _ => 0,
+                    };
+                }
+                let entrypoint: String = row.get(1)?;
+                let add = |c: &mut Calls| {
+                    c.observations += numbers[0] as i64;
+                    c.partial += numbers[1] as i64;
+                    c.missing += numbers[2] as i64;
+                    c.pricing_partial += numbers[3] as i64;
+                    for i in 0..3 {
+                        c.known[i] += numbers[4 + 2 * i] as i64;
+                        c.sums[i] += numbers[5 + 2 * i];
+                    }
+                };
+                add(days.entry((day, entrypoint.clone())).or_default());
+                add(groups.entry(entrypoint).or_default());
+            }
+        }
     }
     read::check()?;
     let mut breakdown: Vec<_> = groups.into_iter().collect();
@@ -632,6 +726,18 @@ fn facets(conn: &Connection, q: &Query, r: &Range, use_rollups: bool) -> Result<
             let (sql, values) = raw(r);
             collect_facets(conn, &sql, &values, &mut facets)?;
         }
+    }
+    if history::exists(conn)? {
+        let (sql, values) = rollup::filter(q, history::buckets(r.start, r.end), true, false);
+        collect_facets(
+            conn,
+            &format!(
+                "SELECT DISTINCT provider,model,account_id,client,source FROM {} WHERE {sql}",
+                history::named("usage_history_facets")
+            ),
+            &values,
+            &mut facets,
+        )?;
     }
     let mut out = serde_json::Map::new();
     let mut collector_labels = CollectorLabels::default();

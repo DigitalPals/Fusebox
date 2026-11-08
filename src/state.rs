@@ -74,10 +74,11 @@ impl App {
         // Tests opt in with an explicit isolated database; never touch a user's default DB.
         let usage_enabled = cfg.usage.enabled && (!cfg!(test) || cfg.usage.database.is_some());
         let (usage, usage_error) = if usage_enabled {
-            match crate::usage::store::Store::open(
+            match crate::usage::store::Store::open_keeping(
                 &crate::usage::database_path(&cfg, &cfg_path),
                 cfg.usage.queue_capacity,
                 cfg.usage.retention_days,
+                cfg.usage.totals_retention_days,
                 cfg.usage.pricing_overrides.as_deref().map(std::path::Path::new),
             ) {
                 Ok(store) => (Some(store), None),

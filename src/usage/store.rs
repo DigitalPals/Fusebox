@@ -25,10 +25,12 @@ mod client_totals;
 mod codec;
 mod compact;
 mod dashboard;
+mod history;
 mod read;
 mod rollback;
 mod rollup;
 pub use compact::{DatabaseStats, compact, downgrade};
+pub(crate) use history::floor as record_floor;
 pub(crate) use read::ReadError;
 pub use rollback::rollback_copy;
 #[cfg(test)]
@@ -206,7 +208,19 @@ impl Health {
     }
 }
 impl Store {
+    /// Keeps the totals of deleted records for good.
+    #[cfg(test)]
     pub fn open(path: &Path, queue_capacity: usize, retention_days: u32, overrides: Option<&Path>) -> Result<Self> {
+        Self::open_keeping(path, queue_capacity, retention_days, 0, overrides)
+    }
+    /// `totals_days` bounds the totals kept after records are deleted; 0 keeps them.
+    pub fn open_keeping(
+        path: &Path,
+        queue_capacity: usize,
+        retention_days: u32,
+        totals_days: u32,
+        overrides: Option<&Path>,
+    ) -> Result<Self> {
         if !(1..=65_536).contains(&queue_capacity) {
             bail!("usage queue capacity must be 1..65536");
         }
@@ -216,13 +230,16 @@ impl Store {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
+        if totals_days > 36_600 {
+            bail!("usage totals retention days must be 0..36600");
+        }
         let catalogue = Catalogue::load(overrides)?;
-        Self::start(path, queue_capacity, retention_days, catalogue, None)
+        Self::start(path, queue_capacity, (retention_days, totals_days), catalogue, None)
     }
     /// Standalone outboxes install their allocation bound before migrations or
     /// writer-session startup can allocate pages. They never switch through WAL.
     pub(crate) fn open_collector(path: &Path, byte_limit: u64) -> Result<Self> {
-        Self::start(path, 128, 3650, Catalogue::load(None)?, Some(byte_limit))
+        Self::start(path, 128, (3650, 0), Catalogue::load(None)?, Some(byte_limit))
     }
     /// Admin/import access preserves the configured retention horizon and catalogue.
     pub fn open_existing(path: &Path, queue_capacity: usize) -> Result<Self> {
@@ -236,19 +253,27 @@ impl Store {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let retention: String =
             conn.query_row("SELECT value FROM usage_meta WHERE key='retention_days'", [], |r| r.get(0))?;
+        // Databases written before totals were kept have no setting: keep them all.
+        let totals: Option<String> = conn
+            .query_row("SELECT value FROM usage_meta WHERE key='totals_retention_days'", [], |r| r.get(0))
+            .optional()?;
         let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
         let saved: Catalogue = serde_json::from_str(&raw)?;
         let catalogue = if refresh_rates && !saved.local_override { Catalogue::load(None)? } else { saved };
-        Self::start(path, queue_capacity, retention.parse().context("stored retention invalid")?, catalogue, None)
+        let retention = (
+            retention.parse().context("stored retention invalid")?,
+            totals.as_deref().unwrap_or("0").parse().context("stored totals retention invalid")?,
+        );
+        Self::start(path, queue_capacity, retention, catalogue, None)
     }
     fn start(
         path: &Path,
         queue_capacity: usize,
-        retention_days: u32,
+        (retention_days, totals_days): (u32, u32),
         catalogue: Catalogue,
         byte_limit: Option<u64>,
     ) -> Result<Self> {
-        if !(1..=65_536).contains(&queue_capacity) || !(1..=36_600).contains(&retention_days) {
+        if !(1..=65_536).contains(&queue_capacity) || !(1..=36_600).contains(&retention_days) || totals_days > 36_600 {
             bail!("invalid stored usage settings");
         }
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
@@ -288,11 +313,15 @@ impl Store {
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS usage_entries_unpriced_time ON usage_entries(event_at_ms) WHERE cost_nanos IS NULL;",
             )?;
+            // Outboxes forward records and keep no totals of their own.
+            history::ensure(&conn)?;
         }
         conn.execute("INSERT INTO usage_meta(key,value) VALUES('catalogue',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(&catalogue)?])?;
         conn.execute("INSERT INTO usage_meta(key,value) VALUES('retention_days',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[retention_days.to_string()])?;
+        conn.execute("INSERT INTO usage_meta(key,value) VALUES('totals_retention_days',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[totals_days.to_string()])?;
         let cutoff = (Utc::now().timestamp_millis() - i64::from(retention_days) * 86_400_000).max(0);
-        purge_conn(&mut conn, cutoff)?;
+        purge_conn(&mut conn, cutoff, true)?;
+        history::trim(&mut conn, totals_days)?;
         // Collector outboxes only forward evidence; the server prices it on ingestion.
         let startup_repriced = if byte_limit.is_none() { reprice(&mut conn)? } else { 0 };
         if startup_repriced > 0 {
@@ -322,7 +351,7 @@ impl Store {
             historical_rejected,
             historical_errors,
             prior_unclosed,
-            database: Mutex::new(compact::stats(&conn, path, true).ok()),
+            database: Mutex::new(compact::stats(&conn, path, true, retention_days).ok()),
             ..Default::default()
         });
         let stats_path = path.to_path_buf();
@@ -337,7 +366,7 @@ impl Store {
             .spawn(move || {
                 let mut last_retention = Utc::now().timestamp_millis();
                 let refresh_stats = |conn: &Connection, compressing: bool| {
-                    if let Ok(stats) = compact::stats(conn, &stats_path, compressing) {
+                    if let Ok(stats) = compact::stats(conn, &stats_path, compressing, retention_days) {
                         *worker_health.database.lock().unwrap() = Some(stats);
                     }
                 };
@@ -358,7 +387,10 @@ impl Store {
                     };
                     let now = Utc::now().timestamp_millis();
                     if now - last_retention >= 3_600_000 {
-                        if let Err(e) = purge_conn(&mut conn, (now - i64::from(retention_days) * 86_400_000).max(0)) {
+                        if let Err(e) =
+                            purge_conn(&mut conn, (now - i64::from(retention_days) * 86_400_000).max(0), true)
+                                .and_then(|_| history::trim(&mut conn, totals_days))
+                        {
                             worker_health.fail(&e);
                         } else if let Err(e) = compact::release_free_pages(&conn) {
                             tracing::warn!("usage database: could not release free pages: {e:#}");
@@ -627,8 +659,10 @@ impl Store {
     pub async fn details(&self, q: Query) -> Result<Value> {
         self.read(move |conn| details(conn, &q)).await
     }
+    /// Deletes everything before `before_ms`, kept totals included: an explicit
+    /// deletion, unlike retention, which keeps the totals of the records it deletes.
     pub async fn purge(&self, before_ms: i64) -> Result<Value> {
-        self.call(move |conn| purge_conn(conn, before_ms)).await
+        self.call(move |conn| purge_conn(conn, before_ms, false)).await
     }
 }
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -978,8 +1012,7 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
     }
     let raw: String = conn.query_row("SELECT value FROM usage_meta WHERE key='catalogue'", [], |r| r.get(0))?;
     let catalogue: Catalogue = serde_json::from_str(&raw)?;
-    let watermark: i64 =
-        conn.query_row("SELECT CAST(value AS INTEGER) FROM usage_meta WHERE key='purge_before_ms'", [], |r| r.get(0))?;
+    let watermark = history::floor(conn)?;
     // Read before the savepoint: its first statement must be the write, or a commit
     // by another connection in between turns the upgrade into SQLITE_BUSY_SNAPSHOT.
     let mut documents = Documents::new(conn)?;
@@ -1071,11 +1104,14 @@ pub fn suppress_origin_event(
     tx.commit()?;
     Ok(json!({"suppressed_groups":keys.len()}))
 }
-fn purge_conn(conn: &mut Connection, before_ms: i64) -> Result<Value> {
+/// Deletes the records before `before_ms`. Retention keeps their totals
+/// (`keep_totals`); an explicit purge deletes the kept totals before then too.
+fn purge_conn(conn: &mut Connection, before_ms: i64, keep_totals: bool) -> Result<Value> {
     if before_ms < 0 || before_ms > Utc::now().timestamp_millis() + 86_400_000 {
         bail!("purge timestamp out of bounds");
     }
     let tx = conn.savepoint()?;
+    let keeping = if keep_totals { history::stage(&tx, before_ms)? } else { history::forget(&tx, before_ms)? };
     let mut affected = Vec::new();
     {
         let mut statement = tx.prepare("SELECT canonical_key FROM usage_entries WHERE event_at_ms<?1")?;
@@ -1094,6 +1130,9 @@ fn purge_conn(conn: &mut Connection, before_ms: i64) -> Result<Value> {
     tx.execute("DELETE FROM usage_suppressed WHERE NOT EXISTS(SELECT 1 FROM usage_observations o WHERE o.source=usage_suppressed.source AND o.source_event_id=usage_suppressed.source_event_id)",[])?;
     for key in affected {
         rebuild_entries(&tx, &key)?;
+    }
+    if keeping {
+        history::seal(&tx, before_ms)?;
     }
     tx.execute(
         "UPDATE usage_meta SET value=CAST(MAX(CAST(value AS INTEGER),?1) AS TEXT) WHERE key='purge_before_ms'",
@@ -1374,3 +1413,7 @@ mod entrypoint_tests;
 #[cfg(test)]
 #[path = "store/entrypoint_bench.rs"]
 mod entrypoint_bench;
+
+#[cfg(test)]
+#[path = "store/history_tests.rs"]
+mod history_tests;

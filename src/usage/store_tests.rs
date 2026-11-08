@@ -695,6 +695,7 @@ fn dashboard_metrics(value: &mut Value) {
                 "trends",
                 "models",
                 "unpriced_reasons",
+                "summarized_before_ms",
             ] {
                 fields.remove(key);
             }
@@ -1218,7 +1219,7 @@ fn insert_legacy(c: &mut Connection, observations: &[Observation]) -> Result<Val
 async fn t3_repair_and_explicit_refresh_preserve_evidence_unknowns_and_audit() {
     let p = path("t3-reprice");
     let legacy = Catalogue::provider_fixture();
-    let store = Store::start(&p, 16, 3650, legacy, None).unwrap();
+    let store = Store::start(&p, 16, (3650, 0), legacy, None).unwrap();
     let mut haiku = event("proxy", "dated-haiku");
     haiku.provider = "anthropic".into();
     haiku.actual_model = Some("claude-haiku-4-5-20251001".into());
@@ -1375,7 +1376,7 @@ async fn startup_reprice_prices_old_unpriced_rows_once_and_keeps_priced_rows() {
 #[tokio::test]
 async fn startup_repairs_unpriced_claude_regions_and_preserves_priced_snapshots() {
     let p = path("region-reprice");
-    let store = Store::start(&p, 8, 3650, Catalogue::provider_fixture(), None).unwrap();
+    let store = Store::start(&p, 8, (3650, 0), Catalogue::provider_fixture(), None).unwrap();
     let mut unavailable = anthropic("proxy", "unavailable", Some("msg-unavailable"), &Utc::now().to_rfc3339());
     unavailable.inference_geo = Some("not_available".into());
     let mut unknown = unavailable.clone();
@@ -1494,7 +1495,7 @@ async fn refreshed_catalogue_repairs_known_prices_and_keeps_an_audit() {
             r.tier_multipliers.remove("ultrafast");
         }
     }
-    let store = Store::start(&p, 8, 3650, old, None).unwrap();
+    let store = Store::start(&p, 8, (3650, 0), old, None).unwrap();
     let mut sonnet = event("proxy", "sonnet");
     sonnet.provider = "anthropic".into();
     sonnet.actual_model = Some("claude-sonnet-5-5".into());
@@ -1558,7 +1559,7 @@ async fn repricing_preserves_organization_catalogue_and_established_prices() {
             r.cache_read_nanos_per_token = Some(200);
         }
     }
-    let store = Store::start(&p, 8, 3650, old, None).unwrap();
+    let store = Store::start(&p, 8, (3650, 0), old, None).unwrap();
     let mut sonnet = event("proxy", "organization-sonnet");
     sonnet.provider = "anthropic".into();
     sonnet.actual_model = Some("claude-sonnet-5-5".into());

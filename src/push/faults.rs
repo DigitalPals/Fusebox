@@ -90,13 +90,22 @@ pub fn storage(stats: Option<&crate::usage::store::DatabaseStats>, warn_mb: u64)
         ));
     }
     (warn_mb > 0 && stats.bytes > warn_mb << 20).then(|| {
+        // Where it levels off says more than daily growth: retention deletes as much.
+        let outlook = if stats.retention_days > 0 && stats.settles_near_bytes > 0 {
+            format!(
+                "at today's traffic, {} days of records level off near {}",
+                stats.retention_days,
+                mb(stats.settles_near_bytes)
+            )
+        } else {
+            format!("grows about {} a day", mb(stats.growth_bytes_per_day))
+        };
         fault(
             "warn",
             "Usage database is large",
             format!(
-                "It is {} and grows about {} a day. Lower usage.retention-days, or raise usage.warn-database-mb.",
+                "It is {}; {outlook}. Lower usage.retention-days (costs and tokens stay, kept as totals), or raise usage.warn-database-mb.",
                 mb(stats.bytes),
-                mb(stats.growth_bytes_per_day)
             ),
         )
     })

@@ -303,11 +303,7 @@ pub fn import(database: &Path, input_database: &Path, origin: &str, apply: bool)
         [],
         |r| r.get::<_, String>(0),
     )?)?;
-    let watermark: i64 = destination.query_row(
-        "SELECT CAST(value AS INTEGER) FROM usage_meta WHERE key='purge_before_ms'",
-        [],
-        |r| r.get(0),
-    )?;
+    let watermark = store::record_floor(&destination)?;
     let mut statement = source.prepare(SELECT).map_err(|_| anyhow!("unsupported keeper schema"))?;
     let mut skipped = BTreeMap::<String, u64>::new();
     let (mut rows, mut eligible, mut priced, mut cost) = (0_u64, 0_u64, 0_u64, 0_i128);

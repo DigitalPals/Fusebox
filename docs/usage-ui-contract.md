@@ -121,6 +121,7 @@ Example response:
       "weak_identity": 12
     },
     "proxy_first_event_at_ms": 1789344000000,
+    "summarized_before_ms": 1792310400000,
     "stack": "provider",
     "trend": [
       {
@@ -191,7 +192,13 @@ aggregate shape (`observations`, `estimated_cost_nanos`,
   response ID. They can never be matched, so they may still duplicate proxy
   traffic; the UI shows this count.
 - `proxy_first_event_at_ms`: earliest proxy observation regardless of range or
-  filters, or null. Days before it predate the proxy.
+  filters, or null. Days before it predate the proxy. Once retention has deleted
+  the first records, this is the start of the first kept 15-minute bucket: the
+  same local day in every timezone.
+- `summarized_before_ms`: before this instant retention deleted the records and
+  kept their 15-minute totals, or null while none are kept. Every field above
+  reads the same for those days; only `/api/usage/observations` and the export,
+  which list records, have nothing before it.
 - `trend`: one row per local date (in `timezone`, DST-aware) and group, sorted
   by date then group. `group` is the provider or the actual model per `stack`;
   it can be null for an unknown model. Every group is returned; the UI keeps the

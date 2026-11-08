@@ -26,6 +26,13 @@ pub struct DatabaseStats {
     pub bytes_per_observation: u64,
     /// Observations a day over the last week, times bytes per observation.
     pub growth_bytes_per_day: u64,
+    /// The totals kept after retention deleted their records (see `history`).
+    pub kept_bytes: u64,
+    /// How many days of records retention keeps.
+    pub retention_days: u32,
+    /// Where the database levels off at the last week's traffic: that many days of
+    /// records, plus the totals kept so far.
+    pub settles_near_bytes: u64,
     /// Space left on the filesystem that holds the database.
     pub disk_free_bytes: Option<u64>,
     /// Rows still stored as uncompressed text; zero once compaction has finished.
@@ -229,7 +236,7 @@ fn disk_free(path: &Path) -> Option<u64> {
     fs2::available_space(dir).ok()
 }
 
-pub(super) fn stats(conn: &Connection, path: &Path, compressing: bool) -> Result<DatabaseStats> {
+pub(super) fn stats(conn: &Connection, path: &Path, compressing: bool, retention_days: u32) -> Result<DatabaseStats> {
     let (page_size, pages, free, incremental): (u64, u64, u64, i64) = conn.query_row(
         "SELECT page_size,page_count,freelist_count,auto_vacuum FROM pragma_page_size(),pragma_page_count(),pragma_freelist_count(),pragma_auto_vacuum()",
         [],
@@ -253,14 +260,31 @@ pub(super) fn stats(conn: &Connection, path: &Path, compressing: bool) -> Result
         0
     };
     let live = (pages - free) * page_size;
-    let per = if observations > 0 { live / observations as u64 } else { 0 };
+    // Kept totals are small and walked page by page only for their own tables.
+    let mut kept = 0_u64;
+    if history::exists(conn)? {
+        for name in history::OBJECTS {
+            kept += conn
+                .query_row("SELECT pgsize FROM dbstat WHERE name=?1 AND aggregate=TRUE", [name], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
+                .optional()?
+                .flatten()
+                .unwrap_or(0) as u64;
+        }
+    }
+    let per = if observations > 0 { live.saturating_sub(kept) / observations as u64 } else { 0 };
+    let growth = (week as u64 * per) / 7;
     Ok(DatabaseStats {
         bytes: file_bytes(path),
         live_bytes: live,
         free_bytes: free * page_size,
         observations,
         bytes_per_observation: per,
-        growth_bytes_per_day: (week as u64 * per) / 7,
+        growth_bytes_per_day: growth,
+        kept_bytes: kept,
+        retention_days,
+        settles_near_bytes: growth.saturating_mul(u64::from(retention_days)) + kept,
         disk_free_bytes: disk_free(path),
         uncompressed_rows: uncompressed,
         compressing,

@@ -314,7 +314,7 @@ fn documents(c: &Connection) -> Result<Vec<Document>> {
 #[tokio::test]
 async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original_text() {
     let p = temp("compress");
-    let store = Store::start(&p, 64, 3650, Catalogue::provider_fixture(), None).unwrap();
+    let store = Store::start(&p, 64, (3650, 0), Catalogue::provider_fixture(), None).unwrap();
     let records = journal(11, 1200);
     store.call(move |c| insert_batch(c, &records)).await.unwrap();
     let everything = Query { start: Some("2026-03-01".into()), end: Some("2026-05-01".into()), ..Default::default() };
@@ -410,7 +410,8 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
     let original: String =
         c.query_row("SELECT value FROM usage_meta WHERE key='catalogue_before_downgrade'", [], |r| r.get(0)).unwrap();
     assert!(original.contains("above_threshold_write_5m_nanos_per_token"));
-    // Schema-3 objects plus an additive audit table older releases can ignore.
+    // Schema-3 objects plus additive tables older releases ignore: the price audit
+    // and the totals kept after records are deleted.
     let names: BTreeSet<String> = c
         .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         .unwrap()
@@ -422,6 +423,10 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
         "usage_meta",
         "usage_price_revisions",
         "usage_price_revisions_observation",
+        "usage_history",
+        "usage_history_dims",
+        "usage_history_entrypoints",
+        "usage_history_facets",
         "usage_observations",
         "usage_suppressed",
         "usage_event_time",
@@ -467,7 +472,7 @@ async fn compression_is_invisible_to_readers_and_downgrade_restores_the_original
     drop(c);
 
     // And forward again: the same records, the same totals.
-    let store = Store::start(&p, 64, 3650, Catalogue::provider_fixture(), None).unwrap();
+    let store = Store::start(&p, 64, (3650, 0), Catalogue::provider_fixture(), None).unwrap();
     assert_eq!(store.dashboard_scan(everything.clone()).await.unwrap(), store.dashboard(everything).await.unwrap());
     let back = store.call(|c| documents(c)).await.unwrap();
     assert_eq!(strip(&back), strip(&latest));

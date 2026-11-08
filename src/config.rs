@@ -570,7 +570,8 @@ debug: false
 # Persistent proxy usage; imports/collectors are opt-in. Storage changes need a restart.
 usage:
   enabled: true
-  retention-days: 90
+  retention-days: 90          # each request's record; budgets need 32 or more
+  totals-retention-days: 0    # 15-minute cost and token totals after that; 0 keeps them for good
   queue-capacity: 1024
   # database: /path/to/usage.sqlite3  # default: beside config.yaml
   # pricing-overrides: /path/to/rates.json
@@ -843,6 +844,11 @@ impl Config {
         {
             anyhow::bail!("invalid usage queue capacity or retention");
         }
+        anyhow::ensure!(
+            cfg.usage.totals_retention_days == 0
+                || (cfg.usage.retention_days..=36500).contains(&cfg.usage.totals_retention_days),
+            "usage.totals-retention-days must be 0 (keep totals for good) or from retention-days to 36500"
+        );
         let mut ids = std::collections::HashSet::new();
         for client in &cfg.named_clients {
             let id = &client.id;
@@ -955,6 +961,18 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_totals_are_kept_for_good_unless_bounded_past_the_records() {
+        assert_eq!(Config::parse("port: 8317\n").unwrap().usage.totals_retention_days, 0);
+        for (records, totals, ok) in
+            [(45, 0, true), (45, 45, true), (45, 3650, true), (45, 30, false), (45, 36501, false)]
+        {
+            let parsed =
+                Config::parse(&format!("usage:\n  retention-days: {records}\n  totals-retention-days: {totals}\n"));
+            assert_eq!(parsed.is_ok(), ok, "{records} days of records, {totals} of totals");
+        }
+    }
 
     #[test]
     fn configured_headers_preserve_gateway_credentials_and_reject_protected_names_and_invalid_values() {

@@ -133,6 +133,9 @@ test('the Collection drawer shows the usage database\'s size, growth and free di
   html = run(`usageDatabaseHTML(${JSON.stringify({ ...db, compressing: false, disk_free_bytes: null })})`);
   assert.doesNotMatch(html, /Compressing/);
   assert.match(html, /Unknown<\/b><span>Free disk/);
+  assert.doesNotMatch(html, /Levels off/, 'only once the server reports it');
+  html = run(`usageDatabaseHTML(${JSON.stringify({ ...db, retention_days: 45, settles_near_bytes: 1.52e9 })})`);
+  assert.match(html, /1\.5 GB<\/b><span>Levels off, 45 days/);
   run(`Usage.drawerOpen = true; Usage.status = { health: {}, database: ${JSON.stringify(db)} }`);
   assert.match(run('usageDrawerHTML()'), /Growth a day/);
 });

@@ -296,6 +296,11 @@ fn a_large_usage_database_or_a_full_disk_is_a_fault() {
     let large = faults::storage(Some(&stats(3 << 30, 100 << 30)), 2048).unwrap();
     assert_eq!((large.kind, large.level, large.path.as_str()), ("storage", "warn", "#/usage"));
     assert!(large.detail.unwrap().contains("14 MB a day"));
+    // With retention known, it says where the database levels off instead.
+    let settled = DatabaseStats { retention_days: 90, settles_near_bytes: 3_100_000_000, ..stats(3 << 30, 100 << 30) };
+    let detail = faults::storage(Some(&settled), 2048).unwrap().detail.unwrap();
+    assert!(detail.contains("90 days of records level off near 3100 MB"), "{detail}");
+    assert!(detail.contains("kept as totals"), "{detail}");
     assert!(faults::storage(Some(&stats(3 << 30, 100 << 30)), 0).is_none(), "0 turns the size warning off");
     let full = faults::storage(Some(&stats(1 << 20, 500 << 20)), 0).unwrap();
     assert_eq!(full.level, "err");

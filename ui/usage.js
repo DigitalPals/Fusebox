@@ -134,14 +134,18 @@ const UsageTools = (() => {
   const parts = (iso) => { const at = new Date(`${iso}T00:00:00Z`); return { w: W[at.getUTCDay()], m: M[at.getUTCMonth()], d: at.getUTCDate(), y: at.getUTCFullYear(), monday: at.getUTCDay() === 1 }; };
   const dayLabel = (iso) => { const p = parts(iso); return `${p.w} ${p.m} ${p.d}`; };
   const shortDate = (iso) => { const p = parts(iso); return `${p.m} ${p.d}`; };
-  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, timeText, localTimeText, refreshLocalTimezone, parts, dayLabel, shortDate, bytes };
+  // BY MONTH: the calendar months a range touches ("2026-10"), and the trend summed into them.
+  const months = (days) => [...new Set(days.map((d) => d.slice(0, 7)))];
+  const byMonth = (trend) => (trend || []).map((r) => ({ ...r, date: String(r.date).slice(0, 7) }));
+  const monthLabel = (key) => { const p = parts(`${key}-01`); return `${p.m} ${p.y}`; };
+  return { OTHER, escape, date, shift, range, dates, query, privateLabel, count, dollars, compact, chart, localDate, beforeProxy, timeText, localTimeText, refreshLocalTimezone, parts, dayLabel, shortDate, months, byMonth, monthLabel, bytes };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = UsageTools;
 
 const Usage = {
   preset: '7', range: UsageTools.range(7), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   filters: { provider: '', model: '', account: '', client: '', entrypoint: '' },
-  stack: 'provider', metric: 'cost', hoverDay: null, dim: 'model', showAll: false, clientsAll: false,
+  stack: 'provider', metric: 'cost', period: '', hoverDay: null, dim: 'model', showAll: false, clientsAll: false,
   drawerOpen: false, customError: '',
   summary: null, status: null, entrypoints: null,
   loading: false, loaded: false, error: '', actionError: '', busy: false,
@@ -171,7 +175,18 @@ const usageClientLabel = (id) => (Usage.summary?.facets?.clients || []).find((c)
 const usageStack = (k) => k === UsageTools.OTHER ? 'Other' : Usage.stack === 'model' ? k || 'Unknown model' : usageProvName(k);
 const usageDollarsShort = (v) => v >= 10 ? `$${Math.round(v).toLocaleString('en-US')}` : v > 0 ? `$${v.toFixed(2)}` : '$0';
 const usageToday = () => UsageTools.date(new Date());
-const usageRangeLabel = () => Usage.preset === '1' ? 'Today' : Usage.preset === '7' ? 'Last 7 days' : Usage.preset === '30' ? 'Last 30 days' : `${UsageTools.shortDate(Usage.range.start)} – ${UsageTools.shortDate(Usage.range.through)}`;
+const usageRangeLabel = () => Usage.preset === '1' ? 'Today' : Usage.preset === '7' ? 'Last 7 days' : Usage.preset === '30' ? 'Last 30 days' : Usage.preset === '365' ? 'Last 12 months' : `${UsageTools.shortDate(Usage.range.start)} – ${UsageTools.shortDate(Usage.range.through)}`;
+// Bars by month once a range spans more than a month: chosen, or by month past three.
+const usagePeriod = (days = UsageTools.dates(Usage.range).length) => days <= 31 ? 'day' : Usage.period || (days > 92 ? 'month' : 'day');
+// How far back the custom range reaches: the server reads ranges of up to 3660 days.
+const USAGE_HISTORY_DAYS = 3650;
+const usageBarLabel = (key) => key.length === 7 ? UsageTools.monthLabel(key) : UsageTools.dayLabel(key);
+// The first local day whose individual records are still stored, when retention
+// has deleted older ones and kept their totals; null otherwise.
+const usageRecordsFrom = () => {
+  const ms = usageCombined().summarized_before_ms;
+  return ms == null || !Number.isFinite(Number(ms)) ? null : UsageTools.localDate(Number(ms), Usage.timezone);
+};
 const usageDayCost = (day) => day.priced ? UsageTools.dollars(day.cost) : day.calls ? 'Unpriced' : '$0.00';
 
 // The page is drawn once; after that each section is its own patch target (a
@@ -228,10 +243,10 @@ function usageBoundary() {
 }
 function usageHeadHTML() {
   const u = Usage, phone = usagePhone();
-  const presets = `<div class="seg u-range" role="group" aria-label="Date range">${[['1', 'Today'], ['7', '7 days'], ['30', '30 days'], ['custom', 'Custom']].map(([v, label]) => `<button type="button" data-usage-act="range" data-value="${v}" aria-pressed="${u.preset === v}">${label}</button>`).join('')}</div>`;
+  const presets = `<div class="seg u-range" role="group" aria-label="Date range">${[['1', 'Today'], ['7', '7 days'], ['30', '30 days'], ['365', '12 months'], ['custom', 'Custom']].map(([v, label]) => `<button type="button" data-usage-act="range" data-value="${v}" aria-pressed="${u.preset === v}">${label}</button>`).join('')}</div>`;
   const collection = `<button class="btn u-collection" type="button" data-usage-act="open-collection" aria-haspopup="dialog"><span class="dot s7 ${usageHealthDot()}"></span>Collection</button>`;
   const refresh = `<button class="icon-btn row" type="button" data-usage-act="refresh" title="Refresh · updates every minute" aria-label="Refresh usage"${u.loading ? ' disabled' : ''}><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M11.5 7a4.5 4.5 0 1 1-1.3-3.2"/><path d="M11.5 1.8v2.6H8.9"/></svg></button>`;
-  const today = usageToday(), min = UsageTools.shift(today, -365);
+  const today = usageToday(), min = UsageTools.shift(today, -USAGE_HISTORY_DAYS);
   const custom = u.preset === 'custom' ? `<form id="usage-range" class="u-custom"><label class="u-field"><span>From</span><input type="date" name="start" value="${ux(u.range.start)}" min="${min}" max="${today}" required></label><label class="u-field"><span>Through</span><input type="date" name="through" value="${ux(u.range.through)}" min="${min}" max="${today}" required></label><button class="btn" type="submit">Apply dates</button>${u.customError ? `<span class="u-custom-err" role="alert">${ux(u.customError)}</span>` : ''}</form>` : '';
   const labels = { model: 'Model', account: 'Account', provider: 'Provider', client: 'Client', entrypoint: 'Entrypoint' };
   const pills = Object.keys(labels).filter((k) => u.filters[k]).map((k) => {
@@ -301,12 +316,14 @@ function usageCostHTML() {
   const missingWrite = Number(t.missing_token_counts?.cache_write || 0);
   const stats = [[usageCount(t.observations ?? 0), 'Calls'], [usageCount(t.history_only ?? 0), 'From history only'], [UsageTools.compact(tokens.input), 'Tokens in'], [UsageTools.compact(tokens.output), 'Tokens out'], [UsageTools.compact(tokens.cache_read), 'Cache read'],
     [tokens.cache_write == null ? 'Unknown' : UsageTools.compact(tokens.cache_write), tokens.cache_write != null && missingWrite > 0 ? 'Cache write, partial' : 'Cache write']];
-  const stale = usageStaleLine(), lifetimes = usageCacheLifetimes(tokens);
+  const stale = usageStaleLine(), lifetimes = usageCacheLifetimes(tokens), from = usageRecordsFrom();
+  const kept = from && u.range.start < from ? `Before ${UsageTools.dayLabel(from)}, calls are kept as totals: retention deleted their individual records and kept their cost and tokens` : '';
   return `<section class="card u-cost" aria-labelledby="usage-cost-label">
     <div class="u-cost-top"><div class="u-total"><span class="label" id="usage-cost-label">ESTIMATED COST · ${ux(word)}</span><span class="u-total-v">${t.aggregation_overflow && cost == null ? 'Out of range' : ux(UsageTools.dollars(cost ?? (t.observations ? null : 0)))}</span><span class="u-total-sub">${sub}</span></div>
     <dl class="u-stats">${stats.map(([v, l]) => `<div><dd>${ux(v)}</dd><dt>${ux(l)}</dt></div>`).join('')}</dl></div>
     ${days.length > 1 ? `<div id="usage-chart" class="u-chart">${usageChartHTML()}</div>` : ''}
     ${lifetimes ? `<div class="u-foot"><span class="fg2">${ux(lifetimes)}</span></div>` : ''}
+    ${kept ? `<div class="u-foot"><span class="fg2">${ux(kept)}</span></div>` : ''}
     <div class="u-foot"><span class="fg2">${ux(usageCoverageLine(t))}</span>${stale ? `<span class="warn">${stale}</span>` : ''}${phone ? '' : `<span class="grow"></span><span>Unknown usage and missing prices are left out, never counted as zero · catalogue ${ux(s.pricing?.version || u.status?.pricing?.version || 'unknown')}</span>`}</div>
   </section>`;
 }
@@ -317,12 +334,13 @@ let usageChartCache = null;
 const usageEmptyTrend = [];
 function usageChartData() {
   const trend = usageCombined().trend || usageEmptyTrend;
-  const { start, end } = Usage.range, metric = Usage.metric;
+  const { start, end } = Usage.range, metric = Usage.metric, days = UsageTools.dates(Usage.range), period = usagePeriod(days.length);
   const shade = typeof document !== 'undefined' && document.documentElement.dataset.shade;
   const prev = usageChartCache;
-  if (prev && prev.trend === trend && prev.start === start && prev.end === end && prev.metric === metric && prev.shade === shade) return prev.chart;
-  const chart = UsageTools.chart(trend, UsageTools.dates(Usage.range), metric);
-  usageChartCache = { trend, start, end, metric, shade, chart };
+  if (prev && prev.trend === trend && prev.start === start && prev.end === end && prev.metric === metric && prev.period === period && prev.shade === shade) return prev.chart;
+  const chart = period === 'month' ? UsageTools.chart(UsageTools.byMonth(trend), UsageTools.months(days), metric) : UsageTools.chart(trend, days, metric);
+  chart.period = period;
+  usageChartCache = { trend, start, end, metric, period, shade, chart };
   return chart;
 }
 function usageChartHTML() {
@@ -336,14 +354,17 @@ function usageChartHTML() {
     const value = calls ? UsageTools.compact(d.total) : d.priced || !d.calls ? usageDollarsShort(d.total) : 'Unpriced';
     const segs = d.parts.map((v, k) => (v > 0 ? `<i style="flex:${Math.max(1, Math.round(v / d.total * 1000))} 1 0px;background:${c.colors[k]}"></i>` : '')).join('');
     const description = calls ? `${usageCount(d.calls)} calls` : `${usageDayCost(d)} · ${usageCount(d.calls - d.unpriced)} priced calls${d.unpriced ? ` · ${usageCount(d.unpriced)} unpriced` : ''}`;
-    return `<button type="button" class="u-bar${hover >= 0 && hover !== i ? ' dim' : ''}${hover === i ? ' on' : ''}" data-usage-day="${d.date}" aria-label="${ux(UsageTools.dayLabel(d.date))}: ${ux(description)}">${showVals ? `<span class="u-bar-v">${ux(value)}</span>` : ''}<span class="u-bar-s" style="height:${h.toFixed(2)}%">${segs}</span></button>`;
+    return `<button type="button" class="u-bar${hover >= 0 && hover !== i ? ' dim' : ''}${hover === i ? ' on' : ''}" data-usage-day="${d.date}" aria-label="${ux(usageBarLabel(d.date))}: ${ux(description)}">${showVals ? `<span class="u-bar-v">${ux(value)}</span>` : ''}<span class="u-bar-s" style="height:${h.toFixed(2)}%">${segs}</span></button>`;
   }).join('');
-  const labels = c.series.map((d) => {
-    const p = UsageTools.parts(d.date);
-    const text = days.length <= 10 ? (phone ? p.w.slice(0, 2) : `${p.w} ${p.d}`) : p.monday ? `${p.m} ${p.d}` : '';
-    return `<span${d.date === today ? ' class="today"' : ''}>${ux(text)}</span>`;
+  const months = c.period === 'month', current = months ? today.slice(0, 7) : today;
+  const labels = c.series.map((d, i) => {
+    const p = UsageTools.parts(months ? `${d.date}-01` : d.date);
+    // A month names its year at the first bar and every January.
+    const text = months ? (i === 0 || p.m === 'Jan' ? `${p.m} '${String(p.y).slice(2)}` : p.m) : days.length <= 10 ? (phone ? p.w.slice(0, 2) : `${p.w} ${p.d}`) : p.monday ? `${p.m} ${p.d}` : '';
+    return `<span${d.date === current ? ' class="today"' : ''}>${ux(text)}</span>`;
   }).join('');
-  return `<div class="u-chart-head"><span class="label">BY DAY</span>${calls ? '' : '<span class="meta u-chart-scope">Priced calls only</span>'}<span class="grow"></span>${seg('stack', [['provider', 'Provider'], ['model', 'Model']], 'stack', 'Stack bars by')}${seg('metric', [['cost', 'Cost'], ['calls', 'Calls']], 'metric', 'Bar value')}</div>
+  const period = UsageTools.dates(u.range).length > 31 ? `<div class="seg u-seg" role="group" aria-label="Bar per">${[['day', 'Day'], ['month', 'Month']].map(([v, l]) => `<button type="button" data-usage-act="period" data-value="${v}" aria-pressed="${c.period === v}">${l}</button>`).join('')}</div>` : '';
+  return `<div class="u-chart-head"><span class="label">BY ${months ? 'MONTH' : 'DAY'}</span>${calls ? '' : '<span class="meta u-chart-scope">Priced calls only</span>'}<span class="grow"></span>${period}${seg('stack', [['provider', 'Provider'], ['model', 'Model']], 'stack', 'Stack bars by')}${seg('metric', [['cost', 'Cost'], ['calls', 'Calls']], 'metric', 'Bar value')}</div>
     ${legend ? `<div class="u-legend">${legend}</div>` : ''}
     <div class="u-bars${days.length > 20 ? ' dense' : ''}" data-usage-bars>${bars}</div>
     <div class="u-days${days.length > 20 ? ' dense' : ''}" aria-hidden="true">${labels}</div>
@@ -351,10 +372,13 @@ function usageChartHTML() {
 }
 function usageReadoutHTML(c, hover) {
   if (!c.series.length) return '';
-  const i = hover >= 0 ? hover : c.peak, d = c.series[i], calls = Usage.metric === 'calls';
-  const title = `${hover >= 0 ? 'Day' : !calls && !c.max && d.calls ? 'Busiest day' : 'Peak day'} · ${UsageTools.dayLabel(d.date)}${d.date === usageToday() ? ', so far' : ''}`;
+  const i = hover >= 0 ? hover : c.peak, d = c.series[i], calls = Usage.metric === 'calls', unit = c.period === 'month' ? 'month' : 'day';
+  const now = c.period === 'month' ? usageToday().slice(0, 7) : usageToday();
+  const title = `${hover >= 0 ? (unit === 'month' ? 'Month' : 'Day') : !calls && !c.max && d.calls ? `Busiest ${unit}` : `Peak ${unit}`} · ${usageBarLabel(d.date)}${d.date === now ? ', so far' : ''}`;
   const parts = d.groups.map((g, k) => (g.calls || g.priced ? `<span class="u-rp"><i style="background:${c.colors[k]}"></i><span class="u-rp-name">${ux(usageStack(c.keys[k]))}</span> <span class="mono">${ux(calls ? `${usageCount(g.calls)} calls` : usageDayCost(g))}</span>${g.unpriced ? `<span class="dim">(${calls ? '' : `${usageCount(g.calls - g.unpriced)} priced · `}${usageCount(g.unpriced)} unpriced)</span>` : ''}</span>` : '')).join('');
-  const before = UsageTools.beforeProxy(d.date, usageCombined().proxy_first_event_at_ms, Usage.timezone);
+  // A month is before the proxy only when its last day is.
+  const last = c.period === 'month' ? UsageTools.shift(`${UsageTools.shift(`${d.date}-28`, 4).slice(0, 7)}-01`, -1) : d.date;
+  const before = UsageTools.beforeProxy(last, usageCombined().proxy_first_event_at_ms, Usage.timezone);
   return `<span class="${hover >= 0 ? '' : 'dim'}">${ux(title)}</span><span class="mono">${ux(usageDayCost(d))}</span><span class="fg2">${usageCount(d.calls)} call${d.calls === 1 ? '' : 's'}</span>${parts}${before ? '<span class="dim">Before the proxy was set up · history only</span>' : ''}`;
 }
 
@@ -562,6 +586,8 @@ function usageDrawerHTML() {
 function usageDatabaseHTML(db) {
   if (!db) return '';
   const figs = [[UsageTools.bytes(db.bytes), 'Database'], [UsageTools.bytes(db.growth_bytes_per_day), 'Growth a day'], [db.disk_free_bytes == null ? 'Unknown' : UsageTools.bytes(db.disk_free_bytes), 'Free disk']];
+  // Retention deletes as much as arrives: where the file levels off with this many days of records.
+  if (db.settles_near_bytes && db.retention_days) figs.splice(2, 0, [UsageTools.bytes(db.settles_near_bytes), `Levels off, ${db.retention_days} days`]);
   return `<div class="figs u-figs u-db">${figs.map(([v, l]) => `<div><b>${ux(v)}</b><span>${l}</span></div>`).join('')}</div>${db.compressing ? '<p class="meta" role="status">Compressing older records…</p>' : ''}`;
 }
 function usageImportHTML(source) {
@@ -790,7 +816,7 @@ if (typeof document !== 'undefined') {
     const values = new FormData(form);
     if (form.id === 'usage-range') {
       try {
-        const start = values.get('start'), through = values.get('through'), today = usageToday(), min = UsageTools.shift(today, -365);
+        const start = values.get('start'), through = values.get('through'), today = usageToday(), min = UsageTools.shift(today, -USAGE_HISTORY_DAYS);
         UsageTools.shift(start, 0); UsageTools.shift(through, 0);
         if (through < start) throw new Error('The end date must be on or after the start date.');
         if (start < min || through > today) throw new Error(`Choose dates between ${UsageTools.shortDate(min)}, ${min.slice(0, 4)} and ${UsageTools.shortDate(today)}, ${today.slice(0, 4)}.`);
@@ -835,6 +861,7 @@ if (typeof document !== 'undefined') {
     }
     if (act === 'stack') { if (Usage.stack !== el.dataset.value) { Usage.stack = el.dataset.value; usageLoadStack(); } return; }
     if (act === 'metric') { Usage.metric = el.dataset.value; return usageRenderChart(); }
+    if (act === 'period') { Usage.period = el.dataset.value; Usage.hoverDay = null; return usageRenderChart(); }
     if (act === 'dim') { Usage.dim = el.dataset.value; Usage.showAll = false; return usageRender(); }
     if (act === 'show-all') { Usage.showAll = !Usage.showAll; return usageRender(); }
     if (act === 'clients-all') { Usage.clientsAll = !Usage.clientsAll; return usageRender(undefined, ['clients']); }
