@@ -14,9 +14,13 @@ permissions:
   issues: write
   checks: write
 
+# Linux x64 jobs of trusted events run on ephemeral Beast VMs (DigitalPals/ci-platform
+# github-runners): push, workflow_dispatch, schedule and same-repository pull requests.
+# Fork pull requests, and everything while the BEAST_RUNNERS variable
+# is "off" use GitHub-hosted runners. The Beast job hook rejects any other event too.
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-fusebox"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2

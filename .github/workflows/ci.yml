@@ -12,6 +12,10 @@ concurrency:
   group: fusebox-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Linux x64 jobs of trusted events run on ephemeral Beast VMs (DigitalPals/ci-platform
+# github-runners): push, workflow_dispatch, schedule and same-repository pull requests.
+# Fork pull requests, macOS, Windows, and everything while the BEAST_RUNNERS variable
+# is "off" use GitHub-hosted runners. The Beast job hook rejects any other event too.
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -19,13 +23,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-fusebox"]') || matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
       - name: Format
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
