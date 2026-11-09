@@ -842,7 +842,9 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }]
         });
         let req = parse_request(Format::Chat, &body).unwrap();
-        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"] {
+        for model in
+            ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2", "claude-mythos-5-2"]
+        {
             let out = claude::build_request(&req, model);
             assert!(out["temperature"].is_null(), "{model}");
             assert_eq!(out["tool_choice"], json!({ "type": "auto", "disable_parallel_tool_use": true }), "{model}");

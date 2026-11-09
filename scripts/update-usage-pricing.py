@@ -103,9 +103,11 @@ def compile_catalogue(document, date, version):
     rates = list(groups.values())
     present = {name for row in rates for name in row["models"]}
     # Preserve existing published model support when LiteLLM has no matching ID.
-    # These rows retain their official source URL, making the fallback auditable.
+    # These rows retain their official source URL, making the fallback auditable,
+    # and the published speed multipliers the T3 calculation uses.
     for row in provider["rates"]:
         missing = [name for name in row["models"] if name not in present]
+        tiers = row.get("tier_multipliers") or {}
         if missing:
             rates.append({"provider": row["provider"], "models": missing, "effective_from": None,
                           "effective_until": None, "source_url": row["source_url"],
@@ -113,7 +115,8 @@ def compile_catalogue(document, date, version):
                           "cache_read_nanos_per_token": row.get("cache_read_nanos_per_token"),
                           "cache_write_nanos_per_token": row.get("cache_write_5m_nanos_per_token"),
                           "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
-                          "output_nanos_per_token": row["output_nanos_per_token"], "tier_multipliers": {}})
+                          "output_nanos_per_token": row["output_nanos_per_token"],
+                          "tier_multipliers": {speed: tiers[speed] for speed in ("fast", "ultrafast") if speed in tiers}})
     for row in rates:
         row["models"].sort()
     rates.sort(key=lambda row: (row["provider"], row["models"][0]))

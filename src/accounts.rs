@@ -193,6 +193,7 @@ impl Provider {
     pub fn builtin_models(self) -> &'static [&'static str] {
         match self {
             Provider::Claude => &[
+                "claude-fable-5-2",
                 "claude-fable-5-1",
                 "claude-opus-5-5",
                 "claude-sonnet-5-5",

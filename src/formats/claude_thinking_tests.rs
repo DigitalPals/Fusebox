@@ -32,7 +32,14 @@ fn chat_request(effort: &str, tool_turn: bool) -> Value {
 
 #[test]
 fn adaptive_tool_turns_preserve_thinking_effort_and_prefix() {
-    for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6"] {
+    for model in [
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+    ] {
         for effort in ["low", "medium", "high", "xhigh", "max"] {
             let fresh = build_request(&super::super::chat::parse_request(&chat_request(effort, false)).unwrap(), model);
             let replay = build_request(&super::super::chat::parse_request(&chat_request(effort, true)).unwrap(), model);
@@ -55,6 +62,8 @@ fn explicit_none_uses_valid_thinking_and_preserves_structured_output() {
         "claude-fable-5-1",
         "claude-fable-5",
         "claude-mythos-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
         "claude-mythos-preview",
     ] {
         let mut body = chat_request("none", true);
@@ -224,7 +233,7 @@ impl Fixture {
 #[tokio::test]
 async fn http_tool_replays_keep_adaptive_thinking_and_effort() {
     let fixture = Fixture::new().await;
-    for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"] {
+    for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-fable-5-2"] {
         for effort in ["high", "xhigh", "max"] {
             let mut body = chat_request(effort, true);
             body["model"] = model.into();
@@ -246,7 +255,7 @@ async fn http_tool_replays_keep_adaptive_thinking_and_effort() {
 #[tokio::test]
 async fn http_explicit_disable_and_native_suffix_use_supported_modes() {
     let fixture = Fixture::new().await;
-    for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"] {
+    for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-fable-5-2"] {
         for native in [false, true] {
             let mut body = if native {
                 json!({"model":model,"max_tokens":64,"thinking":{"type":"disabled"},

@@ -900,6 +900,39 @@ mod tier_tests {
         assert_eq!(c.price(&o).cost_nanos, Some(200_000_000));
     }
     #[test]
+    fn fable_and_mythos_5_2_cost_less_than_5_1_and_fast_doubles_them() {
+        // 1,000 input, 200 cache reads, 50 five-minute and 50 one-hour writes, 100 output.
+        let provider = Catalogue::provider_fixture();
+        let t3 = Catalogue::load(None).unwrap();
+        let standard = 1000 * 8000 + 200 * 200 + 50 * 10_000 + 50 * 16_000 + 100 * 40_000;
+        // T3's flat calculation prices every cache write at the five-minute rate.
+        let t3_standard = 1000 * 8000 + 200 * 200 + 100 * 10_000 + 100 * 40_000;
+        for model in ["claude-fable-5-2", "claude-mythos-5-2"] {
+            let mut o = event("anthropic", model);
+            for (tier, cost, t3_cost) in [
+                ("standard", standard, t3_standard),
+                ("fast", standard * 2, t3_standard * 2),
+                ("batch", standard / 2, t3_standard),
+            ] {
+                o.service_tier = Some(tier.into());
+                assert_eq!(provider.price(&o).cost_nanos, Some(cost), "{model} {tier}");
+                let snapshot = t3.price(&o);
+                assert_eq!(snapshot.cost_nanos, Some(t3_cost), "{model} {tier}");
+                assert!(snapshot.assumptions.contains(&"published_provider_rate_fallback".into()), "{model}");
+                assert!(!snapshot.assumptions.contains(&"speed_rate_unavailable_standard_rate_used".into()));
+            }
+            o.inference_geo = Some("us".into());
+            o.service_tier = Some("standard".into());
+            assert_eq!(provider.price(&o).cost_nanos, Some(standard * 11 / 10), "{model}");
+        }
+        let mut o = event("anthropic", "claude-fable-5-1");
+        o.service_tier = Some("standard".into());
+        assert_eq!(
+            provider.price(&o).cost_nanos,
+            Some(1000 * 10_000 + 200 * 250 + 50 * 12_500 + 50 * 20_000 + 100 * 50_000)
+        );
+    }
+    #[test]
     fn haiku_threshold_prices_each_cache_ttl_and_includes_cached_input() {
         let c = Catalogue::provider_fixture();
         let mut o = event("anthropic", "claude-haiku-5-5");

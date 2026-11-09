@@ -522,8 +522,9 @@ fn claude(t: &Target, mut body: Value) -> Prepared {
 /// the request then goes at standard speed. A subscription bills fast mode to usage
 /// credits only, and without them Anthropic refuses it with a 429 that reads like a spent
 /// account, so subscriptions get it only with `claude-subscription-fast-mode`. Only
-/// Opus 5.5, Opus 5 and Opus 4.8 have fast mode; other models refuse the field. The
-/// `fast-mode` beta flag stays, as on Claude Code's own standard-speed retries.
+/// Fable 5.2, Mythos 5.2, Opus 5.5, Opus 5 and Opus 4.8 have fast mode; other models
+/// refuse the field. The `fast-mode` beta flag stays, as on Claude Code's own
+/// standard-speed retries.
 pub fn claude_speed_downgrade(acct: &Account, cfg: &Config, model: &str, body: &Value) -> Option<&'static str> {
     if body.get("speed").and_then(Value::as_str) != Some("fast") {
         return None;
@@ -535,11 +536,12 @@ pub fn claude_speed_downgrade(acct: &Account, cfg: &Config, model: &str, body: &
 }
 
 /// Models Anthropic runs in fast mode at `now`. Opus 4.8 loses it on 2026-11-30, when the
-/// API starts refusing fast requests for it.
+/// API starts refusing fast requests for it. Fable and Mythos have it from 5.2 on only.
 fn claude_fast_model(model: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     let model = model.to_ascii_lowercase();
     let opus_4_8_until = chrono::DateTime::from_timestamp(1_795_996_800, 0).unwrap_or_default(); // 2026-11-30 UTC
-    model.starts_with("claude-opus-5") || (model.starts_with("claude-opus-4-8") && now < opus_4_8_until)
+    ["claude-opus-5", "claude-fable-5-2", "claude-mythos-5-2"].iter().any(|prefix| model.starts_with(prefix))
+        || (model.starts_with("claude-opus-4-8") && now < opus_4_8_until)
 }
 
 /// Keep native beta formatting and unknown provider flags; append only missing requirements.
@@ -1603,12 +1605,19 @@ mod tests {
                     let beta = get_header(&standard.headers, "anthropic-beta").unwrap_or_default();
                     assert!(beta.contains("fast-mode-2026-02-01"), "{case}: the beta flag stays: {beta}");
                     for (acct, cfg) in [(&subscription, &enabled), (&api_key, &default)] {
-                        for model in ["claude-opus-5-5", "claude-opus-5"] {
+                        for model in ["claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-mythos-5-2"] {
                             assert_eq!(send(acct, cfg, model).body["speed"], "fast", "{case} {model}");
                         }
                     }
                     for acct in [&subscription, &api_key] {
-                        for model in ["claude-sonnet-5-5", "claude-haiku-4-5-20251001", "claude-opus-4-7"] {
+                        for model in [
+                            "claude-sonnet-5-5",
+                            "claude-haiku-4-5-20251001",
+                            "claude-opus-4-7",
+                            "claude-fable-5-1",
+                            "claude-mythos-5-1",
+                            "claude-fable-5",
+                        ] {
                             assert!(send(acct, &enabled, model).body.get("speed").is_none(), "{case} {model}");
                         }
                     }
@@ -1636,6 +1645,12 @@ mod tests {
         assert!(claude_fast_model("claude-opus-4-8", day("2026-11-29T23:59:59Z")));
         assert!(!claude_fast_model("claude-opus-4-8", day("2026-11-30T00:00:00Z")));
         assert!(claude_fast_model("claude-opus-5-5", day("2027-06-01T00:00:00Z")));
+        for model in ["claude-fable-5-2", "CLAUDE-MYTHOS-5-2"] {
+            assert!(claude_fast_model(model, day("2027-06-01T00:00:00Z")), "{model}");
+        }
+        for model in ["claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-preview"] {
+            assert!(!claude_fast_model(model, day("2026-11-09T00:00:00Z")), "{model}");
+        }
         for body in [json!({}), json!({"speed": "standard"}), json!({"speed": 1})] {
             assert_eq!(claude_speed_downgrade(&subscription, &cfg, "claude-sonnet-5-5", &body), None);
         }

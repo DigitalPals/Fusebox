@@ -1,5 +1,5 @@
 {
-  "version": "t3-2026-11-04.1",
+  "version": "t3-2026-11-09.1",
   "verified_at": "2026-10-29",
   "calculation": "t3",
   "rates": [
@@ -36,6 +36,28 @@
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 50000,
       "tier_multipliers": {}
+    },
+    {
+      "provider": "anthropic",
+      "models": [
+        "claude-fable-5-2",
+        "claude-mythos-5-2"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "input_nanos_per_token": 8000,
+      "cache_read_nanos_per_token": 200,
+      "cache_write_nanos_per_token": 10000,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 40000,
+      "tier_multipliers": {
+        "fast": [
+          2,
+          1
+        ]
+      }
     },
     {
       "provider": "anthropic",

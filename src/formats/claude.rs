@@ -254,7 +254,7 @@ pub(crate) fn drop_rejected_prefill(body: &mut Value) -> bool {
 /// Models that reject forced tool use (`tool_choice` `any` or `tool`) even with thinking off.
 fn rejects_forced_tool_use(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    ["opus-5-5", "sonnet-5-5", "fable-5-1", "mythos-5-1"].iter().any(|k| m.contains(k))
+    ["opus-5-5", "sonnet-5-5", "fable-5-1", "mythos-5-1", "fable-5-2", "mythos-5-2"].iter().any(|k| m.contains(k))
 }
 
 pub fn default_max_tokens(model: &str) -> u64 {
@@ -927,6 +927,8 @@ mod tests {
             "claude-fable-5",
             "claude-fable-5-1",
             "claude-mythos-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
             "claude-mythos-preview",
         ];
         let accepting = [

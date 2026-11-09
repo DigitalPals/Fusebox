@@ -61,7 +61,7 @@ Confidence boundary: official SDK proves envelope and API docs prove `message.us
 
 ## Pricing and provenance
 
-Pricing tables were rechecked against both official pricing pages on **2026-10-18** for catalogue `2026-10-18.1`. The comparison also used [T3 Code pricing](https://github.com/pingdotgg/t3code/blob/6a6ebb278dc70dd859439a3c28960a7d23a1e645/apps/server/src/usage/usagePricing.ts). Catalogue `2026-10-21.1` subsequently corrects OpenAI lifetime pricing, rechecked against the prompt caching guide on **2026-10-21**. The model, tier and regional price verification remains **2026-10-18**; those tables were not reverified as part of this correction. Provider tables govern model-specific context thresholds, cache TTLs and tiers. The native format evidence above retains its original verification date.
+Pricing tables were rechecked against both official pricing pages on **2026-10-18** for catalogue `2026-10-18.1`. The comparison also used [T3 Code pricing](https://github.com/pingdotgg/t3code/blob/6a6ebb278dc70dd859439a3c28960a7d23a1e645/apps/server/src/usage/usagePricing.ts). Catalogue `2026-10-21.1` subsequently corrects OpenAI lifetime pricing, rechecked against the prompt caching guide on **2026-10-21**. The model, tier and regional price verification remains **2026-10-18**; those tables were not reverified as part of this correction. Catalogue `2026-11-09.1` adds Claude Fable 5.2 and Mythos 5.2 from Anthropic's pricing, fast mode and model pages, checked on **2026-11-09**, the day they were released; no other row changed. Provider tables govern model-specific context thresholds, cache TTLs and tiers. The native format evidence above retains its original verification date.
 
 **Current verification date is not rate effective date.** The fetched current tables mostly do not state historical effective dates. Store `verified_at=2026-10-18`, `effective_from=null` (or explicitly labeled assumed current estimate), source URL, currency USD, unit 1M tokens, model/tier/context/region, and rate-card version. Do not backdate new current prices over historical imports and claim historical actual spend. (Fusebox prices such older usage only as a labelled current-rate equivalent with `backdated: true`; see [usage-costs.md](usage-costs.md).) Unknown models/tiers/categories should remain unpriced, not $0. Local USD estimates are not subscription-plan charges, invoices, or provider truth.
 
@@ -104,6 +104,7 @@ Source fetched: https://platform.claude.com/docs/en/about-claude/pricing and htt
 
 | Model | Rates |
 |---|---|
+| Claude Fable 5.2, Mythos 5.2 | 8 / 40 / 10 / 16 / 0.2 |
 | Claude Fable 5.1, Mythos 5.1 | 10 / 50 / 12.5 / 20 / 0.25 |
 | Claude Fable 5, Mythos 5 | 10 / 50 / 12.5 / 20 / 1 |
 | Claude Opus 5.5 | 4 / 20 / 5 / 8 / 0.2 |
@@ -119,7 +120,7 @@ Source fetched: https://platform.claude.com/docs/en/about-claude/pricing and htt
 
 **Claude 4.6 and later, except Haiku 5.5,** include full 1M context at standard pricing, including 900k requests. Haiku 5.5 applies fivefold prices to every category strictly above 100,000 total request input tokens, including cache reads and writes. Do not retain a blanket >200k premium from older prices. Historical >200k prices for older models were not established from the current table; use explicit historical/override rate cards.
 
-Cache 5m write=1.25x input, 1h write=2x; cache reads are **model-specific** (Opus 5.5 .05x; Fable/Mythos 5.1 .025x; most others .1x). Batch discount is 50% input/output, and cache modifiers stack. US-only inference_geo on Claude 4.6+ adds 1.1x to all categories. Priority tiers may be contracted; unknown actual rate remains unknown. Fast is currently Opus 5.5 input/output 8/40 and Opus 5/4.8 10/50, all context; cache/region modifiers stack; no Batch+Fast. Opus 4.7 fast errors, Opus 4.6 runs standard. Don't apply old Opus 4.6 Fast assumptions.
+Cache 5m write=1.25x input, 1h write=2x; cache reads are **model-specific** (Opus 5.5 .05x; Fable/Mythos 5.1 and 5.2 .025x; most others .1x). Batch discount is 50% input/output, and cache modifiers stack. US-only inference_geo on Claude 4.6+ adds 1.1x to all categories. Priority tiers may be contracted; unknown actual rate remains unknown. Fast is currently Fable/Mythos 5.2 input/output 16/80, Opus 5.5 8/40 and Opus 5/4.8 10/50, all context; cache/region modifiers stack; no Batch+Fast. Opus 4.7 fast errors, Opus 4.6 runs standard. Don't apply old Opus 4.6 Fast assumptions.
 
 Anthropic formula: `uncached_input*input_rate + output*output_rate + read*read_rate + write5m*write5m_rate + write1h*write1h_rate`, /1e6. If positive aggregate creation lacks TTL split, precise TTL-weighted pricing is unknown; a 5m assumption is an **explicit estimate**, not evidence. Output includes thinking/reasoning. Server tools may incur separate prices (e.g. web search $10/1k); token-only local logs cannot claim full invoices.
 
