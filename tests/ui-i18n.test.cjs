@@ -123,6 +123,15 @@ test('combined weekly limits read in Chinese', () => {
   assert.equal(tr('1 point over pace'), '高于均匀用量 1 个百分点');
   assert.equal(tr('On pace'), '符合均匀用量');
   assert.equal(tr('Claude combined weekly quota used'), 'Claude 每周合计额度已用');
+  // A model's own week, such as Fable's, under the provider's and each account's.
+  assert.equal(tr('Claude combined Fable weekly quota used'), 'Claude Fable 每周合计额度已用');
+  assert.equal(tr('Claude combined Fable weekly quota remaining'), 'Claude Fable 每周合计额度剩余');
+  assert.equal(tr('Claude combined Fable weekly: not reported'), 'Claude Fable 每周合计：未报告');
+  assert.equal(tr('Next account’s Fable weekly limit resets Wednesday, 11 November 2026 at 17:00:00 CET'),
+    '下一个账号的 Fable 每周额度将于 2026年11月11日 星期三 17:00:00 CET 重置');
+  assert.equal(tr('Fable weekly window quota used'), 'Fable 每周窗口额度已用');
+  assert.equal(tr('Fable weekly window resets Wednesday, 11 November 2026 at 17:00:00 CET'),
+    'Fable 每周窗口将于 2026年11月11日 星期三 17:00:00 CET 重置');
   assert.equal(tr('22% used · Healthy · even pace 32% used by now').split(' · ')[2], '均匀用量此刻应为 32%');
   assert.equal(tr('3 accounts · Ultra'), '3 个账号 · Ultra', 'plan names stay as the provider writes them');
   assert.equal(tr('Each provider’s subscriptions together, weighted by plan allowance'), '每个提供商的订阅合并计算，按套餐额度加权');

@@ -538,6 +538,9 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
 .stack-list .meters .segs { max-width: none; min-width: 0; }
 .stack-list .meters .capsm { width: 20px; }
 .stack-list .meters .pct { width: 38px; }
+/* A list with a model's row ("Fable" under WK) gives every label its width, so the meters
+   stay in one column. */
+.scoped .meters .capsm { width: auto; min-width: 36px; }
 .metaline { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--fg-3); }
 .metaline .fg2 { color: var(--fg-2); }
 .errline { font: 400 12px/1.5 var(--mono); color: var(--err); overflow-wrap: anywhere; text-wrap: pretty; }

@@ -30,6 +30,7 @@ function load() {
     piece('const windowLabel ='), piece('const windowTitle ='), piece('function windowSeconds(w) {'),
     piece('function windowElapsed(w'), piece('function windowSpent(a, w) {'),
     piece('const segsHTML ='), piece('function meterHTML(q'), piece('function pctHTML(w) {'), piece('function meterRowHTML(a, short) {'), piece('const meterRowsHTML ='),
+    piece('const metersHTML ='), piece('const cap = (s)'), piece('const scopedWindows ='), piece('const scopedTitle ='), piece('function scopedRowHTML(w) {'),
     piece('function windowBlockHTML(a, w, title, size) {'), piece('function miniMetersHTML(a) {'), piece('function windowHTML(a, short, size) {'),
     piece('function noShortBlockHTML(size) {'), piece('function quotaWindowsHTML(a'),
   ].join('\n'), context);
@@ -141,4 +142,35 @@ test('Meta sign-ins are metered subscriptions with 5-hour and weekly rows', () =
   const blocks = run(`quotaWindowsHTML(${JSON.stringify(live)}, 'lg')`);
   assert.match(blocks, /5-hour/);
   assert.match(blocks, /Weekly/);
+});
+
+test('the overview adds a model’s weekly row, such as Claude’s Fable, under WK', () => {
+  const run = load();
+  run('S.quotaDisplay = "used"');
+  // As production read an Ultra account on 2026-11-09, Fable further along than the week.
+  const ultra = { id: 'u', provider: 'claude', kind: 'oauth', quota: { no_five_hour_limit: true, windows: [
+    { name: 'week', used: 25, resets_at: '2026-10-28T16:00:00Z' },
+    { name: 'week fable', used: 61, resets_at: '2026-10-28T16:00:00Z', model: 'fable' },
+  ] } };
+  const plain = run(`meterRowsHTML(${JSON.stringify(ultra)})`);
+  assert.equal((plain.match(/class="mrow"/g) || []).length, 1, 'other lists keep their rows');
+  assert.doesNotMatch(plain, /Fable/);
+  const rows = run(`meterRowsHTML(${JSON.stringify(ultra)}, true)`);
+  assert.equal((rows.match(/class="mrow"/g) || []).length, 2);
+  assert.match(rows, /<span class="capsm">WK<\/span>.*<span class="capsm">Fable<\/span>/s, 'Fable follows the week');
+  assert.match(rows, /aria-label="Fable weekly window quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="61"/);
+  assert.match(rows, /<span class="pct ">61%<\/span><span class="rst" title="Fable weekly window resets [^"]+">↺ <span data-until="2026-10-28T16:00:00Z"/);
+  // The model's week is a week long, so it has an even-pace mark like WK.
+  const marks = rows.match(/<b class="pace" style="left:([\d.]+)%"/g) || [];
+  assert.equal(marks.length, 2);
+  assert.equal(marks[0], marks[1], 'both weeks renew together, so their pace is the same');
+  run('S.quotaDisplay = "remaining"');
+  assert.match(run(`meterRowsHTML(${JSON.stringify(ultra)}, true)`), /Fable weekly window quota remaining[^>]*aria-valuenow="39"/);
+  assert.match(run(`metersHTML(${JSON.stringify(ultra)}, true)`), /^<div class="meters">.*capsm">Fable</s);
+  // A renewed model window waits for the next reading instead of showing a stale bar.
+  const renewed = { ...ultra, quota: { ...ultra.quota, windows: [ultra.quota.windows[0], { ...ultra.quota.windows[1], resets_at: '2026-10-23T13:00:00Z' }] } };
+  assert.doesNotMatch(run(`meterRowsHTML(${JSON.stringify(renewed)}, true)`), /Fable/);
+  // Names reach the page escaped.
+  const odd = { ...ultra, quota: { ...ultra.quota, windows: [{ ...ultra.quota.windows[1], name: 'week <b>', model: '<b>' }] } };
+  assert.doesNotMatch(run(`meterRowsHTML(${JSON.stringify(odd)}, true)`), /<b>/);
 });

@@ -29,7 +29,7 @@ function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } 
     piece('const CODEX_PLAN_NAMES ='), piece('const CLAUDE_PLAN_NAMES ='), piece('const planName = (a)'), piece('function quotaOf(w'),
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('function meterHTML(q'), piece('const PLAN_WEIGHT_NOTE ='), piece('function planCounts(list) {'),
-    piece('function weeklyPools() {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='),
+    piece('function weeklyPools() {'), piece('function poolNextReset(p) {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='),
     piece('function poolQuota(p) {'), piece('function poolRateText(o) {'), piece('function poolMeterHTML(p) {'),
     piece('function poolCount(p) {'), piece('function poolBasis(pools) {'), piece('function poolStatusHTML(p) {'), piece('function ovPoolHTML() {'),
   ].join('\n'), context);
@@ -99,6 +99,8 @@ test('the meter draws the server’s weekly pools with their accounts', () => {
   assert.equal(pools.length, 2, 'whole-account weeks only, and only with accounts the page knows');
   assert.equal(pools[0].account.id, 'a');
   assert.deepEqual(pools[0].plans, [['Ultra', 2], ['Pro', 1]]);
+  assert.deepEqual(pools[0].scoped.map((p) => [p.provider, p.model]), [['claude', 'opus']], 'the model week rides along');
+  assert.deepEqual(pools[1].scoped, [], 'only the provider’s own model weeks');
   assert.deepEqual([pools[0].used, pools[0].pace, pools[0].priced], [40, 0.625, true]);
   assert.equal(pools[1].account.id, 'x');
   assert.equal(pools[1].accounts, 3, 'the server counts the members');
@@ -235,4 +237,46 @@ test('the heading says how each provider’s accounts count', () => {
   // Plan names reach the page escaped.
   run('S.accounts[0].quota.plan = "<b>"');
   assert.match(run('ovPoolHTML()'), /2 accounts · 1 &lt;b&gt;/);
+});
+
+test('a provider’s model week, such as Claude’s Fable, is a row under its combined week', () => {
+  const HOUR = 3600000;
+  const at = (h) => new Date(NOW + h * HOUR).toISOString();
+  const member = (id, fableReset) => ({ ...sub(id, 'max_20x'), quota: { plan: 'max_20x', windows: [
+    { name: 'week', used: 20, resets_at: at(60) },
+    ...(fableReset === undefined ? [] : [{ name: 'week fable', used: 30, resets_at: fableReset, model: 'fable' }]),
+  ] } });
+  // The server's pools as production listed them on 2026-11-09: the week and Fable's.
+  const fable = pool(['a', 'b', 'c'], { window: 'week fable', model: 'fable', used: 61.25, pace: 0.25, priced: true, outlook: null });
+  const S = state([member('a', at(-1)), member('b', at(30)), member('c', at(42))], [pool(['a', 'b', 'c'], { priced: true }), fable]);
+  const run = load(S);
+  for (const mobile of [false, true]) {
+    run(`mob = () => ${mobile}; S.quotaDisplay = 'used'`);
+    let html = run('ovPoolHTML()');
+    assert.match(html, /class="card [^"]*pool scoped"/, 'the list widens its labels');
+    assert.equal((html.match(/class="mrow"/g) || []).length, 2);
+    assert.match(html, /<span class="capsm">WK<\/span>.*<span class="capsm">Fable<\/span>/s);
+    assert.match(html, /aria-label="Claude combined Fable weekly quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="61"/);
+    assert.match(html, /aria-valuetext="61% used · Healthy · even pace 25% used by now"/);
+    assert.equal((html.match(/<b class="pace" style="left:25%"/g) || []).length, 1);
+    // The renewed member is left out: the next reset still to come is b's.
+    assert.match(html, new RegExp(`<span class="pct ">61%</span><span class="rst" title="Next account’s Fable weekly limit resets [^"]+">↺ <span data-until="${at(30)}"`));
+    assert.match(html, /Expected to last/, 'the forecast stays the week’s');
+    run('S.quotaDisplay = "remaining"');
+    html = run('ovPoolHTML()');
+    assert.match(html, /aria-label="Claude combined Fable weekly quota remaining"[^>]*aria-valuenow="39"/);
+  }
+  // Not every member reporting it: the row says so rather than inventing a share.
+  run('mob = () => false; S.quotaDisplay = "used"; S.overview.pools[1].reported = 2');
+  let html = run('ovPoolHTML()');
+  assert.match(html, /Claude combined Fable weekly: not reported/);
+  assert.match(html, /capsm">Fable<\/span><span class="segs [^"]*" role="img"[^>]*>(?:<i><\/i>){20}<\/span><span class="pct dim"/);
+  // No model pool, no row and no wider labels.
+  run('S.overview.pools.pop()');
+  html = run('ovPoolHTML()');
+  assert.doesNotMatch(html, /Fable|scoped/);
+  assert.equal((html.match(/class="mrow"/g) || []).length, 1);
+  // Without any member's reset, the row has no countdown.
+  const noReset = load(state([member('a'), member('b')], [pool(['a', 'b']), { ...fable, account_ids: ['a', 'b'], accounts: 2, reported: 2 }]));
+  assert.match(noReset('ovPoolHTML()'), /capsm">Fable<\/span>.*<span class="rst"><\/span><\/div>/s);
 });

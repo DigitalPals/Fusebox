@@ -272,6 +272,9 @@ pub(super) fn claude(v: &Value) -> Reading {
         l.used_percent = Some(used.clamp(0.0, 100.0));
         out.limits.push(l);
     }
+    // `is_active` marks the binding limit, the one nearest its end (Fable at 43% beside a
+    // 26% week, the session over the weeks), not whether a limit applies: an inactive
+    // entry still counts its use and renews at its own time.
     let typed: Vec<_> = v["limits"].as_array().into_iter().flatten().collect();
     let is_fable = |w: &&Value| {
         w["kind"] == "weekly_scoped"
@@ -291,8 +294,7 @@ pub(super) fn claude(v: &Value) -> Reading {
         out.windows.push(Window {
             name: "week fable".into(),
             used: number(&w["percent"]).unwrap().clamp(0.0, 100.0),
-            // Explicitly inactive data retires a previously observed cap.
-            resets_at: if w["is_active"] == false { Some(Utc::now()) } else { reset(w) },
+            resets_at: reset(w),
             model: Some("fable".into()),
         });
     }
@@ -330,7 +332,6 @@ pub(super) fn claude(v: &Value) -> Reading {
                 w,
             );
             l.used_percent = Some(used.clamp(0.0, 100.0));
-            l.enabled = w["is_active"].as_bool();
             out.limits.push(l);
         }
     }
@@ -537,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn active_typed_scopes_win_and_explicitly_inactive_scopes_stop_blocking() {
+    fn active_typed_scopes_win_and_inactive_scopes_still_count() {
         let mut st = crate::accounts::AccountState::default();
         usage(
             &mut st,
@@ -550,6 +551,7 @@ mod tests {
         );
         assert!(st.quota.exhausted("claude-fable-5"));
         assert!(st.quota.exhausted("claude-custom"));
+        // Not the binding limit is no exemption: a used-up scope still blocks its models.
         usage(
             &mut st,
             Provider::Claude,
@@ -558,8 +560,9 @@ mod tests {
                 {"kind":"weekly_scoped","scope":{"model":{"id":"claude-custom"}},"percent":100,"is_active":false}
             ]}),
         );
-        assert!(!st.quota.exhausted("claude-fable-5"));
-        assert!(!st.quota.exhausted("claude-custom"));
+        assert!(st.quota.exhausted("claude-fable-5"));
+        assert!(st.quota.exhausted("claude-custom"));
+        assert!(!st.quota.exhausted("claude-opus-5-5"));
         usage(
             &mut st,
             Provider::Codex,
@@ -567,6 +570,34 @@ mod tests {
         );
         assert!(st.quota.exhausted("gpt-fast"));
         assert!(!st.quota.exhausted("gpt-normal"));
+    }
+
+    /// An Ultra account's usage on 2026-11-09 (trimmed, renewals moved to 2099): the
+    /// week binds, so Fable is inactive, yet it has its own use and renewal.
+    #[test]
+    fn an_inactive_fable_limit_keeps_its_use_and_renewal() {
+        let reading = claude(&json!({
+            "five_hour": null,
+            "seven_day": { "utilization": 25.0, "resets_at": "2099-11-11T16:00:00.078457+00:00" },
+            "iguana_necktie": null,
+            "limits": [
+                { "kind": "weekly_all", "group": "weekly", "percent": 25, "severity": "normal",
+                  "resets_at": "2099-11-11T16:00:00.078457+00:00", "scope": null, "is_active": true },
+                { "kind": "weekly_scoped", "group": "weekly", "percent": 61, "severity": "normal",
+                  "resets_at": "2099-11-11T16:00:00.078621+00:00",
+                  "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }, "is_active": false },
+            ],
+            "weekly_scoped_shares": [{ "limit_index": 1, "used_percent_of_weekly": 30, "allowance_percent_of_weekly": 50 }],
+        }));
+        let fable = reading.windows.iter().find(|w| w.model.as_deref() == Some("fable")).expect("a Fable window");
+        assert_eq!(fable.name, "week fable");
+        assert_eq!(fable.used, 61.0);
+        assert_eq!(fable.resets_at.unwrap().to_rfc3339(), "2099-11-11T16:00:00.078621+00:00");
+        assert!(reading.limits.is_empty(), "Fable is a window, not a limit");
+        let mut st = crate::accounts::AccountState::default();
+        st.set_quota(reading.windows, None);
+        assert_eq!(st.quota.pressure("claude-fable-5-2"), Some(61.0), "Fable requests meet the tighter Fable week");
+        assert_eq!(st.quota.pressure("claude-opus-5-5"), Some(25.0));
     }
 
     /// A real `response.subscription_usage` frame as Meta sent it on 2026-11-03,

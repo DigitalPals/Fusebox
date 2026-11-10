@@ -999,13 +999,15 @@ const noShortNote = (a) => (noShortLimit(a) ? ' · no 5h limit' : '')
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
 const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
 
-// A window's length from its name ("5h", "day", "week"), in seconds.
+// A window's length from its name ("5h", "day", "week"), in seconds. A model's window
+// ("week fable") is as long as its first word says, as in src/attribution.rs.
 function windowSeconds(w) {
-  const h = /^(\d+)h$/.exec(w?.name || '');
+  const name = String(w?.name || '').split(' ')[0];
+  const h = /^(\d+)h$/.exec(name);
   if (h) return Number(h[1]) * 3600;
-  const other = /^(\d+)([dms])$/.exec(w?.name || '');
+  const other = /^(\d+)([dms])$/.exec(name);
   if (other) return Number(other[1]) * ({ d: 86400, m: 60, s: 1 }[other[2]]);
-  return { day: 86400, week: 7 * 86400 }[w?.name] || null;
+  return { day: 86400, week: 7 * 86400 }[name] || null;
 }
 
 // How far through its window we are, 0 to 1, when the window says when it resets.
@@ -1054,8 +1056,17 @@ function meterRowHTML(a, short) {
   const title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
   return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst"${title}>${reset}</span></div>`;
 }
-const meterRowsHTML = (a) => `${noShortLimit(a) ? '' : meterRowHTML(a, true)}${meterRowHTML(a, false)}`;
-const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : meterRowsHTML(a)}</div>`;
+
+// A window limited to one model (Claude's Fable weekly) as a row under the account's own:
+// "Fable [segments] 12% ↺ 1d 18h".
+function scopedRowHTML(w) {
+  const title = scopedTitle(w);
+  const tip = w.resets_at ? ` title="${esc(title)} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
+  return `<div class="mrow"><span class="capsm">${esc(cap(w.model))}</span>${segsHTML(w, `${title} window`)}${pctHTML(w)}<span class="rst"${tip}>${w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : ''}</span></div>`;
+}
+// `scoped` adds the model windows' rows (the overview); other lists keep 5H and WK.
+const meterRowsHTML = (a, scoped = false) => `${noShortLimit(a) ? '' : meterRowHTML(a, true)}${meterRowHTML(a, false)}${scoped ? scopedWindows(a).map(scopedRowHTML).join('') : ''}`;
+const metersHTML = (a, scoped = false) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : meterRowsHTML(a, scoped)}</div>`;
 
 function miniMetersHTML(a) {
   if (!a.quota?.windows?.length && a.quota?.limits?.length) return quotaLimitsHTML(a, true);
@@ -1393,31 +1404,33 @@ function ovSubsHTML() {
   }
   const subs = list.filter(metered);
   if (!subs.length) return '';
+  // Model rows widen every row's label, so the meters stay in one column.
+  const scoped = subs.some((a) => scopedWindows(a).length) ? ' scoped' : '';
   if (mob()) {
     const items = subs.map((a) => {
       const st = acctState(a);
       return `<div class="item click" data-open="${esc(a.id)}">
         <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div>${statusHTML(a, 7)}</div>
-        <div class="meters indent">${meterRowsHTML(a)}</div>
+        <div class="meters indent">${meterRowsHTML(a, true)}</div>
         <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
       </div>`;
     }).join('');
     return `<div class="sec-head"><div class="stack"><h2 class="h-sec">Subscriptions</h2><span class="meta" data-subs-meta="short">${esc(subsMeta(true))}</span></div>${quotaControlsHTML(true, false)}</div>
-      <div class="card stack-list">${items}</div>`;
+      <div class="card stack-list${scoped}">${items}</div>`;
   }
   const rows = subs.map((a, i) => {
     const st = acctState(a);
     return `<div class="tr click" data-open="${esc(a.id)}">
       <span class="c-idx idx">${String(i + 1).padStart(2, '0')}</span>
       <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div></div>
-      ${metersHTML(a)}
+      ${metersHTML(a, true)}
       <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}</div>
       <span class="c-req r">${fmt(a.counters.requests)}</span>
       <div class="c-last c-now" data-now="${esc(a.id)}">${nowHTML(a)}</div>
     </div>`;
   }).join('');
   return `<div class="sec-head"><h2 class="h-sec">Subscriptions</h2><span class="meta" data-subs-meta>${esc(subsMeta())}</span><span class="grow"></span>${quotaControlsHTML()}</div>
-    <div class="card rivets table subs" role="table" aria-label="Subscriptions">
+    <div class="card rivets table subs${scoped}" role="table" aria-label="Subscriptions">
       <div class="th" role="row"><span class="c-idx">#</span><span>Account</span><span>Limits · ${quotaWord()}</span><span>Status</span><span class="c-req r">Requests</span><span class="r">Activity</span></div>
       ${rows}</div>`;
 }
@@ -1436,12 +1449,29 @@ function planCounts(list) {
 }
 
 // Server forecasts for each provider with several subscriptions; quota and resets
-// are weighted consistently in src/pools.rs and src/outlook.rs.
+// are weighted consistently in src/pools.rs and src/outlook.rs. A provider's weeks
+// limited to one model (Claude's Fable) come along as `scoped`, drawn under its own.
 function weeklyPools() {
-  return ((S.overview && S.overview.pools) || []).filter((p) => p.window === 'week' && !p.model).map((p) => {
+  const all = (S.overview && S.overview.pools) || [];
+  return all.filter((p) => p.window === 'week' && !p.model).map((p) => {
     const list = (p.account_ids || []).map(accountById).filter(Boolean);
-    return list.length ? { ...p, account: list[0], plans: planCounts(list) } : null;
+    const scoped = all.filter((m) => m.provider === p.provider && m.model && String(m.window).split(' ')[0] === 'week')
+      .sort((x, y) => String(x.model).localeCompare(String(y.model)));
+    return list.length ? { ...p, account: list[0], plans: planCounts(list), scoped } : null;
   }).filter(Boolean);
+}
+
+// A pooled window's first renewal, from its members' own readings: the forecast that
+// names the weekly one leaves model windows out.
+function poolNextReset(p) {
+  const now = Date.now();
+  let next = null;
+  for (const a of (p.account_ids || []).map(accountById).filter(Boolean)) {
+    const w = (a.quota?.windows || []).find((x) => x.name === p.window && (x.model || null) === (p.model || null));
+    const at = Date.parse(w?.resets_at);
+    if (at > now && !(Date.parse(next) <= at)) next = w.resets_at;
+  }
+  return next;
 }
 
 // The status beside the bar comes from this forecast; the bar itself is current quota.
@@ -1471,13 +1501,19 @@ function poolStatus(p) {
 }
 
 // As an account's weekly row: the current quota in the selected mode with the even-pace
-// mark and the next account's reset.
+// mark and the next account's reset. Model weeks follow as the account's own do.
 function poolMeterHTML(p) {
-  const o = p.outlook || {};
-  const q = poolQuota(p);
-  const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
-  const reset = o.next_reset_at ? `<span class="rst" title="${esc(`Next account resets ${fullResetTime(o.next_reset_at)}`)}">↺ ${liveLeft(o.next_reset_at, true)}</span>` : '<span class="rst"></span>';
-  return `<div class="meters"><div class="mrow"><span class="capsm">WK</span>${meterHTML(q, q && p.pace, `${provName(p.account)} combined weekly`)}${pct}${reset}</div></div>`;
+  const row = (label, w, what, resetsAt, resetText) => {
+    const q = poolQuota(w);
+    const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
+    const reset = resetsAt ? `<span class="rst" title="${esc(`${resetText} ${fullResetTime(resetsAt)}`)}">↺ ${liveLeft(resetsAt, true)}</span>` : '<span class="rst"></span>';
+    return `<div class="mrow"><span class="capsm">${esc(label)}</span>${meterHTML(q, q && w.pace, `${provName(p.account)} combined ${what}`)}${pct}${reset}</div>`;
+  };
+  const models = (p.scoped || []).map((m) => {
+    const name = cap(m.model);
+    return row(name, m, `${name} weekly`, poolNextReset(m), `Next account’s ${name} weekly limit resets`);
+  });
+  return `<div class="meters">${row('WK', p, 'weekly', p.outlook?.next_reset_at, 'Next account resets')}${models.join('')}</div>`;
 }
 
 function poolStatusHTML(p) {
@@ -1523,12 +1559,13 @@ function ovPoolHTML() {
   if (!pools.length) return '';
   const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_WEIGHT_NOTE)}"` : '';
   const heading = `<div class="sec-head"><h2 class="h-sec">Combined weekly quota</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>`;
+  const scoped = pools.some((p) => p.scoped.length) ? ' scoped' : '';
   if (mob()) {
     const items = pools.map((p) => `<div class="item">
         <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div></div>
         <div class="indent">${poolMeterHTML(p)}<div class="c-status">${poolStatusHTML(p)}</div></div>
       </div>`).join('');
-    return `${heading}<div class="card stack-list pool">${items}</div>`;
+    return `${heading}<div class="card stack-list pool${scoped}">${items}</div>`;
   }
   const rows = pools.map((p) => `<div class="tr">
       <span class="c-idx"></span>
@@ -1536,7 +1573,7 @@ function ovPoolHTML() {
       ${poolMeterHTML(p)}
       <div class="c-status">${poolStatusHTML(p)}</div>
     </div>`).join('');
-  return `${heading}<div class="card table subs pool">${rows}</div>`;
+  return `${heading}<div class="card table subs pool${scoped}">${rows}</div>`;
 }
 
 function ovOtherHTML() {
