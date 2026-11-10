@@ -1056,17 +1056,30 @@ function meterRowHTML(a, short) {
   const title = w && w.resets_at ? ` title="${esc(windowTitle(w))} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
   return `<div class="mrow"><span class="capsm">${esc(label)}</span>${segsHTML(w, `${windowTitle(w || { name: short ? '5h' : 'week' })}`)}${pctHTML(w)}<span class="rst"${title}>${reset}</span></div>`;
 }
+const meterRowsHTML = (a) => `${noShortLimit(a) ? '' : meterRowHTML(a, true)}${meterRowHTML(a, false)}`;
+const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : meterRowsHTML(a)}</div>`;
 
-// A window limited to one model (Claude's Fable weekly) as a row under the account's own:
-// "Fable [segments] 12% ↺ 1d 18h".
-function scopedRowHTML(w) {
-  const title = scopedTitle(w);
-  const tip = w.resets_at ? ` title="${esc(title)} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
-  return `<div class="mrow"><span class="capsm">${esc(cap(w.model))}</span>${segsHTML(w, `${title} window`)}${pctHTML(w)}<span class="rst"${tip}>${w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : ''}</span></div>`;
+// On the overview, a window limited to one model (Claude's Fable weekly) is a child of its
+// account's or pool's rows, "↳ Fable", and takes its state colour as a whole when it runs
+// low. A wide list gives it a line of its own, its label under the name and its meter
+// under WK; on a phone it follows WK in the meters.
+function childRowHTML(model, cells, cls, wide) {
+  const label = `<span class="sub-label"><span aria-hidden="true">↳ </span>${esc(cap(model))}</span>`;
+  const level = cls ? ` data-level="${cls}"` : '';
+  return wide
+    ? `<div class="subline"${level}><span class="c-idx"></span>${label}<div class="meters"><div class="mrow"><span class="capsm"></span>${cells}</div></div></div>`
+    : `<div class="mrow sub-row"${level}>${label}${cells}</div>`;
 }
-// `scoped` adds the model windows' rows (the overview); other lists keep 5H and WK.
-const meterRowsHTML = (a, scoped = false) => `${noShortLimit(a) ? '' : meterRowHTML(a, true)}${meterRowHTML(a, false)}${scoped ? scopedWindows(a).map(scopedRowHTML).join('') : ''}`;
-const metersHTML = (a, scoped = false) => `<div class="meters">${!a.quota?.windows?.length && a.quota?.limits?.length ? quotaLimitsHTML(a, true) : meterRowsHTML(a, scoped)}</div>`;
+
+// An account's model windows as child rows, each drawn as its own rows are.
+function scopedRowsHTML(a, wide) {
+  return scopedWindows(a).map((w) => {
+    const title = scopedTitle(w);
+    const tip = w.resets_at ? ` title="${esc(title)} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
+    const cells = `${segsHTML(w, `${title} window`)}${pctHTML(w)}<span class="rst"${tip}>${w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : ''}</span>`;
+    return childRowHTML(w.model, cells, quotaOf(w)?.cls, wide);
+  }).join('');
+}
 
 function miniMetersHTML(a) {
   if (!a.quota?.windows?.length && a.quota?.limits?.length) return quotaLimitsHTML(a, true);
@@ -1404,14 +1417,14 @@ function ovSubsHTML() {
   }
   const subs = list.filter(metered);
   if (!subs.length) return '';
-  // Model rows widen every row's label, so the meters stay in one column.
+  // On a phone a model's child row ("↳ Fable") widens every label, so the meters stay in one column.
   const scoped = subs.some((a) => scopedWindows(a).length) ? ' scoped' : '';
   if (mob()) {
     const items = subs.map((a) => {
       const st = acctState(a);
       return `<div class="item click" data-open="${esc(a.id)}">
         <div class="item-top">${acctLogo(a, 18)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span>${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div>${statusHTML(a, 7)}</div>
-        <div class="meters indent">${meterRowsHTML(a, true)}</div>
+        <div class="meters indent">${meterRowsHTML(a)}${scopedRowsHTML(a, false)}</div>
         <div class="metaline indent">${st.cls === 'cooling' ? `<span class="fg2">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}<span>${fmt(a.counters.requests)} requests · <span data-now="${esc(a.id)}" data-inline>${nowHTML(a, true)}</span></span></div>
       </div>`;
     }).join('');
@@ -1423,14 +1436,15 @@ function ovSubsHTML() {
     return `<div class="tr click" data-open="${esc(a.id)}">
       <span class="c-idx idx">${String(i + 1).padStart(2, '0')}</span>
       <div class="who">${acctLogo(a)}<div class="cell2"><button class="name-btn" type="button" data-act="open-acc" data-id="${esc(a.id)}">${esc(acctLabel(a))}</button><span class="sub">${esc(provName(a))} · ${esc(planName(a) || authName(a))}${esc(noShortNote(a))}</span></div></div>
-      ${metersHTML(a, true)}
+      ${metersHTML(a)}
       <div class="c-status">${statusHTML(a)}${st.cls === 'cooling' ? `<span class="subs-line">${esc(modelScope(st.model))} · ${st.resetUnknown ? 'Reset time unknown' : `back ${esc(when(st.until))}`}</span>` : ''}${bankedLineHTML(a)}${renewalLineHTML(a)}</div>
       <span class="c-req r">${fmt(a.counters.requests)}</span>
       <div class="c-last c-now" data-now="${esc(a.id)}">${nowHTML(a)}</div>
+      ${scopedRowsHTML(a, true)}
     </div>`;
   }).join('');
   return `<div class="sec-head"><h2 class="h-sec">Subscriptions</h2><span class="meta" data-subs-meta>${esc(subsMeta())}</span><span class="grow"></span>${quotaControlsHTML()}</div>
-    <div class="card rivets table subs${scoped}" role="table" aria-label="Subscriptions">
+    <div class="card rivets table subs" role="table" aria-label="Subscriptions">
       <div class="th" role="row"><span class="c-idx">#</span><span>Account</span><span>Limits · ${quotaWord()}</span><span>Status</span><span class="c-req r">Requests</span><span class="r">Activity</span></div>
       ${rows}</div>`;
 }
@@ -1500,20 +1514,28 @@ function poolStatus(p) {
   return { text: 'Forecast unavailable', cls: '' };
 }
 
-// As an account's weekly row: the current quota in the selected mode with the even-pace
-// mark and the next account's reset. Model weeks follow as the account's own do.
-function poolMeterHTML(p) {
-  const row = (label, w, what, resetsAt, resetText) => {
-    const q = poolQuota(w);
-    const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
-    const reset = resetsAt ? `<span class="rst" title="${esc(`${resetText} ${fullResetTime(resetsAt)}`)}">↺ ${liveLeft(resetsAt, true)}</span>` : '<span class="rst"></span>';
-    return `<div class="mrow"><span class="capsm">${esc(label)}</span>${meterHTML(q, q && w.pace, `${provName(p.account)} combined ${what}`)}${pct}${reset}</div>`;
-  };
-  const models = (p.scoped || []).map((m) => {
+// A pooled window as an account's row: the current quota in the selected mode with the
+// even-pace mark and the next account's reset.
+function poolCellsHTML(p, w, what, resetsAt, resetText) {
+  const q = poolQuota(w);
+  const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
+  const reset = resetsAt ? `<span class="rst" title="${esc(`${resetText} ${fullResetTime(resetsAt)}`)}">↺ ${liveLeft(resetsAt, true)}</span>` : '<span class="rst"></span>';
+  return `${meterHTML(q, q && w.pace, `${provName(p.account)} combined ${what}`)}${pct}${reset}`;
+}
+
+// The provider's model weeks (Fable) as child rows of its combined week.
+function poolChildRowsHTML(p, wide) {
+  return (p.scoped || []).map((m) => {
     const name = cap(m.model);
-    return row(name, m, `${name} weekly`, poolNextReset(m), `Next account’s ${name} weekly limit resets`);
-  });
-  return `<div class="meters">${row('WK', p, 'weekly', p.outlook?.next_reset_at, 'Next account resets')}${models.join('')}</div>`;
+    return childRowHTML(m.model, poolCellsHTML(p, m, `${name} weekly`, poolNextReset(m), `Next account’s ${name} weekly limit resets`), poolQuota(m)?.cls, wide);
+  }).join('');
+}
+
+// The combined week's meter; on a phone its model weeks follow inside it, while a wide
+// row gives them lines of their own.
+function poolMeterHTML(p, wide = false) {
+  const week = `<div class="mrow"><span class="capsm">WK</span>${poolCellsHTML(p, p, 'weekly', p.outlook?.next_reset_at, 'Next account resets')}</div>`;
+  return `<div class="meters">${week}${wide ? '' : poolChildRowsHTML(p, false)}</div>`;
 }
 
 function poolStatusHTML(p) {
@@ -1570,10 +1592,11 @@ function ovPoolHTML() {
   const rows = pools.map((p) => `<div class="tr">
       <span class="c-idx"></span>
       <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${esc(poolCount(p))}</span></div></div>
-      ${poolMeterHTML(p)}
+      ${poolMeterHTML(p, true)}
       <div class="c-status">${poolStatusHTML(p)}</div>
+      ${poolChildRowsHTML(p, true)}
     </div>`).join('');
-  return `${heading}<div class="card table subs pool${scoped}">${rows}</div>`;
+  return `${heading}<div class="card table subs pool">${rows}</div>`;
 }
 
 function ovOtherHTML() {

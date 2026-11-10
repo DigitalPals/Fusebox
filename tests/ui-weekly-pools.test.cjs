@@ -30,7 +30,8 @@ function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } 
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('function meterHTML(q'), piece('const PLAN_WEIGHT_NOTE ='), piece('function planCounts(list) {'),
     piece('function weeklyPools() {'), piece('function poolNextReset(p) {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='),
-    piece('function poolQuota(p) {'), piece('function poolRateText(o) {'), piece('function poolMeterHTML(p) {'),
+    piece('function poolQuota(p) {'), piece('function poolRateText(o) {'), piece('function childRowHTML(model, cells, cls, wide) {'),
+    piece('function poolCellsHTML(p, w, what, resetsAt, resetText) {'), piece('function poolChildRowsHTML(p, wide) {'), piece('function poolMeterHTML(p, wide = false) {'),
     piece('function poolCount(p) {'), piece('function poolBasis(pools) {'), piece('function poolStatusHTML(p) {'), piece('function ovPoolHTML() {'),
   ].join('\n'), context);
   return (code) => {
@@ -239,7 +240,7 @@ test('the heading says how each provider’s accounts count', () => {
   assert.match(run('ovPoolHTML()'), /2 accounts · 1 &lt;b&gt;/);
 });
 
-test('a provider’s model week, such as Claude’s Fable, is a row under its combined week', () => {
+test('a provider’s model week, such as Claude’s Fable, is a child row of its combined week', () => {
   const HOUR = 3600000;
   const at = (h) => new Date(NOW + h * HOUR).toISOString();
   const member = (id, fableReset) => ({ ...sub(id, 'max_20x'), quota: { plan: 'max_20x', windows: [
@@ -250,12 +251,20 @@ test('a provider’s model week, such as Claude’s Fable, is a row under its co
   const fable = pool(['a', 'b', 'c'], { window: 'week fable', model: 'fable', used: 61.25, pace: 0.25, priced: true, outlook: null });
   const S = state([member('a', at(-1)), member('b', at(30)), member('c', at(42))], [pool(['a', 'b', 'c'], { priced: true }), fable]);
   const run = load(S);
+  const label = '<span class="sub-label"><span aria-hidden="true">↳ </span>Fable</span>';
   for (const mobile of [false, true]) {
     run(`mob = () => ${mobile}; S.quotaDisplay = 'used'`);
     let html = run('ovPoolHTML()');
-    assert.match(html, /class="card [^"]*pool scoped"/, 'the list widens its labels');
-    assert.equal((html.match(/class="mrow"/g) || []).length, 2);
-    assert.match(html, /<span class="capsm">WK<\/span>.*<span class="capsm">Fable<\/span>/s);
+    if (mobile) {
+      // On a phone it follows WK in the meters, and the list widens its labels to fit it.
+      assert.match(html, /class="card stack-list pool scoped"/);
+      assert.match(html, new RegExp(`<span class="capsm">WK</span>.*<div class="mrow sub-row">${label}<span class="segs `, 's'));
+    } else {
+      // Wide: a line of its own after the status, its label under the name, its meter under WK.
+      assert.match(html, /class="card table subs pool"/);
+      assert.match(html, new RegExp(`<div class="c-status">.*</div>\\s*<div class="subline"><span class="c-idx"></span>${label}<div class="meters"><div class="mrow"><span class="capsm"></span><span class="segs `, 's'));
+    }
+    assert.equal((html.match(/class="mrow/g) || []).length, 2);
     assert.match(html, /aria-label="Claude combined Fable weekly quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="61"/);
     assert.match(html, /aria-valuetext="61% used · Healthy · even pace 25% used by now"/);
     assert.equal((html.match(/<b class="pace" style="left:25%"/g) || []).length, 1);
@@ -266,17 +275,25 @@ test('a provider’s model week, such as Claude’s Fable, is a row under its co
     html = run('ovPoolHTML()');
     assert.match(html, /aria-label="Claude combined Fable weekly quota remaining"[^>]*aria-valuenow="39"/);
   }
+  // Running low, the whole child row takes the state colour.
+  run('mob = () => false; S.quotaDisplay = "used"; S.overview.pools[1].used = 80');
+  assert.match(run('ovPoolHTML()'), /<div class="subline" data-level="warn">/);
+  run('S.overview.pools[1].used = 97');
+  assert.match(run('ovPoolHTML()'), /<div class="subline" data-level="err">/);
   // Not every member reporting it: the row says so rather than inventing a share.
-  run('mob = () => false; S.quotaDisplay = "used"; S.overview.pools[1].reported = 2');
+  run('S.overview.pools[1].reported = 2');
   let html = run('ovPoolHTML()');
   assert.match(html, /Claude combined Fable weekly: not reported/);
-  assert.match(html, /capsm">Fable<\/span><span class="segs [^"]*" role="img"[^>]*>(?:<i><\/i>){20}<\/span><span class="pct dim"/);
-  // No model pool, no row and no wider labels.
+  assert.match(html, /<div class="subline"><span class="c-idx"><\/span><span class="sub-label">.*<span class="capsm"><\/span><span class="segs [^"]*" role="img"[^>]*>(?:<i><\/i>){20}<\/span><span class="pct dim"/s);
+  // No model pool, no child row and no wider labels.
   run('S.overview.pools.pop()');
-  html = run('ovPoolHTML()');
-  assert.doesNotMatch(html, /Fable|scoped/);
-  assert.equal((html.match(/class="mrow"/g) || []).length, 1);
+  for (const mobile of [false, true]) {
+    run(`mob = () => ${mobile}`);
+    html = run('ovPoolHTML()');
+    assert.doesNotMatch(html, /Fable|scoped|sub-/);
+    assert.equal((html.match(/class="mrow/g) || []).length, 1);
+  }
   // Without any member's reset, the row has no countdown.
-  const noReset = load(state([member('a'), member('b')], [pool(['a', 'b']), { ...fable, account_ids: ['a', 'b'], accounts: 2, reported: 2 }]));
-  assert.match(noReset('ovPoolHTML()'), /capsm">Fable<\/span>.*<span class="rst"><\/span><\/div>/s);
+  const noReset = load(state([member('a'), member('b')], [pool(['a', 'b']), { ...fable, used: 61.25, account_ids: ['a', 'b'], accounts: 2, reported: 2 }]));
+  assert.match(noReset('ovPoolHTML()'), /<div class="subline">.*<span class="rst"><\/span><\/div><\/div><\/div>/s);
 });
