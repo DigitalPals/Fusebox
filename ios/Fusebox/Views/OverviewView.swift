@@ -25,7 +25,7 @@ struct OverviewView: View {
         .navigationTitle(AppSection.overview.pageTitle)
     }
 
-    /// A model's row (Claude's Fable) in either list widens both lists' meter labels, so
+    /// A model's child row ("↳ Fable") in either list widens both lists' meter labels, so
     /// their meters line up.
     private var labelWidth: CGFloat {
         store.subscriptions.contains { !$0.scopedWindows().isEmpty } || store.weeklyPools.contains { !$0.scoped.isEmpty }
@@ -153,7 +153,7 @@ struct SubscriptionRow: View {
     var labelWidth = MeterLabel.narrow
 
     var body: some View {
-        // The overview's rows add the model windows (Fable) under WK.
+        // The overview's rows add the model windows under WK as child rows ("↳ Fable").
         Button { if let select { select() } else { navigate(.account(account.id)) } } label: {
             AccountRowContent(account: account, selected: selected, scoped: true, labelWidth: labelWidth)
         }
@@ -226,8 +226,8 @@ struct AccountRowContent: View {
 }
 
 /// A provider's combined weekly limit: its subscriptions together, with the weighted even
-/// pace, the next reset and the forecast's verdict. Its model weeks (Fable) follow WK with
-/// their own pace and the first member's renewal; the verdict stays the week's.
+/// pace, the next reset and the forecast's verdict. Its model weeks follow WK as child rows
+/// ("↳ Fable") with their own pace and the first member's renewal; the verdict stays the week's.
 struct PoolRow: View {
     @Environment(AppStore.self) private var store
     var pool: WeeklyPool
@@ -249,7 +249,7 @@ struct PoolRow: View {
                 ForEach(pool.scoped) { s in
                     MeterRow(label: s.name, title: "\(pool.providerName) combined \(s.name) weekly", reading: s.reading,
                              pace: s.reading == nil ? nil : s.pool.pace, resetsAt: s.nextReset, mode: store.quotaDisplay,
-                             labelWidth: labelWidth)
+                             labelWidth: labelWidth, child: true)
                 }
             }
             VStack(alignment: .leading, spacing: 2) {

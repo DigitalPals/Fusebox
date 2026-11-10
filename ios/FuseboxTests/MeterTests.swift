@@ -47,6 +47,17 @@ struct MeterTests {
         #expect(m.pace == nil)
     }
 
+    /// A model's child row ("↳ Fable") takes its state colour as a whole only once it runs
+    /// low, by what's used, whichever percentage it shows (DESIGN.md "Model rows").
+    @Test func childRowsTakeTheirStateColourOnlyWhenLow() {
+        #expect(MeterRow.childLevel(nil) == nil)
+        #expect(MeterRow.childLevel(QuotaReading(used: 0)) == nil)
+        #expect(MeterRow.childLevel(QuotaReading(used: 74.9)) == nil)
+        #expect(MeterRow.childLevel(QuotaReading(used: 83)) == .warn)
+        #expect(MeterRow.childLevel(QuotaReading(used: 95)) == .err)
+        #expect(MeterRow.childLevel(QuotaReading(used: 100)) == .err)
+    }
+
     @Test func paceSitsAtTheElapsedFraction() {
         #expect(model(10, pace: 0.4).pace == 0.4)
         #expect(model(10, pace: 0).pace == 0)

@@ -234,9 +234,13 @@ struct ResetCell: View {
     var window: QuotaWindow?
     var resetsAt: Date?
     var runsOutEarly = false
+    /// A child row running low ("↳ Fable") tints its countdown with its state colour.
+    var tint: Color?
 
-    init(window: QuotaWindow?) { self.window = window; resetsAt = window?.resetsAt }
-    init(resetsAt: Date?, runsOutEarly: Bool = false) { window = nil; self.resetsAt = resetsAt; self.runsOutEarly = runsOutEarly }
+    init(window: QuotaWindow?, tint: Color? = nil) { self.window = window; resetsAt = window?.resetsAt; self.tint = tint }
+    init(resetsAt: Date?, runsOutEarly: Bool = false, tint: Color? = nil) {
+        window = nil; self.resetsAt = resetsAt; self.runsOutEarly = runsOutEarly; self.tint = tint
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { ctx in
@@ -245,7 +249,7 @@ struct ResetCell: View {
                 if let out {
                     Text("out \(Fmt.compactLeft(out, now: ctx.date))").foregroundStyle(Palette.warn)
                 } else if let resetsAt, resetsAt > ctx.date {
-                    Text("↺ \(Fmt.compactLeft(resetsAt, now: ctx.date))").foregroundStyle(runsOutEarly ? Palette.warn : Palette.fg3)
+                    Text("↺ \(Fmt.compactLeft(resetsAt, now: ctx.date))").foregroundStyle(runsOutEarly ? Palette.warn : tint ?? Palette.fg3)
                 } else {
                     Text(" ")
                 }
@@ -256,14 +260,16 @@ struct ResetCell: View {
     }
 }
 
-/// The meter label column: 5H and WK fit 26pt. A list that shows a model's row ("Fable")
-/// gives every row 40pt, so the meters stay in one column.
+/// The meter label column: 5H and WK fit 26pt. A list that shows a model's child row
+/// ("↳ Fable") gives every row 54pt, so the meters stay in one column.
 enum MeterLabel {
     static let narrow: CGFloat = 26
-    static let wide: CGFloat = 40
+    static let wide: CGFloat = 54
 }
 
-/// One list meter row: "5H [segments] 47% ↺ 2h 14m".
+/// One list meter row: "5H [segments] 47% ↺ 2h 14m". A `child` row is a window limited to
+/// one model under its account's or pool's own (DESIGN.md "Model rows"): "↳ Fable" in
+/// sentence case, and running low, its label and countdown take the state colour too.
 struct MeterRow: View {
     var label: String
     var title: String
@@ -275,11 +281,34 @@ struct MeterRow: View {
     var height: CGFloat = 9
     var knockout = Palette.surface
     var labelWidth = MeterLabel.narrow
+    var child = false
+
+    /// A child row's state once it runs low (`warn` from 75% used, `err` from 95%); nil while
+    /// it's healthy or not reported.
+    static func childLevel(_ reading: QuotaReading?) -> QuotaReading.Level? {
+        guard let level = reading?.level, level != .normal else { return nil }
+        return level
+    }
+
+    private var tint: Color? { child ? Self.childLevel(reading).map(Palette.level) : nil }
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(label).capsLabel(10.5)
-                .frame(width: labelWidth, alignment: .leading)
+            Group {
+                if child {
+                    HStack(spacing: 0) {
+                        Text("↳ ").accessibilityHidden(true)
+                        Text(label)
+                    }
+                    .font(Typeface.small)
+                    .foregroundStyle(tint ?? Palette.fg3)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                } else {
+                    Text(label).capsLabel(10.5)
+                }
+            }
+            .frame(width: labelWidth, alignment: .leading)
             SegmentedMeter(reading, pace: pace, mode: mode, height: height, label: title, knockout: knockout)
                 .frame(minWidth: 60, maxWidth: 220)
             Text(reading.map { Fmt.percent($0.value(mode)) } ?? "–")
@@ -287,7 +316,7 @@ struct MeterRow: View {
                 .foregroundStyle(reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
                 .frame(width: 44, alignment: .trailing)
             Group {
-                if let window { ResetCell(window: window) } else { ResetCell(resetsAt: resetsAt) }
+                if let window { ResetCell(window: window, tint: tint) } else { ResetCell(resetsAt: resetsAt, tint: tint) }
             }
             .frame(width: 72, alignment: .leading)
         }
@@ -296,7 +325,8 @@ struct MeterRow: View {
 }
 
 /// An account's 5H and WK rows (the 5H row is left out when there's no 5-hour limit). On
-/// the overview (`scoped`) each window limited to one model follows WK: "Fable".
+/// the overview (`scoped`) each window limited to one model follows WK as a child row:
+/// "↳ Fable".
 struct AccountMeters: View {
     var account: Account
     var mode: QuotaDisplay
@@ -311,7 +341,7 @@ struct AccountMeters: View {
             if scoped {
                 ForEach(account.scopedWindows(), id: \.self) { w in
                     MeterRow(label: Fmt.capitalized(w.model ?? ""), title: Quotas.scopedTitle(w), reading: QuotaReading(w),
-                             pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout, labelWidth: labelWidth)
+                             pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout, labelWidth: labelWidth, child: true)
                 }
             }
         }
