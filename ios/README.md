@@ -8,7 +8,9 @@ and uses its words. It runs on iPhone, including the foldable iPhone Duo, iOS 27
 
 - Bundle `com.digitalpals.fusebox` (display name “Fusebox”; App Store name “Fusebox - Subscription
   Proxy”, app record 6829404456), widgets `com.digitalpals.fusebox.widgets`, notification service
-  `com.digitalpals.fusebox.notifications`, team `4R8P9MTF9T`, automatic signing, version 1.0.0.
+  `com.digitalpals.fusebox.notifications`, team `4R8P9MTF9T`, automatic signing, version 1.1.0.
+  1.0 is on the App Store: once App Review approves a version, App Store Connect takes no more
+  builds of it, so each App Store release raises `MARKETING_VERSION` in `project.yml`.
 - Keychain access group `<team>.com.digitalpals.fusebox.shared`, shared with both extensions:
   the management key (only ever in the Keychain), the server URL, the widgets' last snapshot, and
   the push relay's handle and key, which the notification service decrypts with.
