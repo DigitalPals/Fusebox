@@ -363,14 +363,19 @@ extension Account {
 public struct WeeklyPool: Identifiable, Sendable, Equatable {
     public var pool: Pool
     public var accounts: [Account]
+    /// The provider's weeks limited to one model (Claude's Fable), drawn under its own.
+    public var scoped: [ScopedPool] = []
     public var id: String { pool.id }
 
     public var providerName: String { accounts.first?.providerName ?? Provider.name(pool.provider) }
     public var logo: String { accounts.first?.logo ?? Provider.logo(provider: pool.provider) }
 
     /// Current combined quota, once every account reports its weekly window.
-    public var reading: QuotaReading? {
-        guard pool.accounts > 0, pool.reported == pool.accounts, let used = pool.used else { return nil }
+    public var reading: QuotaReading? { Self.reading(pool) }
+
+    /// A pool's combined quota, once every member reports the window.
+    public static func reading(_ p: Pool) -> QuotaReading? {
+        guard p.accounts > 0, p.reported == p.accounts, let used = p.used else { return nil }
         return QuotaReading(used: used)
     }
 
@@ -421,13 +426,39 @@ public struct WeeklyPool: Identifiable, Sendable, Equatable {
         return [count, mix].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    /// Each provider's whole-account weekly pool, matched to its accounts.
-    public static func weekly(overview: Overview?, accounts: [Account]) -> [WeeklyPool] {
-        (overview?.pools ?? []).filter { $0.window == "week" && $0.model == nil }.compactMap { p in
+    /// Each provider's whole-account weekly pool, matched to its accounts, with the
+    /// provider's model weeks (ui/app.js `weeklyPools`).
+    public static func weekly(overview: Overview?, accounts: [Account], now: Date = .now) -> [WeeklyPool] {
+        let all = overview?.pools ?? []
+        return all.filter { $0.window == "week" && $0.model == nil }.compactMap { p in
             let list = (p.accountIDs ?? []).compactMap { id in accounts.first { $0.id == id } }
-            return list.isEmpty ? nil : WeeklyPool(pool: p, accounts: list)
+            guard !list.isEmpty else { return nil }
+            let scoped = all.filter { $0.provider == p.provider && $0.model != nil && $0.window.split(separator: " ").first == "week" }
+                .sorted { ($0.model ?? "") < ($1.model ?? "") }
+                .map { ScopedPool(pool: $0, nextReset: nextReset($0, accounts: accounts, now: now)) }
+            return WeeklyPool(pool: p, accounts: list, scoped: scoped)
         }
     }
+
+    /// A pooled window's first renewal still to come, from its members' own readings: the
+    /// forecast that names the weekly one leaves model windows out (ui/app.js `poolNextReset`).
+    public static func nextReset(_ p: Pool, accounts: [Account], now: Date = .now) -> Date? {
+        (p.accountIDs ?? []).compactMap { id in accounts.first { $0.id == id } }
+            .compactMap { a in (a.quota?.windows ?? []).first { $0.name == p.window && $0.model == p.model }?.resetsAt }
+            .filter { $0 > now }
+            .min()
+    }
+}
+
+/// A provider's week limited to one model, all its subscriptions together: "Fable".
+public struct ScopedPool: Identifiable, Sendable, Equatable {
+    public var pool: Pool
+    public var nextReset: Date?
+    public var id: String { pool.id }
+
+    /// The meter row's label and the model's name: "Fable".
+    public var name: String { Fmt.capitalized(pool.model ?? "") }
+    public var reading: QuotaReading? { WeeklyPool.reading(pool) }
 }
 
 // MARK: - Requests

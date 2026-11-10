@@ -256,6 +256,13 @@ struct ResetCell: View {
     }
 }
 
+/// The meter label column: 5H and WK fit 26pt. A list that shows a model's row ("Fable")
+/// gives every row 40pt, so the meters stay in one column.
+enum MeterLabel {
+    static let narrow: CGFloat = 26
+    static let wide: CGFloat = 40
+}
+
 /// One list meter row: "5H [segments] 47% ↺ 2h 14m".
 struct MeterRow: View {
     var label: String
@@ -267,11 +274,12 @@ struct MeterRow: View {
     var mode: QuotaDisplay
     var height: CGFloat = 9
     var knockout = Palette.surface
+    var labelWidth = MeterLabel.narrow
 
     var body: some View {
         HStack(spacing: 10) {
             Text(label).capsLabel(10.5)
-                .frame(width: 26, alignment: .leading)
+                .frame(width: labelWidth, alignment: .leading)
             SegmentedMeter(reading, pace: pace, mode: mode, height: height, label: title, knockout: knockout)
                 .frame(minWidth: 60, maxWidth: 220)
             Text(reading.map { Fmt.percent($0.value(mode)) } ?? "–")
@@ -287,16 +295,25 @@ struct MeterRow: View {
     }
 }
 
-/// An account's 5H and WK rows (the 5H row is left out when there's no 5-hour limit).
+/// An account's 5H and WK rows (the 5H row is left out when there's no 5-hour limit). On
+/// the overview (`scoped`) each window limited to one model follows WK: "Fable".
 struct AccountMeters: View {
     var account: Account
     var mode: QuotaDisplay
     var knockout = Palette.surface
+    var scoped = false
+    var labelWidth = MeterLabel.narrow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if !account.noShortLimit { row(short: true) }
             row(short: false)
+            if scoped {
+                ForEach(account.scopedWindows(), id: \.self) { w in
+                    MeterRow(label: Fmt.capitalized(w.model ?? ""), title: Quotas.scopedTitle(w), reading: QuotaReading(w),
+                             pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout, labelWidth: labelWidth)
+                }
+            }
         }
     }
 
@@ -304,7 +321,8 @@ struct AccountMeters: View {
         let w = account.window(short: short)
         return MeterRow(label: Quotas.label(w, short: short),
                         title: w.map(Quotas.title) ?? (short ? "5-hour" : "Weekly"),
-                        reading: QuotaReading(w), pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout)
+                        reading: QuotaReading(w), pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout,
+                        labelWidth: labelWidth)
     }
 }
 

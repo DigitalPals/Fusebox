@@ -190,6 +190,43 @@ struct RulesTests {
         #expect(account(morning(-1)).renewalRow(now: noon) == nil, "a day that is over")
     }
 
+    /// The overview's Fable rows: Claude's model weeks ride under its combined week, each
+    /// with the first member renewal still to come (ui/app.js `weeklyPools`, `poolNextReset`).
+    @Test func modelWeeksRideUnderTheProvidersCombinedWeek() throws {
+        let hour: TimeInterval = 3600
+        func member(_ id: String, fable: TimeInterval?) -> Account {
+            var windows = [QuotaWindow(name: "week", used: 20, resetsAt: now.addingTimeInterval(60 * hour))]
+            if let fable { windows.append(QuotaWindow(name: "week fable", used: 30, resetsAt: now.addingTimeInterval(fable * hour), model: "fable")) }
+            return Account(id: id, provider: "claude", label: id, quota: Quota(windows: windows, plan: "max_20x", noFiveHourLimit: true))
+        }
+        let accounts = [member("a", fable: -1), member("b", fable: 30), member("c", fable: 42),
+                        Account(id: "x", provider: "codex", label: "x"), Account(id: "y", provider: "codex", label: "y")]
+        let ids = ["a", "b", "c"]
+        let overview = Overview(pools: [
+            Pool(provider: "claude", window: "week", accounts: 3, accountIDs: ids, reported: 3, used: 22, pace: 0.5, priced: true),
+            Pool(provider: "claude", window: "week fable", model: "fable", accounts: 3, accountIDs: ids, reported: 3, used: 61.25, pace: 0.25, priced: true),
+            Pool(provider: "codex", window: "week", accounts: 2, accountIDs: ["x", "y"], reported: 2, used: 10),
+        ])
+        let pools = WeeklyPool.weekly(overview: overview, accounts: accounts, now: now)
+        #expect(pools.map(\.pool.provider) == ["claude", "codex"], "model weeks get no row of their own")
+        let fable = try #require(pools[0].scoped.first)
+        #expect(pools[0].scoped.count == 1)
+        #expect(pools[1].scoped.isEmpty, "only the provider's own model weeks")
+        #expect(fable.name == "Fable")
+        #expect(fable.reading?.used == 61.25)
+        #expect(fable.nextReset == now.addingTimeInterval(30 * hour), "a's Fable week has renewed; b's comes first")
+        // Not every member reporting it: no combined figure rather than a partial one.
+        var partial = overview
+        partial.pools?[1].reported = 2
+        #expect(WeeklyPool.weekly(overview: partial, accounts: accounts, now: now)[0].scoped.first?.reading == nil)
+        // The account rows draw the same windows: only live ones, in name order.
+        #expect(accounts[1].scopedWindows(now: now).map(\.name) == ["week fable"])
+        #expect(accounts[0].scopedWindows(now: now).isEmpty, "a renewed window waits for the next reading")
+        #expect(Quotas.scopedTitle(accounts[1].scopedWindows(now: now)[0]) == "Fable weekly")
+        let pace = try #require(Quotas.elapsed(accounts[2].scopedWindows(now: now)[0], now: now))
+        #expect(abs(pace - (1 - 42.0 / 168)) < 1e-9, "a model's week is a week long, so it has an even-pace mark")
+    }
+
     @Test func routingSentence() throws {
         let r = try decode([RequestLog].self, "requests")
         let reused = try #require(r.first { $0.routingReason == "session_reused" })

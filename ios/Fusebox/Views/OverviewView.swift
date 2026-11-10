@@ -25,12 +25,20 @@ struct OverviewView: View {
         .navigationTitle(AppSection.overview.pageTitle)
     }
 
+    /// A model's row (Claude's Fable) in either list widens both lists' meter labels, so
+    /// their meters line up.
+    private var labelWidth: CGFloat {
+        store.subscriptions.contains { !$0.scopedWindows().isEmpty } || store.weeklyPools.contains { !$0.scoped.isEmpty }
+            ? MeterLabel.wide : MeterLabel.narrow
+    }
+
     @ViewBuilder private var subscriptions: some View {
         if !store.subscriptions.isEmpty {
+            let width = labelWidth
             VStack(alignment: .leading, spacing: 12) {
                 SectionHead("Subscriptions", meta: subsMeta) { QuotaModeToggle() }
                 FoldAwareColumns(items: store.subscriptions, minColumnWidth: 340) { column in
-                    RowsPanel(items: column, rivets: true) { SubscriptionRow(account: $0) }
+                    RowsPanel(items: column, rivets: true) { SubscriptionRow(account: $0, labelWidth: width) }
                 }
             }
         }
@@ -39,11 +47,12 @@ struct OverviewView: View {
     @ViewBuilder private var pools: some View {
         let pools = store.weeklyPools
         if !pools.isEmpty {
+            let width = labelWidth
             VStack(alignment: .leading, spacing: 12) {
                 SectionHead("Combined weekly limits", meta: PoolsBasis.text(pools))
                     .accessibilityIdentifier("combined-weekly")
                 FoldAwareColumns(items: pools, minColumnWidth: 340) { column in
-                    RowsPanel(items: column) { PoolRow(pool: $0) }
+                    RowsPanel(items: column) { PoolRow(pool: $0, labelWidth: width) }
                 }
             }
         }
@@ -141,10 +150,12 @@ struct SubscriptionRow: View {
     /// In Accounts' split layout the row selects instead of navigating.
     var select: (() -> Void)?
     var selected = false
+    var labelWidth = MeterLabel.narrow
 
     var body: some View {
+        // The overview's rows add the model windows (Fable) under WK.
         Button { if let select { select() } else { navigate(.account(account.id)) } } label: {
-            AccountRowContent(account: account, selected: selected)
+            AccountRowContent(account: account, selected: selected, scoped: true, labelWidth: labelWidth)
         }
         .buttonStyle(RowButtonStyle())
         .accessibilityIdentifier("subscription-\(account.id)")
@@ -164,6 +175,9 @@ struct AccountRowContent: View {
     @Environment(AppStore.self) private var store
     var account: Account
     var selected = false
+    /// Adds the windows limited to one model ("Fable") under WK.
+    var scoped = false
+    var labelWidth = MeterLabel.narrow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -180,7 +194,7 @@ struct AccountRowContent: View {
                     .layoutPriority(1)
             }
             if account.metered {
-                AccountMeters(account: account, mode: store.quotaDisplay)
+                AccountMeters(account: account, mode: store.quotaDisplay, scoped: scoped, labelWidth: labelWidth)
             }
             metaLine
         }
@@ -212,10 +226,12 @@ struct AccountRowContent: View {
 }
 
 /// A provider's combined weekly limit: its subscriptions together, with the weighted even
-/// pace, the next reset and the forecast's verdict.
+/// pace, the next reset and the forecast's verdict. Its model weeks (Fable) follow WK with
+/// their own pace and the first member's renewal; the verdict stays the week's.
 struct PoolRow: View {
     @Environment(AppStore.self) private var store
     var pool: WeeklyPool
+    var labelWidth = MeterLabel.narrow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -226,8 +242,16 @@ struct PoolRow: View {
                     Text(pool.countText).font(Typeface.small).foregroundStyle(Palette.fg3)
                 }
             }
-            MeterRow(label: "WK", title: "\(pool.providerName) combined weekly", reading: pool.reading,
-                     pace: pool.reading == nil ? nil : pool.pool.pace, resetsAt: pool.pool.outlook?.nextResetAt, mode: store.quotaDisplay)
+            VStack(alignment: .leading, spacing: 4) {
+                MeterRow(label: "WK", title: "\(pool.providerName) combined weekly", reading: pool.reading,
+                         pace: pool.reading == nil ? nil : pool.pool.pace, resetsAt: pool.pool.outlook?.nextResetAt, mode: store.quotaDisplay,
+                         labelWidth: labelWidth)
+                ForEach(pool.scoped) { s in
+                    MeterRow(label: s.name, title: "\(pool.providerName) combined \(s.name) weekly", reading: s.reading,
+                             pace: s.reading == nil ? nil : s.pool.pace, resetsAt: s.nextReset, mode: store.quotaDisplay,
+                             labelWidth: labelWidth)
+                }
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(pool.status.text).font(Typeface.sans(13, .medium, relativeTo: .footnote)).foregroundStyle(Palette.state(pool.status.level))
                 Text(pool.detail()).font(Typeface.small).foregroundStyle(Palette.fg3)

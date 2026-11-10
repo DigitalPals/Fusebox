@@ -46,6 +46,11 @@ struct DecodingTests {
         let pools = WeeklyPool.weekly(overview: o, accounts: accounts)
         #expect(!pools.isEmpty)
         #expect(pools[0].accounts.count == pools[0].pool.accountIDs?.count)
+        // The capture has Claude's Fable week as its own pool: it rides under the week.
+        let fable = try #require(pools[0].scoped.first { $0.pool.model == "fable" })
+        #expect(fable.name == "Fable")
+        #expect(fable.pool.window == "week fable")
+        #expect(fable.pool.accountIDs == pools[0].pool.accountIDs)
     }
 
     @Test func bankedResets() throws {
