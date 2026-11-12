@@ -1,0 +1,38 @@
+{
+  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; a wide change also runs the full suite on The Beast. The Docker image build stays with the Docker workflow.",
+  "steps": [
+    {
+      "name": "rust-fmt",
+      "when": ["*.rs"],
+      "run": "cargo fmt --check"
+    },
+    {
+      "name": "rust",
+      "about": "Clippy of the crate, then the tests of the changed modules (src/quota/x.rs runs the tests named quota::x::…).",
+      "when": ["src/**/*.rs"],
+      "run": "set --; for f in {files}; do m=${f#src/}; m=${m%.rs}; m=${m%/mod}; set -- \"$@\" \"$(printf %s \"$m\" | sed 's#/#::#g')::\"; done; cargo clippy --locked --all-targets -- -D warnings && cargo test --locked -- \"$@\"",
+      "timeout": 30
+    },
+    {
+      "name": "ui",
+      "about": "The dashboard's node tests.",
+      "when": ["ui/**", "tests/*.test.cjs"],
+      "run": "node --test tests/*.test.cjs"
+    },
+    {
+      "name": "python",
+      "about": "The scripts' Python tests.",
+      "when": ["scripts/*.py", "tests/test_*.py", "tests/fixtures/**"],
+      "run": "python3 -m unittest discover -s tests -p 'test_*.py'"
+    }
+  ],
+  "wide": ["Cargo.toml", "Cargo.lock", "build.rs", "rustfmt.toml", "src/main.rs", "src/state.rs", "src/server.rs", "src/config.rs", "tests/golden/**", "proptest-regressions/**"],
+  "wideIfDeleted": ["src/**"],
+  "full": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && python3 -m unittest discover -s tests -p 'test_*.py' && N=/cache/npm/node-v24.21.0-linux-x64 && { [ -x $N/bin/node ] || curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz | tar -xJ -C /cache/npm; } && $N/bin/node --test tests/*.test.cjs",
+  "beast": {
+    "image": "docker.io/library/rust:1-trixie",
+    "prepare": "rustup component add clippy rustfmt",
+    "network": "internet",
+    "caches": ["cargo-target"]
+  }
+}
