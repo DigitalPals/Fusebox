@@ -236,6 +236,25 @@ impl Observation {
         }
     }
 
+    /// The speed a call is priced and timed at. Codex follows the requested tier:
+    /// its Fast calls can come back reporting `service_tier: default`.
+    pub fn speed(&self) -> Speed {
+        if self.provider == "anthropic" {
+            // Claude reports speed separately. Its contracted/ordinary service
+            // tier does not imply the Codex priority or ultrafast speeds.
+            if self.service_tier.as_deref().is_some_and(|t| t == "fast" || t.ends_with("+fast")) {
+                Speed::Fast
+            } else {
+                Speed::Standard
+            }
+        } else if self.provider == "meta" {
+            // Muse has one speed; T3 records its usage as standard.
+            Speed::Standard
+        } else {
+            self.requested_speed().unwrap_or_else(|| Speed::from_tier(self.service_tier.as_deref()))
+        }
+    }
+
     pub fn set_requested_speed(&mut self, tier: Option<&str>) {
         self.numeric_metadata.insert("requested_speed".into(), Speed::from_tier(tier) as u64);
     }
