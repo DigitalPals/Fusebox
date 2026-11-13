@@ -7,8 +7,9 @@ import Testing
 @Suite("Cancelled reads")
 struct CancellationTests {
     @Test func aCancelledReadThrowsCancellationErrorNotAnAPIError() async {
-        // TEST-NET-1 is never routed, so the read is still connecting when it is cancelled.
-        let api = FuseboxAPI(baseURL: URL(string: "http://192.0.2.1:8317")!, key: "test")
+        // TEST-NET-1 is never routed, so the read is still connecting when it is cancelled
+        // (https: App Transport Security refuses plain http before connecting).
+        let api = FuseboxAPI(baseURL: URL(string: "https://192.0.2.1:8317")!, key: "test")
         let read = Task { try await api.overview() }
         try? await Task.sleep(for: .milliseconds(100))
         read.cancel()
