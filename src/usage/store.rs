@@ -217,16 +217,26 @@ fn write_batch(conn: &mut Connection, batch: &[Observation], health: &Health) {
             records = batch.len(),
             "usage database: a write failed, writing its records one at a time: {error:#}"
         );
-        batch
-            .iter()
-            .filter_map(|o| match insert_batch(conn, std::slice::from_ref(o)) {
-                Ok(result) => {
-                    counted(&result);
-                    None
+        // Once the database itself fails, the rest would each wait out the busy timeout;
+        // they are lost with that error instead.
+        let mut failed = Vec::new();
+        let mut database: Option<String> = None;
+        for o in batch {
+            if let Some(e) = &database {
+                failed.push((o, anyhow!("{e}")));
+                continue;
+            }
+            match insert_batch(conn, std::slice::from_ref(o)) {
+                Ok(result) => counted(&result),
+                Err(e) => {
+                    if database_failure(&e) {
+                        database = Some(format!("{e:#}"));
+                    }
+                    failed.push((o, e));
                 }
-                Err(e) => Some((o, e)),
-            })
-            .collect()
+            }
+        }
+        failed
     } else {
         batch.iter().map(|o| (o, anyhow!("{error:#}"))).collect()
     };
