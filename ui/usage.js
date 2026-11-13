@@ -656,7 +656,7 @@ function usageSpeedHTML() {
     ${list}
     <div class="u-chart-head u-sp-chart-head"><span class="label">BY ${usagePeriod(days) === 'month' ? 'MONTH' : 'DAY'}</span><span class="meta">${Usage.speedMetric === 'rate' ? 'Output tokens a second' : 'Seconds to first token'} · charted models</span><span class="grow"></span>${metric}</div>
     <div id="usage-speed-chart">${usageSpeedPlotHTML(c)}</div>
-    <div class="u-foot u-sp-foot"><span>Speed is output tokens over the time after generation started, summed over calls, so long answers count more. Reasoning tokens count as output.</span><span>Fast is the tier the call asked for. Not timed: failed and cancelled calls, calls without streamed content or reported output, hidden reasoning with no known start, and answers that arrived in one piece.${c.backfilling ? ' Earlier calls are still getting their timings.' : ''}</span></div>
+    <div class="u-foot u-sp-foot"><span>Speed is output tokens over the time after generation started, summed over calls, so long answers count more. Reasoning tokens count as output, and first token is when reasoning began.</span><span>Fast is the tier the call asked for. Not timed: failed and cancelled calls, calls without streamed content or reported output, hidden reasoning with no known start, and answers that arrived in one piece.${c.backfilling ? ' Earlier calls are still getting their timings.' : ''}</span></div>
   </section>`;
 }
 
