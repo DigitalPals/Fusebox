@@ -144,12 +144,14 @@ struct SpeedSummary {
     func sorted(by sort: String, provider: String) -> [Model] {
         models.filter { provider.isEmpty || ($0.provider ?? "") == provider }.sorted { a, b in
             if sort == "calls" { return a.sums.calls > b.sums.calls }
-            let (x, y) = sort == "first" ? (a.first, b.first) : (b.rate, a.rate)
+            let (x, y) = sort == "first" ? (a.first, b.first) : (a.rate, b.rate)
             guard let x, let y else {
                 if (x == nil) != (y == nil) { return x != nil }
                 return a.sums.calls > b.sums.calls
             }
-            return x != y ? x < y : a.sums.calls > b.sums.calls
+            // Fastest first: highest rate, or shortest wait for the first token.
+            if x == y { return a.sums.calls > b.sums.calls }
+            return sort == "first" ? x < y : x > y
         }
     }
 
