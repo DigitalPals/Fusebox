@@ -265,3 +265,72 @@ async fn a_non_streaming_client_on_a_streaming_upstream_gets_a_first_token() {
     assert!(log.ttft_ms.is_some(), "timed like a translated non-streaming call");
     server.abort();
 }
+
+/// Sends each batch of messages after its delay.
+async fn paced_upstream(batches: Vec<(u64, Vec<Value>)>) -> (ByteStream, tokio::task::JoinHandle<()>) {
+    let router = axum::Router::new().route(
+        "/",
+        get(move || {
+            let batches = batches.clone();
+            async move {
+                let body = Body::from_stream(async_stream::stream! {
+                    for (delay, messages) in batches {
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        let data: String = messages.into_iter().map(|v| format!("data: {v}\n\n")).collect();
+                        yield Ok::<_, Infallible>(Bytes::from(data));
+                    }
+                });
+                ([(header::CONTENT_TYPE, "text/event-stream")], body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (Box::pin(reqwest::get(url).await.unwrap().bytes_stream()), server)
+}
+
+#[tokio::test]
+async fn a_held_codex_stream_is_timed_from_its_reasoning_item() {
+    // Reasoning starts at once; bootstrap holds it for BOOT_HOLD (300 ms in tests)
+    // and the text comes 600 ms later, then the end.
+    let (app, mut tracker) = new_tracker();
+    let tap = tracker.usage_tap().unwrap();
+    let (body, server) = paced_upstream(vec![
+        (
+            0,
+            vec![
+                json!({"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}),
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}),
+            ],
+        ),
+        (600, vec![json!({"type":"response.output_text.delta","output_index":1,"delta":"Done."})]),
+        (
+            100,
+            vec![json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],
+            "usage":{"input_tokens":10,"output_tokens":400,"output_tokens_details":{"reasoning_tokens":300}}}})],
+        ),
+    ])
+    .await;
+    let limits = crate::stream_limits::Limits::default();
+    let mut first_error = None;
+    let Boot::Ready(stream, reasoning_at) =
+        bootstrap(body, Format::Responses, None, &limits, "gpt-6.1-sol", &mut first_error).await
+    else {
+        panic!("the stream should be released after the hold")
+    };
+    // As the request path does with a released stream.
+    tracker.held_reasoning_at = reasoning_at.map(|at| at.into_std());
+    let mut frames = passthrough_stream(stream, Format::Responses, tracker, false, 16 << 20, false);
+    while frames.next().await.is_some() {}
+    drop(frames);
+    let log = app.stats.recent.lock()[0].clone();
+    assert_eq!(log.status, 200);
+    let (start, total) = timing(&tap);
+    let (start, total) = (start.expect("timed"), total.unwrap());
+    // From the reasoning item, not from the release at 300 ms or the text at 600 ms.
+    assert!(start < 200, "start {start} ms");
+    assert!(log.ttft_ms.unwrap() >= 550, "the request log keeps the first text: {:?}", log.ttft_ms);
+    assert_eq!(log.stream_ms, Some(total - start));
+    server.abort();
+}
