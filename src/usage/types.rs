@@ -260,6 +260,20 @@ impl Observation {
     }
 }
 
+/// Shorter streams are one or two network reads, not a measurable rate.
+pub const MIN_STREAM_MS: u64 = 50;
+/// Output tokens a second above which a call arrived buffered, not generated live.
+pub const MAX_STREAM_RATE: u64 = 10_000;
+
+/// How long a call streamed after its first content, when that measures its output
+/// speed: it reported output, streamed for at least [`MIN_STREAM_MS`], and no faster
+/// than [`MAX_STREAM_RATE`]. The usage database applies the same rule in SQL.
+pub fn stream_ms(output: u64, ttft_ms: Option<u64>, total_ms: u64) -> Option<u64> {
+    let stream = total_ms.checked_sub(ttft_ms?)?;
+    (output > 0 && stream >= MIN_STREAM_MS && output.saturating_mul(1000) <= MAX_STREAM_RATE.saturating_mul(stream))
+        .then_some(stream)
+}
+
 /// Numeric metadata keeps the observation wire format compatible. These values
 /// are stable on disk and across collectors: 1 standard, 2 fast, 3 ultrafast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

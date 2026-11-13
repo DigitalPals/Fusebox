@@ -29,6 +29,7 @@ mod history;
 mod read;
 mod rollback;
 mod rollup;
+mod speed;
 pub use compact::{DatabaseStats, compact, downgrade};
 pub(crate) use history::floor as record_floor;
 pub(crate) use read::ReadError;
@@ -346,6 +347,7 @@ impl Store {
             params![session_id, Utc::now().timestamp_millis()],
         )?;
         let mut compactor = compact::Compactor::new(path, byte_limit.is_some());
+        let mut speed_backfill = speed::Backfill::new(byte_limit.is_some());
         let health = Arc::new(Health {
             historical_dropped,
             historical_rejected,
@@ -374,8 +376,11 @@ impl Store {
                 let mut health_checkpoint = HealthCheckpoint::default();
                 let stop = loop {
                     // Wake sooner while the compactor has work, so it keeps its pace.
-                    let wait =
-                        if compactor.busy() { compact::STEP_INTERVAL } else { std::time::Duration::from_secs(1) };
+                    let wait = if compactor.busy() || speed_backfill.busy() {
+                        compact::STEP_INTERVAL
+                    } else {
+                        std::time::Duration::from_secs(1)
+                    };
                     let received = runtime.block_on(async { tokio::time::timeout(wait, rx.recv()).await });
                     let command = match received {
                         Ok(Some(command)) => Some(command),
@@ -407,6 +412,9 @@ impl Store {
                     }
                     if was_busy && !compactor.busy() {
                         refresh_stats(&conn, false);
+                    }
+                    if let Err(e) = speed_backfill.tick(&mut conn) {
+                        tracing::warn!("usage database: stopped adding timings to older calls until restart: {e:#}");
                     }
                     if last_health.elapsed() >= std::time::Duration::from_secs(1) {
                         last_health = std::time::Instant::now();
@@ -644,6 +652,14 @@ impl Store {
     pub async fn dashboard(&self, q: Query) -> Result<Value> {
         self.read(move |conn| dashboard::summary(conn, &q)).await
     }
+    /// Output speed per model and tier for the Usage page, read beside the dashboard.
+    pub async fn speed(&self, q: Query) -> Result<Value> {
+        self.read(move |conn| speed::read(conn, &q)).await
+    }
+    #[cfg(test)]
+    pub async fn speed_scan(&self, q: Query) -> Result<Value> {
+        self.read(move |conn| speed::read_scan(conn, &q)).await
+    }
     /// Claude Code entrypoints for the Usage page, read beside the dashboard.
     pub async fn entrypoints(&self, q: Query) -> Result<Value> {
         self.read(move |conn| dashboard::entrypoints(conn, &q)).await
@@ -678,7 +694,8 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         bail!("usage database schema {version} is newer than supported {VERSION}");
     }
     if version == VERSION {
-        return rollup::ensure_entrypoints(conn);
+        rollup::ensure_entrypoints(conn)?;
+        return speed::ensure(conn);
     }
     if version < 0 {
         bail!("unsupported usage database migration");
@@ -743,7 +760,8 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
-    rollup::ensure_entrypoints(conn)
+    rollup::ensure_entrypoints(conn)?;
+    speed::ensure(conn)
 }
 
 /// Schema 4: compressed documents (see `codec`), the pricing flag lifted out of the
@@ -1045,11 +1063,13 @@ pub fn insert_batch(conn: &mut Connection, observations: &[Observation]) -> Resu
         };
         let changed=tx.prepare_cached("INSERT OR IGNORE INTO usage_observations(source,origin_id,source_event_id,fingerprint,canonical_key,association_key,trust_rank,event_at_ms,ingested_at_ms,provider,model,account_id,client_id,logical_request_id,attempt_id,response_id,completeness,known_fields,input,cache_read,cache_write,write_5m,write_1h,output,reasoning,cost_nanos,pricing_basis,catalogue_version,snapshot_json,payload,pricing_partial,write_30m,write_12h) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)")?.execute(params![o.source,o.origin_id,o.source_event_id,fingerprint,canonical_key(o),association_key(o),rank,o.event_at_ms,Utc::now().timestamp_millis(),o.provider,o.actual_model.as_ref(),o.account_id,o.client_id,o.logical_request_id,o.attempt_id,o.response_id,o.completeness,known as i64,tokens.input,tokens.cache_read,tokens.cache_write,tokens.write_5m,tokens.write_1h,tokens.output,tokens.reasoning,snapshot.cost_nanos,snapshot.basis,snapshot.catalogue_version,documents.store(&serde_json::to_string(&snapshot)?)?,documents.store(&serde_json::to_string(o)?)?,i64::from(snapshot.partial),tokens.write_30m,tokens.write_12h])?;
         if changed > 0 {
-            // Before the entry is chosen: its triggers read the label to roll it up.
+            let id = tx.last_insert_rowid();
+            // Before the entry is chosen: its triggers read the label and timing to roll them up.
             if let Some(entrypoint) = &o.entrypoint {
                 tx.prepare_cached("INSERT INTO usage_entrypoints(id,entrypoint) VALUES(?1,?2)")?
-                    .execute(params![tx.last_insert_rowid(), entrypoint])?;
+                    .execute(params![id, entrypoint])?;
             }
+            speed::record(&tx, id, o)?;
             changed_groups.insert(canonical_key(o));
             inserted += 1;
         } else {
@@ -1122,12 +1142,14 @@ fn purge_conn(conn: &mut Connection, before_ms: i64, keep_totals: bool) -> Resul
             affected.push(row?);
         }
     }
-    // Entries go first, while their entrypoints are still there for the rollup triggers.
+    // Entries go first, while their entrypoints and timings are still there for the rollup triggers.
     tx.execute("DELETE FROM usage_entries WHERE event_at_ms<?1", [before_ms])?;
-    tx.execute(
-        "DELETE FROM usage_entrypoints WHERE id IN (SELECT id FROM usage_observations INDEXED BY usage_event_time WHERE event_at_ms<?1)",
-        [before_ms],
-    )?;
+    for table in ["usage_entrypoints", "usage_timings"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE id IN (SELECT id FROM usage_observations INDEXED BY usage_event_time WHERE event_at_ms<?1)"),
+            [before_ms],
+        )?;
+    }
     let deleted = tx.execute("DELETE FROM usage_observations WHERE event_at_ms<?1", [before_ms])?;
     tx.execute("DELETE FROM usage_suppressed WHERE NOT EXISTS(SELECT 1 FROM usage_observations o WHERE o.source=usage_suppressed.source AND o.source_event_id=usage_suppressed.source_event_id)",[])?;
     for key in affected {
@@ -1409,6 +1431,12 @@ mod labels_tests;
 #[cfg(test)]
 #[path = "store/entrypoint_tests.rs"]
 mod entrypoint_tests;
+#[cfg(test)]
+#[path = "store/speed_bench.rs"]
+mod speed_bench;
+#[cfg(test)]
+#[path = "store/speed_tests.rs"]
+mod speed_tests;
 
 #[cfg(test)]
 #[path = "store/entrypoint_bench.rs"]
