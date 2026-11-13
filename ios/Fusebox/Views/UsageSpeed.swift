@@ -74,7 +74,7 @@ struct SpeedSummary {
     }
 
     /// At most this many models are charted at once (one colour each).
-    static let maxPicks = Palette.chart.count
+    static let maxPicks = SpeedPalette.colors.count
 
     var models: [Model] = []
     var calls = 0
@@ -198,6 +198,23 @@ struct SpeedLine: Identifiable {
         }
         if !run.isEmpty { runs.append(run) }
         return runs
+    }
+}
+
+/// The speed chart's line colours: the web's hues (ui/usage.js usageSpeedColor), oklch(0.6 0.09 h)
+/// in light mode and oklch(0.74 0.09 h) in dark, without its hue 90, an ochre, as the app has no amber.
+enum SpeedPalette {
+    private static let light: [UInt32] = [0xB06B60, 0x578F63, 0x2D8F9E, 0x6B7DB6, 0x9F6C9A]
+    private static let dark: [UInt32] = [0xDE9589, 0x81BB8D, 0x5FBACA, 0x95A8E4, 0xCC96C6]
+
+    static let colors: [Color] = zip(light, dark).map { l, d in
+        Color(UIColor { $0.userInterfaceStyle == .dark ? rgb(d) : rgb(l) })
+    }
+
+    static func color(_ slot: Int) -> Color { colors[slot % colors.count] }
+
+    private static func rgb(_ v: UInt32) -> UIColor {
+        UIColor(red: CGFloat(v >> 16 & 0xFF) / 255, green: CGFloat(v >> 8 & 0xFF) / 255, blue: CGFloat(v & 0xFF) / 255, alpha: 1)
     }
 }
 
@@ -358,7 +375,7 @@ struct SpeedCard: View {
     /// The charted model's colour, or an empty square when it isn't charted.
     private func swatch(_ slot: Int?) -> some View {
         RoundedRectangle(cornerRadius: 2)
-            .fill(slot.map { Palette.chart[$0 % Palette.chart.count] } ?? .clear)
+            .fill(slot.map { SpeedPalette.color($0) } ?? .clear)
             .frame(width: 9, height: 9)
             .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Palette.lineStrong, lineWidth: slot == nil ? 1 : 0.5))
     }
@@ -422,7 +439,8 @@ struct SpeedCard: View {
                     RuleMark(x: .value("Day", dayDates[i])).foregroundStyle(Palette.lineStrong).lineStyle(StrokeStyle(lineWidth: 1))
                 }
             }
-            .chartXScale(domain: dayDates.first!...dayDates.last!)
+            // Whole days, so each day's label sits under its value at noon.
+            .chartXScale(domain: dayDates.first!.addingTimeInterval(-43_200)...dayDates.last!.addingTimeInterval(43_200))
             .chartYScale(domain: .automatic(includesZero: true))
             .chartXSelection(value: Binding(
                 get: { selectedDay.flatMap { dayDates[safe: $0] } },
@@ -440,7 +458,7 @@ struct SpeedCard: View {
             }
             .chartXAxis {
                 AxisMarks(values: .stride(by: .day, count: days > 10 ? 7 : 1)) { v in
-                    AxisValueLabel(centered: false) {
+                    AxisValueLabel(centered: true) {
                         if let d = v.as(Date.self) {
                             Text(days > 10 ? d.formatted(.dateTime.month(.abbreviated).day()) : d.formatted(.dateTime.weekday(.abbreviated)))
                                 .font(Typeface.label(10.5)).foregroundStyle(Palette.fg3)
@@ -461,7 +479,7 @@ struct SpeedCard: View {
     private static func points(_ lines: [SpeedLine], days: [Date]) -> [Point] {
         var points: [Point] = []
         for l in lines {
-            let color = Palette.chart[l.slot % Palette.chart.count]
+            let color = SpeedPalette.color(l.slot)
             let dash: [CGFloat] = l.speed == "fast" ? [6, 4] : l.speed == "ultrafast" ? [2, 3] : []
             let last = l.values.lastIndex { $0 != nil }
             for (n, run) in l.runs.enumerated() {
@@ -478,7 +496,7 @@ struct SpeedCard: View {
         FlowLayout(spacing: 12, lineSpacing: 6) {
             ForEach(lines) { l in
                 HStack(spacing: 6) {
-                    let color = Palette.chart[l.slot % Palette.chart.count]
+                    let color = SpeedPalette.color(l.slot)
                     if SpeedTier.isStandard(l.speed) {
                         RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 9, height: 9)
                     } else {
@@ -503,7 +521,7 @@ struct SpeedCard: View {
                 Text("\(selectedDay == nil ? "Latest day" : "Day") · \(days[i].formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))").capsLabel(10.5)
                 ForEach(lines) { l in
                     HStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 2).fill(Palette.chart[l.slot % Palette.chart.count]).frame(width: 9, height: 9)
+                        RoundedRectangle(cornerRadius: 2).fill(SpeedPalette.color(l.slot)).frame(width: 9, height: 9)
                         Text(l.name).font(Typeface.meta).foregroundStyle(Palette.fg2).lineLimit(1)
                         Spacer()
                         Text(l.values[i].map { first ? SpeedText.seconds($0) : "\(SpeedText.rate($0)) tok/s" } ?? "—")
