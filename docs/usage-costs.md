@@ -43,6 +43,18 @@ These are estimates and labelled so. The provider's own accounting is per token 
 
 A client is its key: a named client by its name, a shared key from `api-keys` as "Shared key" and the start of its hash. Only a request without a key is named by its program. Each account's page shows, under every meter, which clients used the current window and the last one; its coding sessions show their share of the current windows. The Usage page's **Top clients** ranks the clients in the selected range and filters by estimated cost, with each one's share of the cost, its tokens and its models; it names clients only, not the subscription accounts they used. A window that would run out before it renews at its pace so far appears in the faults menu, naming the client that used most of it; it is not pushed and does not count on the app badge. For a provider with several subscriptions the warning is for all of them together, and names the client that used most of their windows, each account counting as it does on the overview's Combined weekly quota. Weekly pool warnings use the same recent-consumption forecast as the outlook ([calculation](weekly-outlook.md)). The current and last windows and the bounded recent quota history used for forecasts survive restarts in `<auth-dir>/.quota-attribution.state`; the usage database keeps no history of them.
 
+## Output speed
+
+The Usage page's **Output speed by model** card shows how fast each model streams once it has started: output tokens a second after the first token. It follows the page's range and filters.
+
+- **What is measured.** Each call Fusebox serves records its total time and when its first content arrived (text, reasoning or a tool call). Speed is output tokens divided by the time after the first content, summed over calls, so a long answer weighs more than a short one. Output includes reasoning tokens, as everywhere on the page. **First token** is the average wait for that first content, from the moment Fusebox received the request; retries and account switches before it are included.
+- **What is not timed.** Calls without streamed content or reported output (failures, cancelled calls), and answers that arrived in one piece: less than 50 ms of streaming, or faster than 10,000 tokens a second. They count under **Not timed**. Imported Claude Code and Codex history has no timings.
+- **Speed tiers.** A model that ran at more than one tier gets a row per tier. Codex calls count as **Fast** when the request asked for the priority tier, the same rule pricing uses: Codex Fast calls can come back reporting `service_tier: default`. Claude calls count as Fast when the response reports fast mode, which Fusebox leaves off on subscriptions unless it is turned on.
+- **Change** compares each model's speed with the equally long period just before the range.
+- **History.** Calls stored before this release get their timings from a background pass after the first start, newest first, so recent days fill in first; the card says so while it runs. Speeds cover the records kept (`retention-days`), not the 15-minute totals kept after records are deleted.
+
+The Overview's **Output speed** figure is the same measure over the last 60 minutes, from the live request log; its hover lists the busiest models. `GET /api/usage/speed` returns the sums per provider, model and tier, per local day, and for the period before, with the usual range and filter parameters.
+
 ## Local setup and configuration
 
 Usage storage is enabled by default for the proxy and is created beside the selected `config.yaml` as `usage.sqlite3`. Imports and collectors are opt-in. The SQLite library is built into the Fusebox binary; no database server or additional runtime is required.
