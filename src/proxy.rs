@@ -106,11 +106,16 @@ pub struct Tracker {
     /// When generation started, for output speed: the first content or the start of
     /// reasoning, whichever came first. Reasoning may stream nothing a client sees.
     generation_ms: Option<u64>,
-    /// Reasoning was streamed or announced, so its tokens fall inside the timed span.
-    reasoning_seen: bool,
+    /// A parser marked where reasoning began, so its tokens fall inside the timed span.
+    /// Reasoning text alone doesn't count: a summary (Gemini, some Chat providers)
+    /// can arrive only after the thinking it sums up.
+    reasoning_start_seen: bool,
     /// Generation began with reasoning that arrived only whole (Claude redacted
     /// thinking), so its start is unknown and the call can't be timed.
     start_unknown: bool,
+    /// When `bootstrap` saw the first reasoning start in the events it held back,
+    /// for the tracker to use when it replays them.
+    held_reasoning_at: Option<Instant>,
     load: Option<crate::accounts::RequestLoad>,
     done: bool,
     analytics: Option<crate::usage::capture::RequestUsage>,
@@ -150,8 +155,9 @@ impl Tracker {
             stream_error: None,
             stream_finished: false,
             generation_ms: None,
-            reasoning_seen: false,
+            reasoning_start_seen: false,
             start_unknown: false,
+            held_reasoning_at: None,
             load: None,
             done: false,
             log: RequestLog {
@@ -201,6 +207,11 @@ impl Tracker {
         self.attempt_started = Instant::now();
         self.prepared_ms = None;
         self.headers_ms = None;
+        // Only the attempt that answers is timed.
+        self.generation_ms = None;
+        self.reasoning_start_seen = false;
+        self.start_unknown = false;
+        self.held_reasoning_at = None;
         if let Some(a) = &mut self.analytics {
             a.attempt(acct);
         }
@@ -401,7 +412,6 @@ impl Tracker {
         self.generation_started_at(Instant::now());
     }
 
-    /// Reasoning that `bootstrap` held back began at `at`, before the tracker saw it.
     fn generation_started_at(&mut self, at: Instant) {
         if self.generation_ms.is_none() {
             self.generation_ms = Some(at.saturating_duration_since(self.started).as_millis() as u64);
@@ -413,7 +423,7 @@ impl Tracker {
     /// came after that start. Reasoning that was never streamed nor announced, or that
     /// came only whole before anything else, took time the span doesn't hold.
     fn speed_start(&self, status: u16, usage: &Usage) -> Option<u64> {
-        let hidden = self.start_unknown || (usage.reasoning > 0 && !self.reasoning_seen);
+        let hidden = self.start_unknown || (usage.reasoning > 0 && !self.reasoning_start_seen);
         self.generation_ms.filter(|_| status < 400 && !hidden)
     }
 
@@ -425,16 +435,13 @@ impl Tracker {
             // consuming while it reads, since Chat can send usage after its finish reason.
             Event::Finish(_) => self.stream_finished = true,
             Event::ReasoningStart => {
-                self.reasoning_seen = true;
-                self.generation_started();
+                self.reasoning_start_seen = true;
+                // Held back by `bootstrap`, it began before this replay.
+                let at = self.held_reasoning_at.take().unwrap_or_else(Instant::now);
+                self.generation_started_at(at);
             }
             Event::RedactedReasoning(_) if self.generation_ms.is_none() => self.start_unknown = true,
-            event if is_content(event) => {
-                if matches!(event, Event::Reasoning(_)) {
-                    self.reasoning_seen = true;
-                }
-                self.first_token();
-            }
+            event if is_content(event) => self.first_token(),
             _ => {}
         }
     }
@@ -2351,9 +2358,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             match boot {
                 Boot::Ready(stream, reasoning_at) => {
-                    if let Some(at) = reasoning_at {
-                        tracker.generation_started_at(at.into_std());
-                    }
+                    tracker.held_reasoning_at = reasoning_at.map(|at| at.into_std());
                     body = Some(stream);
                 }
                 Boot::Failed { status, message, held } => {

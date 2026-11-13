@@ -105,10 +105,23 @@ async fn reasoning_never_streamed_nor_announced_is_not_timed() {
     assert_eq!(log.stream_ms, None);
     assert!(near(log.ttft_ms, 20_000));
 
-    // Streamed reasoning is inside the span.
+    // Reasoning text without a start marker may be a summary sent after the thinking
+    // (Gemini's thoughts, a Chat `reasoning` field): not timed either.
+    let (app, mut tracker) = new_tracker();
+    let tap = tracker.usage_tap().unwrap();
+    at(&mut tracker, 20_000);
+    tracker.observe_stream_event(&Event::Reasoning("I considered the options.".into()));
+    tracker.observe_stream_event(&Event::Text("Done.".into()));
+    at(&mut tracker, 22_000);
+    tracker.finish(200, &Usage { output: 2_200, reasoning: 2_000, ..Default::default() }, None);
+    assert_eq!(timing(&tap).0, None);
+    assert_eq!(app.stats.recent.lock()[0].stream_ms, None);
+
+    // Reasoning streamed from its marked start is inside the span.
     let (app, mut tracker) = new_tracker();
     let tap = tracker.usage_tap().unwrap();
     at(&mut tracker, 1_000);
+    tracker.observe_stream_event(&Event::ReasoningStart);
     tracker.observe_stream_event(&Event::Reasoning("Let me think".into()));
     at(&mut tracker, 21_000);
     tracker.observe_stream_event(&Event::Text("Done.".into()));
@@ -129,6 +142,50 @@ async fn redacted_thinking_before_anything_else_is_not_timed() {
     tracker.finish(200, &Usage { output: 2_200, ..Default::default() }, None);
     assert_eq!(timing(&tap).0, None);
     assert_eq!(app.stats.recent.lock()[0].stream_ms, None);
+}
+
+#[tokio::test]
+async fn reasoning_held_by_bootstrap_counts_from_when_it_arrived_in_order() {
+    // Bootstrap saw the reasoning start 4 s before releasing the stream.
+    let (app, mut tracker) = new_tracker();
+    let tap = tracker.usage_tap().unwrap();
+    at(&mut tracker, 5_000);
+    tracker.held_reasoning_at = Some(Instant::now() - Duration::from_millis(4_000));
+    tracker.observe_stream_event(&Event::ReasoningStart);
+    tracker.observe_stream_event(&Event::Text("Done.".into()));
+    at(&mut tracker, 7_000);
+    tracker.finish(200, &Usage { output: 600, reasoning: 400, ..Default::default() }, None);
+    assert!(near(timing(&tap).0, 1_000), "{:?}", timing(&tap));
+    assert!(near(app.stats.recent.lock()[0].stream_ms, 6_000));
+
+    // Redacted thinking held before it still leaves the start unknown.
+    let (app, mut tracker) = new_tracker();
+    let tap = tracker.usage_tap().unwrap();
+    at(&mut tracker, 5_000);
+    tracker.held_reasoning_at = Some(Instant::now() - Duration::from_millis(1_000));
+    tracker.observe_stream_event(&Event::RedactedReasoning("opaque".into()));
+    tracker.observe_stream_event(&Event::ReasoningStart);
+    tracker.observe_stream_event(&Event::Text("Done.".into()));
+    at(&mut tracker, 7_000);
+    tracker.finish(200, &Usage { output: 600, ..Default::default() }, None);
+    assert_eq!(timing(&tap).0, None);
+    assert_eq!(app.stats.recent.lock()[0].stream_ms, None);
+}
+
+#[tokio::test]
+async fn a_new_attempt_starts_its_timing_afresh() {
+    let (app, mut tracker) = new_tracker();
+    let tap = tracker.usage_tap().unwrap();
+    at(&mut tracker, 1_000);
+    tracker.observe_stream_event(&Event::RedactedReasoning("opaque".into()));
+    tracker.attempt(&app.pool.all()[0]);
+    let tap = tracker.usage_tap().unwrap_or(tap);
+    at(&mut tracker, 3_000);
+    tracker.observe_stream_event(&Event::Text("Done.".into()));
+    at(&mut tracker, 5_000);
+    tracker.finish(200, &Usage { output: 200, ..Default::default() }, None);
+    assert!(near(timing(&tap).0, 3_000), "{:?}", timing(&tap));
+    assert!(near(app.stats.recent.lock()[0].stream_ms, 2_000));
 }
 
 #[tokio::test]
