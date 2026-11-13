@@ -212,11 +212,6 @@ async fn the_rollup_stays_exact_through_rebuilds_purges_and_older_releases() {
                 rebuild_entries(c, &key)?;
             }
             c.execute("UPDATE usage_entries SET output=output+1 WHERE id%2=0", [])?;
-            assert_exact(c)?;
-            // Timings removed and added while their entries stay.
-            c.execute("DELETE FROM usage_timings WHERE id%5=0", [])?;
-            assert_exact(c)?;
-            c.execute("INSERT INTO usage_timings(id,speed,ttft_ms,total_ms) SELECT id,1,100,9000 FROM usage_entries WHERE id%5=0", [])?;
             assert_exact(c)
         })
         .await
@@ -316,7 +311,7 @@ async fn the_store_backfills_on_its_own_and_a_downgrade_removes_the_tables() {
         store.call(move |c| insert_batch(c, &records())).await.unwrap();
         store.shutdown().await.unwrap();
         let c = Connection::open(&*p).unwrap();
-        c.execute_batch("DELETE FROM usage_timings;").unwrap();
+        c.execute_batch("DELETE FROM usage_timings; DELETE FROM usage_speed_rollup;").unwrap();
         c.execute("INSERT INTO usage_meta(key,value) VALUES('speed_backfill_below','1000000')", []).unwrap();
     }
     let store = Store::open(&p, 64, 3650, None).unwrap();

@@ -116,7 +116,7 @@ async fn speed_bench() {
         // The backfill of a journal written by a release without timings.
         let backfill = store
             .call(|c| {
-                c.execute_batch("DELETE FROM usage_timings;")?;
+                c.execute_batch("DELETE FROM usage_timings; DELETE FROM usage_speed_rollup;")?;
                 let below: i64 = c.query_row("SELECT MAX(id)+1 FROM usage_observations", [], |r| r.get(0))?;
                 c.execute("INSERT INTO usage_meta(key,value) VALUES('speed_backfill_below',?1)", [below.to_string()])?;
                 let started = Instant::now();
@@ -137,5 +137,9 @@ async fn speed_bench() {
         store.shutdown().await.unwrap();
     }
     println!("{}", Value::Object(out));
-    let _ = std::fs::remove_dir_all(&dir);
+    if std::env::var_os("BENCH_KEEP").is_some() {
+        println!("kept {}", dir.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

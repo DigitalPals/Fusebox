@@ -1,10 +1,12 @@
 //! Output speed per model. `usage_timings` keeps, by observation id, how long a
 //! proxy call took, when its first content arrived and the speed tier it ran at;
 //! `usage_speed_rollup` sums the proxy entries that have one, like `usage_rollup`
-//! with the tier as a fifth dimension. Triggers on both `usage_entries` and
-//! `usage_timings` keep it exact, whichever of the two arrives first: a new call's
-//! timing lands before its entry is chosen, and the history backfill adds timings
-//! to entries that already exist.
+//! with the tier as a fifth dimension. Triggers on `usage_entries` keep it exact: a
+//! new call's timing lands before its entry is chosen, and a purge deletes entries
+//! before their timings. Only the history backfill adds timings to entries that
+//! already exist, and it adds them to the rollup itself, a batch at a time.
+//! (`usage_entries` has no index on `id`, so a trigger on the timings could only
+//! find an entry by reading them all.)
 //!
 //! Both tables sit beside the schema-5 layout, like the entrypoint tables: releases
 //! that don't know them keep reading and writing the database, and the entry
@@ -24,13 +26,11 @@ pub(super) const MAX_RATE: i64 = super::super::types::MAX_STREAM_RATE as i64;
 const STEP_ROWS: i64 = 2_000;
 
 /// Trigger names, for a downgrade to drop.
-pub(super) const TRIGGERS: [&str; 6] = [
+pub(super) const TRIGGERS: [&str; 4] = [
     "usage_speed_entry_insert",
     "usage_speed_entry_delete",
     "usage_speed_entry_update_old",
     "usage_speed_entry_update_new",
-    "usage_speed_timing_insert",
-    "usage_speed_timing_delete",
 ];
 
 /// What one entry `e` with timing `t` adds to its rollup row.
@@ -93,9 +93,8 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
     if present == 2 + TRIGGERS.len() as i64 {
         return Ok(());
     }
-    // Trigger bodies name NEW and OLD; the other table is selected under `t` or `e`.
+    // Trigger bodies name the entry NEW or OLD; its timing is selected under `t`.
     let entry_timing = |id: &str| format!("FROM usage_timings t WHERE t.id={id}.id");
-    let timing_entry = |id: &str| format!("FROM usage_entries e WHERE e.id={id}.id AND e.source='proxy'");
     conn.execute_batch(&format!(
         "SAVEPOINT usage_speed;
          CREATE TABLE IF NOT EXISTS usage_timings(id INTEGER PRIMARY KEY,speed INTEGER NOT NULL,ttft_ms INTEGER,
@@ -108,15 +107,11 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
          CREATE TRIGGER usage_speed_entry_delete AFTER DELETE ON usage_entries WHEN OLD.source='proxy' BEGIN {} END;
          CREATE TRIGGER usage_speed_entry_update_old AFTER UPDATE ON usage_entries WHEN OLD.source='proxy' BEGIN {} END;
          CREATE TRIGGER usage_speed_entry_update_new AFTER UPDATE ON usage_entries WHEN NEW.source='proxy' BEGIN {} END;
-         CREATE TRIGGER usage_speed_timing_insert AFTER INSERT ON usage_timings BEGIN {} END;
-         CREATE TRIGGER usage_speed_timing_delete AFTER DELETE ON usage_timings BEGIN {} END;
          DELETE FROM usage_speed_rollup;",
         add("NEW", "t", &entry_timing("NEW")),
         remove("OLD", "t", &entry_timing("OLD")),
         remove("OLD", "t", &entry_timing("OLD")),
         add("NEW", "t", &entry_timing("NEW")),
-        add("e", "NEW", &timing_entry("NEW")),
-        remove("e", "OLD", &timing_entry("OLD")),
         drops = TRIGGERS.map(|t| format!("DROP TRIGGER IF EXISTS {t};")).join("\n"),
     ))?;
     let result = (|| -> Result<()> {
@@ -142,15 +137,24 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
 
 /// Fills `usage_speed_rollup` from the entries and timings, as the triggers would have.
 pub(super) fn rebuild(conn: &Connection) -> Result<()> {
-    conn.execute_batch(&format!(
-        "DELETE FROM usage_speed_rollup;
-         INSERT INTO usage_speed_rollup({COLUMNS})
+    conn.execute_batch("DELETE FROM usage_speed_rollup;")?;
+    conn.execute(&sum_into_rollup("1"), [])?;
+    Ok(())
+}
+
+/// Adds to the rollup the proxy entries with a timing that `filter` (on `e` and `t`) selects.
+fn sum_into_rollup(filter: &str) -> String {
+    format!(
+        "INSERT INTO usage_speed_rollup({COLUMNS})
          SELECT bucket,dims,MAX(provider),MAX(model),MAX(account_id),MAX(client),MAX(speed),COUNT(*),SUM(timed),SUM(output),
            SUM(stream_ms),SUM(ttft_ms)
-         FROM (SELECT {} FROM usage_entries e JOIN usage_timings t ON t.id=e.id WHERE e.source='proxy') GROUP BY bucket,dims;",
-        row("e", "t")
-    ))?;
-    Ok(())
+         FROM (SELECT {} FROM usage_entries e INDEXED BY usage_entries_event_time JOIN usage_timings t ON t.id=e.id
+               WHERE e.source='proxy' AND {filter})
+         WHERE 1 GROUP BY bucket,dims
+         ON CONFLICT(bucket,dims) DO UPDATE SET {} calls=usage_speed_rollup.calls+excluded.calls;",
+        row("e", "t"),
+        SUMS.map(|c| format!("{c}=usage_speed_rollup.{c}+excluded.{c},")).join("")
+    )
 }
 
 /// The timing a proxy observation carries, as (speed, ttft_ms, total_ms).
@@ -186,20 +190,30 @@ pub(super) fn backfill_step(conn: &mut Connection, limit: i64) -> Result<usize> 
     };
     let rows = tx
         .prepare_cached(
-            "SELECT id,payload FROM usage_observations WHERE id<?1 AND source='proxy' ORDER BY id DESC LIMIT ?2",
+            // `+source`: walk ids downward instead of sorting every proxy record by the source index.
+            "SELECT id,event_at_ms,payload FROM usage_observations WHERE id<?1 AND +source='proxy' ORDER BY id DESC LIMIT ?2",
         )?
-        .query_map(params![below, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, rusqlite::types::Value>(1)?)))?
-        .collect::<rusqlite::Result<Vec<(i64, rusqlite::types::Value)>>>()?;
+        .query_map(params![below, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, rusqlite::types::Value>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<(i64, i64, rusqlite::types::Value)>>>()?;
     let mut decoder = codec::Decoder::new(&tx);
-    for (id, payload) in &rows {
+    for (id, _, payload) in &rows {
         // A record that no longer parses has no timing to add.
         let Ok(text) = decoder.decode(payload.into()) else { continue };
         let Ok(o) = serde_json::from_str::<Observation>(&text) else { continue };
         record(&tx, *id, &o)?;
     }
     drop(decoder);
+    // Ids below the mark had no timing, so this adds each of their entries once.
+    // Entries are found by time: they keep their observation's event time.
+    if let (Some(newest), Some(oldest)) = (rows.first(), rows.last()) {
+        let (from, to) = rows.iter().fold((i64::MAX, i64::MIN), |(lo, hi), (_, at, _)| (lo.min(*at), hi.max(*at)));
+        tx.prepare_cached(&sum_into_rollup("e.event_at_ms BETWEEN ?1 AND ?2 AND t.id BETWEEN ?3 AND ?4"))?
+            .execute(params![from, to, oldest.0, newest.0])?;
+    }
     match rows.last() {
-        Some((id, _)) if rows.len() as i64 == limit => {
+        Some((id, _, _)) if rows.len() as i64 == limit => {
             tx.execute("UPDATE usage_meta SET value=?1 WHERE key='speed_backfill_below'", [id.to_string()])?;
         }
         _ => {
