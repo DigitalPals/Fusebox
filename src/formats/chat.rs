@@ -616,7 +616,7 @@ impl StreamRenderer for Renderer {
                 out.push(Frame::data(super::error_body(crate::ir::Format::Chat, *status, message).to_string()));
             }
             Event::Start { model: Some(_), .. } | Event::Start { .. } => {}
-            Event::ReasoningSig(_) | Event::RedactedReasoning(_) | Event::ToolSig { .. } => {}
+            Event::ReasoningStart | Event::ReasoningSig(_) | Event::RedactedReasoning(_) | Event::ToolSig { .. } => {}
         }
     }
 

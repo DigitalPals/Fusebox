@@ -438,7 +438,7 @@ function usageEntrypointsHTML() {
   </section>`;
 }
 
-// Output speed per model: tokens a second once the first content arrived, from the
+// Output speed per model: tokens a second once generation started, from the
 // timings of calls Fusebox served. Codex models split by the tier the call asked
 // for, which is also what pricing uses (Fast calls can come back saying "default").
 const USAGE_SPEED_TIERS = { fast: 'Fast', ultrafast: 'Ultrafast', standard: 'Standard' };
@@ -632,9 +632,10 @@ function usageSpeedHTML() {
   const sort = Usage.speedSort;
   const rows = c.list.filter((m) => !Usage.speedProvider || m.provider === Usage.speedProvider).sort((a, b) => {
     if (sort === 'calls') return b.calls - a.calls;
-    const [x, y] = sort === 'first' ? [a.first, b.first] : [b.rate, a.rate];
-    if (x == null || y == null) return (x == null) - (y == null) || b.calls - a.calls;
-    return x - y || b.calls - a.calls;
+    // Untimed models go last either way, so check before the direction swaps them.
+    const [p, q] = sort === 'first' ? [a.first, b.first] : [a.rate, b.rate];
+    if (p == null || q == null) return (p == null) - (q == null) || b.calls - a.calls;
+    return (sort === 'first' ? p - q : q - p) || b.calls - a.calls;
   });
   const shown = Usage.speedAll ? rows : rows.slice(0, USAGE_SPEED_ROWS);
   const max = Math.max(0, ...c.list.flatMap((m) => [m.rate, ...m.tiers.map((t) => t.rate)]).filter((v) => v != null));
@@ -655,7 +656,7 @@ function usageSpeedHTML() {
     ${list}
     <div class="u-chart-head u-sp-chart-head"><span class="label">BY ${usagePeriod(days) === 'month' ? 'MONTH' : 'DAY'}</span><span class="meta">${Usage.speedMetric === 'rate' ? 'Output tokens a second' : 'Seconds to first token'} · charted models</span><span class="grow"></span>${metric}</div>
     <div id="usage-speed-chart">${usageSpeedPlotHTML(c)}</div>
-    <div class="u-foot u-sp-foot"><span>Speed is output tokens over the time after the first token, summed over calls, so long answers count more. Reasoning tokens count as output.</span><span>Fast is the tier the call asked for. Not timed: calls without streamed content or reported output, and answers that arrived in one piece.${c.backfilling ? ' Earlier calls are still getting their timings.' : ''}</span></div>
+    <div class="u-foot u-sp-foot"><span>Speed is output tokens over the time after generation started, summed over calls, so long answers count more. Reasoning tokens count as output, and first token is when reasoning began.</span><span>Fast is the tier the call asked for. Not timed: failed and cancelled calls, calls without streamed content or reported output, reasoning with no known start, and answers that arrived in one piece.${c.backfilling ? ' Earlier calls are still getting their timings.' : ''}</span></div>
   </section>`;
 }
 

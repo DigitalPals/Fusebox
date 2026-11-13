@@ -1,5 +1,5 @@
 //! Output speed per model. `usage_timings` keeps, by observation id, how long a
-//! proxy call took, when its first content arrived and the speed tier it ran at;
+//! proxy call took, when its generation started and the speed tier it ran at;
 //! `usage_speed_rollup` sums the proxy entries that have one, like `usage_rollup`
 //! with the tier as a fifth dimension. Triggers on `usage_entries` keep it exact: a
 //! new call's timing lands before its entry is chosen, and a purge deletes entries
@@ -12,11 +12,12 @@
 //! that don't know them keep reading and writing the database, and the entry
 //! triggers keep the rollup exact meanwhile.
 //!
-//! A call is *timed* when content arrived, it reported output tokens, and it kept
-//! streaming for at least [`MIN_STREAM_MS`] at no more than [`MAX_RATE`] tokens a
-//! second; anything faster arrived in one piece and says nothing about speed. Speed
-//! is output tokens over streaming time (total minus time to first content), summed
-//! over timed calls, so long answers weigh more than short ones.
+//! A call is *timed* when it has a start (`ttft_ms`, which the proxy leaves out for
+//! failed calls and reasoning with no known start, see `Tracker::speed_start`), it
+//! reported output tokens, and it kept streaming for at least [`MIN_STREAM_MS`] at no
+//! more than [`MAX_RATE`] tokens a second; anything faster arrived in one piece and
+//! says nothing about speed. Speed is output tokens over streaming time (total minus
+//! that start), summed over timed calls, so long answers weigh more than short ones.
 use super::*;
 use std::{collections::BTreeMap, time::Instant};
 

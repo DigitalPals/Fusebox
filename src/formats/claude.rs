@@ -601,6 +601,7 @@ impl StreamParser for Parser {
                         }
                     }
                     Some("thinking") => {
+                        out.push(Event::ReasoningStart);
                         if let Some(t) = b["thinking"].as_str().filter(|t| !t.is_empty()) {
                             out.push(Event::Reasoning(t.to_string()));
                         }
@@ -795,7 +796,7 @@ impl StreamRenderer for Renderer {
             self.usage.merge(u);
             return;
         }
-        if let Event::Start { .. } = ev {
+        if let Event::Start { .. } | Event::ReasoningStart = ev {
             return;
         }
         self.ensure_started(out);

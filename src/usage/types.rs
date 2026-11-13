@@ -265,7 +265,7 @@ pub const MIN_STREAM_MS: u64 = 50;
 /// Output tokens a second above which a call arrived buffered, not generated live.
 pub const MAX_STREAM_RATE: u64 = 10_000;
 
-/// How long a call streamed after its first content, when that measures its output
+/// How long a call streamed after generation started, when that measures its output
 /// speed: it reported output, streamed for at least [`MIN_STREAM_MS`], and no faster
 /// than [`MAX_STREAM_RATE`]. The usage database applies the same rule in SQL.
 pub fn stream_ms(output: u64, ttft_ms: Option<u64>, total_ms: u64) -> Option<u64> {

@@ -860,7 +860,6 @@ async fn native_turn(
             match ev {
                 Event::Usage(u) => usage.merge(&u),
                 Event::Error { status, message } => error = Some((status, message)),
-                Event::Text(_) | Event::Reasoning(_) | Event::ToolStart { .. } => tracker.first_token(),
                 _ => {}
             }
         }
