@@ -160,6 +160,8 @@ final class AppStore {
             loadError = nil
             lastLoaded = .now
             dataChanged()
+        } catch is CancellationError {
+            // Stopped by the app itself, not a failure; the next refresh updates the page.
         } catch {
             applyIfCurrent(gen) { loadError = error.localizedDescription }
         }

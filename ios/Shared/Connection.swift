@@ -80,6 +80,10 @@ public struct FuseboxAPI: Sendable {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await Self.session.data(for: req)
+        } catch let e as URLError where e.code == .cancelled {
+            // The app stopped the read itself (a pull to refresh SwiftUI ended, a page
+            // left): not a failure to show, so callers can tell it apart.
+            throw CancellationError()
         } catch let e as URLError {
             throw APIError(status: 0, message: Self.describe(e))
         }

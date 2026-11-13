@@ -102,10 +102,14 @@ struct UsageView: View {
         do {
             data = try await api.get("/usage/dashboard?\(query)")
             error = nil
+        } catch is CancellationError {
+            // A read the app stopped itself keeps what the page shows; the next one updates it.
+            return
         } catch {
             self.error = error.localizedDescription
         }
-        speed = await speedRead
+        let read = await speedRead
+        if read != nil || !Task.isCancelled { speed = read }
     }
 
     private static func optional<T: Decodable & Sendable>(_ api: FuseboxAPI, _ type: T.Type, _ path: String) async -> T? {
