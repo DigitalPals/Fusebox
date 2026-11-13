@@ -196,14 +196,10 @@ fn window(value: &Value, now: DateTime<Utc>, ultra: bool) -> Window {
 fn weekly_available(value: &Value, now: DateTime<Utc>) -> bool {
     let Some(week) = value.get("seven_day") else { return false };
     // A never-used subscription can also have an explicitly inactive week.
-    if !week.is_null()
-        && !(week["utilization"].as_f64().is_some_and(|u| u.is_finite() && (0.0..100.0).contains(&u))
+    week.is_null()
+        || (week["utilization"].as_f64().is_some_and(|u| u.is_finite() && (0.0..100.0).contains(&u))
             && (week["resets_at"].as_str().is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok_and(|at| at > now))
                 || week.get("resets_at") == Some(&Value::Null) && week["utilization"].as_f64() == Some(0.0)))
-    {
-        return false;
-    }
-    true
 }
 
 fn native_id(acct: &Account) -> Result<String> {
