@@ -1,7 +1,8 @@
 # Drop-in for CLIProxyAPI's image: same working directory, config path, auth
 # directory and ports, so an existing docker-compose.yml keeps working.
 
-FROM rust:1-bookworm AS dependencies
+# The Rust version is rust-toolchain.toml's.
+FROM rust:1.100.0-bookworm AS dependencies
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
