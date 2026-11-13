@@ -1,9 +1,22 @@
 name: CI
 
+# The tests on Linux, macOS and Windows. Day to day, changes are tested with fast-test
+# (Linux, on The Dragon and The Beast; see AGENTS.md) and nobody waits for this workflow.
+# It runs:
+# - every night for main: fast-test's nightly run starts it and reports its result;
+# - before a release: release.yml calls it for the tag and publishes only when it passes;
+# - on pull requests;
+# - by hand, for a change that Windows or macOS may take differently:
+#   gh workflow run ci.yml --ref <branch>
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: What to test, when it isn't the commit that started the workflow
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,7 +26,7 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 concurrency:
-  group: fusebox-ci-${{ github.event.pull_request.number || github.ref }}
+  group: fusebox-ci-${{ inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,8 +39,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          ref: ${{ inputs.ref }}
+      - name: Read the Rust version
+        id: rust
+        shell: bash
+        # rust-toolchain.toml names it; a tag from before that file gets the newest stable.
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml 2> /dev/null || true)
+          echo "version=${version:-stable}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
@@ -43,12 +66,14 @@ jobs:
         run: |
           echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Not for a release (inputs.ref): the tag's formatting and lints were checked when
+      # its changes were made, and an older tag has no pinned Rust to lint with.
       - name: Format
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && !inputs.ref
         run: cargo fmt --check
       - name: Clippy
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets -- -D warnings
+        if: matrix.os == 'ubuntu-latest' && !inputs.ref
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         # Dependencies, SQLite's C code above all, are built optimised. That
         # halves the test run; Fusebox itself stays unoptimised, with debug

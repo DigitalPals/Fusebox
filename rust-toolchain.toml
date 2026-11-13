@@ -1,0 +1,7 @@
+# The one Rust version Fusebox is built and checked with: here, on The Beast, in GitHub's
+# workflows and in the Docker image. To move to a newer Rust, change it here and in the
+# three image names (tests/test_rust_version.py lists them), then fix what its Clippy finds.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
