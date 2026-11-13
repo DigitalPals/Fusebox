@@ -26,6 +26,9 @@ mod cache_diagnostic_tests;
 #[path = "diagnostic_tests.rs"]
 mod diagnostic_tests;
 #[cfg(test)]
+#[path = "speed_timing_tests.rs"]
+mod speed_timing_tests;
+#[cfg(test)]
 #[path = "stream_accounting_tests.rs"]
 mod stream_accounting_tests;
 
@@ -100,6 +103,14 @@ pub struct Tracker {
     cache_diagnostics: crate::cache::DiagnosticObserver,
     stream_error: Option<(u16, String)>,
     stream_finished: bool,
+    /// When generation started, for output speed: the first content or the start of
+    /// reasoning, whichever came first. Reasoning may stream nothing a client sees.
+    generation_ms: Option<u64>,
+    /// Reasoning was streamed or announced, so its tokens fall inside the timed span.
+    reasoning_seen: bool,
+    /// Generation began with reasoning that arrived only whole (Claude redacted
+    /// thinking), so its start is unknown and the call can't be timed.
+    start_unknown: bool,
     load: Option<crate::accounts::RequestLoad>,
     done: bool,
     analytics: Option<crate::usage::capture::RequestUsage>,
@@ -138,6 +149,9 @@ impl Tracker {
             cache_diagnostics: crate::cache::DiagnosticObserver::default(),
             stream_error: None,
             stream_finished: false,
+            generation_ms: None,
+            reasoning_seen: false,
+            start_unknown: false,
             load: None,
             done: false,
             log: RequestLog {
@@ -380,6 +394,27 @@ impl Tracker {
         if self.log.ttft_ms.is_none() {
             self.log.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
         }
+        self.generation_started();
+    }
+
+    fn generation_started(&mut self) {
+        self.generation_started_at(Instant::now());
+    }
+
+    /// Reasoning that `bootstrap` held back began at `at`, before the tracker saw it.
+    fn generation_started_at(&mut self, at: Instant) {
+        if self.generation_ms.is_none() {
+            self.generation_ms = Some(at.saturating_duration_since(self.started).as_millis() as u64);
+        }
+    }
+
+    /// When the timed span of a call that ends with `status` and `usage` starts, when
+    /// it measures output speed: the call succeeded, and every output token it reports
+    /// came after that start. Reasoning that was never streamed nor announced, or that
+    /// came only whole before anything else, took time the span doesn't hold.
+    fn speed_start(&self, status: u16, usage: &Usage) -> Option<u64> {
+        let hidden = self.start_unknown || (usage.reasoning > 0 && !self.reasoning_seen);
+        self.generation_ms.filter(|_| status < 400 && !hidden)
     }
 
     pub(crate) fn observe_stream_event(&mut self, event: &Event) {
@@ -389,7 +424,17 @@ impl Tracker {
             // A client may stop reading immediately after the terminal event. Keep
             // consuming while it reads, since Chat can send usage after its finish reason.
             Event::Finish(_) => self.stream_finished = true,
-            event if is_content(event) => self.first_token(),
+            Event::ReasoningStart => {
+                self.reasoning_seen = true;
+                self.generation_started();
+            }
+            Event::RedactedReasoning(_) if self.generation_ms.is_none() => self.start_unknown = true,
+            event if is_content(event) => {
+                if matches!(event, Event::Reasoning(_)) {
+                    self.reasoning_seen = true;
+                }
+                self.first_token();
+            }
             _ => {}
         }
     }
@@ -423,10 +468,13 @@ impl Tracker {
         }
         self.done = true;
         self.log.cache_diagnostics = self.cache_diagnostics.snapshot();
+        // The usage database times the call from this start; the request log keeps
+        // the first content a client saw.
+        let speed_start = self.speed_start(status, if self.log.chunks > 0 { &self.stream_usage } else { usage });
         if let Some(c) = self.usage_tap() {
             c.metadata("request_latency_ms", self.started.elapsed().as_millis() as u64);
-            if let Some(ttft) = self.log.ttft_ms {
-                c.metadata("request_ttft_ms", ttft);
+            if let Some(start) = speed_start {
+                c.metadata("request_ttft_ms", start);
             }
             if let Some(ms) = self.prepared_ms {
                 c.metadata("prepare_ms", ms);
@@ -469,7 +517,7 @@ impl Tracker {
         self.log.output_tokens = output;
         self.log.cache_tokens = cache;
         self.log.speed = captured.as_deref().map_or("standard", |o| o.speed().as_str());
-        self.log.stream_ms = crate::usage::types::stream_ms(output, self.log.ttft_ms, self.log.latency_ms);
+        self.log.stream_ms = crate::usage::types::stream_ms(output, speed_start, self.log.latency_ms);
         self.log.error = error.map(|e| e.chars().take(400).collect());
         if let Some(a) = &self.acct {
             if let Some(message) = &self.log.error
@@ -2302,7 +2350,12 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     error_code = %error.code, error_type = %error.kind, "codex stream opened with an error");
             }
             match boot {
-                Boot::Ready(stream) => body = Some(stream),
+                Boot::Ready(stream, reasoning_at) => {
+                    if let Some(at) = reasoning_at {
+                        tracker.generation_started_at(at.into_std());
+                    }
+                    body = Some(stream);
+                }
                 Boot::Failed { status, message, held } => {
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                         status, "upstream failed before its first token; trying another account");
@@ -2566,8 +2619,9 @@ fn stalled_message(limit: Option<std::time::Duration>) -> String {
 
 /// What the first moments of a streamed answer showed.
 enum Boot {
-    /// The stream, with everything read so far put back in front.
-    Ready(ByteStream),
+    /// The stream, with everything read so far put back in front, and when reasoning
+    /// began in what was held: held events reach the tracker only when released.
+    Ready(ByteStream, Option<tokio::time::Instant>),
     /// It failed before the client saw anything, so another account can answer.
     /// `held` is what it sent first, for the usage it reported.
     Failed { status: u16, message: String, held: Vec<bytes::Bytes> },
@@ -2597,15 +2651,16 @@ async fn bootstrap(
     let mut dec = SseDecoder::with_limit(limits.for_model(model));
     let mut parser = formats::parser(native);
     let mut events = Vec::new();
-    let ready = |held: Vec<bytes::Bytes>, rest: ByteStream| -> Boot {
-        Boot::Ready(Box::pin(futures::stream::iter(held.into_iter().map(Ok)).chain(rest)))
+    let mut reasoning_at = None;
+    let ready = |held: Vec<bytes::Bytes>, rest: ByteStream, reasoning_at| -> Boot {
+        Boot::Ready(Box::pin(futures::stream::iter(held.into_iter().map(Ok)).chain(rest)), reasoning_at)
     };
     loop {
-        let Some(deadline) = release_at.or(stall_at) else { return ready(held, body) };
+        let Some(deadline) = release_at.or(stall_at) else { return ready(held, body, reasoning_at) };
         let next = match tokio::time::timeout_at(deadline, body.next()).await {
             Ok(next) => next,
             Err(_) if release_at.is_none() => return Boot::Stalled,
-            Err(_) => return ready(held, body),
+            Err(_) => return ready(held, body, reasoning_at),
         };
         let chunk = match next {
             Some(Ok(chunk)) => chunk,
@@ -2620,6 +2675,9 @@ async fn bootstrap(
             let parsed = serde_json::from_str::<Value>(&sse.data).ok();
             let before = events.len();
             parser.feed_value(&sse, parsed.as_ref(), &mut events);
+            if reasoning_at.is_none() && events[before..].iter().any(|e| matches!(e, Event::ReasoningStart)) {
+                reasoning_at = Some(tokio::time::Instant::now());
+            }
             let opens = |e: &Event| is_content(e) || matches!(e, Event::Error { .. } | Event::Finish(_));
             if first_error.is_none()
                 && !events[..before].iter().any(opens)
@@ -2629,15 +2687,15 @@ async fn bootstrap(
             }
         }
         if dec.failed() {
-            return ready(held, body);
+            return ready(held, body, reasoning_at);
         }
         for ev in events.drain(..) {
             match ev {
                 Event::Error { status, message } if matches!(status, 429 | 500 | 502 | 503 | 504 | 529) => {
                     return Boot::Failed { status, message, held };
                 }
-                Event::Error { .. } | Event::Finish(_) => return ready(held, body),
-                ev if is_content(&ev) => return ready(held, body),
+                Event::Error { .. } | Event::Finish(_) => return ready(held, body, reasoning_at),
+                ev if is_content(&ev) => return ready(held, body, reasoning_at),
                 _ => {}
             }
         }
@@ -2646,7 +2704,7 @@ async fn bootstrap(
         // event the first-event deadline must keep applying, so buffering
         // continues there, bounded by the decoder's event limit instead.
         if release_at.is_some() && held_bytes >= limits.bootstrap_bytes {
-            return ready(held, body);
+            return ready(held, body, reasoning_at);
         }
     }
 }
@@ -2844,9 +2902,6 @@ async fn collect(events: EventStream, format: Format, model: &str, req: &Request
     let mut agg = Aggregate::default();
     while let Some(ev) = events.next().await {
         tracker.observe_stream_event(&ev);
-        if is_content(&ev) {
-            tracker.first_token();
-        }
         agg.push(&ev);
     }
     if let Some((status, msg)) = agg.error.clone() {
@@ -3014,23 +3069,27 @@ async fn collect_passthrough(
     let mut agg = Aggregate::default();
     let mut final_obj: Option<Value> = None;
     let mut evs = Vec::new();
-    let mut handle = |sse: crate::sse::SseEvent, agg: &mut Aggregate, final_obj: &mut Option<Value>| {
-        let parsed = serde_json::from_str::<Value>(&sse.data).ok();
-        if let Some(v) = &parsed {
-            tracker.observe_quota_value(v);
-            tracker.observe_wire(v);
-        }
-        parser.feed_value(&sse, parsed.as_ref(), &mut evs);
-        evs.drain(..).for_each(|e| agg.push(&e));
-        if let Some(mut v) = parsed
-            && matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.done"))
-        {
-            *final_obj = Some(v["response"].take());
-        }
-    };
+    let mut handle =
+        |tracker: &mut Tracker, sse: crate::sse::SseEvent, agg: &mut Aggregate, final_obj: &mut Option<Value>| {
+            let parsed = serde_json::from_str::<Value>(&sse.data).ok();
+            if let Some(v) = &parsed {
+                tracker.observe_quota_value(v);
+                tracker.observe_wire(v);
+            }
+            parser.feed_value(&sse, parsed.as_ref(), &mut evs);
+            for e in evs.drain(..) {
+                tracker.observe_stream_event(&e);
+                agg.push(&e);
+            }
+            if let Some(mut v) = parsed
+                && matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.done"))
+            {
+                *final_obj = Some(v["response"].take());
+            }
+        };
     while let Some(chunk) = body.next().await {
         match chunk {
-            Ok(c) => dec.push(&c).into_iter().for_each(|s| handle(s, &mut agg, &mut final_obj)),
+            Ok(c) => dec.push(&c).into_iter().for_each(|s| handle(&mut tracker, s, &mut agg, &mut final_obj)),
             Err(e) => {
                 if agg.finish.is_none() {
                     tracker.diagnostic_failure(crate::diagnostics::Failure::http("upstream_body_read", &e));
@@ -3044,7 +3103,7 @@ async fn collect_passthrough(
             break;
         }
     }
-    dec.finish().into_iter().for_each(|s| handle(s, &mut agg, &mut final_obj));
+    dec.finish().into_iter().for_each(|s| handle(&mut tracker, s, &mut agg, &mut final_obj));
     // A trailing multiline event can first cross the limit in the final flush.
     if dec.failed() {
         tracker.diagnostic_failure(crate::diagnostics::Failure::classified("upstream_event_limit"));

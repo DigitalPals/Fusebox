@@ -584,6 +584,7 @@ impl StreamRenderer for Renderer {
             }
             Event::Usage(u) => return self.usage.merge(u),
             Event::Finish(f) => return self.finish = Some(*f),
+            Event::ReasoningStart => return,
             Event::Error { status, message } => {
                 self.tool = None;
                 self.errored = true;

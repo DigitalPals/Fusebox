@@ -260,6 +260,10 @@ pub enum Event {
     },
     Text(String),
     Reasoning(String),
+    /// The model began reasoning, whose text may stay hidden (a Responses reasoning
+    /// item, a Claude thinking block). It carries nothing to render; it marks when
+    /// generation started, for output speed.
+    ReasoningStart,
     ReasoningSig(Sig),
     RedactedReasoning(String),
     ToolStart {
@@ -344,6 +348,7 @@ impl Aggregate {
             Event::Usage(u) => self.usage.merge(u),
             Event::Finish(f) => self.finish = Some(*f),
             Event::Error { status, message } => self.error = Some((*status, message.clone())),
+            Event::ReasoningStart => {}
         }
     }
 

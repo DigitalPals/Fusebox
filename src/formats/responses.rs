@@ -461,6 +461,7 @@ impl StreamParser for Parser {
             "response.output_item.added" => {
                 let item = &v["item"];
                 match item["type"].as_str() {
+                    Some("reasoning") => out.push(Event::ReasoningStart),
                     Some("function_call") | Some("custom_tool_call") => {
                         if item["type"] == "custom_tool_call" {
                             self.custom.insert(idx);
@@ -820,7 +821,7 @@ impl StreamRenderer for Renderer {
         match ev {
             Event::Usage(u) => return self.usage.merge(u),
             Event::Finish(f) => return self.finish = Some(*f),
-            Event::Start { .. } => return,
+            Event::Start { .. } | Event::ReasoningStart => return,
             _ => {}
         }
         self.ensure_started(out);
