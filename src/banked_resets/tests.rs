@@ -1035,26 +1035,37 @@ async fn pending_entry_precedes_dispatch_and_failed_save_never_dispatches() {
         .await
         .unwrap();
     assert_eq!(durable.calls.load(Ordering::Relaxed), 1);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let id = quote(&app, &mock, &ledger);
-        let dir = durable.root.join(".banked-resets");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result = execute(
-            &app,
-            &acct,
-            &durable,
-            "organization-1",
-            "account-1",
-            &mut ledger,
-            Request::Manual(action(&id, "redeem")),
-        )
-        .await;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(result.is_err());
-        assert_eq!(durable.calls.load(Ordering::Relaxed), 1);
-    }
+    // A save that cannot replace the journal must stop the reset before anything is sent. A
+    // directory in the journal's place stops it on every platform, and for root as well, which
+    // writes to a read-only directory regardless.
+    let id = quote(&app, &mock, &ledger);
+    let journal = std::fs::read_dir(durable.root.join(".banked-resets"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .unwrap();
+    std::fs::remove_file(&journal).unwrap();
+    std::fs::create_dir(&journal).unwrap();
+    std::fs::write(journal.join("in-the-way"), "").unwrap();
+    let result = execute(
+        &app,
+        &acct,
+        &durable,
+        "organization-1",
+        "account-1",
+        &mut ledger,
+        Request::Manual(action(&id, "redeem")),
+    )
+    .await;
+    assert!(format!("{:#}", result.unwrap_err()).contains("Cannot persist reset operation"));
+    assert_eq!(durable.calls.load(Ordering::Relaxed), 1);
+    // The failed save leaves no half-written file behind.
+    let left: Vec<_> = std::fs::read_dir(journal.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 #[tokio::test]
 async fn refusal_is_saved_and_can_be_replayed_without_spending() {
