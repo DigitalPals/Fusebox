@@ -1,38 +1,85 @@
 {
-  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; a wide change also runs the full suite on The Beast. The Docker image build stays with the Docker workflow.",
+  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; a wide change runs the full suite on The Beast instead of the Rust steps here. Windows and macOS: GitHub's ci.yml, every night and before a release (AGENTS.md). The Docker image build stays with the Docker workflow.",
   "steps": [
     {
       "name": "rust-fmt",
-      "when": ["*.rs"],
-      "run": "cargo fmt --check"
+      "when": [
+        "*.rs"
+      ],
+      "run": "cargo fmt --check",
+      "inFull": true
+    },
+    {
+      "name": "rust-clippy",
+      "about": "Clippy of the crate, in a build folder of its own so that it runs beside the tests.",
+      "when": [
+        "src/**/*.rs"
+      ],
+      "run": "CARGO_TARGET_DIR=target/clippy cargo clippy --locked --all-targets -- -D warnings",
+      "inFull": true
     },
     {
       "name": "rust",
-      "about": "Clippy of the crate, then the tests of the changed modules (src/quota/x.rs runs the tests named quota::x::…).",
-      "when": ["src/**/*.rs"],
-      "run": "set --; for f in {files}; do m=${f#src/}; m=${m%.rs}; m=${m%/mod}; set -- \"$@\" \"$(printf %s \"$m\" | sed 's#/#::#g')::\"; done; cargo clippy --locked --all-targets -- -D warnings && cargo test --locked -- \"$@\"",
-      "timeout": 30
+      "about": "The tests of the changed modules (src/quota/x.rs runs the tests named quota::x::…).",
+      "when": [
+        "src/**/*.rs"
+      ],
+      "run": "set --; for f in {files}; do m=${f#src/}; m=${m%.rs}; m=${m%/mod}; set -- \"$@\" \"$(printf %s \"$m\" | sed 's#/#::#g')::\"; done; cargo test --locked -- \"$@\"",
+      "timeout": 30,
+      "inFull": true
     },
     {
       "name": "ui",
       "about": "The dashboard's node tests.",
-      "when": ["ui/**", "tests/*.test.cjs"],
+      "when": [
+        "ui/**",
+        "tests/*.test.cjs"
+      ],
       "run": "node --test tests/*.test.cjs"
     },
     {
       "name": "python",
-      "about": "The scripts' Python tests.",
-      "when": ["scripts/*.py", "tests/test_*.py", "tests/fixtures/**"],
+      "about": "The scripts' Python tests, and the one that keeps the Rust version the same everywhere.",
+      "when": [
+        "scripts/*.py",
+        "tests/test_*.py",
+        "tests/fixtures/**",
+        "rust-toolchain.toml",
+        "Dockerfile",
+        ".fast-test.json",
+        ".github/workflows/*.yml",
+        ".github/scripts/*.py"
+      ],
       "run": "python3 -m unittest discover -s tests -p 'test_*.py'"
     }
   ],
-  "wide": ["Cargo.toml", "Cargo.lock", "build.rs", "rustfmt.toml", "src/main.rs", "src/state.rs", "src/server.rs", "src/config.rs", "tests/golden/**", "proptest-regressions/**"],
-  "wideIfDeleted": ["src/**"],
-  "full": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && python3 -m unittest discover -s tests -p 'test_*.py' && N=/cache/npm/node-v24.21.0-linux-x64 && { [ -x $N/bin/node ] || curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz | tar -xJ -C /cache/npm; } && $N/bin/node --test tests/*.test.cjs",
+  "wide": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "build.rs",
+    "rustfmt.toml",
+    "src/main.rs",
+    "src/state.rs",
+    "src/server.rs",
+    "src/config.rs",
+    "tests/golden/**",
+    "proptest-regressions/**"
+  ],
+  "wideIfDeleted": [
+    "src/**"
+  ],
+  "full": "cargo fmt --check && { CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-target}/clippy\" cargo clippy --locked --all-targets -- -D warnings > /tmp/clippy.log 2>&1 & cargo test --locked --config \"profile.dev.package.'*'.opt-level=2\"; t=$?; wait $!; c=$?; cat /tmp/clippy.log; [ $t = 0 ] && [ $c = 0 ]; } && python3 -m unittest discover -s tests -p 'test_*.py' && N=/cache/npm/node-v24.21.0-linux-x64 && { [ -x $N/bin/node ] || curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz | tar -xJ -C /cache/npm; } && $N/bin/node --test tests/*.test.cjs",
+  "nightly": {
+    "about": "Windows and macOS: the nightly run has GitHub run CI for the same commit.",
+    "github": "ci.yml"
+  },
   "beast": {
-    "image": "docker.io/library/rust:1-trixie",
+    "image": "docker.io/library/rust:1.100.0-trixie",
     "prepare": "rustup component add clippy rustfmt",
     "network": "internet",
-    "caches": ["cargo-target"]
+    "caches": [
+      "cargo-target"
+    ]
   }
 }
