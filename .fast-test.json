@@ -1,5 +1,5 @@
 {
-  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; a wide change runs the full suite on The Beast instead of the Rust steps here. Windows and macOS: GitHub's ci.yml, every night and before a release (AGENTS.md). The Docker image build stays with the Docker workflow.",
+  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; Clippy and the Rust tests run on The Beast, where a wide change runs the full suite instead. Windows and macOS: GitHub's ci.yml, every night and before a release (AGENTS.md). The Docker image build stays with the Docker workflow.",
   "steps": [
     {
       "name": "rust-fmt",
@@ -11,19 +11,21 @@
     },
     {
       "name": "rust-clippy",
-      "about": "Clippy of the crate, in a build folder of its own so that it runs beside the tests.",
+      "about": "Clippy of the crate, in a build folder of its own under the kept Cargo target, on The Beast: it compiles the whole crate.",
       "when": [
         "src/**/*.rs"
       ],
-      "run": "CARGO_TARGET_DIR=target/clippy cargo clippy --locked --all-targets -- -D warnings",
+      "where": "beast",
+      "run": "CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-target}/clippy\" cargo clippy --locked --all-targets -- -D warnings",
       "inFull": true
     },
     {
       "name": "rust",
-      "about": "The tests of the changed modules (src/quota/x.rs runs the tests named quota::x::…).",
+      "about": "The tests of the changed modules (src/quota/x.rs runs the tests named quota::x::…), on The Beast: building the test binary compiles the whole crate.",
       "when": [
         "src/**/*.rs"
       ],
+      "where": "beast",
       "run": "set --; for f in {files}; do m=${f#src/}; m=${m%.rs}; m=${m%/mod}; set -- \"$@\" \"$(printf %s \"$m\" | sed 's#/#::#g')::\"; done; cargo test --locked -- \"$@\"",
       "timeout": 30,
       "inFull": true
