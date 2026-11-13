@@ -78,4 +78,6 @@ from a directory, and The Beast's tests run as root, which writes there anyway. 
 | A newer Rust than the pinned one | No | No | No |
 
 The last row is on purpose. A newer Rust arrives when someone changes the version in `rust-toolchain.toml` and the
-image names beside it, in a commit of its own that fixes what the new Clippy finds.
+image names beside it, in a commit of its own that fixes what the new Clippy finds. The Client compatibility
+workflow looks for a newer stable Rust every day and, on Mondays, opens one issue (label `rust-version`) while there
+is one; the issue closes once `main` builds with it.

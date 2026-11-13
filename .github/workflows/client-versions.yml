@@ -1,6 +1,7 @@
 name: Client compatibility
 
-# Daily reports; one quiet, consolidated compatibility review each Monday.
+# Daily reports; each Monday one quiet, consolidated compatibility review, and an issue when a
+# newer Rust is out.
 on:
   schedule:
     - cron: "17 6 * * 0,2-6"
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       update_issues:
-        description: Reconcile the weekly review issue and retire legacy version alerts
+        description: Reconcile the weekly review issue and the Rust issue, and retire legacy version alerts
         type: boolean
         default: true
 
@@ -24,6 +25,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPDATE_ISSUES: ${{ (github.event_name == 'workflow_dispatch' && inputs.update_issues) || github.event.schedule == '17 6 * * 1' }}
     steps:
       - uses: actions/checkout@v7
       - name: Check upstream client compatibility reviews
@@ -33,6 +37,12 @@ jobs:
           else
             python3 .github/scripts/client_versions.py
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPDATE_ISSUES: ${{ (github.event_name == 'workflow_dispatch' && inputs.update_issues) || github.event.schedule == '17 6 * * 1' }}
+      # Fusebox stays on the Rust in rust-toolchain.toml; this says when a newer one is out.
+      - name: Check for a newer Rust
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "$UPDATE_ISSUES" = "true" ]; then
+            python3 .github/scripts/rust_release.py --update-issues
+          else
+            python3 .github/scripts/rust_release.py
+          fi

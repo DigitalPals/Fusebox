@@ -27,7 +27,8 @@ Why it is set up this way, with the numbers: `docs/testing-procedure.md`.
 - One Rust version everywhere. `rust-toolchain.toml` names it; The Dragon, The Beast, GitHub's workflows and the
   Docker image all build with it, and `tests/test_rust_version.py` fails when one of them names another. To move to a
   newer Rust, change the version there and in the image names that test lists, in one commit, and fix what the new
-  Clippy finds.
+  Clippy finds. An issue with the label `rust-version` says when a newer stable Rust is out
+  (`.github/scripts/rust_release.py`, in the Client compatibility workflow).
 - `fast-test` tests on Linux. GitHub's CI workflow (`.github/workflows/ci.yml`) tests Linux, macOS and Windows. It
   doesn't run on a push and you don't wait for it. It runs every night for `main` (started and reported by the nightly
   run above), before a release, on pull requests, and by hand.
