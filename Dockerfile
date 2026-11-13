@@ -8,6 +8,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 # Cache compiled dependencies by toolchain, manifests, and SQLite settings.
 # A minimal root builds both runtime and build dependencies without UI/source.
+# What that root built of Fusebox itself is removed again, or the next stage would keep
+# its empty build script's result. Cargo keeps a package's own files in
+# target/release/build/<package> since Rust 1.100; an older Rust needs other paths.
 RUN mkdir src \
  && printf 'fn main() {}\n' > src/main.rs \
  && printf 'fn main() {}\n' > build.rs
@@ -16,9 +19,7 @@ RUN mkdir src \
 RUN cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')" \
  && export RUSTFLAGS="$(for src in "$CARGO_HOME"/registry/src/*/; do printf -- '--remap-path-prefix=%s= ' "$src"; done)" \
  && cargo build --release --locked \
- && rm -rf target/release/fusebox target/release/fusebox.d \
-      target/release/deps/fusebox-* target/release/build/fusebox-* \
-      target/release/.fingerprint/fusebox-*
+ && rm -rf target/release/fusebox target/release/fusebox.d target/release/build/fusebox
 
 FROM dependencies AS build
 COPY build.rs ./
