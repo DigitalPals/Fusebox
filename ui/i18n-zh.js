@@ -1201,7 +1201,7 @@
       "Speed is output tokens over the time after generation started, summed over calls, so long answers count more.": "速度是开始生成之后的输出 token 数除以所用时间，按调用汇总，因此长回答的权重更大。",
       "Reasoning tokens count as output, and first token is when reasoning began.": "推理 token 计入输出，首个 token 指推理开始的时间。",
       "Fast is the tier the call asked for.": "“快速”是调用所请求的档位。",
-      "Not timed: failed and cancelled calls, calls without streamed content or reported output, hidden reasoning with no known start, and answers that arrived in one piece.": "未计时：失败和取消的调用、没有流式内容或未报告输出的调用、无法确定开始时间的隐藏推理，以及一次性到达的回答。",
+      "Not timed: failed and cancelled calls, calls without streamed content or reported output, reasoning with no known start, and answers that arrived in one piece.": "未计时：失败和取消的调用、没有流式内容或未报告输出的调用、无法确定开始时间的推理，以及一次性到达的回答。",
       "Earlier calls are still getting their timings.": "较早的调用仍在补充计时。",
       "Output speed · last 60 min": "输出速度 · 最近 60 分钟",
       "Busiest models first · by model on the Usage page": "调用最多的模型在前 · 按模型的明细见用量页",
