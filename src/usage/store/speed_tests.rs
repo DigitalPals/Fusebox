@@ -1,6 +1,6 @@
 //! Output speed per model: what the Usage page reads, that the rollup agrees with a
 //! scan of the entries, that the triggers stay exact whichever table changes, and
-//! that the backfill gives stored calls the same timings live recording would have.
+//! that the backfill counts stored calls as live recording would, without timing them.
 use super::super::types::Tokens;
 use super::*;
 
@@ -237,7 +237,7 @@ async fn the_rollup_stays_exact_through_rebuilds_purges_and_older_releases() {
 }
 
 #[tokio::test]
-async fn the_backfill_gives_stored_calls_their_timings_newest_first() {
+async fn the_backfill_counts_stored_calls_untimed_newest_first() {
     let live = temp("live");
     let older = temp("older");
     let batch: Vec<_> = (0..25)
@@ -291,14 +291,31 @@ async fn the_backfill_gives_stored_calls_their_timings_newest_first() {
     drop(c);
     let store = Store::open(&older, 64, 3650, None).unwrap();
     let mut value = store.speed(day()).await.unwrap();
-    let late = model(&value, "claude-opus-5-5", "standard")["calls"].as_i64().unwrap();
-    assert_eq!(late, model(&expected, "claude-opus-5-5", "standard")["calls"].as_i64().unwrap() + 1);
-    // Without the late call, the backfilled database reads as if it had recorded live.
+    let opus = model(&value, "claude-opus-5-5", "standard");
+    assert_eq!(
+        opus["calls"].as_i64().unwrap(),
+        model(&expected, "claude-opus-5-5", "standard")["calls"].as_i64().unwrap() + 1
+    );
+    assert_eq!(opus["timed"], 1, "only the late call, recorded live, is timed");
+    // Without the late call, the backfilled database counts every call live recording
+    // did, but times none: earlier releases started the clock after hidden reasoning.
     let without = Query { end: Some("2026-10-20T19:00:00Z".into()), ..day() };
     value = store.speed(without.clone()).await.unwrap();
     let recorded = Store::open(&live, 64, 3650, None).unwrap();
-    assert_eq!(value["models"], recorded.speed(without).await.unwrap()["models"]);
-    assert_eq!(value["models"], expected["models"]);
+    let live_value = recorded.speed(without).await.unwrap();
+    assert_eq!(live_value["models"], expected["models"]);
+    let rows = |v: &Value| -> Vec<(Value, Value, Value)> {
+        v["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["model"].clone(), r["speed"].clone(), r["calls"].clone()))
+            .collect()
+    };
+    assert_eq!(rows(&value), rows(&expected));
+    assert!(!rows(&value).is_empty());
+    assert!(expected["models"].as_array().unwrap().iter().all(|r| r["timed"].as_i64().unwrap() > 0));
+    assert!(value["models"].as_array().unwrap().iter().all(|r| r["timed"] == 0), "{value}");
     recorded.shutdown().await.unwrap();
     store.shutdown().await.unwrap();
 }
@@ -404,7 +421,8 @@ async fn the_store_backfills_on_its_own_and_a_downgrade_removes_the_tables() {
         value = store.speed(day()).await.unwrap();
     }
     assert_eq!(value["backfilling"], false, "the writer finishes the backfill");
-    assert_eq!(model(&value, "claude-opus-5-5", "standard")["timed"], 2);
+    let opus = model(&value, "claude-opus-5-5", "standard");
+    assert_eq!((opus["calls"].as_i64(), opus["timed"].as_i64()), (Some(4), Some(0)), "counted, not timed");
     store.shutdown().await.unwrap();
     drop(store);
     let objects = |c: &Connection| -> Vec<String> {

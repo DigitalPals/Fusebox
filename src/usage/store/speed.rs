@@ -204,7 +204,11 @@ pub(super) fn timing(o: &Observation) -> Option<(i64, Option<i64>, i64)> {
 /// Records an inserted observation's timing, before its entry is chosen. It replaces
 /// a stale row an older release left when it purged, should SQLite reuse the id.
 pub(super) fn record(tx: &Connection, id: i64, o: &Observation) -> Result<()> {
-    if let Some((speed, ttft, total)) = timing(o) {
+    write(tx, id, timing(o))
+}
+
+fn write(tx: &Connection, id: i64, timing: Option<(i64, Option<i64>, i64)>) -> Result<()> {
+    if let Some((speed, ttft, total)) = timing {
         tx.prepare_cached("INSERT OR REPLACE INTO usage_timings(id,speed,ttft_ms,total_ms) VALUES(?1,?2,?3,?4)")?
             .execute(params![id, speed, ttft, total])?;
     }
@@ -214,6 +218,11 @@ pub(super) fn record(tx: &Connection, id: i64, o: &Observation) -> Result<()> {
 /// Adds the timings of up to `limit` stored proxy observations below the saved
 /// mark, newest first, so recent days fill in before older ones. Returns how many
 /// it read; 0 once there is nothing left, and the mark is gone.
+///
+/// Those calls are counted but not timed. Releases before output speed recorded only
+/// when the first visible content arrived, so hidden reasoning (a Codex reasoning item,
+/// a Claude thinking block) ran before that start while its tokens counted as output,
+/// and failed calls carried a start too: timing them would overstate speed.
 pub(super) fn backfill_step(conn: &mut Connection, limit: i64) -> Result<usize> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let Some(below): Option<i64> = tx
@@ -236,7 +245,7 @@ pub(super) fn backfill_step(conn: &mut Connection, limit: i64) -> Result<usize> 
         // A record that no longer parses has no timing to add.
         let Ok(text) = decoder.decode(payload.into()) else { continue };
         let Ok(o) = serde_json::from_str::<Observation>(&text) else { continue };
-        record(&tx, *id, &o)?;
+        write(&tx, *id, timing(&o).map(|(speed, _, total)| (speed, None, total)))?;
     }
     drop(decoder);
     // Ids below the mark had no timing, so this adds each of their entries once.
