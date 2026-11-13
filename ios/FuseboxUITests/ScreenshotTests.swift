@@ -56,6 +56,18 @@ final class ScreenshotTests: XCTestCase {
 
     /// The tab bar, at the bottom or (the iPhone Duo's outer screen, iOS 27.1) down the side,
     /// where XCUI doesn't report it as a tab bar. Unfolded, the app keeps the same tabs.
+    /// Drags the page until `element`'s top is `top` points below the window's top.
+    private func scroll(_ element: XCUIElement, toTop top: CGFloat) {
+        for _ in 0..<10 {
+            guard element.exists else { app.swipeUp(); continue }
+            let dy = element.frame.minY - top
+            if abs(dy) < 30 { return }
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -max(-450, min(450, dy)))),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+    }
+
     private func tabButton(_ title: String) -> XCUIElement {
         let inBar = app.tabBars.buttons[title]
         if inBar.exists { return inBar }
@@ -104,13 +116,15 @@ final class ScreenshotTests: XCTestCase {
         // Output speed per model, under the by-day chart (servers from 0.15 on).
         let speedRow = app.descendants(matching: .any).matching(identifier: "speed-row").firstMatch
         if speedRow.exists {
-            for _ in 0..<4 where !speedRow.isHittable { app.swipeUp() }
+            scroll(app.staticTexts["speed-head"], toTop: 130)
             sleep(1)
             shot("09b-usage-speed")
-            let chart = app.descendants(matching: .any)["speed-chart"]
-            for _ in 0..<4 where !(chart.exists && chart.isHittable) { app.swipeUp() }
+            scroll(speedRow, toTop: 130)
             sleep(1)
-            shot("09c-usage-speed-chart")
+            shot("09c-usage-speed-models")
+            scroll(app.staticTexts["speed-by-day"], toTop: 130)
+            sleep(1)
+            shot("09d-usage-speed-chart")
         }
         tab("Settings")
         sleep(2)

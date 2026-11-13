@@ -222,6 +222,7 @@ struct SpeedCard: View {
         let word = days == 1 ? "today" : "last \(days) days"
         Card(spacing: 12) {
             PanelHead("Output speed by model · \(word)")
+                .accessibilityIdentifier("speed-head")
             if c.models.isEmpty {
                 Text(c.backfilling ? "Adding timings to earlier calls; this fills in shortly."
                      : "No timed calls in this range. Fusebox times the calls it serves; imported history has no timings.")
@@ -395,7 +396,7 @@ struct SpeedCard: View {
         let lines = SpeedLine.lines(speed.trend ?? [], dates: dates, picks: picks, first: first)
         let dayDates = dates.map(Self.noon)
         HStack(spacing: 8) {
-            Text("By day").capsLabel(10.5)
+            Text("By day").capsLabel(10.5).accessibilityIdentifier("speed-by-day")
             Spacer(minLength: 0)
             FuseSegmented("Chart", selection: $metric, options: [("rate", "Speed"), ("first", "First token")])
         }
