@@ -835,3 +835,18 @@ test('a failed speed read only leaves out its card', async () => {
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('USAGE_PARTS.speed()'), '');
 });
+
+test('output speed keeps untimed models last, by speed and by first token', () => {
+  const d = speedPage();
+  // Untimed models first in the data, as a busy one would be after a calls sort.
+  d.run('Usage.speed.models.unshift({ provider: "openai", model: "untimed-a", speed: "standard", calls: 9, timed: 0, output: 0, stream_ms: 0, ttft_ms: 0 }, { provider: "meta", model: "untimed-b", speed: "standard", calls: 1, timed: 0, output: 0, stream_ms: 0, ttft_ms: 0 })');
+  const order = () => [...d.run('usageSpeedHTML()').matchAll(/data-usage-act="speed-pick" data-value="[^"]*"/g)].map((m) => m[0].split('data-value="')[1].slice(0, -1));
+  d.run('Usage.speedAll = true');
+  for (const sort of ['rate', 'first']) {
+    d.run(`Usage.speedSort = "${sort}"`);
+    const got = order();
+    const timed = got.findIndex((k) => /untimed|haiku/.test(k));
+    assert.ok(got.slice(0, timed).every((k) => /sol|opus/.test(k)) && got.slice(timed).every((k) => /untimed|haiku/.test(k)), `${sort}: ${got.join(', ')}`);
+    assert.ok(got.indexOf(got.find((k) => /untimed-a/.test(k))) < got.indexOf(got.find((k) => /untimed-b/.test(k))), 'untimed by calls');
+  }
+});
