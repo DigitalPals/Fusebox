@@ -760,6 +760,8 @@ An entry older than the built-in release is ignored, so a forgotten one can't ho
 
 See [provider identity and header policy](docs/provider-identity.md) for account/session rebinding, extra inbound header configuration, outbound-header precedence and HTTP/WebSocket behavior. Supported native attribution still includes client-requested context, and providers see the outbound network/proxy IP and transport behavior. Compatibility does not promise invisibility or a particular latency improvement. The [dated audit](notes/claude-codex-identity-audit-2026-10-24.md) records the earlier findings; it is not a validation sign-off for these changes.
 
+The same workflow says when a newer stable Rust is out than the one in `rust-toolchain.toml`: one issue (label `rust-version`), opened on a Monday and closed once `main` builds with it (`python3 .github/scripts/rust_release.py` for a local report).
+
 For a local report, run `python3 .github/scripts/client_versions.py --dry-run`. Issue changes require `--update-issues` plus `GITHUB_TOKEN` and `GITHUB_REPOSITORY`; `--dry-run` always suppresses writes. The monitor's regression tests run with the normal Python checks in CI.
 
 See [release binary size](docs/binary-size.md) for compiler comparisons, measured
