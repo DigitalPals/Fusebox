@@ -654,6 +654,36 @@ public struct UsageDashboard: Codable, Sendable, Equatable {
     }
 }
 
+/// GET /usage/speed: output speed per provider, model and speed tier, from the timings of
+/// proxy calls, for the range (`models`), each local day in it (`trend`) and the equally long
+/// period before it (`previous`). Servers before 0.15 don't have it.
+public struct UsageSpeed: Codable, Sendable, Equatable {
+    public var models: [Row]?
+    public var trend: [Row]?
+    public var previous: [Row]?
+    /// Earlier calls are still getting their timings.
+    public var backfilling: Bool?
+
+    public struct Row: Codable, Sendable, Equatable {
+        public var provider: String?
+        public var model: String?
+        /// `standard`, `fast` or `ultrafast`: the tier the call asked for.
+        public var speed: String?
+        public var calls: Int?
+        /// Calls whose speed could be measured.
+        public var timed: Int?
+        public var output: Int?
+        public var streamMs: Int?
+        public var ttftMs: Int?
+        /// Only on `trend` rows: the local day, yyyy-mm-dd.
+        public var date: String?
+
+        enum CodingKeys: String, CodingKey {
+            case provider, model, speed, calls, timed, output, date, streamMs = "stream_ms", ttftMs = "ttft_ms"
+        }
+    }
+}
+
 // MARK: - Decoder
 
 extension JSONDecoder {
