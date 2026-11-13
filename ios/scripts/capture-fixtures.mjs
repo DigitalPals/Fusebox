@@ -89,6 +89,7 @@ const files = {
   'requests.json': '/requests?limit=40',
   'push.json': '/push',
   'usage-dashboard.json': `/usage/dashboard?start=${day(start)}&end=${day(end)}&timezone=Europe%2FAmsterdam`,
+  'usage-speed.json': `/usage/speed?start=${day(start)}&end=${day(end)}&timezone=Europe%2FAmsterdam`,
 };
 const raw = {};
 for (const [name, path] of Object.entries(files)) raw[name] = await get(path);

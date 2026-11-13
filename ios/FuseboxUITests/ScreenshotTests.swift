@@ -101,6 +101,17 @@ final class ScreenshotTests: XCTestCase {
         shot("08-usage")
         app.swipeUp()
         shot("09-usage-breakdown")
+        // Output speed per model, under the by-day chart (servers from 0.15 on).
+        let speedRow = app.descendants(matching: .any).matching(identifier: "speed-row").firstMatch
+        if speedRow.exists {
+            for _ in 0..<4 where !speedRow.isHittable { app.swipeUp() }
+            sleep(1)
+            shot("09b-usage-speed")
+            let chart = app.descendants(matching: .any)["speed-chart"]
+            for _ in 0..<4 where !(chart.exists && chart.isHittable) { app.swipeUp() }
+            sleep(1)
+            shot("09c-usage-speed-chart")
+        }
         tab("Settings")
         sleep(2)
         shot("10-settings")

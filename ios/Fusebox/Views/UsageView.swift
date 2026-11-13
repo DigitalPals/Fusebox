@@ -11,6 +11,8 @@ struct UsageView: View {
     @SceneStorage("usage.dim") private var dim = "model"
     @State private var filter: (dim: String, id: String)?
     @State private var data: UsageDashboard?
+    /// Output speed per model; nil on a server without /usage/speed (before 0.15).
+    @State private var speed: UsageSpeed?
     @State private var error: String?
     @State private var loading = false
     @State private var selectedDay: String?
@@ -38,10 +40,11 @@ struct UsageView: View {
                     }
                 }
                 if let c = data?.combined {
-                    FoldAwareColumns(items: [Part.cost, .chart, .breakdown], minColumnWidth: 380) { part in
+                    FoldAwareColumns(items: [Part.cost, .chart] + (speed == nil ? [] : [.speed]) + [.breakdown], minColumnWidth: 380) { part in
                         switch part {
                         case .cost: costCard(c)
                         case .chart: chartCard(c)
+                        case .speed: if let speed { SpeedCard(speed: speed, days: days, dates: range.dates) }
                         case .breakdown: breakdownCard(c)
                         }
                     }
@@ -68,7 +71,7 @@ struct UsageView: View {
         .accessibilityIdentifier("usage")
     }
 
-    private enum Part: String, Identifiable { case cost, chart, breakdown; var id: String { rawValue } }
+    private enum Part: String, Identifiable { case cost, chart, speed, breakdown; var id: String { rawValue } }
 
     // MARK: Loading
 
@@ -93,12 +96,20 @@ struct UsageView: View {
         q.queryItems = [URLQueryItem(name: "start", value: range.start), URLQueryItem(name: "end", value: range.end),
                         URLQueryItem(name: "timezone", value: TimeZone.current.identifier)]
         if let filter { q.queryItems?.append(URLQueryItem(name: filter.dim, value: filter.id)) }
+        let query = q.percentEncodedQuery ?? ""
+        // Speed has the same range and filter; without it (an older server) its panel stays away.
+        async let speedRead = Self.optional(api, UsageSpeed.self, "/usage/speed?\(query)")
         do {
-            data = try await api.get("/usage/dashboard?\(q.percentEncodedQuery ?? "")")
+            data = try await api.get("/usage/dashboard?\(query)")
             error = nil
         } catch {
             self.error = error.localizedDescription
         }
+        speed = await speedRead
+    }
+
+    private static func optional<T: Decodable & Sendable>(_ api: FuseboxAPI, _ type: T.Type, _ path: String) async -> T? {
+        try? await api.get(path)
     }
 
     // MARK: Cost
