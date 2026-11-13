@@ -1586,3 +1586,31 @@ async fn repricing_preserves_organization_catalogue_and_established_prices() {
         .unwrap();
     store.shutdown().await.unwrap();
 }
+
+/// One record the schema refuses must not take the rest of its batch with it, and a
+/// loss is counted (and logged) per record.
+#[tokio::test]
+async fn a_failing_record_drops_only_itself() {
+    let p = path("poison");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
+    let health = std::sync::Arc::new(Health::default());
+    let counters = health.clone();
+    let (written, rows) = store
+        .call(move |c| {
+            c.execute_batch(
+                "CREATE TEMP TRIGGER poison BEFORE INSERT ON usage_observations WHEN NEW.source_event_id='poison'
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )?;
+            let batch: Vec<_> = ["a", "poison", "b", "c"].iter().map(|id| event("proxy", id)).collect();
+            write_batch(c, &batch, &counters);
+            let rows: i64 = c.query_row("SELECT COUNT(*) FROM usage_observations", [], |r| r.get(0))?;
+            Ok((counters.written.load(Ordering::Relaxed), rows))
+        })
+        .await
+        .unwrap();
+    assert_eq!((written, rows), (3, 3));
+    assert_eq!(health.dropped.load(Ordering::Relaxed), 1);
+    assert_eq!(health.errors.load(Ordering::Relaxed), 1);
+    assert!(health.error.lock().unwrap().as_deref().unwrap().contains("refused"));
+    store.shutdown().await.unwrap();
+}

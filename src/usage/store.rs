@@ -199,6 +199,46 @@ fn database_failure(error: &anyhow::Error) -> bool {
             )
         })
 }
+/// Writes a batch of observations from the queue. When the batch fails for something
+/// other than the database itself (one record the schema refuses), its records are
+/// written one at a time, so only the records that fail are lost. Every loss is logged.
+fn write_batch(conn: &mut Connection, batch: &[Observation], health: &Health) {
+    let counted = |result: &Value| {
+        health.written.fetch_add(result["inserted"].as_u64().unwrap_or(0), Ordering::Relaxed);
+        health.rejected.fetch_add(result["purged"].as_u64().unwrap_or(0), Ordering::Relaxed);
+        health.committed();
+    };
+    let error = match insert_batch(conn, batch) {
+        Ok(result) => return counted(&result),
+        Err(e) => e,
+    };
+    let failed: Vec<(&Observation, anyhow::Error)> = if batch.len() > 1 && !database_failure(&error) {
+        tracing::warn!(
+            records = batch.len(),
+            "usage database: a write failed, writing its records one at a time: {error:#}"
+        );
+        batch
+            .iter()
+            .filter_map(|o| match insert_batch(conn, std::slice::from_ref(o)) {
+                Ok(result) => {
+                    counted(&result);
+                    None
+                }
+                Err(e) => Some((o, e)),
+            })
+            .collect()
+    } else {
+        batch.iter().map(|o| (o, anyhow!("{error:#}"))).collect()
+    };
+    for (o, e) in &failed {
+        tracing::error!(source = %o.source, provider = %o.provider, event_at_ms = o.event_at_ms,
+            "usage database: dropped a usage record: {e:#}");
+    }
+    if let Some((_, e)) = failed.last() {
+        health.dropped.fetch_add(failed.len() as u64, Ordering::Relaxed);
+        health.fail(e);
+    }
+}
 impl Health {
     fn fail(&self, e: &anyhow::Error) {
         self.errors.fetch_add(1, Ordering::Relaxed);
@@ -442,21 +482,7 @@ impl Store {
                                     Err(_) => break,
                                 }
                             }
-                            match insert_batch(&mut conn, &batch) {
-                                Ok(result) => {
-                                    worker_health
-                                        .written
-                                        .fetch_add(result["inserted"].as_u64().unwrap_or(0), Ordering::Relaxed);
-                                    worker_health
-                                        .rejected
-                                        .fetch_add(result["purged"].as_u64().unwrap_or(0), Ordering::Relaxed);
-                                    worker_health.committed();
-                                }
-                                Err(e) => {
-                                    worker_health.dropped.fetch_add(batch.len() as u64, Ordering::Relaxed);
-                                    worker_health.fail(&e);
-                                }
-                            }
+                            write_batch(&mut conn, &batch, &worker_health);
                             if let Err(e) = health_checkpoint.persist(&conn, &worker_session, &worker_health) {
                                 worker_health.fail(&e);
                             }
