@@ -278,7 +278,7 @@ struct SpeedCard: View {
         }
         Hairline()
         chart(c, picks: picks)
-        Text("Speed is output tokens over the time after the first token, summed over calls, so long answers count more. Reasoning tokens count as output. Fast is the tier the call asked for. Not timed: calls without streamed content or reported output, and answers that arrived in one piece.\(c.backfilling ? " Earlier calls are still getting their timings." : "")")
+        Text("Speed is output tokens over the time after generation started, summed over calls, so long answers count more. Reasoning tokens count as output. Fast is the tier the call asked for. Not timed: failed and cancelled calls, calls without streamed content or reported output, hidden reasoning with no known start, and answers that arrived in one piece.\(c.backfilling ? " Earlier calls are still getting their timings." : "")")
             .font(Typeface.small).foregroundStyle(Palette.fg3)
             .fixedSize(horizontal: false, vertical: true)
     }
