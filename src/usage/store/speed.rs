@@ -33,17 +33,19 @@ pub(super) const TRIGGERS: [&str; 4] = [
     "usage_speed_entry_update_new",
 ];
 
-/// What one entry `e` with timing `t` adds to its rollup row.
+/// What one entry `e` with timing `t` adds to its rollup row. An entry without an
+/// output count (NULL) is not timed: `timed` is always 0 or 1, never NULL.
 fn row(e: &str, t: &str) -> String {
+    let output = format!("COALESCE({e}.output,0)");
     let timed = format!(
-        "({t}.ttft_ms IS NOT NULL AND {e}.output>0 AND {t}.total_ms-{t}.ttft_ms>={MIN_STREAM_MS}
-          AND {e}.output*1000<={MAX_RATE}*({t}.total_ms-{t}.ttft_ms))"
+        "({t}.ttft_ms IS NOT NULL AND {output}>0 AND {t}.total_ms-{t}.ttft_ms>={MIN_STREAM_MS}
+          AND {output}*1000<={MAX_RATE}*({t}.total_ms-{t}.ttft_ms))"
     );
     format!(
         "{e}.event_at_ms/{bucket} AS bucket,
          json_array({e}.provider,{e}.model,{e}.account_id,{client},{t}.speed) AS dims,
          {e}.provider AS provider,{e}.model AS model,{e}.account_id AS account_id,{client} AS client,{t}.speed AS speed,
-         {timed} AS timed,CASE WHEN {timed} THEN {e}.output ELSE 0 END AS output,
+         {timed} AS timed,CASE WHEN {timed} THEN {output} ELSE 0 END AS output,
          CASE WHEN {timed} THEN {t}.total_ms-{t}.ttft_ms ELSE 0 END AS stream_ms,
          CASE WHEN {timed} THEN {t}.ttft_ms ELSE 0 END AS ttft_ms",
         bucket = rollup::BUCKET_MS,
@@ -78,23 +80,52 @@ fn remove(e: &str, t: &str, source: &str) -> String {
     )
 }
 
-/// Creates the timing tables and triggers when a database lacks them, and marks
-/// the observations already stored for the backfill. An existing set is left as is.
-pub(super) fn ensure(conn: &Connection) -> Result<()> {
-    let present: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM sqlite_master WHERE (type='table' AND name IN ('usage_timings','usage_speed_rollup'))
-               OR (type='trigger' AND name IN ({}))",
-            TRIGGERS.map(|t| format!("'{t}'")).join(",")
+/// The four triggers, as `CREATE TRIGGER` statements (also how SQLite stores them).
+pub(super) fn trigger_sql() -> [String; 4] {
+    // Trigger bodies name the entry NEW or OLD; its timing is selected under `t`.
+    let entry_timing = |id: &str| format!("FROM usage_timings t WHERE t.id={id}.id");
+    let added = add("NEW", "t", &entry_timing("NEW"));
+    let removed = remove("OLD", "t", &entry_timing("OLD"));
+    [
+        format!(
+            "CREATE TRIGGER {} AFTER INSERT ON usage_entries WHEN NEW.source='proxy' BEGIN {added} END",
+            TRIGGERS[0]
         ),
+        format!(
+            "CREATE TRIGGER {} AFTER DELETE ON usage_entries WHEN OLD.source='proxy' BEGIN {removed} END",
+            TRIGGERS[1]
+        ),
+        format!(
+            "CREATE TRIGGER {} AFTER UPDATE ON usage_entries WHEN OLD.source='proxy' BEGIN {removed} END",
+            TRIGGERS[2]
+        ),
+        format!(
+            "CREATE TRIGGER {} AFTER UPDATE ON usage_entries WHEN NEW.source='proxy' BEGIN {added} END",
+            TRIGGERS[3]
+        ),
+    ]
+}
+
+/// Creates the timing tables and triggers when a database lacks them, and marks
+/// the observations already stored for the backfill. Triggers an earlier build defined
+/// differently are replaced and the rollup rebuilt; the timings and the backfill mark stay.
+pub(super) fn ensure(conn: &Connection) -> Result<()> {
+    let triggers = trigger_sql();
+    let tables: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('usage_timings','usage_speed_rollup')",
         [],
         |r| r.get(0),
     )?;
-    if present == 2 + TRIGGERS.len() as i64 {
+    let mut current = tables == 2;
+    for (name, sql) in TRIGGERS.iter().zip(&triggers) {
+        let stored: Option<String> = conn
+            .query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1", [name], |r| r.get(0))
+            .optional()?;
+        current &= stored.as_deref() == Some(sql.as_str());
+    }
+    if current {
         return Ok(());
     }
-    // Trigger bodies name the entry NEW or OLD; its timing is selected under `t`.
-    let entry_timing = |id: &str| format!("FROM usage_timings t WHERE t.id={id}.id");
     conn.execute_batch(&format!(
         "SAVEPOINT usage_speed;
          CREATE TABLE IF NOT EXISTS usage_timings(id INTEGER PRIMARY KEY,speed INTEGER NOT NULL,ttft_ms INTEGER,
@@ -103,16 +134,10 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
            account_id TEXT,client TEXT,speed INTEGER NOT NULL,calls INTEGER NOT NULL,timed INTEGER NOT NULL,
            output INTEGER NOT NULL,stream_ms INTEGER NOT NULL,ttft_ms INTEGER NOT NULL,PRIMARY KEY(bucket,dims)) WITHOUT ROWID;
          {drops}
-         CREATE TRIGGER usage_speed_entry_insert AFTER INSERT ON usage_entries WHEN NEW.source='proxy' BEGIN {} END;
-         CREATE TRIGGER usage_speed_entry_delete AFTER DELETE ON usage_entries WHEN OLD.source='proxy' BEGIN {} END;
-         CREATE TRIGGER usage_speed_entry_update_old AFTER UPDATE ON usage_entries WHEN OLD.source='proxy' BEGIN {} END;
-         CREATE TRIGGER usage_speed_entry_update_new AFTER UPDATE ON usage_entries WHEN NEW.source='proxy' BEGIN {} END;
+         {creates}
          DELETE FROM usage_speed_rollup;",
-        add("NEW", "t", &entry_timing("NEW")),
-        remove("OLD", "t", &entry_timing("OLD")),
-        remove("OLD", "t", &entry_timing("OLD")),
-        add("NEW", "t", &entry_timing("NEW")),
         drops = TRIGGERS.map(|t| format!("DROP TRIGGER IF EXISTS {t};")).join("\n"),
+        creates = triggers.map(|t| format!("{t};")).join("\n"),
     ))?;
     let result = (|| -> Result<()> {
         rebuild(conn)?;

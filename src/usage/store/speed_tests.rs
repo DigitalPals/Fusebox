@@ -303,6 +303,64 @@ async fn the_backfill_gives_stored_calls_their_timings_newest_first() {
     store.shutdown().await.unwrap();
 }
 
+/// A call with no output count (an error after the first content) is counted, not timed;
+/// it must neither fail the live insert nor stop the backfill (seen on a production journal).
+#[tokio::test]
+async fn a_call_without_an_output_count_is_counted_not_timed() {
+    let without = |id: &str, at: &str| {
+        let mut o = call(id, "claude-opus-5-5", at, 0, Some(1500), 9000);
+        o.tokens.output = None;
+        o
+    };
+    let p = temp("null-output");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
+    let mut batch = records();
+    batch.push(without("n1", "2026-10-20T12:00:00Z"));
+    store.call(move |c| insert_batch(c, &batch)).await.unwrap();
+    let value = store.speed(day()).await.unwrap();
+    assert_eq!(value, store.speed_scan(day()).await.unwrap());
+    let opus = model(&value, "claude-opus-5-5", "standard");
+    assert_eq!((opus["calls"].as_i64(), opus["timed"].as_i64()), (Some(5), Some(2)));
+    store.shutdown().await.unwrap();
+
+    // As on production: the newest call (n2) was timed live, the older ones wait for the
+    // backfill, and the triggers were defined differently by an earlier build. They are
+    // replaced, keeping the timings and the mark, and the backfill steps over n1.
+    let mut c = Connection::open(&*p).unwrap();
+    codec::register(&c).unwrap();
+    insert_batch(&mut c, &[without("n2", "2026-10-20T13:00:00Z")]).unwrap();
+    c.execute_batch(&format!(
+        "INSERT INTO usage_meta(key,value) SELECT 'speed_backfill_below',MAX(id) FROM usage_observations;
+         DELETE FROM usage_timings WHERE id<(SELECT MAX(id) FROM usage_observations);
+         DROP TRIGGER {0}; CREATE TRIGGER {0} AFTER DELETE ON usage_entries BEGIN SELECT 1; END;",
+        speed::TRIGGERS[1]
+    ))
+    .unwrap();
+    let timings: i64 = c.query_row("SELECT COUNT(*) FROM usage_timings", [], |r| r.get(0)).unwrap();
+    migrate(&mut c).unwrap();
+    let stored: Vec<String> = c
+        .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'usage_speed_entry_%' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut expected = speed::trigger_sql().to_vec();
+    expected.sort();
+    assert_eq!(stored, expected, "stale triggers are replaced");
+    assert!(speed::backfilling(&c).unwrap(), "the mark stays");
+    assert_eq!(c.query_row("SELECT COUNT(*) FROM usage_timings", [], |r| r.get::<_, i64>(0)).unwrap(), timings);
+    assert_exact(&mut c).unwrap();
+    while speed::backfill_step(&mut c, 3).unwrap() > 0 {}
+    assert!(!speed::backfilling(&c).unwrap());
+    assert_exact(&mut c).unwrap();
+    // Deleting and changing such entries keeps the rollup exact too.
+    c.execute("UPDATE usage_entries SET output=NULL WHERE source='proxy' AND id%2=0", []).unwrap();
+    assert_exact(&mut c).unwrap();
+    c.execute("DELETE FROM usage_entries WHERE output IS NULL AND id%3=0", []).unwrap();
+    assert_exact(&mut c).unwrap();
+}
+
 #[tokio::test]
 async fn the_store_backfills_on_its_own_and_a_downgrade_removes_the_tables() {
     let p = temp("downgrade");
