@@ -7,6 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI builds keep only line numbers (enough for panic backtraces), which
+  # compiles about 25 s faster on Windows and macOS. Local builds are unchanged.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 concurrency:
   group: fusebox-ci-${{ github.event.pull_request.number || github.ref }}
@@ -26,6 +30,19 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The cache can't see the Test step's --config; change this with it,
+          # or every run rebuilds the dependencies.
+          key: deps-opt-level-2
+      - name: Keep temporary files on the work drive (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        # The tests' SQLite databases sync every write to disk. C: on Windows
+        # runners is slow at that; the runner's work drive is not. This took
+        # the Windows test run from 147-213 s to 87-117 s.
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Format
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
@@ -33,7 +50,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked
+        # Dependencies, SQLite's C code above all, are built optimised. That
+        # halves the test run; Fusebox itself stays unoptimised, with debug
+        # assertions. Not in Cargo.toml: it doubles a build from scratch, and
+        # every local worktree starts from scratch. The quoting works in both
+        # bash and PowerShell.
+        run: cargo test --locked --config "profile.dev.package.'*'.opt-level=2"
       - uses: actions/setup-node@v4
         if: matrix.os == 'ubuntu-latest'
         with:
