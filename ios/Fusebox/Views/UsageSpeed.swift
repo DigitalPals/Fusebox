@@ -231,7 +231,6 @@ struct SpeedCard: View {
                 content(c)
             }
         }
-        .accessibilityIdentifier("usage-speed")
     }
 
     @ViewBuilder private func content(_ c: SpeedSummary) -> some View {
