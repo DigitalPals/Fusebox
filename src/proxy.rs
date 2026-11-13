@@ -164,6 +164,8 @@ impl Tracker {
                 status: 0,
                 latency_ms: 0,
                 ttft_ms: None,
+                speed: "standard",
+                stream_ms: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_tokens: 0,
@@ -466,6 +468,8 @@ impl Tracker {
         self.log.input_tokens = input;
         self.log.output_tokens = output;
         self.log.cache_tokens = cache;
+        self.log.speed = captured.as_deref().map_or("standard", |o| o.speed().as_str());
+        self.log.stream_ms = crate::usage::types::stream_ms(output, self.log.ttft_ms, self.log.latency_ms);
         self.log.error = error.map(|e| e.chars().take(400).collect());
         if let Some(a) = &self.acct {
             if let Some(message) = &self.log.error

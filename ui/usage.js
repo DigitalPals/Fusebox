@@ -147,7 +147,9 @@ const Usage = {
   filters: { provider: '', model: '', account: '', client: '', entrypoint: '' },
   stack: 'provider', metric: 'cost', period: '', hoverDay: null, dim: 'model', showAll: false, clientsAll: false,
   drawerOpen: false, customError: '',
-  summary: null, status: null, entrypoints: null,
+  summary: null, status: null, entrypoints: null, speed: null,
+  // Output speed: the provider chip, the sorted column, the charted models (key → colour slot) and the chart's metric.
+  speedProvider: '', speedSort: 'rate', speedPicked: null, speedMetric: 'rate', speedAll: false,
   loading: false, loaded: false, error: '', actionError: '', busy: false,
   sequence: 0, credential: null, confirm: null, roots: {}, collectorDraft: '', rows: [],
 };
@@ -197,6 +199,7 @@ const USAGE_PARTS = {
   notices: () => usageNoticesHTML(),
   cost: () => (Usage.summary ? usageCostHTML() : !Usage.loading && !Usage.error ? '<div class="card pad"><h2 class="h-sec">No usage loaded</h2><p class="meta">Refresh to read persisted metadata.</p></div>' : ''),
   entrypoints: () => (Usage.summary && Usage.entrypoints ? usageEntrypointsHTML() : ''),
+  speed: () => (Usage.summary && Usage.speed ? usageSpeedHTML() : ''),
   breakdown: () => (Usage.summary ? usageBreakdownHTML() : ''),
   clients: () => (Usage.summary ? usageClientsHTML() : ''),
   drawer: () => (Usage.drawerOpen ? usageDrawerHTML() : ''),
@@ -213,7 +216,7 @@ function usageHTML() {
   return `<div class="usage-page">
     ${usagePart('head')}
     ${usagePart('notices')}
-    <div id="usage-results" class="usage-results" aria-busy="${Usage.loading}">${usagePart('cost')}${usagePart('entrypoints')}${usagePart('breakdown')}
+    <div id="usage-results" class="usage-results" aria-busy="${Usage.loading}">${usagePart('cost')}${usagePart('entrypoints')}${usagePart('speed')}${usagePart('breakdown')}
     ${usagePart('clients')}</div>
     ${usagePart('drawer')}
   </div>`;
@@ -432,6 +435,227 @@ function usageEntrypointsHTML() {
     <div class="u-ep-figs"><div class="u-ep-fig"><b>${ux(usageShare(c.sdk, all))}</b><span>of ${ux(usageCount(all))} calls had an SDK label</span></div>${latest}</div>
     ${bars ? `<div class="u-bars u-ep-bars${days.length > 20 ? ' dense' : ''}">${bars}</div><div class="u-days${days.length > 20 ? ' dense' : ''}" aria-hidden="true">${labels}</div>` : ''}
     <p class="u-ep-note">Claude Code names its entrypoint in the User-Agent; Fusebox records it and passes it on unchanged. The Agent SDK labels (sdk-ts, sdk-cli) are reported to use the 5-hour window about 1.8× faster than cli (anthropics/claude-code#97074). Only calls that named one are counted.</p>
+  </section>`;
+}
+
+// Output speed per model: tokens a second once the first content arrived, from the
+// timings of calls Fusebox served. Codex models split by the tier the call asked
+// for, which is also what pricing uses (Fast calls can come back saying "default").
+const USAGE_SPEED_TIERS = { fast: 'Fast', ultrafast: 'Ultrafast', standard: 'Standard' };
+const USAGE_SPEED_ORDER = { fast: 0, ultrafast: 1, standard: 2 };
+const USAGE_SPEED_ROWS = 12;
+const USAGE_SPEED_PICKS = 6;
+const usageSpeedFields = ['calls', 'timed', 'output', 'stream_ms', 'ttft_ms'];
+const usageSpeedSum = (rows) => rows.reduce((t, r) => { for (const f of usageSpeedFields) t[f] += Number(r[f] || 0); return t; }, { calls: 0, timed: 0, output: 0, stream_ms: 0, ttft_ms: 0 });
+const usageRate = (t) => (t.stream_ms > 0 ? t.output * 1000 / t.stream_ms : null);
+const usageFirst = (t) => (t.timed > 0 ? t.ttft_ms / t.timed / 1000 : null);
+const usageRateText = (v) => (v == null ? '—' : v < 10 ? v.toFixed(1) : numbersText(Math.round(v)));
+const usageSecondsText = (v) => (v == null ? '—' : `${v < 10 ? v.toFixed(1) : Math.round(v)} s`);
+const numbersText = (n) => n.toLocaleString('en-US');
+const usageSpeedKey = (r) => `${r.provider ?? ''}\u0000${r.model ?? ''}`;
+const usageSpeedChange = (now, before) => {
+  if (now == null || before == null || before <= 0) return ['—', 'dim'];
+  const d = Math.round((now / before - 1) * 100);
+  return [d === 0 ? '±0%' : `${d > 0 ? '+' : '−'}${Math.abs(d)}%`, d >= 3 ? 'ok' : d <= -3 ? 'warn' : 'dim'];
+};
+function usageSpeedData() {
+  const s = Usage.speed;
+  if (!s) return null;
+  const models = new Map(), before = new Map();
+  for (const r of s.models || []) {
+    const k = usageSpeedKey(r);
+    if (!models.has(k)) models.set(k, { key: k, provider: r.provider, model: r.model, tiers: [] });
+    models.get(k).tiers.push(r);
+  }
+  for (const r of s.previous || []) {
+    const k = usageSpeedKey(r);
+    if (!before.has(k)) before.set(k, []);
+    before.get(k).push(r);
+  }
+  const list = [...models.values()].map((m) => {
+    m.tiers.sort((a, b) => USAGE_SPEED_ORDER[a.speed] - USAGE_SPEED_ORDER[b.speed]);
+    const total = usageSpeedSum(m.tiers), prev = before.get(m.key) || [];
+    const tiers = m.tiers.map((r) => ({ ...r, rate: usageRate(r), first: usageFirst(r), before: usageRate(usageSpeedSum(prev.filter((p) => p.speed === r.speed))) }));
+    return { ...m, ...total, tiers, rate: usageRate(total), first: usageFirst(total), before: usageRate(usageSpeedSum(prev)),
+      fast: m.tiers.filter((r) => r.speed !== 'standard').reduce((n, r) => n + Number(r.calls || 0), 0) };
+  });
+  // Charted models keep their colour while they stay charted; the busiest four start.
+  const keys = new Set(list.map((m) => m.key));
+  let picked = Usage.speedPicked && Object.fromEntries(Object.entries(Usage.speedPicked).filter(([k]) => keys.has(k)));
+  if (!picked || !Object.keys(picked).length) {
+    picked = {};
+    [...list].filter((m) => m.timed > 0).sort((a, b) => b.timed - a.timed).slice(0, 4).forEach((m, i) => { picked[m.key] = i; });
+  }
+  Usage.speedPicked = picked;
+  const providers = new Set(list.filter((m) => m.fast > 0).map((m) => m.provider));
+  const withFast = list.filter((m) => providers.has(m.provider));
+  const fastCalls = withFast.reduce((n, m) => n + m.fast, 0), fastOf = withFast.reduce((n, m) => n + m.calls, 0);
+  // The busiest model timed at both speeds, for the Fast-against-Standard figure.
+  const both = [...list].sort((a, b) => b.calls - a.calls).find((m) => m.tiers.some((t) => t.speed === 'fast' && t.rate) && m.tiers.some((t) => t.speed === 'standard' && t.rate));
+  const gain = both && { model: both.model, ratio: both.tiers.find((t) => t.speed === 'fast').rate / both.tiers.find((t) => t.speed === 'standard').rate };
+  const calls = list.reduce((n, m) => n + m.calls, 0), timed = list.reduce((n, m) => n + m.timed, 0);
+  return { list, picked, calls, timed, providers: [...providers], fastShare: fastOf ? fastCalls / fastOf : null, gain, backfilling: !!s.backfilling };
+}
+const usageSpeedColor = (slot) => {
+  const light = typeof document !== 'undefined' && document.documentElement.dataset.shade === 'light';
+  return `oklch(${light ? 0.6 : 0.74} 0.09 ${[30, 90, 150, 210, 270, 330][slot]})`;
+};
+// Nice steps for the value axis: 1, 2 or 5 times a power of ten, at most five lines.
+function usageSpeedAxis(max) {
+  if (!(max > 0)) return { top: 1, step: 1 };
+  const raw = max / 4, power = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map((m) => m * power).find((v) => v >= raw);
+  return { top: Math.ceil(max / step) * step, step };
+}
+// The charted models by day (or month), one line per speed tier; Fast is dashed.
+function usageSpeedChart(c) {
+  const days = UsageTools.dates(Usage.range), period = usagePeriod(days.length);
+  const keys = period === 'month' ? UsageTools.months(days) : days;
+  if (keys.length < 2) return null;
+  const index = new Map(keys.map((k, i) => [k, i])), metric = Usage.speedMetric;
+  const lines = new Map();
+  for (const r of Usage.speed?.trend || []) {
+    const k = usageSpeedKey(r);
+    if (!(k in c.picked) || !Number(r.timed)) continue;
+    const id = `${k}\u0000${r.speed}`;
+    if (!lines.has(id)) lines.set(id, { key: k, model: r.model, speed: r.speed, slot: c.picked[k], sums: keys.map(() => usageSpeedSum([])) });
+    const i = index.get(period === 'month' ? String(r.date).slice(0, 7) : r.date);
+    if (i == null) continue;
+    const t = lines.get(id).sums[i];
+    for (const f of usageSpeedFields) t[f] += Number(r[f] || 0);
+  }
+  const series = [...lines.values()].sort((a, b) => a.slot - b.slot || USAGE_SPEED_ORDER[a.speed] - USAGE_SPEED_ORDER[b.speed])
+    .map((l) => ({ ...l, values: l.sums.map((t) => (metric === 'rate' ? usageRate(t) : usageFirst(t))), color: usageSpeedColor(l.slot) }));
+  const max = Math.max(0, ...series.flatMap((l) => l.values.filter((v) => v != null)));
+  return { keys, period, series, axis: usageSpeedAxis(max), metric };
+}
+const USAGE_SPEED_PLOT = 170;
+function usageSpeedPlotHTML(c) {
+  const chart = usageSpeedChart(c);
+  if (!chart) return '<p class="u-sp-none">Pick a longer range to see speed by day.</p>';
+  const { keys, series, axis, metric } = chart, phone = usagePhone(), today = usageToday();
+  if (!series.length) return '<p class="u-sp-none">Click a model above to chart it.</p>';
+  const x = (i) => (keys.length === 1 ? 500 : (i / (keys.length - 1)) * 1000);
+  const y = (v) => (1 - v / axis.top) * 100;
+  const fmt = (v) => (metric === 'rate' ? usageRateText(v) : usageSecondsText(v));
+  let grid = '', ylabels = '';
+  for (let v = 0; v <= axis.top + 1e-9; v += axis.step) {
+    grid += `<line x1="0" x2="1000" y1="${y(v)}" y2="${y(v)}"/>`;
+    ylabels += `<span style="top:${(y(v) / 100 * USAGE_SPEED_PLOT).toFixed(1)}px">${ux(metric === 'rate' ? numbersText(Math.round(v)) : `${+v.toFixed(2)}s`)}</span>`;
+  }
+  let paths = '', dots = '';
+  const ends = [];
+  for (const l of series) {
+    const dash = l.speed === 'fast' ? ' stroke-dasharray="6 4"' : l.speed === 'ultrafast' ? ' stroke-dasharray="2 3"' : '';
+    let run = [];
+    const flush = () => {
+      if (run.length > 1) paths += `<polyline points="${run.map(([i, v]) => `${x(i).toFixed(1)},${y(v).toFixed(2)}`).join(' ')}" stroke="${l.color}"${dash}/>`;
+      run = [];
+    };
+    l.values.forEach((v, i) => { if (v == null) flush(); else run.push([i, v]); });
+    flush();
+    l.values.forEach((v, i) => {
+      const lone = v != null && l.values[i - 1] == null && l.values[i + 1] == null;
+      if (lone) dots += `<i class="u-sp-dot${l.speed === 'standard' ? '' : ' hollow'}" style="left:${(x(i) / 10).toFixed(2)}%;top:${(y(v) / 100 * USAGE_SPEED_PLOT).toFixed(1)}px;--c:${l.color}"></i>`;
+    });
+    const last = l.values.map((v, i) => [v, i]).filter(([v]) => v != null).pop();
+    if (last) {
+      dots += `<i class="u-sp-dot${l.speed === 'standard' ? '' : ' hollow'}" style="left:${(x(last[1]) / 10).toFixed(2)}%;top:${(y(last[0]) / 100 * USAGE_SPEED_PLOT).toFixed(1)}px;--c:${l.color}"></i>`;
+      ends.push({ l, v: last[0], top: y(last[0]) / 100 * USAGE_SPEED_PLOT });
+    }
+  }
+  ends.sort((a, b) => a.top - b.top);
+  for (let i = 1; i < ends.length; i++) if (ends[i].top - ends[i - 1].top < 13) ends[i].top = ends[i - 1].top + 13;
+  const short = (m) => String(m || 'Unknown model').replace(/^claude-/, '').replace(/^.*\//, '');
+  const labels = phone ? '' : `<div class="u-sp-ends" aria-hidden="true">${ends.map((e) => `<span style="top:${e.top.toFixed(1)}px"><b>${ux(fmt(e.v))}</b> ${ux(short(e.l.model))}${e.l.speed === 'standard' ? '' : ` ${ux(USAGE_SPEED_TIERS[e.l.speed].toLowerCase())}`}</span>`).join('')}</div>`;
+  const every = keys.length <= 10 ? 1 : Math.ceil(keys.length / (phone ? 4 : 7));
+  const xlabels = keys.map((k, i) => {
+    if (i % every && i !== keys.length - 1) return '';
+    const text = chart.period === 'month' ? UsageTools.monthLabel(k) : (() => { const p = UsageTools.parts(k); return keys.length <= 10 ? (phone ? p.w.slice(0, 2) : `${p.w} ${p.d}`) : `${p.m} ${p.d}`; })();
+    return `<span style="left:${(x(i) / 10).toFixed(2)}%"${k === today || k === today.slice(0, 7) && chart.period === 'month' ? ' class="today"' : ''}>${ux(text)}</span>`;
+  }).join('');
+  const legend = `<div class="u-legend u-sp-legend">${series.map((l) => `<span>${l.speed === 'standard' ? `<i style="background:${l.color}"></i>` : `<svg viewBox="0 0 16 8" aria-hidden="true"><line x1="0" x2="16" y1="4" y2="4" stroke="${l.color}" stroke-width="2" stroke-dasharray="${l.speed === 'fast' ? '4 3' : '1.5 2.5'}"/></svg>`}<span class="mono">${ux(l.model || 'Unknown model')}</span>${l.speed === 'standard' ? '' : ` ${ux(USAGE_SPEED_TIERS[l.speed])}`}</span>`).join('')}</div>`;
+  const what = metric === 'rate' ? 'Output tokens a second' : 'Seconds to first token';
+  const summary = series.map((l) => `${l.model}${l.speed === 'standard' ? '' : ` ${USAGE_SPEED_TIERS[l.speed]}`}: ${l.values.filter((v) => v != null).length ? `latest ${fmt(l.values.filter((v) => v != null).pop())}` : 'no timed calls'}`).join('; ');
+  return `${legend}<div class="u-sp-plot" data-usage-speed-plot="${keys.length}" role="img" aria-label="${ux(`${what} by ${chart.period} for the charted models. ${summary}`)}">
+    <div class="u-sp-y" aria-hidden="true">${ylabels}</div>
+    <div class="u-sp-area"><svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true"><g class="u-sp-grid">${grid}</g><g class="u-sp-lines">${paths}</g></svg>${dots}<span class="u-sp-xh" hidden></span><div class="u-sp-tip" hidden></div></div>
+    ${labels}<div class="u-sp-x" aria-hidden="true">${xlabels}</div></div>`;
+}
+// The hover readout for one day of the speed chart, drawn into the plot without a repaint.
+function usageSpeedHover(plot, clientX) {
+  const area = plot.querySelector('.u-sp-area'), tip = plot.querySelector('.u-sp-tip'), xh = plot.querySelector('.u-sp-xh');
+  const c = usageSpeedData(), chart = c && usageSpeedChart(c);
+  if (!area || !chart || !chart.series.length) return;
+  const box = area.getBoundingClientRect(), n = chart.keys.length;
+  if (clientX == null || clientX < box.left - 8 || clientX > box.right + 8) { tip.hidden = true; xh.hidden = true; return; }
+  const i = Math.max(0, Math.min(n - 1, Math.round(((clientX - box.left) / box.width) * (n - 1))));
+  const fmt = (v) => (chart.metric === 'rate' ? `${usageRateText(v)} tok/s` : usageSecondsText(v));
+  const rows = chart.series.map((l) => [l, l.values[i]]).sort((a, b) => (b[1] ?? -1) - (a[1] ?? -1));
+  const label = chart.period === 'month' ? UsageTools.monthLabel(chart.keys[i]) : UsageTools.dayLabel(chart.keys[i]);
+  tip.innerHTML = `<b>${ux(label)}</b>${rows.map(([l, v]) => `<span><i style="background:${l.color}"></i><span class="mono">${ux(l.model || 'Unknown model')}</span>${l.speed === 'standard' ? '' : ` ${ux(USAGE_SPEED_TIERS[l.speed])}`}<span class="mono v">${ux(v == null ? '—' : fmt(v))}</span></span>`).join('')}`;
+  const left = n === 1 ? 0.5 : i / (n - 1);
+  xh.style.left = `${(left * 100).toFixed(2)}%`; xh.hidden = false;
+  tip.hidden = false;
+  const width = tip.offsetWidth, px = left * box.width;
+  tip.style.left = `${px + 14 + width > box.width ? Math.max(0, px - width - 14) : px + 14}px`;
+}
+function usageSpeedRowHTML(m, max, phone) {
+  const on = m.key in Usage.speedPicked, color = on ? usageSpeedColor(Usage.speedPicked[m.key]) : '';
+  const pick = `<span class="u-sp-pick${on ? ' on' : ''}" aria-hidden="true"${on ? ` style="--c:${color}"` : ''}></span>`;
+  const tiers = m.tiers.length > 1 || m.tiers[0]?.speed !== 'standard';
+  const sub = `${usageProvName(m.provider)}${m.tiers.length > 1 ? ` · ${m.tiers.map((t) => USAGE_SPEED_TIERS[t.speed]).join(' and ')}` : m.tiers[0]?.speed !== 'standard' ? ` · ${USAGE_SPEED_TIERS[m.tiers[0].speed]} only` : ''}`;
+  const bar = (rate, kid) => `<span class="u-sp-rate${kid ? ' kid' : ''}"><b>${ux(usageRateText(rate))}</b><span class="dim">tok/s</span><span class="u-sp-bar"><i style="width:${rate == null || !max ? 0 : (rate / max * 100).toFixed(1)}%"></i></span></span>`;
+  const share = m.fast ? (() => { const p = Math.round(m.fast / m.calls * 100); return `<span class="u-sp-share">${p}%<span><i style="width:${p}%"></i></span></span>`; })() : '<span class="dim">—</span>';
+  const [change, changeCls] = usageSpeedChange(m.rate, m.before);
+  const label = `${m.model || 'Unknown model'}, ${usageRateText(m.rate)} tokens a second${on ? ', charted' : ''}`;
+  const kids = tiers && m.tiers.length > 1 ? m.tiers.map((t) => {
+    const [c, cls] = usageSpeedChange(t.rate, t.before);
+    if (phone) return `<span class="u-sp-kid"><span class="dim">↳ ${ux(USAGE_SPEED_TIERS[t.speed])}</span><span class="mono">${ux(usageRateText(t.rate))} tok/s</span><span class="dim">${ux(usageSecondsText(t.first))} · ${usageCount(t.calls)} calls</span></span>`;
+    return `<div class="u-sp-row kid"><span class="u-sp-who">↳ ${ux(USAGE_SPEED_TIERS[t.speed])}</span>${bar(t.rate, true)}<span class="r mono fg2">${ux(usageSecondsText(t.first))}</span><span class="r">${t.speed === 'standard' ? '' : `<span class="u-ep-tag">${ux(USAGE_SPEED_TIERS[t.speed])}</span>`}</span><span class="r ${cls} u-wide">${ux(c)}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(t.output))}</span><span class="r">${usageCount(t.calls)}</span></div>`;
+  }).join('') : '';
+  if (phone) return `<button type="button" class="u-sp-item" data-usage-act="speed-pick" data-value="${ux(m.key)}" aria-pressed="${on}" aria-label="${ux(label)}"><span class="u-bd-l1">${pick}${usageLogo(m.provider)}<span class="u-bd-name mono">${ux(m.model || 'Unknown model')}</span><span class="u-bd-cost mono">${ux(usageRateText(m.rate))}<span class="dim"> tok/s</span></span></span><span class="u-bd-l2"><span class="dim">${ux(usageSecondsText(m.first))} to first token · ${usageCount(m.calls)} calls${m.fast ? ` · ${Math.round(m.fast / m.calls * 100)}% Fast` : ''}</span></span>${kids}</button>`;
+  return `<button type="button" class="u-sp-row${on ? ' on' : ''}" data-usage-act="speed-pick" data-value="${ux(m.key)}" aria-pressed="${on}" aria-label="${ux(label)}"><span class="u-sp-who">${pick}${usageLogo(m.provider)}<span class="cell2"><span class="mono">${ux(m.model || 'Unknown model')}</span><span class="dim">${ux(sub)}</span></span></span>${bar(m.rate)}<span class="r mono fg2">${ux(usageSecondsText(m.first))}</span><span class="r">${share}</span><span class="r ${changeCls} u-wide">${ux(change)}</span><span class="r mono fg2 u-wide">${ux(UsageTools.compact(m.output))}</span><span class="r">${usageCount(m.calls)}</span></button>${kids}`;
+}
+function usageSpeedHTML() {
+  const c = usageSpeedData();
+  if (!c) return '';
+  const phone = usagePhone(), range = ux(usageRangeLabel().toUpperCase());
+  if (!c.list.length) {
+    return `<section class="card u-sp" aria-labelledby="usage-sp-label"><div class="u-chart-head"><span class="label" id="usage-sp-label">OUTPUT SPEED BY MODEL · ${range}</span></div>
+      <p class="u-sp-none">${c.backfilling ? 'Adding timings to earlier calls; this fills in shortly.' : 'No timed calls in this range. Fusebox times the calls it serves; imported history has no timings.'}</p></section>`;
+  }
+  const providers = [...new Set(c.list.map((m) => m.provider))];
+  if (Usage.speedProvider && !providers.includes(Usage.speedProvider)) Usage.speedProvider = '';
+  const chips = providers.length > 1 ? `<div class="u-tabs u-sp-chips" role="group" aria-label="Provider">${[['', 'All models', c.list.length], ...providers.map((p) => [p, usageProvName(p), c.list.filter((m) => m.provider === p).length])]
+    .map(([p, name, n]) => `<button type="button" data-usage-act="speed-provider" data-value="${ux(p ?? '')}" aria-pressed="${(Usage.speedProvider || '') === (p ?? '')}">${p ? usageLogo(p, 14) : ''}${ux(name)} <span class="mono dim">${n}</span></button>`).join('')}</div>` : '';
+  const sort = Usage.speedSort;
+  const rows = c.list.filter((m) => !Usage.speedProvider || m.provider === Usage.speedProvider).sort((a, b) => {
+    if (sort === 'calls') return b.calls - a.calls;
+    const [x, y] = sort === 'first' ? [a.first, b.first] : [b.rate, a.rate];
+    if (x == null || y == null) return (x == null) - (y == null) || b.calls - a.calls;
+    return x - y || b.calls - a.calls;
+  });
+  const shown = Usage.speedAll ? rows : rows.slice(0, USAGE_SPEED_ROWS);
+  const max = Math.max(0, ...c.list.flatMap((m) => [m.rate, ...m.tiers.map((t) => t.rate)]).filter((v) => v != null));
+  const body = shown.map((m) => usageSpeedRowHTML(m, max, phone)).join('');
+  const more = rows.length > USAGE_SPEED_ROWS ? `<button type="button" class="u-more" data-usage-act="speed-all">${Usage.speedAll ? `Show top ${USAGE_SPEED_ROWS}` : `Show all ${rows.length}`}</button>` : '';
+  const head = (key, text, cls = '') => `<button type="button" class="u-sp-sort${cls}" data-usage-act="speed-sort" data-value="${key}" aria-pressed="${sort === key}">${text}${sort === key ? (key === 'first' ? ' ▴' : ' ▾') : ''}</button>`;
+  const days = UsageTools.dates(Usage.range).length;
+  const period = days === 1 ? 'day before' : `previous ${days} days`;
+  const th = phone ? '' : `<div class="u-sp-th"><span>MODEL</span>${head('rate', 'OUTPUT SPEED', ' l')}${head('first', 'FIRST TOKEN', ' r')}<span class="r">FAST</span><span class="r u-wide" title="${ux(`Output speed against the ${period}`)}">CHANGE</span><span class="r u-wide">TOKENS OUT</span>${head('calls', 'CALLS', ' r')}</div>`;
+  const stats = [[numbersText(c.list.length), 'Models'], [usageCount(c.timed), 'Timed calls'], [usageCount(c.calls - c.timed), 'Not timed']];
+  if (c.fastShare != null) stats.push([`${Math.round(c.fastShare * 100)}%`, `${c.providers.length === 1 ? `${usageProvName(c.providers[0])} calls` : 'Calls'} on Fast`]);
+  if (c.gain) stats.push([`×${c.gain.ratio.toFixed(1)}`, `Fast vs Standard · ${c.gain.model}`]);
+  const metric = `<div class="seg u-seg" role="group" aria-label="Chart"><button type="button" data-usage-act="speed-metric" data-value="rate" aria-pressed="${Usage.speedMetric === 'rate'}">Speed</button><button type="button" data-usage-act="speed-metric" data-value="first" aria-pressed="${Usage.speedMetric === 'first'}">First token</button></div>`;
+  const list = phone ? `<div class="u-sp-list">${body}${more}</div>` : `<div class="u-sp-table">${th}${body}${more}</div>`;
+  return `<section class="card u-sp" aria-labelledby="usage-sp-label">
+    <div class="u-sp-top"><span class="label" id="usage-sp-label">OUTPUT SPEED BY MODEL · ${range}</span><dl class="u-stats">${stats.map(([v, k]) => `<div><dd>${ux(v)}</dd><dt>${ux(k)}</dt></div>`).join('')}</dl></div>
+    <div class="u-sp-ctl">${chips}<span class="grow"></span><span class="meta">Click a model to chart it</span></div>
+    ${list}
+    <div class="u-chart-head u-sp-chart-head"><span class="label">BY ${usagePeriod(days) === 'month' ? 'MONTH' : 'DAY'}</span><span class="meta">${Usage.speedMetric === 'rate' ? 'Output tokens a second' : 'Seconds to first token'} · charted models</span><span class="grow"></span>${metric}</div>
+    <div id="usage-speed-chart">${usageSpeedPlotHTML(c)}</div>
+    <div class="u-foot u-sp-foot"><span>Speed is output tokens over the time after the first token, summed over calls, so long answers count more. Reasoning tokens count as output.</span><span>Fast is the tier the call asked for. Not timed: calls without streamed content or reported output, and answers that arrived in one piece.${c.backfilling ? ' Earlier calls are still getting their timings.' : ''}</span></div>
   </section>`;
 }
 
@@ -697,11 +921,12 @@ function usageAccountsChanged() {
 }
 // What each read feeds.
 const USAGE_READ_PARTS = {
-  summary: ['head', 'notices', 'cost', 'entrypoints', 'breakdown', 'clients'],
+  summary: ['head', 'notices', 'cost', 'entrypoints', 'speed', 'breakdown', 'clients'],
   status: ['head', 'notices', 'cost', 'drawer'],
   entrypoints: ['entrypoints', 'breakdown'],
+  speed: ['speed'],
 };
-const USAGE_LOAD_PARTS = ['head', 'notices', 'cost', 'entrypoints', 'breakdown', 'clients'];
+const USAGE_LOAD_PARTS = ['head', 'notices', 'cost', 'entrypoints', 'speed', 'breakdown', 'clients'];
 const usageQuery = () => UsageTools.query(Usage.range, Usage.filters, Usage.timezone);
 function usageSelectStack(summary) {
   const combined = summary?.combined;
@@ -737,8 +962,8 @@ async function usageRead(field, path, sequence) {
   } catch (e) {
     if (current() && e.name !== 'AbortError') {
       if (field !== 'status') Usage[field] = null;
-      // Without entrypoints the page only lacks their card and tab.
-      if (field !== 'entrypoints') Usage.error = e.message === 'locked' ? 'Management authentication required.' : e.message;
+      // Without entrypoints or speed the page only lacks their cards and tab.
+      if (field !== 'entrypoints' && field !== 'speed') Usage.error = e.message === 'locked' ? 'Management authentication required.' : e.message;
     }
   } finally {
     const active = current();
@@ -757,6 +982,7 @@ async function usageLoad() {
     await Promise.allSettled([
       usageRead('summary', `/usage/dashboard?${query}&stack=${u.stack}`, sequence),
       usageRead('entrypoints', `/usage/entrypoints?${query}`, sequence),
+      usageRead('speed', `/usage/speed?${query}`, sequence),
       usageRead('status', '/usage/status', sequence),
     ]);
   } catch (e) { if (sequence === u.sequence) u.error = e.message === 'locked' ? 'Management authentication required.' : e.message; }
@@ -767,7 +993,7 @@ function usageLoadStack() {
   usageSelectStack(Usage.summary); usageRenderChart();
 }
 // Range and filter changes read everything again.
-function usageReload() { Usage.hoverDay = null; Usage.summary = null; Usage.entrypoints = null; return usageLoad(); }
+function usageReload() { Usage.hoverDay = null; Usage.summary = null; Usage.entrypoints = null; Usage.speed = null; return usageLoad(); }
 async function usageMutate(path, body, after) {
   Usage.busy = true; Usage.actionError = ''; usageRender();
   try {
@@ -847,7 +1073,23 @@ if (typeof document !== 'undefined') {
     const bar = event.target.closest?.('[data-usage-day]');
     if (bar && !usagePhone()) usageHover(bar.dataset.usageDay);
   });
+  // The speed chart's readout follows the pointer, once a frame, without a repaint.
+  let speedFrame = 0, speedAt = null;
+  const speedHover = (plot, x) => {
+    speedAt = [plot, x];
+    if (!speedFrame) speedFrame = requestAnimationFrame(() => { speedFrame = 0; if (speedAt && document.contains(speedAt[0])) usageSpeedHover(...speedAt); });
+  };
+  document.addEventListener('mousemove', (event) => {
+    const plot = event.target.closest?.('[data-usage-speed-plot]');
+    if (plot && !usagePhone()) speedHover(plot, event.clientX);
+  });
+  document.addEventListener('mouseout', (event) => {
+    const plot = event.target.closest?.('[data-usage-speed-plot]');
+    if (plot && !plot.contains(event.relatedTarget)) speedHover(plot, null);
+  });
   document.addEventListener('click', (event) => {
+    const plot = event.target.closest('[data-usage-speed-plot]');
+    if (plot) return speedHover(plot, event.clientX);
     const bar = event.target.closest('[data-usage-day]');
     if (bar) return usageHover(Usage.hoverDay === bar.dataset.usageDay && usagePhone() ? null : bar.dataset.usageDay);
     const el = event.target.closest('[data-usage-act]');
@@ -864,6 +1106,21 @@ if (typeof document !== 'undefined') {
     if (act === 'period') { Usage.period = el.dataset.value; Usage.hoverDay = null; return usageRenderChart(); }
     if (act === 'dim') { Usage.dim = el.dataset.value; Usage.showAll = false; return usageRender(); }
     if (act === 'show-all') { Usage.showAll = !Usage.showAll; return usageRender(); }
+    if (act === 'speed-pick') {
+      const picked = Usage.speedPicked || {}, key = el.dataset.value;
+      if (key in picked) delete picked[key];
+      else {
+        const used = new Set(Object.values(picked)), slot = [...Array(USAGE_SPEED_PICKS).keys()].find((i) => !used.has(i));
+        if (slot == null) { if (typeof toast === 'function') toast(`Up to ${USAGE_SPEED_PICKS} models at a time`); return; }
+        picked[key] = slot;
+      }
+      Usage.speedPicked = picked;
+      return usageRender(`[data-usage-act="speed-pick"][data-value="${CSS.escape(key)}"]`, ['speed']);
+    }
+    if (act === 'speed-provider') { Usage.speedProvider = el.dataset.value; Usage.speedAll = false; return usageRender(undefined, ['speed']); }
+    if (act === 'speed-sort') { Usage.speedSort = el.dataset.value; return usageRender(undefined, ['speed']); }
+    if (act === 'speed-all') { Usage.speedAll = !Usage.speedAll; return usageRender(undefined, ['speed']); }
+    if (act === 'speed-metric') { Usage.speedMetric = el.dataset.value; return usageRender(undefined, ['speed']); }
     if (act === 'clients-all') { Usage.clientsAll = !Usage.clientsAll; return usageRender(undefined, ['clients']); }
     if (act === 'filter-row') {
       const id = Usage.rows[index];

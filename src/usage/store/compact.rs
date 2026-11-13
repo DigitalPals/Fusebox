@@ -431,19 +431,21 @@ pub fn downgrade(path: &Path) -> Result<Value> {
     }
     tx.execute("INSERT OR REPLACE INTO usage_meta(key,value) VALUES('catalogue_before_downgrade',?1)", [&catalogue])?;
     tx.execute("UPDATE usage_meta SET value=?1 WHERE key='catalogue'", [serde_json::to_string(&legacy)?])?;
-    for trigger in rollup::TRIGGERS.into_iter().chain(rollup::ENTRYPOINT_TRIGGERS) {
+    for trigger in rollup::TRIGGERS.into_iter().chain(rollup::ENTRYPOINT_TRIGGERS).chain(speed::TRIGGERS) {
         tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
     }
     client_totals::remove(&tx)?;
     tx.execute_batch(&format!(
         "DROP TABLE IF EXISTS usage_entrypoint_rollup;
          DROP TABLE IF EXISTS usage_entrypoints;
+         DROP TABLE IF EXISTS usage_speed_rollup;
+         DROP TABLE IF EXISTS usage_timings;
          DROP TABLE usage_rollup;
          DROP TABLE usage_facets;
          DROP TABLE usage_dictionaries;
          DROP INDEX usage_entries_imported;
          DROP INDEX IF EXISTS usage_entries_unpriced_time;
-         DELETE FROM usage_meta WHERE key IN ('database_id','active_dictionary','compact_cursor');
+         DELETE FROM usage_meta WHERE key IN ('database_id','active_dictionary','compact_cursor','speed_backfill_below');
          ALTER TABLE usage_observations DROP COLUMN pricing_partial;
          ALTER TABLE usage_observations DROP COLUMN write_30m;
          ALTER TABLE usage_observations DROP COLUMN write_12h;

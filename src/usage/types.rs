@@ -236,9 +236,42 @@ impl Observation {
         }
     }
 
+    /// The speed a call is priced and timed at. Codex follows the requested tier:
+    /// its Fast calls can come back reporting `service_tier: default`.
+    pub fn speed(&self) -> Speed {
+        if self.provider == "anthropic" {
+            // Claude reports speed separately. Its contracted/ordinary service
+            // tier does not imply the Codex priority or ultrafast speeds.
+            if self.service_tier.as_deref().is_some_and(|t| t == "fast" || t.ends_with("+fast")) {
+                Speed::Fast
+            } else {
+                Speed::Standard
+            }
+        } else if self.provider == "meta" {
+            // Muse has one speed; T3 records its usage as standard.
+            Speed::Standard
+        } else {
+            self.requested_speed().unwrap_or_else(|| Speed::from_tier(self.service_tier.as_deref()))
+        }
+    }
+
     pub fn set_requested_speed(&mut self, tier: Option<&str>) {
         self.numeric_metadata.insert("requested_speed".into(), Speed::from_tier(tier) as u64);
     }
+}
+
+/// Shorter streams are one or two network reads, not a measurable rate.
+pub const MIN_STREAM_MS: u64 = 50;
+/// Output tokens a second above which a call arrived buffered, not generated live.
+pub const MAX_STREAM_RATE: u64 = 10_000;
+
+/// How long a call streamed after its first content, when that measures its output
+/// speed: it reported output, streamed for at least [`MIN_STREAM_MS`], and no faster
+/// than [`MAX_STREAM_RATE`]. The usage database applies the same rule in SQL.
+pub fn stream_ms(output: u64, ttft_ms: Option<u64>, total_ms: u64) -> Option<u64> {
+    let stream = total_ms.checked_sub(ttft_ms?)?;
+    (output > 0 && stream >= MIN_STREAM_MS && output.saturating_mul(1000) <= MAX_STREAM_RATE.saturating_mul(stream))
+        .then_some(stream)
 }
 
 /// Numeric metadata keeps the observation wire format compatible. These values

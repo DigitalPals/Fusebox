@@ -439,6 +439,12 @@ pub struct RequestLog {
     pub status: u16,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
+    /// The speed tier the call ran at (`fast`, `ultrafast`); standard is left out.
+    #[serde(skip_serializing_if = "is_standard")]
+    pub speed: &'static str,
+    /// Streaming time after the first content, when it measures output speed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_ms: Option<u64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_tokens: u64,
@@ -466,6 +472,19 @@ pub struct Totals {
     pub cache_tokens: u64,
 }
 
+fn is_standard(speed: &&'static str) -> bool {
+    *speed == "standard"
+}
+
+/// One model's timed output in a minute, at one speed tier.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelSpeed {
+    pub model: String,
+    pub speed: &'static str,
+    pub output: u64,
+    pub stream_ms: u64,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Bucket {
     pub minute: i64,
@@ -478,6 +497,11 @@ pub struct Bucket {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_tokens: u64,
+    /// Output tokens and streaming time of the calls whose speed is measurable.
+    pub timed_output: u64,
+    pub stream_ms: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speeds: Vec<ModelSpeed>,
 }
 
 impl Bucket {
@@ -494,6 +518,22 @@ impl Bucket {
         self.input_tokens += log.input_tokens;
         self.output_tokens += log.output_tokens;
         self.cache_tokens += log.cache_tokens;
+        if let Some(ms) = log.stream_ms {
+            self.timed_output += log.output_tokens;
+            self.stream_ms += ms;
+            match self.speeds.iter_mut().find(|s| s.model == log.model && s.speed == log.speed) {
+                Some(s) => {
+                    s.output += log.output_tokens;
+                    s.stream_ms += ms;
+                }
+                None => self.speeds.push(ModelSpeed {
+                    model: log.model.clone(),
+                    speed: log.speed,
+                    output: log.output_tokens,
+                    stream_ms: ms,
+                }),
+            }
+        }
     }
 }
 
@@ -629,6 +669,8 @@ mod tests {
             status: 200,
             latency_ms: 0,
             ttft_ms: None,
+            speed: "standard",
+            stream_ms: None,
             input_tokens: tokens,
             output_tokens: 2,
             cache_tokens: 3,
@@ -898,6 +940,30 @@ mod tests {
         assert_eq!(stats.series.lock().len(), 3);
         assert!(series.windows(2).all(|b| b[0].minute < b[1].minute));
         assert_eq!(stats.account_series("account").iter().map(|b| b.input_tokens).sum::<u64>(), 1500);
+    }
+
+    #[test]
+    fn each_minute_sums_measurable_output_speed_per_model_and_tier() {
+        let now = Utc::now().timestamp() / 60;
+        let stats = Stats::default();
+        let timed = |model: &str, speed: &'static str, output: u64, stream_ms: Option<u64>| RequestLog {
+            model: model.into(),
+            speed,
+            output_tokens: output,
+            stream_ms,
+            ..log(now, 0)
+        };
+        stats.record(&timed("gpt-6.1-sol", "fast", 1200, Some(10_000)));
+        stats.record(&timed("gpt-6.1-sol", "standard", 700, Some(10_000)));
+        stats.record(&timed("gpt-6.1-sol", "fast", 300, Some(2_000)));
+        stats.record(&timed("claude-opus-5-5", "standard", 900, None));
+        let minute = stats.series().into_iter().find(|b| b.minute == now).unwrap();
+        assert_eq!((minute.timed_output, minute.stream_ms, minute.output_tokens), (2200, 22_000, 3100));
+        let speeds: Vec<_> = minute.speeds.iter().map(|s| (s.model.as_str(), s.speed, s.output, s.stream_ms)).collect();
+        assert_eq!(speeds, [("gpt-6.1-sol", "fast", 1500, 12_000), ("gpt-6.1-sol", "standard", 700, 10_000)]);
+        let json = serde_json::to_value(timed("m", "standard", 1, None)).unwrap();
+        assert!(json.get("speed").is_none() && json.get("stream_ms").is_none(), "standard and untimed stay out");
+        assert_eq!(serde_json::to_value(timed("m", "fast", 1, Some(60))).unwrap()["speed"], "fast");
     }
 
     #[test]

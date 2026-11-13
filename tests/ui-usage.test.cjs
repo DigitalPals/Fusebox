@@ -466,26 +466,27 @@ test('full refresh and filter changes abort superseded reads without exposing ca
   const pending = pendingApi();
   const d = dashboard({ api: pending.api });
   const first = d.run('usageLoad()');
-  assert.deepEqual(pending.calls.map((call) => call.endpoint.split('?')[0]), ['/usage/dashboard', '/usage/entrypoints', '/usage/status'], 'no records are read');
+  assert.deepEqual(pending.calls.map((call) => call.endpoint.split('?')[0]), ['/usage/dashboard', '/usage/entrypoints', '/usage/speed', '/usage/status'], 'no records are read');
   const refresh = d.run('usageLoad()');
-  assert.ok(pending.calls.slice(0, 3).every((call) => call.signal.aborted));
-  assert.ok(pending.calls.slice(3).every((call) => !call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 4).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(4).every((call) => !call.signal.aborted));
   await first;
   assert.equal(d.run('Usage.loading'), true);
   assert.equal(d.run('Usage.error'), '');
   d.run('Usage.filters.model = "new-model"');
   const filtered = d.run('usageReload()');
-  assert.ok(pending.calls.slice(0, 6).every((call) => call.signal.aborted));
+  assert.ok(pending.calls.slice(0, 8).every((call) => call.signal.aborted));
   await refresh;
   assert.equal(d.run('Usage.loading'), true);
   assert.equal(d.run('Usage.error'), '');
-  const active = pending.calls.slice(6);
-  assert.equal(active.length, 3);
+  const active = pending.calls.slice(8);
+  assert.equal(active.length, 4);
   assert.match(active[0].endpoint, /model=new-model/);
   assert.match(active[1].endpoint, /^\/usage\/entrypoints\?.*model=new-model/, 'entrypoints use the same filters');
+  assert.match(active[2].endpoint, /^\/usage\/speed\?.*model=new-model/, 'speed uses the same filters');
   active.forEach((call) => call.resolve({ marker: 'filtered' }));
   await filtered;
-  for (const field of ['summary', 'entrypoints', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
+  for (const field of ['summary', 'entrypoints', 'speed', 'status']) assert.equal(d.run(`Usage.${field}.marker`), 'filtered');
   assert.equal(d.run('Usage.loading'), false);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('usageReads.size'), 0);
@@ -525,20 +526,20 @@ test('route exit and pagehide cancel reads, and re-entry and restored pages resu
   assert.equal(d.run('Usage.loaded'), false);
   d.context.location.hash = '#/usage';
   d.run('bindUsage()');
-  assert.equal(pending.calls.length, 6);
-  pending.calls.slice(0, 3).forEach((call) => call.resolve({ marker: 'stale-route' }));
+  assert.equal(pending.calls.length, 8);
+  pending.calls.slice(0, 4).forEach((call) => call.resolve({ marker: 'stale-route' }));
   await first;
   assert.equal(d.run('Usage.summary'), null);
   assert.equal(d.run('Usage.loading'), true);
   listeners.get('pagehide')();
   assert.ok(pending.calls.every((call) => call.signal.aborted));
   listeners.get('pageshow')({ persisted: true });
-  assert.equal(pending.calls.length, 9);
-  pending.calls.slice(3, 6).forEach((call) => call.reject(new Error('late failure')));
+  assert.equal(pending.calls.length, 12);
+  pending.calls.slice(4, 8).forEach((call) => call.reject(new Error('late failure')));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.error'), '');
   assert.equal(d.run('Usage.loading'), true);
-  pending.calls.slice(6).forEach((call) => call.resolve({ marker: 'restored' }));
+  pending.calls.slice(8).forEach((call) => call.resolve({ marker: 'restored' }));
   await new Promise(setImmediate);
   assert.equal(d.run('Usage.summary.marker'), 'restored');
   assert.equal(d.run('Usage.status.marker'), 'restored');
@@ -588,7 +589,7 @@ test('chart stacking uses the loaded snapshot without another request, including
   assert.equal(d.run('Usage.summary.combined.stack'), 'model');
   d.run('Usage.stack = "provider"; usageLoadStack()');
   assert.equal(d.run('Usage.summary.combined.trend[0].marker'), 'provider');
-  assert.equal(calls, 3, 'dashboard, entrypoints and status, once each');
+  assert.equal(calls, 4, 'dashboard, entrypoints, speed and status, once each');
 });
 
 test('the page is drawn once; a read or an account change repaints only the sections that changed', () => {
@@ -745,4 +746,92 @@ test('the twelve-month preset and custom dates reach back past a year', () => {
   const today = d.run('usageToday()');
   const min = d.run('usageHeadHTML()').match(/name="start" value="[^"]*" min="([^"]+)"/)[1];
   assert.equal(min, helpers.shift(today, -3650));
+});
+
+// Output speed by model: two days of three models, Codex at both speeds.
+function speedData() {
+  const row = (provider, model, speed, calls, timed, output, stream_ms, ttft_ms, extra = {}) => ({ provider, model, speed, calls, timed, output, stream_ms, ttft_ms, ...extra });
+  const models = [
+    row('anthropic', 'claude-opus-5-5', 'standard', 6, 5, 3000, 50000, 11500),
+    row('openai', 'gpt-6.1-sol', 'fast', 4, 4, 1240, 10000, 2000),
+    row('openai', 'gpt-6.1-sol', 'standard', 4, 4, 720, 10000, 4000),
+    row('anthropic', 'claude-<b>haiku</b>', 'standard', 2, 0, 0, 0, 0),
+  ];
+  const trend = models.filter((r) => r.timed).flatMap((r) => ['2026-10-19', '2026-10-20'].map((date) => ({ ...r, date, calls: r.calls / 2, timed: r.timed / 2, output: r.output / 2, stream_ms: r.stream_ms / 2, ttft_ms: r.ttft_ms / 2 })));
+  const previous = [row('anthropic', 'claude-opus-5-5', 'standard', 3, 3, 1000, 20000, 6000), row('openai', 'gpt-6.1-sol', 'fast', 1, 1, 300, 3000, 500)];
+  return { models, trend, previous, backfilling: false };
+}
+function speedPage(extra = {}) {
+  const d = dashboard({ CSS: { escape: (v) => v }, ...extra });
+  d.seed({ loaded: true, range: { start: '2026-10-14', end: '2026-10-21', through: '2026-10-20' }, timezone: 'UTC', summary: { combined: { totals: {}, trend: [], breakdowns: { model: [] } } }, speed: speedData() });
+  return d;
+}
+
+test('output speed lists models first, splits Codex into Fast and Standard, and escapes names', () => {
+  const d = speedPage();
+  const html = d.run('usageSpeedHTML()');
+  assert.ok(html.includes('OUTPUT SPEED BY MODEL'));
+  const rows = JSON.parse(d.run('JSON.stringify(usageSpeedData().list.map((m) => [m.model, m.rate == null ? null : Math.round(m.rate), m.calls, m.fast]))'));
+  assert.deepEqual(rows, [['claude-opus-5-5', 60, 6, 0], ['gpt-6.1-sol', 98, 8, 4], ['claude-<b>haiku</b>', null, 2, 0]]);
+  // Both tiers of a model are child rows under it; one tier needs none.
+  assert.equal((html.match(/↳ Fast/g) || []).length, 1);
+  assert.equal((html.match(/↳ Standard/g) || []).length, 1);
+  assert.ok(html.includes('Codex · Fast and Standard'));
+  assert.ok(html.includes('>124</b>') && html.includes('>72</b>') && html.includes('>98</b>'));
+  // The figures: calls on Fast for the provider that has it, and Fast against Standard.
+  assert.ok(html.includes('Codex calls on Fast') && html.includes('>50%<'));
+  assert.ok(html.includes('×1.7') && html.includes('Fast vs Standard · gpt-6.1-sol'));
+  assert.ok(html.includes('<dd>13</dd><dt>Timed calls</dt>') && html.includes('<dd>3</dd><dt>Not timed</dt>'), '16 calls, 3 not timed');
+  // Fastest first; a model with no timed call last, its figures unknown.
+  const order = [...html.matchAll(/data-usage-act="speed-pick" data-value="[^"]*"/g)].map((m) => m[0]);
+  assert.equal(order.length, 3);
+  assert.ok(html.indexOf('gpt-6.1-sol') < html.indexOf('claude-opus-5-5'));
+  assert.ok(html.includes('claude-&lt;b&gt;haiku&lt;/b&gt;') && !html.includes('<b>haiku</b>'));
+  // Against the previous period: opus 50 → 60 tok/s.
+  assert.ok(html.includes('+20%'));
+  assert.ok(html.includes('title="Output speed against the previous 7 days">CHANGE'));
+  d.run('Usage.speedSort = "first"');
+  const first = d.run('usageSpeedHTML()');
+  assert.ok(first.indexOf('gpt-6.1-sol') < first.indexOf('claude-opus-5-5'), '0.8 s before 2.3 s');
+  d.run('Usage.speedSort = "calls"');
+  const calls = d.run('usageSpeedHTML()');
+  assert.ok(calls.indexOf('gpt-6.1-sol') < calls.indexOf('claude-opus-5-5'), '8 calls before 6');
+  d.run('Usage.speedProvider = "anthropic"');
+  const claude = d.run('usageSpeedHTML()');
+  assert.ok(!claude.includes('speed-pick" data-value="openai') && claude.includes('speed-pick" data-value="anthropic'), 'the provider chip narrows the table');
+});
+
+test('output speed charts the busiest models by day, Fast dashed, and starts empty with a hint', () => {
+  const d = speedPage();
+  const picked = JSON.parse(d.run('JSON.stringify(Object.keys(usageSpeedData().picked).map((k) => k.split("\\u0000")[1]))'));
+  assert.deepEqual(picked, ['gpt-6.1-sol', 'claude-opus-5-5'], 'timed models only, busiest first');
+  const plot = d.run('usageSpeedPlotHTML(usageSpeedData())');
+  assert.equal((plot.match(/<polyline/g) || []).length, 3, 'opus, sol and sol Fast');
+  assert.equal((plot.match(/stroke-dasharray="6 4"/g) || []).length, 1);
+  assert.match(plot, /role="img" aria-label="Output tokens a second by day for the charted models\. /);
+  d.run('Usage.speedMetric = "first"');
+  assert.ok(d.run('usageSpeedPlotHTML(usageSpeedData())').includes('Seconds to first token by day'));
+  d.run('Usage.speedPicked = {}; Usage.speed.trend = Usage.speed.trend.filter((r) => r.model === "nothing")');
+  assert.ok(d.run('usageSpeedPlotHTML(usageSpeedData())').includes('Click a model above to chart it.'));
+  d.run('Usage.range = { start: "2026-10-20", end: "2026-10-21", through: "2026-10-20" }');
+  assert.ok(d.run('usageSpeedPlotHTML(usageSpeedData())').includes('Pick a longer range'));
+});
+
+test('output speed says when nothing was timed or history is still being filled in', () => {
+  const d = speedPage();
+  d.run('Usage.speed = { models: [], trend: [], previous: [], backfilling: true }');
+  assert.ok(d.run('usageSpeedHTML()').includes('Adding timings to earlier calls'));
+  d.run('Usage.speed.backfilling = false');
+  assert.ok(d.run('usageSpeedHTML()').includes('No timed calls in this range'));
+  d.run('Usage.speed = null');
+  assert.equal(d.run('USAGE_PARTS.speed()'), '');
+});
+
+test('a failed speed read only leaves out its card', async () => {
+  const d = dashboard({ api: (endpoint) => (endpoint.startsWith('/usage/speed')
+    ? Promise.reject(new Error('speed unavailable')) : Promise.resolve({ combined: { totals: {}, trend: [], breakdowns: {} } })) });
+  await d.run('usageLoad()');
+  assert.equal(d.run('Usage.speed'), null);
+  assert.equal(d.run('Usage.error'), '');
+  assert.equal(d.run('USAGE_PARTS.speed()'), '');
 });

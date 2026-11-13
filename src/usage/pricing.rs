@@ -496,20 +496,7 @@ impl Catalogue {
     /// region, lifetime counts and final usage revisions on the observation.
     fn price_t3(&self, o: &Observation, rate: &Rate, mut snapshot: Snapshot) -> Snapshot {
         use super::types::Speed;
-        let speed = if o.provider == "anthropic" {
-            // Claude reports speed separately. Its contracted/ordinary service
-            // tier does not imply the Codex priority or ultrafast speeds.
-            if o.service_tier.as_deref().is_some_and(|t| t == "fast" || t.ends_with("+fast")) {
-                Speed::Fast
-            } else {
-                Speed::Standard
-            }
-        } else if o.provider == "meta" {
-            // Muse has one speed; T3 records its usage as standard.
-            Speed::Standard
-        } else {
-            o.requested_speed().unwrap_or_else(|| Speed::from_tier(o.service_tier.as_deref()))
-        };
+        let speed = o.speed();
         snapshot.service_tier = speed.as_str().into();
         snapshot.assumptions.push("t3_flat_category_rates".into());
         if rate.source_url

@@ -585,11 +585,12 @@ function onRequest(log) {
     o.series = o.series.filter((bucket) => bucket.minute >= cutoff);
     let b = o.series.find((bucket) => bucket.minute === minute);
     if (!b && minute >= cutoff) {
-      o.series.push((b = { minute, requests: 0, failed: 0, cancelled: 0, usage_missing: 0, usage_partial: 0, tokens: 0, input_tokens: 0, output_tokens: 0, cache_tokens: 0 }));
+      o.series.push((b = { minute, requests: 0, failed: 0, cancelled: 0, usage_missing: 0, usage_partial: 0, tokens: 0, input_tokens: 0, output_tokens: 0, cache_tokens: 0, timed_output: 0, stream_ms: 0, speeds: [] }));
       o.series.sort((a, b) => a.minute - b.minute);
     }
     if (b) {
       addRequestCounters(b, log);
+      addSpeed(b, log);
       b.tokens += log.input_tokens + log.output_tokens + log.cache_tokens;
     }
   }
@@ -680,9 +681,35 @@ function aggregateTokensHTML(c, field) {
 
 function seriesCounters(series) {
   return series.reduce((sum, b) => {
-    for (const field of ['requests', 'failed', 'cancelled', 'usage_missing', 'usage_partial', 'input_tokens', 'output_tokens', 'cache_tokens']) sum[field] = (sum[field] || 0) + (b[field] || 0);
+    for (const field of ['requests', 'failed', 'cancelled', 'usage_missing', 'usage_partial', 'input_tokens', 'output_tokens', 'cache_tokens', 'timed_output', 'stream_ms']) sum[field] = (sum[field] || 0) + (b[field] || 0);
+    for (const m of b.speeds || []) {
+      const key = `${m.model}\u0000${m.speed}`, t = (sum.speeds ||= new Map()).get(key) || { model: m.model, speed: m.speed, output: 0, stream_ms: 0 };
+      t.output += m.output; t.stream_ms += m.stream_ms;
+      sum.speeds.set(key, t);
+    }
     return sum;
   }, {});
+}
+
+// A request whose output speed is measurable adds its output and streaming time to its minute.
+function addSpeed(b, log) {
+  if (!log.stream_ms) return;
+  b.timed_output = (b.timed_output || 0) + (log.output_tokens || 0);
+  b.stream_ms = (b.stream_ms || 0) + log.stream_ms;
+  const speed = log.speed || 'standard', m = (b.speeds ||= []).find((x) => x.model === log.model && x.speed === speed);
+  if (m) { m.output += log.output_tokens || 0; m.stream_ms += log.stream_ms; }
+  else b.speeds.push({ model: log.model, speed, output: log.output_tokens || 0, stream_ms: log.stream_ms });
+}
+
+const tokRate = (output, ms) => (ms > 0 ? Math.round(output * 1000 / ms) : null);
+// Output tokens a second over the hour, with the busiest models in its hover.
+function speedFigureHTML(c) {
+  const rate = tokRate(c.timed_output || 0, c.stream_ms || 0);
+  if (rate == null) return '<span class="fig-speed" title="No call in the last hour streamed long enough to time">—</span>';
+  const models = [...(c.speeds?.values() || [])].sort((a, b) => b.output - a.output);
+  const rows = models.slice(0, 5).map((m) => `<span><span class="mono">${esc(m.model)}</span>${m.speed !== 'standard' ? `<span class="fig-tag">${m.speed === 'fast' ? 'Fast' : 'Ultrafast'}</span>` : ''}<b>${fmt(tokRate(m.output, m.stream_ms))} tok/s</b></span>`).join('');
+  const more = models.length > 5 ? `<span class="dim">${plural(models.length - 5, 'more model')} on the Usage page</span>` : '<span class="dim">Busiest models first · by model on the Usage page</span>';
+  return `<a class="fig-speed" href="#/usage" aria-label="${esc(`${fmt(rate)} output tokens a second in the last hour; by model on the Usage page`)}">${fmt(rate)}<small>tok/s</small><span class="fig-tip" aria-hidden="true"><b>Output speed · last 60 min</b>${rows}${more}</span></a>`;
 }
 
 function usageStats(c) {
@@ -1320,6 +1347,7 @@ function figuresHTML() {
     ['Cancelled', fmt(c.cancelled || 0)],
     ['Tokens in', aggregateTokensHTML(c, 'input_tokens')],
     ['Tokens out', aggregateTokensHTML(c, 'output_tokens')],
+    ['Output speed', speedFigureHTML(c)],
     ['Cached', aggregateTokensHTML(c, 'cache_tokens')],
     ['In flight', fmt(o.active)],
     ...usageStats(c).map(([v, k]) => [k, v]),

@@ -21,6 +21,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/usage/summary", get(retired_summary))
         .route("/usage/dashboard", get(dashboard))
         .route("/usage/entrypoints", get(entrypoints))
+        .route("/usage/speed", get(speed))
         .route("/usage/observations", get(observations))
         .route("/usage/status", get(status))
         .route("/usage/export", get(export))
@@ -121,6 +122,13 @@ async fn dashboard(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> 
 async fn entrypoints(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> Response {
     match store(&app) {
         Ok(s) => result(s.entrypoints(q).await),
+        Err(r) => *r,
+    }
+}
+/// Output speed per model and speed tier, from proxy calls' own timings.
+async fn speed(State(app): State<Arc<App>>, Query(q): Query<UsageQuery>) -> Response {
+    match store(&app) {
+        Ok(s) => result(s.speed(q).await),
         Err(r) => *r,
     }
 }
