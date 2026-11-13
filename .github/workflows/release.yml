@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a vX.Y.Z tag (vX.Y.Z-rc.N for a prerelease) that matches the version
-# in Cargo.toml builds every target and publishes the release. Notes in
+# in Cargo.toml builds every target, tests the tag on Linux, macOS and Windows
+# (ci.yml), and publishes the release when both went well. Notes in
 # .github/release-notes/vX.Y.Z.md go above the generated list of changes.
 on:
   push:
@@ -37,6 +38,14 @@ jobs:
             exit 1
           fi
 
+  # The tag's tests on Linux, macOS and Windows, beside the builds. Nothing is published
+  # unless they pass: pushes to main aren't tested there.
+  test:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
   build:
     name: ${{ matrix.target }}
     needs: version
@@ -46,8 +55,8 @@ jobs:
         # Linux builds use Debian 12, as the Docker image does, so they run on
         # glibc 2.36 rather than needing the runner's newer one.
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, container: "rust:1-bookworm" }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, container: "rust:1-bookworm" }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, container: "rust:1.100.0-bookworm" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, container: "rust:1.100.0-bookworm" }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
@@ -57,8 +66,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ env.TAG }}
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the Rust version
+        id: rust
+        shell: bash
+        # rust-toolchain.toml names it; a tag from before that file gets the newest stable.
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml 2> /dev/null || true)
+          echo "version=${version:-stable}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.version }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
@@ -124,7 +141,7 @@ jobs:
 
   # One job creates the release, so its notes are generated once.
   publish:
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
