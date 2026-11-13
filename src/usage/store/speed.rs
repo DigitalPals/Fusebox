@@ -126,6 +126,14 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
     if current {
         return Ok(());
     }
+    // Only a new timings table has stored calls without timings. When only the triggers
+    // are replaced, the rebuild below already counts every timing, so a finished backfill
+    // must not start again (it would add those timings twice).
+    let fresh: bool = conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_timings')",
+        [],
+        |r| r.get(0),
+    )?;
     conn.execute_batch(&format!(
         "SAVEPOINT usage_speed;
          CREATE TABLE IF NOT EXISTS usage_timings(id INTEGER PRIMARY KEY,speed INTEGER NOT NULL,ttft_ms INTEGER,
@@ -147,7 +155,7 @@ pub(super) fn ensure(conn: &Connection) -> Result<()> {
             conn.query_row("SELECT EXISTS(SELECT 1 FROM usage_meta WHERE key='speed_backfill_below')", [], |r| {
                 r.get(0)
             })?;
-        if !known && below > 1 {
+        if fresh && !known && below > 1 {
             conn.execute("INSERT INTO usage_meta(key,value) VALUES('speed_backfill_below',?1)", [below.to_string()])?;
         }
         Ok(())

@@ -361,6 +361,28 @@ async fn a_call_without_an_output_count_is_counted_not_timed() {
     assert_exact(&mut c).unwrap();
 }
 
+/// Replacing the triggers after the backfill finished must not run it again.
+#[tokio::test]
+async fn replacing_triggers_keeps_a_finished_backfill_finished() {
+    let p = temp("finished");
+    let store = Store::open(&p, 64, 3650, None).unwrap();
+    store.call(move |c| insert_batch(c, &records())).await.unwrap();
+    store.shutdown().await.unwrap();
+    let mut c = Connection::open(&*p).unwrap();
+    codec::register(&c).unwrap();
+    assert!(!speed::backfilling(&c).unwrap());
+    let before = dump(&c).unwrap();
+    c.execute_batch(&format!(
+        "DROP TRIGGER {0}; CREATE TRIGGER {0} AFTER DELETE ON usage_entries BEGIN SELECT 1; END;",
+        speed::TRIGGERS[1]
+    ))
+    .unwrap();
+    migrate(&mut c).unwrap();
+    assert!(!speed::backfilling(&c).unwrap(), "no second backfill");
+    assert_eq!(dump(&c).unwrap(), before);
+    assert_exact(&mut c).unwrap();
+}
+
 #[tokio::test]
 async fn the_store_backfills_on_its_own_and_a_downgrade_removes_the_tables() {
     let p = temp("downgrade");
