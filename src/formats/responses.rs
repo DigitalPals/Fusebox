@@ -392,9 +392,10 @@ pub fn normalize_reasoning_effort<'a>(effort: &'a str, model: &str) -> &'a str {
     let supports_max = model.starts_with("gpt-5.6")
         || model.starts_with("gpt-6")
         || model.starts_with("muse-wonder-")
+        || model.starts_with("muse-ember-")
         || model == "muse-spark-1.3";
     match effort {
-        "none" if model.starts_with("muse-wonder-") || model.starts_with("muse-spark-") => "minimal",
+        "none" if model.starts_with("muse-") => "minimal",
         "max" if !supports_max => "xhigh",
         _ => effort,
     }

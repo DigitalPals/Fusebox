@@ -276,9 +276,14 @@ impl Provider {
                 "grok-imagine-video-1.5",
                 "grok-imagine-video-1.5-lite",
             ],
-            Provider::Meta => {
-                &["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"]
-            }
+            Provider::Meta => &[
+                "muse-wonder-1.0",
+                "muse-wonder-full-1.0",
+                "muse-ember-1.0",
+                "muse-spark-1.3",
+                "muse-spark-1.2",
+                "muse-spark-1.1",
+            ],
             Provider::Devin => DEVIN_MODELS,
             Provider::Compat => &[],
         }

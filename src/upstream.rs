@@ -1070,7 +1070,7 @@ fn kimi(t: &Target, mut body: Value) -> Prepared {
         }
         Format::Responses => {
             body["stream"] = t.stream.into();
-            strip_responses_extras(&mut body);
+            strip_responses_extras(t.acct.provider, &mut body);
             format!("{v1}/responses")
         }
         _ => {
@@ -1116,11 +1116,17 @@ fn normalize_kimi_k31(body: &mut Value) {
 
 // ------------------------------------------------------------------ xai / meta
 
-/// Fields the stateless Responses backends (xAI, Meta) reject.
-fn strip_responses_extras(body: &mut Value) {
+/// Fields the stateless Responses backends (xAI, Meta) reject. Meta takes a prompt cache
+/// lifetime, and only the client's own: without `24h` Muse Ember loses its cache after
+/// half an hour, but none is added for a client that asked for none.
+fn strip_responses_extras(provider: Provider, body: &mut Value) {
     if let Some(o) = body.as_object_mut() {
+        let lifetime = o.get("prompt_cache_retention").and_then(Value::as_str);
+        let keep_lifetime = provider == Provider::Meta && matches!(lifetime, Some("in_memory" | "24h"));
         for k in ["previous_response_id", "prompt_cache_retention", "safety_identifier", "stream_options", "stop"] {
-            o.remove(k);
+            if k != "prompt_cache_retention" || !keep_lifetime {
+                o.remove(k);
+            }
         }
         if let Some(Value::Array(items)) = o.get_mut("input") {
             items.retain(|it| {
@@ -1134,7 +1140,7 @@ fn responses_api(t: &Target, mut body: Value) -> Prepared {
     let (token, base, oauth, _) = creds(t.acct);
     body["model"] = t.model.into();
     body["stream"] = t.stream.into();
-    strip_responses_extras(&mut body);
+    strip_responses_extras(t.acct.provider, &mut body);
     let mut headers = vec![
         ("authorization".into(), format!("Bearer {token}")),
         ("content-type".into(), "application/json".into()),
@@ -2069,6 +2075,8 @@ mod tests {
             ("muse-wonder-1.0", "none", "minimal"),
             ("muse-wonder-full-1.0", "none", "minimal"),
             ("muse-wonder-1.0", "high", "high"),
+            ("muse-ember-1.0", "max", "max"),
+            ("muse-ember-1.0", "none", "minimal"),
             ("muse-spark-1.3", "max", "max"),
             ("muse-spark-1.3-contributor", "max", "xhigh"),
             ("muse-spark-1.2", "max", "xhigh"),
@@ -2090,6 +2098,38 @@ mod tests {
                 assert_eq!(prepared.body["model"], model);
                 assert_eq!(prepared.body["reasoning"]["effort"], expected);
             }
+        }
+    }
+
+    /// Meta takes a prompt cache lifetime (Muse Ember loses its cache after half an hour
+    /// without `24h`), so the client's own reaches it. None is added, anything else is
+    /// dropped as before, and xAI, which rejects the field, never gets one.
+    #[test]
+    fn meta_gets_the_clients_own_prompt_cache_lifetime_and_xai_none() {
+        let cfg = Config::parse(
+            "auth-dir: /nonexistent\nmeta-api-key:\n  - api-key: synthetic-meta\nxai-api-key:\n  - api-key: synthetic-xai\n",
+        )
+        .unwrap();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let headers = HeaderMap::new();
+        let sent = |provider: Provider, model: &'static str, lifetime: Value| {
+            let acct = pool.all().into_iter().find(|a| a.provider == provider).unwrap();
+            let mut target = test_target(&acct, &cfg, &headers);
+            target.model = model;
+            let mut body = json!({"input":"hello"});
+            if !lifetime.is_null() {
+                body["prompt_cache_retention"] = lifetime;
+            }
+            prepare(&target, body).body.get("prompt_cache_retention").cloned()
+        };
+        for lifetime in ["24h", "in_memory"] {
+            assert_eq!(sent(Provider::Meta, "muse-ember-1.0", lifetime.into()), Some(lifetime.into()));
+            assert_eq!(sent(Provider::Xai, "grok-4.20", lifetime.into()), None);
+        }
+        assert_eq!(sent(Provider::Meta, "muse-ember-1.0", Value::Null), None, "none is added");
+        for other in [json!("1h"), json!(" 24h"), json!(24), json!(true), json!({"ttl":"24h"})] {
+            assert_eq!(sent(Provider::Meta, "muse-ember-1.0", other.clone()), None, "{other}");
         }
     }
 
