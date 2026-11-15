@@ -70,6 +70,7 @@ const S = {
   login: null, // { state, provider, url, callback, status, message }
   keyProvider: 'claude',
   snippet: store.get('snippet') || 'claude',
+  gatewayKey: store.get('gateway-key') === '1', // Claude Code's setup sends the key as a gateway's token
   setupModels: Object.create(null), setupContexts: Object.create(null),
   served: store.get('served') === '1', // this browser has seen Fusebox serve a request
   private: store.get('private') === '1', // hide emails and keys
@@ -1667,6 +1668,12 @@ function modelCapabilitiesText(model) {
     c.tool_calling == null ? '' : c.tool_calling ? 'Tool calls supported' : 'Tool calls not supported'].filter(Boolean).join(' · ');
 }
 
+// What a client key starts with in the form Claude Code reads as a gateway's token: an
+// unsigned JWT whose payload is {"aud":"claude-gateway"}, with the key where the
+// signature goes. Only for such a token does Claude Code act on the limit headers of a
+// 429 from a pool that has run dry. Fusebox takes the key behind it as the key itself.
+const GATEWAY_KEY = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJjbGF1ZGUtZ2F0ZXdheSJ9.';
+
 // A copyable/downloadable configuration for the selected public model ID. Known
 // provider metadata is kept; unknown limits are omitted rather than guessed.
 function snippet(kind, key = null, modelId = null) {
@@ -1714,8 +1721,13 @@ function snippet(kind, key = null, modelId = null) {
       return result(`from openai import OpenAI\n\nclient = OpenAI(base_url=${q(`${origin}/v1`)}, api_key=${q(token)})\nreply = client.chat.completions.create(\n    model=${q(id)},\n    messages=[{"role": "user", "content": "Hello"}],\n)\n`, 'fusebox-example.py', `Fusebox translates the selected model into the client’s API format.${keyed ? '' : ' No key is required, so any value works.'}`);
     case 'curl':
       return result(`curl ${sh(`${origin}/v1/chat/completions`)} \\\n  -H ${sh(`Authorization: Bearer ${token}`)} \\\n  -H 'Content-Type: application/json' \\\n  -d ${sh(q({ model: id, messages: [{ role: 'user', content: 'Hello' }] }))}\n`, 'fusebox-curl.sh', 'Also available: /v1/messages, /v1/responses (HTTP and websocket) and /v1beta/models.');
-    default:
-      return result(`export ANTHROPIC_BASE_URL=${sh(origin)}\nexport ANTHROPIC_AUTH_TOKEN=${sh(token)}\nexport ANTHROPIC_MODEL=${sh(id)}\nclaude\n`, 'fusebox-claude.sh', 'The selected model ID is sent to Fusebox. Fusebox translates when the model uses another provider’s API.');
+    default: {
+      // A key with a dot can't take the gateway form: its token would have four parts.
+      const gateway = token.includes('.') ? null : !!S.gatewayKey;
+      return { gateway, ...result(`export ANTHROPIC_BASE_URL=${sh(origin)}\nexport ANTHROPIC_AUTH_TOKEN=${sh(gateway ? GATEWAY_KEY + token : token)}\nexport ANTHROPIC_MODEL=${sh(id)}\nclaude\n`, 'fusebox-claude.sh', gateway
+        ? 'Claude Code reads this form of the key as a gateway’s. When the Claude accounts are out of quota, it then names the limit and when it resets, as it does for its own plans. It sends one small extra request at start.'
+        : 'The selected model ID is sent to Fusebox. Fusebox translates when the model uses another provider’s API.') };
+    }
   }
 }
 
@@ -1778,7 +1790,8 @@ function setupHTML(key = null, uid = '') {
       ${selected ? `<button class="icon-btn copy" type="button" data-act="copy" data-text="${esc(sn.text)}" data-toast="Snippet copied" aria-label="Copy snippet" title="Copy snippet">${ICON.copy}</button>` : ''}
     </div>
     ${selected ? `<div class="setup-model"><label for="setup-model${uid}">Model</label><select id="setup-model${uid}" class="setup-model-select" data-setup-scope="${esc(scope)}">${models.map((m) => `<option value="${esc(m.id)}"${m.id === selected.id ? ' selected' : ''}>${esc(m.id)}</option>`).join('')}</select>
-      ${S.snippet === 'zed' && !selected.capabilities?.context_window ? `<label for="setup-context${uid}">Context tokens</label><input id="setup-context${uid}" class="setup-context" type="number" min="1" step="1" data-model="${esc(selected.id)}" value="${esc(S.setupContexts[selected.id] || '')}" placeholder="Provider’s documented limit">` : ''}</div>
+      ${S.snippet === 'zed' && !selected.capabilities?.context_window ? `<label for="setup-context${uid}">Context tokens</label><input id="setup-context${uid}" class="setup-context" type="number" min="1" step="1" data-model="${esc(selected.id)}" value="${esc(S.setupContexts[selected.id] || '')}" placeholder="Provider’s documented limit">` : ''}
+      ${sn.gateway == null ? '' : `<button class="btn sm toggle-btn" type="button" data-act="setup-gateway" role="switch" aria-checked="${sn.gateway}" title="Send the key in the form Claude Code reads as a gateway’s, so it shows a used-up limit and its reset"><span class="switch sm" aria-hidden="true" ${sn.gateway ? 'data-on="true"' : ''}></span>Limits in Claude Code</button>`}</div>
       <p class="note setup-capabilities">${esc(modelCapabilitiesText(selected))}</p>
       <pre class="code">${sn.html}</pre>
       <div class="setup-footer"><p class="note">${esc(sn.note)}</p>${sn.filename ? `<button class="btn sm" type="button" data-act="download-setup" data-filename="${esc(sn.filename)}" data-text="${esc(sn.text)}">Download file</button>` : ''}</div>`
@@ -4107,6 +4120,14 @@ document.addEventListener('click', (e) => {
       S.snippet = id;
       store.set('snippet', id);
       return refreshSetups();
+    case 'setup-gateway': {
+      const setup = el.closest('[data-setup]');
+      S.gatewayKey = !S.gatewayKey;
+      store.set('gateway-key', S.gatewayKey ? '1' : '0');
+      refreshSetups();
+      setup?.querySelector('[data-act="setup-gateway"]')?.focus();
+      return;
+    }
     case 'start-login':
       if (S.panel === el.dataset.provider && S.login && S.login.status === 'pending') return;
       return startLogin(el.dataset.provider);

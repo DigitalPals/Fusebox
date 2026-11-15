@@ -16,6 +16,8 @@ claude
 
 Want GPT in Claude Code? `export ANTHROPIC_MODEL=gpt-6-astra`.
 
+Turn on "Limits in Claude Code" in the setup to get the key in the form Claude Code reads as a gateway's. When the Claude accounts are out of quota, it then says which limit was hit and when it resets, instead of a plain API error. See [Routing](routing.md).
+
 **Codex** in `~/.codex/config.toml`
 
 ```toml

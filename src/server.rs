@@ -120,11 +120,19 @@ impl ClientAuth {
     }
 }
 
+/// What a client key starts with in the form Claude Code reads as a gateway's token: an
+/// unsigned JWT whose payload is `{"aud":"claude-gateway"}`, with the key where the
+/// signature goes. Claude Code never checks a signature; it reads the claim, and only
+/// then (or signed in to Claude itself) acts on the limit headers of a dry pool's 429.
+/// The dashboard offers a key in this form for Claude Code. It is the same key: the
+/// client, its limits and its sessions are those of the key behind the prefix.
+pub(crate) const GATEWAY_KEY_PREFIX: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJjbGF1ZGUtZ2F0ZXdheSJ9.";
+
 /// The credential a request carries, in the spellings clients use.
 fn provided_key(req: &Request) -> Option<String> {
     let h = req.headers();
     let get = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(str::trim).map(String::from);
-    get("authorization")
+    let key = get("authorization")
         .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string()))
         .or_else(|| get("x-api-key"))
         .or_else(|| get("x-goog-api-key"))
@@ -132,7 +140,8 @@ fn provided_key(req: &Request) -> Option<String> {
             req.uri().query().and_then(|q| {
                 url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
             })
-        })
+        })?;
+    Some(key.strip_prefix(GATEWAY_KEY_PREFIX).map(String::from).unwrap_or(key))
 }
 
 /// A request still waiting for its answer when the time to finish runs out at shutdown
@@ -1131,6 +1140,62 @@ mod tests {
             let src = icon["src"].as_str().unwrap();
             let resp = router(app.clone()).oneshot(Request::get(src).body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{src}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_key_in_the_form_claude_code_reads_as_a_gateways_is_the_same_key() {
+        use base64::Engine;
+        // What Claude Code looks for: three parts, the second a JSON object whose `aud` is
+        // `claude-gateway`. The key takes the third part's place.
+        let parts: Vec<&str> = GATEWAY_KEY_PREFIX.split('.').collect();
+        let decode = |part: &str| -> Value {
+            serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
+        };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(decode(parts[0]), json!({"alg": "none", "typ": "JWT"}));
+        assert_eq!(decode(parts[1]), json!({"aud": "claude-gateway"}));
+        assert_eq!(parts[2], "");
+        // The dashboard offers a key behind this same prefix.
+        assert!(include_str!("../ui/app.js").contains(&format!("const GATEWAY_KEY = '{GATEWAY_KEY_PREFIX}';")));
+
+        // However it is sent, the key behind the prefix is the one that counts: its
+        // client, limits and sessions are found by it.
+        let gateway = |key: &str| format!("{GATEWAY_KEY_PREFIX}{key}");
+        let sent = |name: &str, value: String| {
+            provided_key(&Request::get("/v1/models").header(name, value).body(Body::empty()).unwrap())
+        };
+        assert_eq!(sent("authorization", format!("Bearer {}", gateway("fbx_laptop"))).as_deref(), Some("fbx_laptop"));
+        assert_eq!(sent("x-api-key", gateway("fbx_laptop")).as_deref(), Some("fbx_laptop"));
+        assert_eq!(sent("authorization", "Bearer fbx_laptop".into()).as_deref(), Some("fbx_laptop"));
+        let query = format!("/v1/models?key={}", gateway("fbx_laptop"));
+        assert_eq!(provided_key(&Request::get(query).body(Body::empty()).unwrap()).as_deref(), Some("fbx_laptop"));
+
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            api_keys: vec!["shared-key".into()],
+            named_clients: vec![crate::config::NamedClient {
+                id: "laptop".into(),
+                label: "Laptop".into(),
+                key: "fbx_laptop".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let app = App::new(cfg, "/nonexistent/config.yaml".into());
+        let status = async |path: &str, key: String| {
+            let request = Request::get(path).header("authorization", format!("Bearer {key}"));
+            router(app.clone()).oneshot(request.body(Body::empty()).unwrap()).await.unwrap().status()
+        };
+        for path in ["/v1/models", "/v1/fusebox/status"] {
+            for key in ["fbx_laptop", "shared-key"] {
+                assert_eq!(status(path, key.into()).await, StatusCode::OK, "{path} {key}");
+                assert_eq!(status(path, gateway(key)).await, StatusCode::OK, "{path} {key} as a gateway's");
+            }
+            // The form opens nothing by itself, and a collector's key stays ingestion-only.
+            for key in ["", "fbx_other", "fbxc_collector"] {
+                assert_eq!(status(path, gateway(key)).await, StatusCode::UNAUTHORIZED, "{path} {key:?}");
+            }
         }
     }
 
