@@ -85,7 +85,12 @@ pub mod claude {
     pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
     pub const REDIRECT: &str = "http://localhost:54545/callback";
     pub const PORT: u16 = 54545;
+    /// The scopes a token refresh names.
     pub const SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+    /// The scopes a sign-in asks for. Since November 2026 Anthropic answers a sign-in link
+    /// without the Console scope, which Claude Code sends, with "Invalid request format".
+    pub const AUTHORIZE_SCOPE: &str =
+        "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 }
 
 pub mod codex {
@@ -108,8 +113,11 @@ pub fn pkce() -> Pkce {
     Pkce { verifier, challenge }
 }
 
-pub fn random_state() -> String {
-    let bytes: Vec<u8> = (0..24).map(|_| rand::random::<u8>()).collect();
+/// The `state` of a sign-in. Anthropic refuses a sign-in link whose state is shorter than
+/// Claude Code's 32 random bytes (43 characters); the other providers keep theirs.
+pub fn random_state(provider: Provider) -> String {
+    let len = if provider == Provider::Claude { 32 } else { 24 };
+    let bytes: Vec<u8> = (0..len).map(|_| rand::random::<u8>()).collect();
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -122,7 +130,7 @@ pub fn auth_url(provider: Provider, state: &str, p: &Pkce) -> String {
                 ("client_id", claude::CLIENT_ID),
                 ("response_type", "code"),
                 ("redirect_uri", claude::REDIRECT),
-                ("scope", claude::SCOPE),
+                ("scope", claude::AUTHORIZE_SCOPE),
                 ("code_challenge", &p.challenge),
                 ("code_challenge_method", "S256"),
                 ("state", state),
@@ -1007,6 +1015,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Anthropic refuses a sign-in link ("Invalid request format") unless it looks like
+    /// Claude Code's: a state of 32 random bytes and the Console scope. A token refresh
+    /// keeps the scopes it always named, and the other providers' links are as they were.
+    #[test]
+    fn a_claude_sign_in_link_carries_a_43_character_state_and_the_console_scope() {
+        let query = |provider, state: &str| -> std::collections::HashMap<String, String> {
+            let link = auth_url(provider, state, &pkce());
+            url::Url::parse(&link).unwrap().query_pairs().into_owned().collect()
+        };
+        let state = random_state(Provider::Claude);
+        assert_eq!(state.len(), 43, "{state}");
+        assert_eq!(URL_SAFE_NO_PAD.decode(&state).unwrap().len(), 32);
+        let claude = query(Provider::Claude, &state);
+        assert_eq!(claude["state"], state, "the state survives the link as it is, case and all");
+        assert_eq!(claude["scope"], format!("org:create_api_key {}", claude::SCOPE));
+        assert_eq!(claude["scope"], claude::AUTHORIZE_SCOPE);
+        assert!(!claude::SCOPE.contains("org:create_api_key"), "a refresh names the scopes it always did");
+
+        for provider in [Provider::Codex, Provider::Antigravity] {
+            let state = random_state(provider);
+            assert_eq!(state.len(), 32, "{provider:?}");
+            assert_eq!(query(provider, &state)["state"], state);
+        }
+        assert_eq!(query(Provider::Codex, "s")["scope"], "openid email profile offline_access");
+        assert_eq!(query(Provider::Antigravity, "s")["scope"], antigravity::SCOPES);
     }
 
     #[test]

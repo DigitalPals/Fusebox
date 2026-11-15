@@ -65,7 +65,7 @@ fn settle(app: &Arc<App>, state: &str, result: &Result<String>) {
 }
 
 pub async fn start_login(app: &Arc<App>, provider: Provider) -> Result<(String, Login)> {
-    let state = oauth::random_state();
+    let state = oauth::random_state(provider);
     match provider {
         Provider::Claude | Provider::Codex | Provider::Antigravity => {
             let pkce = oauth::pkce();
