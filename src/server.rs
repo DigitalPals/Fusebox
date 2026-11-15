@@ -853,9 +853,15 @@ fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
         Reply::Error(status, mut v) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             let wait = proxy::take_retry_after(&mut v);
+            let limit = proxy::take_limit_headers(&mut v);
             let mut resp = (code, axum::Json(v)).into_response();
             if let Some(wait) = wait {
                 resp.headers_mut().insert(header::RETRY_AFTER, wait.into());
+            }
+            for (name, value) in limit {
+                if let (Ok(name), Ok(value)) = (header::HeaderName::try_from(name), HeaderValue::try_from(value)) {
+                    resp.headers_mut().insert(name, value);
+                }
             }
             resp
         }

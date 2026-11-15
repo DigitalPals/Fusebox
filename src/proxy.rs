@@ -840,6 +840,51 @@ pub fn retry_after_of(body: &Value) -> Option<u64> {
     body.get(RETRY_AFTER_KEY)?.as_u64()
 }
 
+/// The limit headers of an error reply ride in its body under this key, as the Retry-After
+/// does, until `server::reply` sets them. No client sees the key.
+const LIMIT_HEADERS_KEY: &str = "__fusebox_limit_headers";
+
+/// Names the spent subscription limit as Anthropic's own 429 does. Claude Code tells a
+/// usage limit from a server-side one by these headers alone: with them it says "You've
+/// hit your 5-hour limit · resets 3pm" and reports the reset to whatever drives it, which
+/// can then resume by itself; without them, "Server is temporarily limiting requests (not
+/// your usage limit)". Nothing is said about paid overage, which Fusebox doesn't know.
+fn with_limit_headers(mut body: Value, claim: &str, resets: chrono::DateTime<Utc>) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        let headers = json!({
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-representative-claim": claim,
+            "anthropic-ratelimit-unified-reset": resets.timestamp().to_string(),
+        });
+        object.insert(LIMIT_HEADERS_KEY.into(), headers);
+    }
+    body
+}
+
+/// The subscription limit a Claude refusal names as the one it enforces, by Anthropic's
+/// name for it. Paid overage is none: its reset is the billing month's, which pauses nothing.
+fn claimed_limit(acct: &Account, headers: &reqwest::header::HeaderMap) -> Option<&'static str> {
+    if acct.provider != Provider::Claude || !acct.is_oauth() {
+        return None;
+    }
+    let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::trim);
+    if h("anthropic-ratelimit-unified-status") != Some("rejected") {
+        return None;
+    }
+    let claim = h("anthropic-ratelimit-unified-representative-claim")?;
+    ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included"]
+        .into_iter()
+        .find(|known| claim.eq_ignore_ascii_case(known))
+}
+
+/// Takes the limit headers an error reply carries out of its body.
+pub fn take_limit_headers(body: &mut Value) -> Vec<(String, String)> {
+    let Some(Value::Object(headers)) = body.as_object_mut().and_then(|object| object.remove(LIMIT_HEADERS_KEY)) else {
+        return Vec::new();
+    };
+    headers.into_iter().filter_map(|(name, value)| Some((name, value.as_str()?.to_string()))).collect()
+}
+
 /// Anthropic answers an API key whose prepaid credit ran out with a 400. Only adding
 /// credit fixes it, so the key sits out (`refuse`). Subscriptions are left alone: the same
 /// text was seen on them with an unclear cause, and a usage reading would undo the pause.
@@ -864,8 +909,9 @@ pub(crate) fn protection_refused(provider: Provider, status: u16, message: &str)
 enum Dry {
     /// A refusal only the owner can fix, to give again: status and message.
     Refused(u16, String),
-    /// A rate limit, spent quota or a quota check, until then.
-    Limit(chrono::DateTime<Utc>),
+    /// A rate limit, spent quota or a quota check, until then. With Anthropic's name for
+    /// the limit when a Claude subscription's spent quota is what it is.
+    Limit(chrono::DateTime<Utc>, Option<&'static str>),
     /// A stalled upstream, until then: no rate limit, but a short wait worth telling.
     Stalled(chrono::DateTime<Utc>),
     /// Anything else, such as a sign-in or permission pause: not a wait to advertise.
@@ -889,7 +935,7 @@ fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclud
     let (until, a) = next?;
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
-        None if a.paused_by_limit(model) => Dry::Limit(until),
+        None if a.paused_by_limit(model) => Dry::Limit(until, a.spent_claim(model, until)),
         None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
@@ -940,8 +986,9 @@ fn bench_stalled(
 
 /// The answer for a request left without an account. A 429 tells when the next account
 /// is back if a rate limit, spent quota or a quota check is all that keeps it away: within
-/// a minute as Retry-After; later with no header, which clients would sleep through for
-/// hours, and to OpenAI clients as `usage_limit_reached` with `resets_at`. A sign-in or
+/// a minute as Retry-After; later with no such header, which clients would sleep through
+/// for hours: to OpenAI clients as `usage_limit_reached` with `resets_at`, and to Claude
+/// clients, for a spent Claude subscription, in Anthropic's limit headers. A sign-in or
 /// permission pause is no wait. A stalled upstream is no rate limit either: a 503 says so,
 /// with Retry-After for the wait (at most a minute, told again on the next try). With `refusals`, a refusal only the owner can fix (a
 /// used-up API credit balance) is given instead while it keeps the next account away.
@@ -968,10 +1015,12 @@ fn no_account_left(
             );
             (503, with_retry_after(formats::error_body(format, 503, &message), wait.min(ADVERTISED_WAIT_LIMIT)))
         }
-        Some(Dry::Limit(until)) => {
+        Some(Dry::Limit(until, claim)) => {
             let wait = seconds_until(until);
             if wait <= ADVERTISED_WAIT_LIMIT {
                 (status, with_retry_after(body, wait))
+            } else if let (Format::Claude, Some(claim)) = (format, claim) {
+                (status, with_limit_headers(body, claim, until))
             } else if matches!(format, Format::Chat | Format::Responses)
                 && body["error"]["type"] != "usage_limit_reached"
             {
@@ -2279,6 +2328,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     // Quota exhaustion was handled above; this is a rate limit.
                     let until = reset_after(&headers, &text).unwrap_or_else(|| backoff(&acct));
                     acct.rate_limit(&model, until, &format!("429: {msg}"));
+                    if let Some(claim) = claimed_limit(&acct, &headers) {
+                        acct.name_limit(&model, until, claim);
+                    }
                     app.broadcast("accounts", Value::Null);
                 }
                 // Meta refuses this client's tools, not the account: no new key, pause or
