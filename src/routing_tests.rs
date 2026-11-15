@@ -1189,7 +1189,7 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     let (status, body, retry_after) = ask(&fixture, None, json!({"model":model,"input":"question"})).await;
     assert_eq!((status, retry_after), (429, None));
     assert_eq!(body["error"]["type"], "usage_limit_reached", "{body}");
-    assert_eq!(body["error"]["resets_at"], account.cooling_until(model).unwrap().timestamp());
+    assert_eq!(body["error"]["resets_at"], reset.timestamp(), "the limit's reset, not the pause's end");
     clear();
     // A refusal worded as used-up quota names its limit and reset the same way.
     wording.store(1, Ordering::Relaxed);
@@ -1282,6 +1282,48 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     key.exhaust(model, later, "subscription quota exhausted: spent");
     let (status, headers, _) = ask_claude(&fixture, model).await;
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
+}
+
+/// With several subscriptions away, the reset a Claude client is told is the one of the
+/// account really back first. An account's pause can end long before its limit resets, so
+/// the one whose pause ends first is not always that account.
+#[tokio::test]
+async fn a_pool_of_spent_subscriptions_tells_the_reset_of_the_one_back_first() {
+    const CLAIM: &str = "anthropic-ratelimit-unified-representative-claim";
+    const RESET: &str = "anthropic-ratelimit-unified-reset";
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let model = "claude-opus-5-5";
+    for name in ["weekly", "session"] {
+        let subscription = json!({"type":"claude","access_token":name,"account_id":name,"email":name,
+            "base_url":fixture.provider.url});
+        std::fs::write(fixture.directory.join(format!("{name}.json")), subscription.to_string()).unwrap();
+    }
+    fixture.app.reload_accounts();
+    let account = |name: &str| fixture.app.pool.get(&format!("file:{name}.json")).unwrap();
+    let (weekly, session) = (account("weekly"), account("session"));
+    let now = chrono::Utc::now();
+    let (minutes, hour, days) =
+        (now + chrono::Duration::minutes(2), now + chrono::Duration::hours(1), now + chrono::Duration::days(3));
+    let told = |headers: &HeaderMap| {
+        let text = |name: &str| headers.get(name).map(|v| v.to_str().unwrap().to_string());
+        (text(CLAIM), text(RESET).map(|at| at.parse::<i64>().unwrap()))
+    };
+
+    // The weekly account's pause ends in two minutes, but its limit resets in three days.
+    // The other's 5-hour limit resets in an hour: that is when the pool serves again.
+    weekly.rate_limit(model, minutes, "429: weekly limit");
+    weekly.name_limit(model, minutes, "seven_day", days);
+    let spent = crate::quota::Window { name: "5h".into(), used: 100.0, resets_at: Some(hour), model: None };
+    session.state.lock().quota.set(vec![spent], None);
+    let (status, headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((status, told(&headers)), (429, (Some("five_hour".into()), Some(hour.timestamp()))));
+
+    // An account back sooner for a reason no limit names: the pool waits for no limit.
+    session.state.lock().quota = Default::default();
+    session.rate_limit(model, hour, "429: slow down");
+    let (status, headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((status, told(&headers)), (429, (None, None)));
+    assert!(fixture.mock.calls.lock().is_empty(), "paused subscriptions are not called");
 }
 
 /// A request still open when the time to finish runs out at shutdown would die with the

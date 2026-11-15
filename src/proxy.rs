@@ -946,25 +946,37 @@ enum Dry {
 
 /// None when an account for `model` is free: the request used up its own choices.
 fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclude: &[String]) -> Option<Dry> {
-    let mut next: Option<(chrono::DateTime<Utc>, Arc<Account>)> = None;
+    let mut paused: Vec<(chrono::DateTime<Utc>, Arc<Account>)> = Vec::new();
     for a in app.pool.all() {
         let disabled = a.state.lock().disabled;
         // As at selection: a held account is out until a sign-in, not back at some time.
         if exclude.contains(&a.id) || disabled || a.held_out() || app.pool.resolve_account(&a, model, only).is_none() {
             continue;
         }
-        let until = a.cooling_until(model)?;
-        if next.as_ref().is_none_or(|(t, _)| until < *t) {
-            next = Some((until, a));
-        }
+        paused.push((a.cooling_until(model)?, a));
     }
-    let (until, a) = next?;
+    let (until, a) = paused.iter().min_by_key(|(until, _)| *until).cloned()?;
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
-        None if a.paused_by_limit(model) => Dry::Limit(until, a.spent_limit(model, until)),
+        None if a.paused_by_limit(model) => Dry::Limit(until, awaited_limit(model, &paused)),
         None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
+}
+
+/// The subscription limit a client waits for while these accounts are away from `model`:
+/// that of the account really back first. An account is back when its limit resets, which
+/// can be long after its pause ends, or at the end of its pause when no limit is named
+/// for it. None when the one back first waits for no named limit.
+fn awaited_limit(
+    model: &str,
+    paused: &[(chrono::DateTime<Utc>, Arc<Account>)],
+) -> Option<(&'static str, chrono::DateTime<Utc>)> {
+    let back = paused.iter().map(|(until, a)| {
+        let limit = a.spent_limit(model, *until);
+        (limit.map_or(*until, |(_, resets)| resets), limit)
+    });
+    back.min_by_key(|(at, _)| *at)?.1
 }
 
 /// Whether an account outside `exclude` could take `model` right now.
@@ -1051,8 +1063,10 @@ fn no_account_left(
                 && body["error"]["type"] != "usage_limit_reached"
             {
                 let message = error_message(&body.to_string());
+                // A named limit's own reset, which can be long after the pause ends.
+                let resets = limit.map_or(until, |(_, resets)| resets);
                 let error = json!({"type": "usage_limit_reached", "code": "usage_limit_reached", "message": message,
-                    "resets_at": until.timestamp(), "resets_in_seconds": wait});
+                    "resets_at": resets.timestamp(), "resets_in_seconds": seconds_until(resets)});
                 (status, json!({ "error": error }))
             } else {
                 (status, body)
