@@ -20,7 +20,7 @@ function load(models = [known, unknown], hidden = false) {
     config: { values: { 'named-clients': [JSON.parse(JSON.stringify(client))] } }, snippet: 'opencode', setupModels: Object.create(null), setupContexts: Object.create(null) },
     location: { origin: 'https://fusebox.test' }, ICON: { copy: '' }, setTimeout, Date };
   vm.createContext(context);
-  vm.runInContext([piece('const esc ='), piece('const HIDDEN ='), piece('const secret ='),
+  vm.runInContext([piece('const esc ='), piece('const HIDDEN ='), piece('const secret ='), piece('const GATEWAY_KEY ='),
     piece('const SNIPPET_TABS ='), piece('const SNIPPET_MORE ='),
     ...['setupModelsFor', 'setupModel', 'modelCapabilitiesText', 'snippet', 'setupHTML'].map((s) => piece(`function ${s}(`))].join('\n'), context);
   const run = (code) => vm.runInContext(code, context);
@@ -109,4 +109,50 @@ test('quotes and shell metacharacters in model aliases remain data in JSON, TOML
   assert.match(page.snippet('codex').text,/model = "team\/\$\(touch BAD\)'\\"<script>"/);
   assert.match(page.snippet('claude').text,/ANTHROPIC_MODEL='team\/\$\(touch BAD\)'"'"'"<script>'/);
   assert.ok(!page.snippet('opencode').html.includes('<script>'));
+});
+
+test('Claude Code can get its key in the form it reads as a gateway\u2019s, and only on request', () => {
+  const page = load();
+  const prefix = page.run('GATEWAY_KEY');
+  const [header, payload, rest] = prefix.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'none', typ: 'JWT' });
+  assert.deepEqual(JSON.parse(Buffer.from(payload, 'base64url')), { aud: 'claude-gateway' });
+  assert.equal(rest, '');
+
+  const plain = page.snippet('claude', client.key, known.id);
+  assert.equal(plain.gateway, false);
+  assert.match(plain.text, /^export ANTHROPIC_AUTH_TOKEN=fbx_laptop_key$/m);
+  page.state.snippet = 'claude';
+  assert.match(page.run(`setupHTML(${JSON.stringify(client.key)})`), /data-act="setup-gateway" role="switch" aria-checked="false"/);
+
+  page.state.gatewayKey = true;
+  const sent = page.snippet('claude', client.key, known.id);
+  assert.equal(sent.gateway, true);
+  assert.ok(sent.text.includes(`export ANTHROPIC_AUTH_TOKEN=${prefix}fbx_laptop_key\n`));
+  // What Claude Code checks: three parts, and the claim in the second.
+  assert.equal(sent.text.match(/ANTHROPIC_AUTH_TOKEN=(\S+)/)[1].split('.').length, 3);
+  assert.match(sent.note, /gateway/);
+  assert.match(page.run(`setupHTML(${JSON.stringify(client.key)})`), /data-act="setup-gateway" role="switch" aria-checked="true"/);
+
+  // Only Claude Code gets the switch and the form.
+  assert.equal(page.snippet('curl', client.key, known.id).gateway, undefined);
+  assert.ok(!page.snippet('curl', client.key, known.id).text.includes(prefix));
+  page.state.snippet = 'codex';
+  assert.doesNotMatch(page.run(`setupHTML(${JSON.stringify(client.key)})`), /setup-gateway/);
+
+  // A key with a dot would make a token of four parts, so it is not offered.
+  page.state.snippet = 'claude';
+  page.state.config.values['named-clients'][0].key = 'dotted.key';
+  const dotted = page.snippet('claude', 'dotted.key', known.id);
+  assert.equal(dotted.gateway, null);
+  assert.match(dotted.text, /^export ANTHROPIC_AUTH_TOKEN=dotted\.key$/m);
+  assert.doesNotMatch(page.run('setupHTML("dotted.key")'), /setup-gateway/);
+});
+
+test('a hidden key stays hidden in the gateway form', () => {
+  const page = load([known, unknown], true);
+  page.state.gatewayKey = true;
+  const sn = page.snippet('claude', client.key, known.id);
+  assert.ok(!sn.html.includes('fbx_laptop_key'));
+  assert.ok(sn.text.includes('fbx_laptop_key'), 'the copied text is the real one');
 });

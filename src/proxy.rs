@@ -863,10 +863,12 @@ pub fn retry_after_of(body: &Value) -> Option<u64> {
 const LIMIT_HEADERS_KEY: &str = "__fusebox_limit_headers";
 
 /// Names the spent subscription limit as Anthropic's own 429 does. Claude Code tells a
-/// usage limit from a server-side one by these headers alone: with them it says "You've
-/// hit your 5-hour limit · resets 3pm" and reports the reset to whatever drives it, which
-/// can then resume by itself; without them, "Server is temporarily limiting requests (not
-/// your usage limit)". Nothing is said about paid overage, which Fusebox doesn't know.
+/// usage limit from a server-side one by these headers: with them it says "You've hit
+/// your 5-hour limit · resets 3pm" and reports the reset to whatever drives it, which can
+/// then resume by itself. It reads them only from a server it takes for Claude or for a
+/// gateway, which is what `server::GATEWAY_KEY_PREFIX` is for; with a plain key it shows
+/// the message as an API error. Nothing is said about paid overage, which Fusebox doesn't
+/// know.
 fn with_limit_headers(mut body: Value, claim: &str, resets: chrono::DateTime<Utc>) -> Value {
     if let Some(object) = body.as_object_mut() {
         let headers = json!({
