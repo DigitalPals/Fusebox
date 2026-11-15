@@ -1407,18 +1407,21 @@ fn ending_at(cutoff: tokio_util::sync::CancellationToken, format: Format, reply:
     Reply::Stream { frames, account }
 }
 
-/// Whether this frame is the last word on an answer: its end, or an error.
+/// Whether this frame is the last word on an answer: its end, or an error. An event with
+/// no name says what it is in its `type`; it is parsed only when it mentions an ending.
 fn ends_answer(format: Format, frame: &Frame) -> bool {
-    const LAST: [&str; 5] = ["message_stop", "response.completed", "response.incomplete", "response.failed", "error"];
+    const LAST: [&str; 6] =
+        ["message_stop", "response.completed", "response.incomplete", "response.failed", "response.done", "error"];
     match frame.event.as_deref() {
         Some(event) => LAST.contains(&event),
         None => match format {
             Format::Chat => frame.data == "[DONE]",
             Format::Gemini => frame.data.contains("\"finishReason\""),
-            // An unnamed event says what it is first.
-            Format::Claude | Format::Responses => frame.data.strip_prefix("{\"type\":\"").is_some_and(|rest| {
-                LAST.iter().any(|last| rest.strip_prefix(last).is_some_and(|r| r.starts_with('"')))
-            }),
+            Format::Claude | Format::Responses => {
+                LAST.iter().any(|last| frame.data.contains(last))
+                    && serde_json::from_str::<Value>(&frame.data)
+                        .is_ok_and(|event| event["type"].as_str().is_some_and(|kind| LAST.contains(&kind)))
+            }
         },
     }
 }
@@ -3409,16 +3412,22 @@ mod tests {
             (Format::Claude, Frame::named("error", r#"{"type":"error","error":{"message":"overloaded"}}"#)),
             (Format::Responses, Frame::named("response.completed", r#"{"type":"response.completed"}"#)),
             (Format::Responses, Frame::data(r#"{"type":"response.failed","response":{}}"#)),
+            (Format::Responses, Frame::named("response.done", r#"{"type":"response.done"}"#)),
+            (Format::Responses, Frame::data(r#"{"response": {"status":"completed"}, "type": "response.completed"}"#)),
+            (Format::Claude, Frame::data(r#"{ "type" : "message_stop" }"#)),
             (Format::Chat, Frame::data("[DONE]")),
             (Format::Gemini, Frame::data(r#"{"candidates":[{"finishReason":"STOP"}]}"#)),
         ] {
             let cut = cut_after(format, vec![delta(), end]).await;
             assert_eq!(cut.len(), 2, "{format:?}: {:?}", cut.last().map(|frame| &frame.data));
         }
-        // An event that only starts like the last one is not it.
-        let cut = cut_after(Format::Responses, vec![Frame::data(r#"{"type":"response.completed_part"}"#)]).await;
-        assert_eq!(cut.len(), 2);
-        assert_eq!(cut[1].event.as_deref(), Some("error"));
+        // An event that only mentions an ending is not one.
+        for mention in
+            [r#"{"type":"response.completed_part"}"#, r#"{"type":"response.output_text.delta","delta":"error"}"#]
+        {
+            let cut = cut_after(Format::Responses, vec![Frame::data(mention)]).await;
+            assert_eq!((cut.len(), cut[1].event.as_deref()), (2, Some("error")), "{mention}");
+        }
     }
 
     fn upstream_headers(pairs: &[(&'static str, String)]) -> reqwest::header::HeaderMap {
