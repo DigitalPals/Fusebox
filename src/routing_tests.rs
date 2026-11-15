@@ -1290,6 +1290,123 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
 }
 
+/// Claude Code, with a key in a gateway's form, asks about the user's limits when it
+/// starts: "quota", for one token, read only for the limit headers. Anthropic refuses that
+/// message on a subscription (it carries no Claude Code prompt) with a bare 429 on every
+/// account tried, and each refusal pauses the model there. So Fusebox answers it from the
+/// pool, and no account hears of it. The same words under a plain key are a request.
+#[tokio::test]
+async fn claude_codes_quota_question_is_answered_from_the_pool() {
+    const STATUS: &str = "anthropic-ratelimit-unified-status";
+    const CLAIM: &str = "anthropic-ratelimit-unified-representative-claim";
+    const RESET: &str = "anthropic-ratelimit-unified-reset";
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let model = "claude-opus-5-5";
+    // How Anthropic answers the question on a subscription.
+    let (anthropic, calls) = scripted(|_| {
+        let error = json!({"type":"error","error":{"type":"rate_limit_error","message":"Error"}});
+        (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response()
+    })
+    .await;
+    let file = fixture.directory.join("claude.json");
+    let subscription = json!({"type":"claude","access_token":"subscription","account_id":"account","email":"owner",
+        "base_url":anthropic.url});
+    std::fs::write(&file, subscription.to_string()).unwrap();
+    fixture.app.reload_accounts();
+    let account = fixture.app.pool.get("file:claude.json").unwrap();
+    let gateway = format!("{}client-one", crate::server::GATEWAY_KEY_PREFIX);
+    let question = || {
+        json!({"model":model,"max_tokens":1,"messages":[{"role":"user","content":"quota"}],
+        "metadata":{"user_id":"device"}})
+    };
+    let send = |key: String, bearer: bool, body: Value| {
+        let request = reqwest::Client::new().post(format!("{}/v1/messages", fixture.proxy.url));
+        let request = if bearer { request.bearer_auth(key) } else { request.header("x-api-key", key) };
+        async move {
+            let response = request.json(&body).send().await.unwrap();
+            let (status, headers) = (response.status().as_u16(), response.headers().clone());
+            (status, headers, response.json::<Value>().await.unwrap())
+        }
+    };
+    let text = |headers: &HeaderMap, name: &str| headers.get(name).map(|v| v.to_str().unwrap().to_string());
+    let clear = || {
+        let mut st = account.state.lock();
+        st.cooldowns.clear();
+        st.quota_cooldowns.clear();
+        st.quota = Default::default();
+    };
+
+    // An account can take the model: allowed, an empty message, and nothing sent on.
+    for bearer in [true, false] {
+        let (status, headers, body) = send(gateway.clone(), bearer, question()).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(text(&headers, STATUS).as_deref(), Some("allowed"));
+        assert_eq!((text(&headers, CLAIM), text(&headers, RESET)), (None, None));
+        assert_eq!(
+            (&body["type"], &body["role"], &body["model"]),
+            (&json!("message"), &json!("assistant"), &json!(model))
+        );
+        assert_eq!((&body["content"], &body["usage"]["output_tokens"]), (&json!([]), &json!(0)));
+        assert!(!body.to_string().contains("__fusebox"), "{body}");
+    }
+    assert!(calls.lock().is_empty(), "the question never reaches an account");
+    assert!(account.cooling_until(model).is_none());
+
+    // A spent subscription: what a request would be told, with the limit and its reset.
+    let reset = chrono::Utc::now() + chrono::Duration::days(3);
+    let pause = chrono::Utc::now() + chrono::Duration::hours(6);
+    account.rate_limit(model, pause, "429: weekly limit");
+    account.name_limit(model, pause, "seven_day", reset);
+    let (status, headers, body) = send(gateway.clone(), true, question()).await;
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(text(&headers, STATUS).as_deref(), Some("rejected"));
+    assert_eq!(text(&headers, CLAIM).as_deref(), Some("seven_day"));
+    assert_eq!(text(&headers, RESET), Some(reset.timestamp().to_string()));
+    // The same answer as a request gets.
+    let (asked_status, asked_headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((asked_status, text(&asked_headers, RESET)), (429, text(&headers, RESET)));
+    // A model no account serves is not there to ask about.
+    let mut unknown = question();
+    unknown["model"] = json!("no-such-model");
+    assert_eq!(send(gateway.clone(), true, unknown).await.0, 404);
+    assert!(calls.lock().is_empty());
+    clear();
+
+    // Anything else under that key is a request: more tokens, other words, a stream.
+    let mut more = question();
+    more["max_tokens"] = json!(16);
+    assert_eq!(send(gateway.clone(), true, more).await.0, 429);
+    assert_eq!(calls.lock().len(), 1, "sent on, and refused as Anthropic refuses it");
+    assert!(account.cooling_until(model).is_some(), "which pauses the model on that account");
+    clear();
+    // And under a plain key, the question itself is one.
+    assert_eq!(send("client-one".into(), true, question()).await.0, 429);
+    assert_eq!(calls.lock().len(), 2);
+}
+
+#[test]
+fn only_claude_codes_quota_question_is_taken_for_one() {
+    use crate::proxy::asks_quota;
+    let question = json!({"model":"m","max_tokens":1,"messages":[{"role":"user","content":"quota"}]});
+    assert!(asks_quota(&question));
+    let with = |change: fn(&mut Value)| {
+        let mut body = question.clone();
+        change(&mut body);
+        asks_quota(&body)
+    };
+    assert!(with(|b| b["messages"][0]["content"] = json!([{"type":"text","text":"quota"}])));
+    assert!(with(|b| b["metadata"] = json!({"user_id":"device"})));
+    assert!(with(|b| b["stream"] = json!(false)));
+    assert!(!with(|b| b["max_tokens"] = json!(2)));
+    assert!(!with(|b| b["stream"] = json!(true)));
+    assert!(!with(|b| b["tools"] = json!([])));
+    assert!(!with(|b| b["messages"][0]["content"] = json!("quota?")));
+    assert!(!with(|b| b["messages"][0]["role"] = json!("assistant")));
+    assert!(!with(|b| b["messages"].as_array_mut().unwrap().push(json!({"role":"user","content":"quota"}))));
+    assert!(!with(|b| b["messages"] = json!([])));
+}
+
 /// With several subscriptions away, the reset a Claude client is told is the one of the
 /// account really back first. An account's pause can end long before its limit resets, so
 /// the one whose pause ends first is not always that account.

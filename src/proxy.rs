@@ -1269,6 +1269,77 @@ fn shorten_tool_names(req: &mut Request) -> HashMap<String, String> {
     map
 }
 
+/// Claude Code, with a key in a gateway's form, asks how the user stands with their limits
+/// when it starts: one throwaway message, "quota", for one token, whose answer it reads
+/// only for the limit headers.
+pub(crate) fn asks_quota(body: &Value) -> bool {
+    let asked = |content: &Value| match content {
+        Value::String(text) => text == "quota",
+        Value::Array(parts) => parts.len() == 1 && parts[0]["type"] == "text" && parts[0]["text"] == "quota",
+        _ => false,
+    };
+    body["max_tokens"] == 1
+        && body["stream"].as_bool() != Some(true)
+        && body.get("tools").is_none()
+        && body["messages"]
+            .as_array()
+            .is_some_and(|m| m.len() == 1 && m[0]["role"] == "user" && asked(&m[0]["content"]))
+}
+
+/// Fusebox answers that question itself, from the pool: "allowed" while an account can
+/// take the model, else what a request would be told, with the limit and its reset when a
+/// spent subscription is the wait. Sent on, the question carries no Claude Code prompt,
+/// and Anthropic refuses such a request on a subscription with a bare 429, on every
+/// account tried; each refusal would pause the model on that account. Only for a key in
+/// the gateway form: with a plain key Claude Code never asks, and the same words from
+/// another client are a request like any other.
+fn quota_question(app: &App, call: &Call) -> Option<Reply> {
+    if call.format != Format::Claude
+        || call.transport != "http"
+        || call.pinned_account.is_some()
+        || !crate::server::key_in_gateway_form(&call.headers)
+        || !asks_quota(&call.body)
+    {
+        return None;
+    }
+    let cfg = app.cfg();
+    let asked = call.body["model"].as_str().unwrap_or_default();
+    let (base, _) = ir::split_model_suffix(asked);
+    // A model group answers for its members: allowed while any of them can be served.
+    let members: Vec<&str> = match cfg.model_groups.get(&base) {
+        Some(group) => group_order_preview(group, None),
+        None => vec![base.as_str()],
+    };
+    let mut refused = None;
+    for member in members {
+        let (member, _) = ir::split_model_suffix(member);
+        let (only, model) = app.pool.route(&member);
+        let model = app.pool.canonical(&model, only.as_ref());
+        if another_account_free(app, &model, only.as_ref(), &[]) {
+            let answer = json!({"id": "msg_fusebox_quota", "type": "message", "role": "assistant", "model": asked,
+                "content": [], "stop_reason": "max_tokens", "stop_sequence": null,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                LIMIT_HEADERS_KEY: {"anthropic-ratelimit-unified-status": "allowed"}});
+            return Some(Reply::Json(answer));
+        }
+        if refused.is_none() {
+            refused = Some(match dry_pool(app, &model, only.as_ref(), &[]) {
+                Some(_) => {
+                    let message = format!("all accounts for {model} are rate limited");
+                    let body = formats::error_body(Format::Claude, 429, &message);
+                    no_account_left(app, Format::Claude, &model, only.as_ref(), &[], 429, body, true)
+                }
+                None => {
+                    let message = format!("no available account serves model `{model}`");
+                    (404, formats::error_body(Format::Claude, 404, &message))
+                }
+            });
+        }
+    }
+    let (status, body) = refused?;
+    Some(Reply::Error(status, body))
+}
+
 pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
     let cfg = app.cfg();
     if let Err(message) = upstream::residency_requirement(&call.headers) {
@@ -1296,6 +1367,9 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         && crate::upstream::is_claude_code(&call.headers)
     {
         set_model(&mut call, background);
+    }
+    if let Some(reply) = quota_question(&app, &call) {
+        return reply;
     }
     if let Some(identity) = crate::affinity::session_identity(&call.headers, &call.body) {
         call.session = Some(identity.key);

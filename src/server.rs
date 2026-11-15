@@ -128,20 +128,28 @@ impl ClientAuth {
 /// client, its limits and its sessions are those of the key behind the prefix.
 pub(crate) const GATEWAY_KEY_PREFIX: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJjbGF1ZGUtZ2F0ZXdheSJ9.";
 
-/// The credential a request carries, in the spellings clients use.
-fn provided_key(req: &Request) -> Option<String> {
-    let h = req.headers();
+/// The credential a request's headers carry, as sent, in the spellings clients use.
+fn header_key(h: &HeaderMap) -> Option<String> {
     let get = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(str::trim).map(String::from);
-    let key = get("authorization")
+    get("authorization")
         .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string()))
         .or_else(|| get("x-api-key"))
         .or_else(|| get("x-goog-api-key"))
-        .or_else(|| {
-            req.uri().query().and_then(|q| {
-                url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
-            })
-        })?;
+}
+
+/// The credential a request carries, in the spellings clients use.
+fn provided_key(req: &Request) -> Option<String> {
+    let key = header_key(req.headers()).or_else(|| {
+        req.uri().query().and_then(|q| {
+            url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
+        })
+    })?;
     Some(key.strip_prefix(GATEWAY_KEY_PREFIX).map(String::from).unwrap_or(key))
+}
+
+/// Whether the request's key came in the form Claude Code reads as a gateway's.
+pub(crate) fn key_in_gateway_form(headers: &HeaderMap) -> bool {
+    header_key(headers).is_some_and(|key| key.starts_with(GATEWAY_KEY_PREFIX))
 }
 
 /// A request still waiting for its answer when the time to finish runs out at shutdown
@@ -905,7 +913,10 @@ async fn codex_models(
 
 fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
     match r {
-        Reply::Json(v) => axum::Json(v).into_response(),
+        Reply::Json(mut v) => {
+            let limit = proxy::take_limit_headers(&mut v);
+            with_headers(axum::Json(v).into_response(), limit)
+        }
         Reply::Error(status, mut v) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             let wait = proxy::take_retry_after(&mut v);
@@ -914,12 +925,7 @@ fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
             if let Some(wait) = wait {
                 resp.headers_mut().insert(header::RETRY_AFTER, wait.into());
             }
-            for (name, value) in limit {
-                if let (Ok(name), Ok(value)) = (header::HeaderName::try_from(name), HeaderValue::try_from(value)) {
-                    resp.headers_mut().insert(name, value);
-                }
-            }
-            resp
+            with_headers(resp, limit)
         }
         Reply::Stream { frames, account } => {
             let (body, ctype) = if json_array {
@@ -938,6 +944,16 @@ fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
             resp
         }
     }
+}
+
+/// The limit headers an answer carried in its body, set on the response.
+fn with_headers(mut resp: Response, limit: Vec<(String, String)>) -> Response {
+    for (name, value) in limit {
+        if let (Ok(name), Ok(value)) = (header::HeaderName::try_from(name), HeaderValue::try_from(value)) {
+            resp.headers_mut().insert(name, value);
+        }
+    }
+    resp
 }
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
