@@ -1364,10 +1364,12 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
 /// A streamed answer ends when `cutoff` fires, at the end of the time requests get to
 /// finish at shutdown. Its tracker then records what was used so far, in time for the
 /// usage database's last save; left open, the stream would die with the process, unrecorded.
-/// The client is told with an error event, so a cut answer is not taken for a whole one.
+/// The client is told with an error event, so a cut answer is not taken for a whole one;
+/// an answer that already ended, with only its connection still open, gets none.
 fn ending_at(cutoff: tokio_util::sync::CancellationToken, format: Format, reply: Reply) -> Reply {
     let Reply::Stream { mut frames, account } = reply else { return reply };
     let frames = Box::pin(async_stream::stream! {
+        let mut ended = false;
         let cut = loop {
             let frame = tokio::select! {
                 biased;
@@ -1375,17 +1377,48 @@ fn ending_at(cutoff: tokio_util::sync::CancellationToken, format: Format, reply:
                 frame = frames.next() => frame,
             };
             match frame {
-                Some(frame) => yield frame,
+                Some(frame) => {
+                    ended |= ends_answer(format, &frame);
+                    yield frame;
+                }
                 None => break false,
             }
         };
         // Recorded before the client hears of it.
         drop(frames);
-        if cut {
-            yield stream_error_frame(format, 503, STOPPED);
+        if cut && !ended {
+            yield stopped_frame(format);
         }
     });
     Reply::Stream { frames, account }
+}
+
+/// Whether this frame is the last word on an answer: its end, or an error.
+fn ends_answer(format: Format, frame: &Frame) -> bool {
+    const LAST: [&str; 5] = ["message_stop", "response.completed", "response.incomplete", "response.failed", "error"];
+    match frame.event.as_deref() {
+        Some(event) => LAST.contains(&event),
+        None => match format {
+            Format::Chat => frame.data == "[DONE]",
+            Format::Gemini => frame.data.contains("\"finishReason\""),
+            // An unnamed event says what it is first.
+            Format::Claude | Format::Responses => frame.data.strip_prefix("{\"type\":\"").is_some_and(|rest| {
+                LAST.iter().any(|last| rest.strip_prefix(last).is_some_and(|r| r.starts_with('"')))
+            }),
+        },
+    }
+}
+
+/// The error event that ends an answer cut at shutdown. Codex reads an error's `code`
+/// only as a string, and drops the whole event otherwise.
+fn stopped_frame(format: Format) -> Frame {
+    let mut body = formats::error_body(format, 503, STOPPED);
+    if format == Format::Responses {
+        body["type"] = "error".into();
+        body["status"] = 503.into();
+        body["error"]["code"] = formats::responses::error_code(503).into();
+    }
+    Frame::named("error", body.to_string())
 }
 
 /// Builds a Responses turn's continuation history from the frames sent to the client.
@@ -3318,6 +3351,61 @@ pub fn estimate_tokens(body: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a stream cut at shutdown ends with, after these frames.
+    async fn cut_after(format: Format, sent: Vec<Frame>) -> Vec<Frame> {
+        let cutoff = tokio_util::sync::CancellationToken::new();
+        let frames: FrameStream = Box::pin(futures::stream::iter(sent).chain(futures::stream::pending()));
+        let Reply::Stream { mut frames, .. } =
+            ending_at(cutoff.clone(), format, Reply::Stream { frames, account: "a".into() })
+        else {
+            unreachable!()
+        };
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), frames.next()).await {
+                Ok(Some(frame)) => seen.push(frame),
+                Ok(None) => return seen,
+                // Everything sent has arrived and the answer hangs: the time to finish runs out.
+                Err(_) => cutoff.cancel(),
+            }
+        }
+    }
+
+    /// An answer cut at shutdown ends with an error event its client can read, so it isn't
+    /// taken for a whole one. An answer that had already ended, or failed, gets none: only
+    /// its connection was still open.
+    #[tokio::test]
+    async fn a_cut_answer_ends_with_an_error_unless_it_had_ended() {
+        let delta = || Frame::named("content_block_delta", r#"{"type":"content_block_delta"}"#);
+        let cut = cut_after(Format::Claude, vec![delta()]).await;
+        let last: Value = serde_json::from_str(&cut[1].data).unwrap();
+        assert_eq!((cut.len(), cut[1].event.as_deref()), (2, Some("error")));
+        assert_eq!((&last["type"], &last["error"]["message"]), (&json!("error"), &json!(STOPPED)));
+
+        // Codex reads an error's code only as a string, and drops the event otherwise.
+        let cut = cut_after(Format::Responses, vec![Frame::named("response.created", "{}")]).await;
+        let last: Value = serde_json::from_str(&cut[1].data).unwrap();
+        assert_eq!((&last["type"], &last["status"]), (&json!("error"), &json!(503)));
+        assert_eq!(last["error"]["code"], "server_is_overloaded");
+
+        for (format, end) in [
+            (Format::Claude, Frame::named("message_stop", r#"{"type":"message_stop"}"#)),
+            (Format::Claude, Frame::data(r#"{"type":"message_stop"}"#)),
+            (Format::Claude, Frame::named("error", r#"{"type":"error","error":{"message":"overloaded"}}"#)),
+            (Format::Responses, Frame::named("response.completed", r#"{"type":"response.completed"}"#)),
+            (Format::Responses, Frame::data(r#"{"type":"response.failed","response":{}}"#)),
+            (Format::Chat, Frame::data("[DONE]")),
+            (Format::Gemini, Frame::data(r#"{"candidates":[{"finishReason":"STOP"}]}"#)),
+        ] {
+            let cut = cut_after(format, vec![delta(), end]).await;
+            assert_eq!(cut.len(), 2, "{format:?}: {:?}", cut.last().map(|frame| &frame.data));
+        }
+        // An event that only starts like the last one is not it.
+        let cut = cut_after(Format::Responses, vec![Frame::data(r#"{"type":"response.completed_part"}"#)]).await;
+        assert_eq!(cut.len(), 2);
+        assert_eq!(cut[1].event.as_deref(), Some("error"));
+    }
 
     fn upstream_headers(pairs: &[(&'static str, String)]) -> reqwest::header::HeaderMap {
         pairs
