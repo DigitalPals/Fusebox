@@ -479,6 +479,18 @@ struct SavedHold {
     reason: String,
 }
 
+/// The subscription limit behind a pause, as Anthropic's refusal told it.
+#[derive(Debug, Clone, Copy)]
+pub struct LimitClaim {
+    /// The pause this refusal led to. It can end before the limit resets: a pause from
+    /// Retry-After is at most six hours long.
+    until: DateTime<Utc>,
+    /// Anthropic's name for the limit (`five_hour`, `seven_day`, ...).
+    claim: &'static str,
+    /// When Anthropic says the limit resets.
+    resets: DateTime<Utc>,
+}
+
 #[derive(Debug, Default)]
 pub struct AccountState {
     pub latency: HashMap<(String, crate::latency::Context), crate::latency::Sample>,
@@ -495,9 +507,9 @@ pub struct AccountState {
     /// The `cooldowns` deadlines a stalled upstream set (`stall`), kept like `limit_pauses`:
     /// a deadline counts only while it is the one recorded here.
     pub stall_pauses: HashMap<String, DateTime<Utc>>,
-    /// Anthropic's name for the limit behind a `cooldowns` deadline, when its refusal named
-    /// one. Kept like `limit_pauses`: it counts only while the deadline is the one recorded.
-    pub limit_claims: HashMap<String, (DateTime<Utc>, &'static str)>,
+    /// The limit Anthropic named when it refused a model, with the pause it led to. Kept
+    /// like `limit_pauses`: it counts only while that pause is the one keeping the model away.
+    pub limit_claims: HashMap<String, LimitClaim>,
     /// The refusal pausing the whole account, if one does (see [`Refusal`]).
     pub refusal: Option<Refusal>,
     /// Confirmed subscription exhaustion, distinct from temporary rate limits. A
@@ -967,32 +979,32 @@ impl Account {
             .copied()
     }
 
-    /// Remembers which limit Anthropic named when it refused `model` until `until`.
-    pub fn name_limit(&self, model: &str, until: DateTime<Utc>, claim: &'static str) {
+    /// Remembers the limit Anthropic named, and its reset, when it refused `model` and that
+    /// paused it until `until`.
+    pub fn name_limit(&self, model: &str, until: DateTime<Utc>, claim: &'static str, resets: DateTime<Utc>) {
         let mut st = self.state.lock();
         let now = Utc::now();
-        st.limit_claims.retain(|_, (t, _)| *t > now);
-        st.limit_claims.insert(model.to_string(), (until, claim));
+        st.limit_claims.retain(|_, named| named.until > now);
+        st.limit_claims.insert(model.to_string(), LimitClaim { until, claim, resets });
     }
 
     /// Which of Anthropic's limits keeps `model` off this Claude subscription until
-    /// `until`, by Anthropic's name for it: the one its refusal named, else the used-up
-    /// window a usage reading shows. None when neither says a subscription limit is what
-    /// keeps it away (a burst rate limit, a quota check), and for API keys, which have no
-    /// such limits. Spent quota that no reading names is told by its length: no 5-hour
-    /// limit is further away than five hours.
-    pub fn spent_claim(&self, model: &str, until: DateTime<Utc>) -> Option<&'static str> {
+    /// `until`, by Anthropic's name for it, and when it resets: the one its refusal named,
+    /// else the used-up window of a usage reading, when that window's reset is what the
+    /// pause waits for. None when neither names a subscription limit (a burst rate limit,
+    /// a quota check, spent quota known only from an error text), and for API keys, which
+    /// have no such limits. The reset is never before `until`: the account is away till then.
+    pub fn spent_limit(&self, model: &str, until: DateTime<Utc>) -> Option<(&'static str, DateTime<Utc>)> {
         if self.provider != Provider::Claude || !self.is_oauth() {
             return None;
         }
-        let named = self.state.lock().limit_claims.get(model).filter(|(t, _)| *t == until).map(|(_, claim)| *claim);
-        if named.is_some() {
-            return named;
+        let named = self.state.lock().limit_claims.get(model).copied().filter(|named| named.until == until);
+        if let Some(named) = named {
+            return Some((named.claim, named.resets.max(until)));
         }
         self.exhausted_until(model).filter(|spent| *spent >= until)?;
         let quota_model = self.resolve(model).unwrap_or_else(|| model.to_string());
-        let window = self.state.lock().quota.spent_claim(&quota_model);
-        Some(window.unwrap_or(if until - Utc::now() <= chrono::Duration::hours(5) { "five_hour" } else { "seven_day" }))
+        self.state.lock().quota.spent_window(&quota_model).filter(|(_, resets)| *resets >= until)
     }
 
     /// Records confirmed quota exhaustion, unless a banked reset is being applied.

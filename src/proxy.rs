@@ -615,7 +615,8 @@ fn error_reply(format: Format, status: u16, msg: &str) -> Reply {
 
 /// Pulls a human readable message out of an upstream error body.
 pub fn error_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
+    let mut stripped = None;
+    if let Ok(mut v) = serde_json::from_str::<Value>(body) {
         let e = if v["error"].is_object() { &v["error"] } else { &v };
         for k in ["message", "detail", "error_description"] {
             if let Some(m) = e[k].as_str() {
@@ -625,8 +626,13 @@ pub fn error_message(body: &str) -> String {
         if let Some(m) = v["error"].as_str() {
             return m.to_string();
         }
+        // A body shown whole never shows what rides in it for `server::reply`.
+        if let Some(object) = v.as_object_mut().filter(|o| o.keys().any(|k| k.starts_with(PRIVATE_KEYS))) {
+            object.retain(|k, _| !k.starts_with(PRIVATE_KEYS));
+            stripped = Some(v.to_string());
+        }
     }
-    let t = body.trim();
+    let t = stripped.as_deref().unwrap_or(body).trim();
     if t.is_empty() { "upstream error".into() } else { t.chars().take(500).collect() }
 }
 
@@ -832,6 +838,8 @@ fn upstream_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 /// `Reply::Error` has no headers, so a Retry-After rides in the error body under this key
 /// until `server::reply` turns it into the header. No client sees the key.
 const RETRY_AFTER_KEY: &str = "__fusebox_retry_after";
+/// What every such key starts with.
+const PRIVATE_KEYS: &str = "__fusebox_";
 
 fn with_retry_after(mut body: Value, seconds: u64) -> Value {
     if let Some(object) = body.as_object_mut() {
@@ -872,8 +880,13 @@ fn with_limit_headers(mut body: Value, claim: &str, resets: chrono::DateTime<Utc
 }
 
 /// The subscription limit a Claude refusal names as the one it enforces, by Anthropic's
-/// name for it. Paid overage is none: its reset is the billing month's, which pauses nothing.
-fn claimed_limit(acct: &Account, headers: &reqwest::header::HeaderMap) -> Option<&'static str> {
+/// name for it, and when Anthropic says it resets. A pause can end sooner (a Retry-After
+/// counts for six hours at most), so the reset is kept apart from it. Paid overage is no
+/// such limit: its reset is the billing month's, which pauses nothing.
+fn claimed_limit(
+    acct: &Account,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<(&'static str, chrono::DateTime<Utc>)> {
     if acct.provider != Provider::Claude || !acct.is_oauth() {
         return None;
     }
@@ -881,10 +894,13 @@ fn claimed_limit(acct: &Account, headers: &reqwest::header::HeaderMap) -> Option
     if h("anthropic-ratelimit-unified-status") != Some("rejected") {
         return None;
     }
-    let claim = h("anthropic-ratelimit-unified-representative-claim")?;
-    ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included"]
+    let named = h("anthropic-ratelimit-unified-representative-claim")?;
+    let claim = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included"]
         .into_iter()
-        .find(|known| claim.eq_ignore_ascii_case(known))
+        .find(|known| named.eq_ignore_ascii_case(known))?;
+    let resets = h("anthropic-ratelimit-unified-reset")?.parse::<i64>().ok()?;
+    let resets = chrono::DateTime::from_timestamp(resets, 0).filter(|at| *at > Utc::now())?;
+    Some((claim, resets))
 }
 
 /// Takes the limit headers an error reply carries out of its body.
@@ -920,8 +936,8 @@ enum Dry {
     /// A refusal only the owner can fix, to give again: status and message.
     Refused(u16, String),
     /// A rate limit, spent quota or a quota check, until then. With Anthropic's name for
-    /// the limit when a Claude subscription's spent quota is what it is.
-    Limit(chrono::DateTime<Utc>, Option<&'static str>),
+    /// the limit and its reset when a Claude subscription's limit is what it is.
+    Limit(chrono::DateTime<Utc>, Option<(&'static str, chrono::DateTime<Utc>)>),
     /// A stalled upstream, until then: no rate limit, but a short wait worth telling.
     Stalled(chrono::DateTime<Utc>),
     /// Anything else, such as a sign-in or permission pause: not a wait to advertise.
@@ -945,7 +961,7 @@ fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclud
     let (until, a) = next?;
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
-        None if a.paused_by_limit(model) => Dry::Limit(until, a.spent_claim(model, until)),
+        None if a.paused_by_limit(model) => Dry::Limit(until, a.spent_limit(model, until)),
         None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
@@ -1025,12 +1041,12 @@ fn no_account_left(
             );
             (503, with_retry_after(formats::error_body(format, 503, &message), wait.min(ADVERTISED_WAIT_LIMIT)))
         }
-        Some(Dry::Limit(until, claim)) => {
+        Some(Dry::Limit(until, limit)) => {
             let wait = seconds_until(until);
             if wait <= ADVERTISED_WAIT_LIMIT {
                 (status, with_retry_after(body, wait))
-            } else if let (Format::Claude, Some(claim)) = (format, claim) {
-                (status, with_limit_headers(body, claim, until))
+            } else if let (Format::Claude, Some((claim, resets))) = (format, limit) {
+                (status, with_limit_headers(body, claim, resets))
             } else if matches!(format, Format::Chat | Format::Responses)
                 && body["error"]["type"] != "usage_limit_reached"
             {
@@ -2301,6 +2317,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             if quota_exhausted(&acct, &model, status, &text) {
                 mark_quota_exhausted(&acct, &model, &headers, &text);
+                if let (Some((claim, resets)), Some(until)) =
+                    (claimed_limit(&acct, &headers), acct.cooling_until(&model))
+                {
+                    acct.name_limit(&model, until, claim, resets);
+                }
                 app.broadcast("accounts", Value::Null);
                 tried.push(acct.id.clone());
                 last_error = Some((status, client_body));
@@ -2367,8 +2388,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     // Quota exhaustion was handled above; this is a rate limit.
                     let until = reset_after(&headers, &text).unwrap_or_else(|| backoff(&acct));
                     acct.rate_limit(&model, until, &format!("429: {msg}"));
-                    if let Some(claim) = claimed_limit(&acct, &headers) {
-                        acct.name_limit(&model, until, claim);
+                    if let Some((claim, resets)) = claimed_limit(&acct, &headers) {
+                        acct.name_limit(&model, until, claim, resets);
                     }
                     app.broadcast("accounts", Value::Null);
                 }

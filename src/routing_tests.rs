@@ -1085,6 +1085,16 @@ async fn a_dry_pool_advertises_only_short_waits_that_limits_impose() {
     assert!(retry_after.is_some_and(|s| (19..=20).contains(&s)), "{retry_after:?}");
 }
 
+/// The private keys an error reply carries for `server::reply` never show in a log.
+#[test]
+fn an_error_shown_whole_leaves_out_what_rides_in_it() {
+    use crate::proxy::error_message;
+    let body = r#"{"type":"error","__fusebox_limit_headers":{"a":"b"},"__fusebox_retry_after":30}"#;
+    assert_eq!(error_message(body), r#"{"type":"error"}"#);
+    assert_eq!(error_message(r#"{"type":"error"}"#), r#"{"type":"error"}"#);
+    assert_eq!(error_message(r#"{"error":{"message":"slow down"},"__fusebox_retry_after":30}"#), "slow down");
+}
+
 /// A Claude request from client-one: the status, the response headers and the body.
 async fn ask_claude(fixture: &Fixture, model: &str) -> (u16, HeaderMap, Value) {
     let response = reqwest::Client::new()
@@ -1110,17 +1120,30 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     const RESET: &str = "anthropic-ratelimit-unified-reset";
     let fixture = Fixture::new(Routing::RoundRobin, false).await;
     let model = "claude-opus-5-5";
-    let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+    // Anthropic names the weekly limit, three days from its reset, and a Retry-After as
+    // long. Fusebox pauses for six hours of a Retry-After at most.
+    let reset = chrono::Utc::now() + chrono::Duration::days(3);
     let refusal = "This request would exceed your account's rate limit. Please try again later.";
-    let (anthropic, calls) = scripted(move |_| {
-        let error = json!({"type":"error","error":{"type":"rate_limit_error","message":refusal}});
-        let headers = [
-            (STATUS, "rejected".to_string()),
-            (CLAIM, "five_hour".to_string()),
-            (RESET, reset.timestamp().to_string()),
-            ("anthropic-ratelimit-unified-overage-status", "rejected".to_string()),
-        ];
-        (StatusCode::TOO_MANY_REQUESTS, headers, Json(error)).into_response()
+    let spent = "You have reached your weekly limit.";
+    // How Anthropic refuses: 0 as a rate limit, 1 as used-up quota, 2 with no reset time.
+    let wording = Arc::new(AtomicU8::new(0));
+    let (anthropic, calls) = scripted({
+        let wording = wording.clone();
+        move |_| {
+            let wording = wording.load(Ordering::Relaxed);
+            let message = if wording == 1 { spent } else { refusal };
+            let error = json!({"type":"error","error":{"type":"rate_limit_error","message":message}});
+            let mut headers = HeaderMap::new();
+            let mut header = |name: &'static str, value: String| headers.insert(name, value.parse().unwrap());
+            header(STATUS, "rejected".into());
+            header(CLAIM, "seven_day".into());
+            header("retry-after", "259200".into());
+            header("anthropic-ratelimit-unified-overage-status", "rejected".into());
+            if wording != 2 {
+                header(RESET, reset.timestamp().to_string());
+            }
+            (StatusCode::TOO_MANY_REQUESTS, headers, Json(error)).into_response()
+        }
     })
     .await;
     let file = fixture.directory.join("claude.json");
@@ -1143,27 +1166,45 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
         st.quota = Default::default();
     };
 
-    // The request that meets the limit gets Anthropic's own error, and the limit it named.
+    // The request that meets the limit gets Anthropic's own error, the limit it named and
+    // the reset it gave: not the end of the pause, which comes first.
     let (status, headers, body) = ask_claude(&fixture, model).await;
     assert_eq!(status, 429, "{body}");
     assert_eq!(body["error"]["message"], refusal);
-    assert_eq!(limit(&headers), told("five_hour", reset));
+    assert_eq!(limit(&headers), told("seven_day", reset));
     assert!(headers.get("retry-after").is_none(), "clients would sleep through a wait of hours");
     assert!(headers.get("anthropic-ratelimit-unified-overage-status").is_none(), "nothing is said of overage");
     assert!(!body.to_string().contains("__fusebox"), "{body}");
+    let paused = (account.cooling_until(model).unwrap() - chrono::Utc::now()).num_minutes();
+    assert!((358..=360).contains(&paused), "{paused}");
     // The next ones don't reach Anthropic, and are told the same.
     let (status, headers, body) = ask_claude(&fixture, model).await;
     assert_eq!(status, 429, "{body}");
     assert!(body["error"]["message"].as_str().unwrap().starts_with("all accounts for claude-opus-5-5"), "{body}");
     assert_eq!(body["error"]["type"], "rate_limit_error");
-    assert_eq!(limit(&headers), told("five_hour", reset));
+    assert_eq!(limit(&headers), told("seven_day", reset));
     assert!(!body.to_string().contains("__fusebox"), "{body}");
     assert_eq!(calls.lock().len(), 1, "a paused subscription is not called");
     // An OpenAI client asking for the same model hears of a usage limit its own way.
     let (status, body, retry_after) = ask(&fixture, None, json!({"model":model,"input":"question"})).await;
     assert_eq!((status, retry_after), (429, None));
     assert_eq!(body["error"]["type"], "usage_limit_reached", "{body}");
-    assert_eq!(body["error"]["resets_at"], reset.timestamp());
+    assert_eq!(body["error"]["resets_at"], account.cooling_until(model).unwrap().timestamp());
+    clear();
+    // A refusal worded as used-up quota names its limit and reset the same way.
+    wording.store(1, Ordering::Relaxed);
+    let (status, headers, body) = ask_claude(&fixture, model).await;
+    assert_eq!((status, &body["error"]["message"]), (429, &json!(spent)));
+    assert_eq!(limit(&headers), told("seven_day", reset));
+    assert!(!account.state.lock().quota_cooldowns.is_empty(), "taken as used-up quota");
+    assert_eq!(limit(&ask_claude(&fixture, model).await.1), told("seven_day", reset));
+    clear();
+    // A limit named without its reset is not passed on: the pause's end is not the reset.
+    wording.store(2, Ordering::Relaxed);
+    let (status, headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((status, limit(&headers)), (429, (None, None, None)));
+    assert_eq!(limit(&ask_claude(&fixture, model).await.1), (None, None, None));
+    assert_eq!(calls.lock().len(), 3);
     clear();
 
     // A pause Anthropic gave no limit for (a burst of requests) is no usage limit.
@@ -1173,7 +1214,7 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     clear();
     // A wait within a minute stays a Retry-After, which Claude Code sits out by itself.
     account.rate_limit(model, chrono::Utc::now() + chrono::Duration::seconds(30), "429: limit");
-    account.name_limit(model, account.cooling_until(model).unwrap(), "five_hour");
+    account.name_limit(model, account.cooling_until(model).unwrap(), "five_hour", reset);
     let (status, headers, _) = ask_claude(&fixture, model).await;
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
     assert!(headers.get("retry-after").is_some());
@@ -1214,14 +1255,21 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     account.state.lock().quota.set(vec![window("week fable", 100.0, later, Some("fable"))], None);
     assert!(account.cooling_until(model).is_none());
     clear();
-    // Spent quota no reading names is told by its length.
-    for (until, claim) in [(soon, "five_hour"), (later, "seven_day")] {
+    // Spent quota that neither a refusal nor a reading names is no limit to tell: its
+    // length doesn't say which one it is.
+    for until in [soon, later] {
         account.exhaust(model, until, "subscription quota exhausted: spent");
-        let (_, headers, _) = ask_claude(&fixture, model).await;
-        assert_eq!(limit(&headers), told(claim, until));
+        let (status, headers, _) = ask_claude(&fixture, model).await;
+        assert_eq!((status, limit(&headers)), (429, (None, None, None)));
         clear();
     }
-    assert_eq!(calls.lock().len(), 1);
+    // Nor is a used-up window whose reset is not what the account waits for.
+    account.state.lock().quota.set(vec![window("5h", 100.0, soon, None)], None);
+    account.exhaust(model, later, "subscription quota exhausted: spent");
+    let (status, headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((status, limit(&headers)), (429, (None, None, None)));
+    clear();
+    assert_eq!(calls.lock().len(), 3);
 
     // An API key has no subscription limits to name.
     std::fs::remove_file(&file).unwrap();
