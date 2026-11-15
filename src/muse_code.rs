@@ -128,21 +128,7 @@ pub(crate) async fn relay(
     if !ENDPOINTS.iter().any(|(name, allowed)| *name == endpoint && *allowed == method) {
         return error(404, "unknown Muse Code endpoint");
     }
-    // A key limited to other models has no business with a Meta account. The models are
-    // the ones the Meta accounts offer, under the names clients use for them: another
-    // provider's account may offer one by the same name.
-    let allowed = client.is_none_or(|c| {
-        let offers = |a: &Arc<Account>| {
-            a.public_models().iter().any(|model| {
-                let prefixed = a.prefix.as_ref().map(|prefix| format!("{prefix}/{model}"));
-                crate::policy::model_allowed(c, model)
-                    || prefixed.is_some_and(|name| crate::policy::model_allowed(c, &name))
-            })
-        };
-        let meta = |a: &Arc<Account>| a.provider == Provider::Meta && !a.state.lock().disabled;
-        c.models.is_empty() || app.pool.all().iter().any(|a| meta(a) && offers(a))
-    });
-    if !allowed {
+    if !client.is_none_or(|c| c.models.is_empty() || may_use_meta(app, c)) {
         return error(403, "this key can't use Muse models");
     }
     let query = forwarded_query(query);
@@ -153,6 +139,35 @@ pub(crate) async fn relay(
         Ok(response) => response,
         Err(_) => error(504, "Meta did not answer in time"),
     }
+}
+
+/// Whether a client with a model allowlist may use a model that a Meta account serves: a
+/// key limited to other models has no business with one. A model counts by a name the
+/// client may use that is routed to a Meta account, as its requests are: the account's
+/// own name for it, with the account's prefix or `meta/` in front, or a model group
+/// holding it. Another provider's model by the same name doesn't hide it, and a name
+/// that a forced prefix keeps from routing there doesn't count.
+fn may_use_meta(app: &App, client: &NamedClient) -> bool {
+    let accounts: Vec<_> =
+        app.pool.all().into_iter().filter(|a| a.provider == Provider::Meta && !a.state.lock().disabled).collect();
+    let reaches_meta = |name: &str| {
+        let (only, model) = app.pool.route(name);
+        accounts.iter().any(|a| app.pool.resolve_account(a, &model, only.as_ref()).is_some())
+    };
+    let usable = |name: &str| crate::policy::model_allowed(client, name) && reaches_meta(name);
+    let by_name = accounts.iter().any(|a| {
+        a.public_models().iter().any(|model| {
+            let prefixed = a.prefix.as_ref().map(|prefix| format!("{prefix}/{model}"));
+            usable(model)
+                || prefixed.is_some_and(|name| usable(&name))
+                || usable(&format!("{}/{model}", Provider::Meta.as_str()))
+        })
+    });
+    by_name
+        || app.cfg().model_groups.iter().any(|(group, members)| {
+            crate::policy::model_allowed(client, group)
+                && members.models.iter().any(|member| reaches_meta(&crate::ir::split_model_suffix(member).0))
+        })
 }
 
 /// Asks the Meta accounts in turn, until one answers.
@@ -401,14 +416,30 @@ mod tests {
             models: vec![crate::config::ModelAlias { name: "claude-sonnet-5-5".into(), alias: Some("coding".into()) }],
             ..Default::default()
         }];
-        fixture.app.set_config(cfg);
+        fixture.app.set_config(cfg.clone());
         let listed = fixture.app.pool.models();
         assert!(listed.contains(&("coding".to_string(), Provider::Claude)), "{listed:?}");
         assert_eq!(fixture.get("/muse-code/models", "fbx_alias").await.status(), 200);
-        assert_eq!(
-            fixture.get("/muse-code/models", "fbx_muse").await.status(),
-            403,
-            "no Muse model is left by that name"
-        );
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 403, "no Muse model by that name");
+        // A group holding a Meta model counts by the group's name.
+        cfg.model_groups
+            .insert("team".into(), crate::config::ModelGroup { models: vec!["coding".into()], balance: false });
+        cfg.named_clients.push(client("group", "team"));
+        cfg.named_clients.push(client("provider", "meta/muse-spark-1.3"));
+        cfg.named_clients.push(client("prefix", "lab/*"));
+        fixture.app.set_config(cfg.clone());
+        assert_eq!(fixture.get("/muse-code/models", "fbx_group").await.status(), 200);
+
+        // The provider's name in front counts, as it routes requests.
+        cfg.meta_api_key[0].models.clear();
+        fixture.app.set_config(cfg.clone());
+        assert_eq!(fixture.get("/muse-code/models", "fbx_provider").await.status(), 200);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 200);
+        // With prefixes forced, a prefixed account serves only its prefixed names.
+        cfg.meta_api_key[0].prefix = Some("lab".into());
+        cfg.force_model_prefix = true;
+        fixture.app.set_config(cfg);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_prefix").await.status(), 200);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 403, "no bare name routes there");
     }
 }
