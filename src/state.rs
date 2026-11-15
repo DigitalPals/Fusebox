@@ -47,6 +47,9 @@ pub struct App {
     quiet_until: AtomicI64,
     /// Fired when the server starts shutting down, so long-lived sockets can close cleanly.
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// Fired when the time requests get to finish at shutdown runs out: those still open
+    /// end here, so what they used is recorded before the usage database is saved.
+    pub cutoff: tokio_util::sync::CancellationToken,
     /// Named clients' request rates and spend, for their limits.
     pub clients: crate::policy::Clients,
     pub admission: Arc<crate::admission::Admission>,
@@ -124,6 +127,7 @@ impl App {
             live_ticker: Default::default(),
             quiet_until: AtomicI64::new(0),
             shutdown: Default::default(),
+            cutoff: Default::default(),
             clients,
             admission: Default::default(),
             key_guesses: Default::default(),

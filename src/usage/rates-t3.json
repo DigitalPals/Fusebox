@@ -1,5 +1,5 @@
 {
-  "version": "t3-2026-11-09.1",
+  "version": "t3-2026-11-15.1",
   "verified_at": "2026-10-29",
   "calculation": "t3",
   "rates": [
@@ -253,6 +253,22 @@
       "cache_write_5m_nanos_per_token": null,
       "cache_write_1h_nanos_per_token": null,
       "output_nanos_per_token": 10000,
+      "tier_multipliers": {}
+    },
+    {
+      "provider": "meta",
+      "models": [
+        "muse-ember-1.0"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "input_nanos_per_token": 100,
+      "cache_read_nanos_per_token": 4,
+      "cache_write_nanos_per_token": null,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 500,
       "tier_multipliers": {}
     },
     {

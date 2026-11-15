@@ -427,6 +427,20 @@ impl Quota {
             .max()
     }
 
+    /// Anthropic's name for the used-up window that renews last, the one keeping `model`
+    /// away, as its `anthropic-ratelimit-unified-representative-claim` header names it.
+    pub fn spent_claim(&self, model: &str) -> Option<&'static str> {
+        let spent = self.live(model).filter(|w| w.used >= 100.0).max_by_key(|w| w.resets_at)?;
+        Some(match (spent.name.as_str(), spent.model.as_deref()) {
+            ("5h", _) => "five_hour",
+            (_, Some("opus")) => "seven_day_opus",
+            (_, Some("sonnet")) => "seven_day_sonnet",
+            // Claude Code calls this one the "Fable limit".
+            (_, Some("fable")) | ("week overage", _) => "seven_day_overage_included",
+            _ => "seven_day",
+        })
+    }
+
     pub(crate) fn set(&mut self, windows: Vec<Window>, plan: Option<String>) {
         if plan.is_some() {
             if self.plan.as_deref().zip(plan.as_deref()).is_some_and(|(old, new)| !same_plan(old, new)) {

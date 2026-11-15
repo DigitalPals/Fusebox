@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-09.1",
+  "version": "2026-11-15.1",
   "verified_at": "2026-10-18",
   "rates": [
     {
@@ -938,6 +938,24 @@
       "above_threshold_write_5m_nanos_per_token": 625,
       "above_threshold_write_1h_nanos_per_token": 1000,
       "above_threshold_output_nanos_per_token": 2500
+    },
+    {
+      "provider": "meta",
+      "models": [
+        "muse-ember-1.0"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "input_nanos_per_token": 100,
+      "cache_read_nanos_per_token": 4,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 500,
+      "threshold_input_tokens": 200000,
+      "above_threshold_input_nanos_per_token": 300,
+      "above_threshold_read_nanos_per_token": 12,
+      "above_threshold_output_nanos_per_token": 1500
     },
     {
       "provider": "meta",

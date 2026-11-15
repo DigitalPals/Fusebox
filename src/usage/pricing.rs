@@ -714,6 +714,19 @@ mod meta_t3_tests {
         let old = muse("muse-wonder-full-1.0", [None, Some(129_524), None, Some(390)]);
         assert_eq!((old.cost_nanos, old.basis.as_str()), (None, "missing_tokens"));
     }
+
+    /// Muse Ember at Meta's published rates: $0.10 input, $0.004 cached input and $0.50
+    /// output per million tokens. The default calculation is flat, as T3 Code's is: it
+    /// leaves out Meta's higher rates for requests of more than 200,000 input tokens.
+    #[test]
+    fn muse_ember_prices_at_metas_rates() {
+        let ember = muse("muse-ember-1.0", [Some(3048), Some(15_217), Some(0), Some(431)]);
+        assert_eq!(ember.cost_nanos, Some(3048 * 100 + 15_217 * 4 + 431 * 500));
+        assert!(!ember.partial, "{:?}", ember.assumptions);
+        assert!(ember.assumptions.contains(&"published_provider_rate_fallback".into()));
+        let long = muse("muse-ember-1.0", [Some(50_000), Some(150_001), Some(0), Some(431)]);
+        assert_eq!(long.cost_nanos, Some(50_000 * 100 + 150_001 * 4 + 431 * 500));
+    }
 }
 
 #[cfg(test)]
@@ -765,6 +778,24 @@ mod tier_tests {
             assert_eq!(c.price(&o).basis, "unknown_model");
             assert!(c.price(&o).cost_nanos.is_none());
         }
+    }
+
+    /// Meta bills a Muse Ember request of more than 200,000 input tokens, cached ones
+    /// included, at three times the rates, in full.
+    #[test]
+    fn ember_costs_three_times_as_much_past_200k_input_tokens_on_the_rate_card() {
+        let c = Catalogue::provider_fixture();
+        let mut o = event("meta", "muse-ember-1.0");
+        o.service_tier = Some("standard".into());
+        o.tokens.cache_write = Some(0);
+        o.tokens.write_5m = None;
+        o.tokens.write_1h = None;
+        o.tokens.output = Some(431);
+        (o.tokens.input, o.tokens.cache_read) = (Some(50_000), Some(150_000));
+        assert_eq!(c.price(&o).cost_nanos, Some(50_000 * 100 + 150_000 * 4 + 431 * 500));
+        assert!(c.price(&o).assumptions.is_empty());
+        o.tokens.cache_read = Some(150_001);
+        assert_eq!(c.price(&o).cost_nanos, Some(50_000 * 300 + 150_001 * 12 + 431 * 1500));
     }
 
     #[test]

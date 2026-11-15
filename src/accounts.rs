@@ -276,9 +276,14 @@ impl Provider {
                 "grok-imagine-video-1.5",
                 "grok-imagine-video-1.5-lite",
             ],
-            Provider::Meta => {
-                &["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"]
-            }
+            Provider::Meta => &[
+                "muse-wonder-1.0",
+                "muse-wonder-full-1.0",
+                "muse-ember-1.0",
+                "muse-spark-1.3",
+                "muse-spark-1.2",
+                "muse-spark-1.1",
+            ],
             Provider::Devin => DEVIN_MODELS,
             Provider::Compat => &[],
         }
@@ -490,6 +495,9 @@ pub struct AccountState {
     /// The `cooldowns` deadlines a stalled upstream set (`stall`), kept like `limit_pauses`:
     /// a deadline counts only while it is the one recorded here.
     pub stall_pauses: HashMap<String, DateTime<Utc>>,
+    /// Anthropic's name for the limit behind a `cooldowns` deadline, when its refusal named
+    /// one. Kept like `limit_pauses`: it counts only while the deadline is the one recorded.
+    pub limit_claims: HashMap<String, (DateTime<Utc>, &'static str)>,
     /// The refusal pausing the whole account, if one does (see [`Refusal`]).
     pub refusal: Option<Refusal>,
     /// Confirmed subscription exhaustion, distinct from temporary rate limits. A
@@ -959,6 +967,34 @@ impl Account {
             .copied()
     }
 
+    /// Remembers which limit Anthropic named when it refused `model` until `until`.
+    pub fn name_limit(&self, model: &str, until: DateTime<Utc>, claim: &'static str) {
+        let mut st = self.state.lock();
+        let now = Utc::now();
+        st.limit_claims.retain(|_, (t, _)| *t > now);
+        st.limit_claims.insert(model.to_string(), (until, claim));
+    }
+
+    /// Which of Anthropic's limits keeps `model` off this Claude subscription until
+    /// `until`, by Anthropic's name for it: the one its refusal named, else the used-up
+    /// window a usage reading shows. None when neither says a subscription limit is what
+    /// keeps it away (a burst rate limit, a quota check), and for API keys, which have no
+    /// such limits. Spent quota that no reading names is told by its length: no 5-hour
+    /// limit is further away than five hours.
+    pub fn spent_claim(&self, model: &str, until: DateTime<Utc>) -> Option<&'static str> {
+        if self.provider != Provider::Claude || !self.is_oauth() {
+            return None;
+        }
+        let named = self.state.lock().limit_claims.get(model).filter(|(t, _)| *t == until).map(|(_, claim)| *claim);
+        if named.is_some() {
+            return named;
+        }
+        self.exhausted_until(model).filter(|spent| *spent >= until)?;
+        let quota_model = self.resolve(model).unwrap_or_else(|| model.to_string());
+        let window = self.state.lock().quota.spent_claim(&quota_model);
+        Some(window.unwrap_or(if until - Utc::now() <= chrono::Duration::hours(5) { "five_hour" } else { "seven_day" }))
+    }
+
     /// Records confirmed quota exhaustion, unless a banked reset is being applied.
     pub fn exhaust(&self, model: &str, until: DateTime<Utc>, reason: &str) {
         let epoch = self.quota_epoch();
@@ -994,6 +1030,7 @@ impl Account {
         st.limit_pauses.retain(|_, t| *t > now);
         st.cooldowns.insert(model.to_string(), until);
         st.limit_pauses.insert(model.to_string(), until);
+        st.limit_claims.remove(model);
         st.pause_error(reason, false, model, until);
     }
 

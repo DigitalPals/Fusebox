@@ -5,8 +5,10 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{
+    DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Query, RawQuery, Request, State,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -39,9 +41,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/codex/models.json", get(codex_models))
         .route("/v1beta/models", get(gemini_models))
         .route("/v1beta/models/{*rest}", post(gemini))
+        .route("/muse-code/{endpoint}", get(muse_code_read).post(muse_code_send))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::decoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::encoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), client_auth))
+        .layer(middleware::from_fn_with_state(app.clone(), ending_at_shutdown))
         .layer(DefaultBodyLimit::max(request_body::MAX_BODY_SIZE))
         // Any origin, with no cookies or credentials. Headers a preflight asks for are
         // allowed by name: the `*` of `CorsLayer::permissive` doesn't cover `Authorization`.
@@ -129,6 +133,22 @@ fn provided_key(req: &Request) -> Option<String> {
                 url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
             })
         })
+}
+
+/// A request still waiting for its answer when the time to finish runs out at shutdown
+/// ends here: dropping it records it, with what it used, before the usage database is
+/// saved. Left alone it would die with the process, unrecorded. Answers are not touched.
+async fn ending_at_shutdown(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
+    let format = format_for_path(req.uri().path());
+    tokio::select! {
+        response = next.run(req) => response,
+        _ = app.cutoff.cancelled() => {
+            let body = formats::error_body(format, 503, "Fusebox is restarting; try again");
+            let mut response = (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            response
+        }
+    }
 }
 
 async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
@@ -586,6 +606,33 @@ pub async fn playground(
     reply(Format::Chat, proxy::execute(app, call).await, false)
 }
 
+/// Muse Code's catalog and settings, from Meta (see [`crate::muse_code`]).
+async fn muse_code_read(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    Path(endpoint): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let cfg = app.cfg();
+    let client = auth.named(&cfg);
+    crate::muse_code::relay(&app, client, Method::GET, &endpoint, query.as_deref(), &headers, Bytes::new()).await
+}
+
+/// Muse Code's web search, to Meta.
+async fn muse_code_send(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    Path(endpoint): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let cfg = app.cfg();
+    let client = auth.named(&cfg);
+    crate::muse_code::relay(&app, client, Method::POST, &endpoint, query.as_deref(), &headers, body).await
+}
+
 async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Response {
     outcome(crate::media::video_status(app, headers, id).await)
 }
@@ -853,9 +900,15 @@ fn reply(_format: Format, r: Reply, json_array: bool) -> Response {
         Reply::Error(status, mut v) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             let wait = proxy::take_retry_after(&mut v);
+            let limit = proxy::take_limit_headers(&mut v);
             let mut resp = (code, axum::Json(v)).into_response();
             if let Some(wait) = wait {
                 resp.headers_mut().insert(header::RETRY_AFTER, wait.into());
+            }
+            for (name, value) in limit {
+                if let (Ok(name), Ok(value)) = (header::HeaderName::try_from(name), HeaderValue::try_from(value)) {
+                    resp.headers_mut().insert(name, value);
+                }
             }
             resp
         }

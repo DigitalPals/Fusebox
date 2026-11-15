@@ -30,6 +30,7 @@ Each wire format (`src/formats/{chat,responses,claude,gemini}.rs`) knows how to 
 | `src/accounts.rs` | Credential files, API keys, routing, priority and cooldowns |
 | `src/policy.rs` | Named clients' limits: models, programs, rate, tokens, spend, expiry |
 | `src/embeddings.rs` | `/v1/embeddings` on OpenAI, compatible, Gemini and Vertex keys |
+| `src/muse_code.rs` | `/muse-code/*`: the catalog, settings and web search Muse Code asks its host for |
 | `src/metrics.rs` | `/readyz` and Prometheus `/metrics` |
 | `src/push/` | Faults, push notifications and webhooks |
 | `src/oauth.rs` · `src/device.rs` | Browser and device-code sign-in, token refresh for every provider |
