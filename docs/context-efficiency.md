@@ -139,7 +139,7 @@ append changing conversation content after a supported cache boundary. Exact
 prefix content, model, account, minimum size and provider lifetime still matter.
 A shared routing key does not make different prompts equivalent or guarantee a hit.
 
-Fusebox's `prompt-cache` settings are described in the [README](../README.md).
+Fusebox's `prompt-cache` settings are described in [routing](routing.md#coding-sessions-and-prompt-caching).
 Session scope remains the default. On models before GPT-5.6, stable keys help
 OpenAI route related requests. On GPT-5.6 and later, keys separate cache accounting;
 automatic routing does not require one. Use `client` or `workspace` scope when
