@@ -173,6 +173,83 @@ async fn downstream_disconnect_cancels_http_generation_and_keeps_usage() {
     cancelled(&app, 20, 80).await;
 }
 
+/// A turn still running on a socket when the time to finish runs out at shutdown is ended
+/// by Fusebox, natively or over HTTP, and recorded as that with what it used.
+#[tokio::test]
+async fn turns_open_when_the_drain_runs_out_are_ended_and_recorded() {
+    let stopped = |app: &Arc<App>, input: u64, cache: u64| {
+        let app = app.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(log) = app.stats.recent.lock().front().cloned() {
+                        assert_eq!((log.status, log.failure_kind), (499, Some("server_shutdown")));
+                        assert_eq!(log.error.as_deref(), Some(crate::proxy::STOPPED));
+                        assert_eq!((log.input_tokens, log.cache_tokens), (input, cache));
+                        assert_eq!(app.stats.active.load(Ordering::Relaxed), 0);
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("a turn open at the cutoff must be recorded promptly");
+        }
+    };
+
+    // Natively: the provider's socket is let go, too.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let released = Arc::new(Notify::new());
+    let observed = released.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        let created = json!({"type":"response.created", "response":{"id":"native-open","status":"in_progress"}});
+        socket.send(tungstenite::Message::Text(created.to_string().into())).await.unwrap();
+        loop {
+            match socket.next().await {
+                Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {}
+            }
+        }
+        observed.notify_one();
+    });
+    let _upstream = Server { url: base.clone(), task };
+    let app = app(&base, true);
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let mut socket = client(&proxy).await;
+    create(&mut socket, true, "first").await;
+    until_event(&mut socket, "response.created").await;
+    app.cutoff.cancel();
+    stopped(&app, 0, 0).await;
+    tokio::time::timeout(Duration::from_secs(2), released.notified())
+        .await
+        .expect("the provider socket must be released at the cutoff");
+
+    // Over HTTP, for a provider without a native socket.
+    let upstream = serve(axum::Router::new().route("/v1/messages", post(|| async {
+        let body = Body::from_stream(async_stream::stream! {
+            for value in [
+                json!({"type":"message_start","message":{"id":"msg_open","usage":{"input_tokens":20,"cache_read_input_tokens":80}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+            ] {
+                yield Ok::<_, Infallible>(Bytes::from(format!("data: {value}\n\n")));
+            }
+            std::future::pending::<()>().await;
+        });
+        ([("content-type", "text/event-stream")], body)
+    }))).await;
+    let app = self::app(&upstream.url, false);
+    let proxy = serve(crate::server::router(app.clone())).await;
+    let mut socket = client(&proxy).await;
+    create(&mut socket, false, "first").await;
+    until_event(&mut socket, "response.output_text.delta").await;
+    app.cutoff.cancel();
+    stopped(&app, 20, 80).await;
+}
+
 #[tokio::test]
 async fn pipelined_creates_wait_for_prior_completion_and_keep_their_order() {
     let released = Arc::new(Notify::new());

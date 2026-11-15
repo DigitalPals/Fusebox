@@ -1293,6 +1293,8 @@ async fn requests_open_when_the_drain_runs_out_are_ended_and_recorded() {
         received.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
     }
     assert!(!received.contains("message_stop"), "{received}");
+    let last = received.trim_end().rsplit("\n\n").next().unwrap();
+    assert!(last.starts_with("event: error\n") && last.contains(crate::proxy::STOPPED), "{last}");
     let waiting = waiting.await.unwrap().unwrap();
     assert_eq!(waiting.status(), 503);
     assert_eq!(waiting.headers()["retry-after"], "1");

@@ -380,6 +380,9 @@ pub async fn handle(app: Arc<App>, headers: HeaderMap, auth: crate::server::Clie
         tokio::pin!(running);
         loop {
             tokio::select! {
+                // The time to finish at shutdown ran out: dropping the turn records it,
+                // with what it used, before the usage database is saved.
+                _ = app.cutoff.cancelled() => break 'connection,
                 message = rx.next() => match message {
                     Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
                         if let Some(text) = interrupt_text(&message) {

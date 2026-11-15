@@ -142,6 +142,7 @@ test('499 timeout and connection errors describe the observed cause without impl
     ['downstream_write_error', 'Connection error while sending the response to the client.'],
     ['downstream_read_error', 'Connection error while reading from the client.'],
     ['downstream_queue_limit', 'Connection ended because the pending request limit was reached.'],
+    ['server_shutdown', 'Fusebox stopped or restarted before the answer was complete.'],
     [null, 'Connection ended before completion.'],
   ]) {
     d.context.request.failure_kind = kind;

@@ -530,6 +530,7 @@ extension RequestLog {
             "downstream_write_error": "Connection error while sending the response to the client.",
             "downstream_read_error": "Connection error while reading from the client.",
             "downstream_queue_limit": "Connection ended because the pending request limit was reached.",
+            "server_shutdown": "Fusebox stopped or restarted before the answer was complete.",
         ][failureKind ?? ""] ?? "Connection ended before completion."
     }
 

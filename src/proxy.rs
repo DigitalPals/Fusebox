@@ -1309,7 +1309,7 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
             capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default(),
         )
     });
-    let cutoff = app.cutoff.clone();
+    let (cutoff, format) = (app.cutoff.clone(), call.format);
     let reply = match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
@@ -1342,19 +1342,34 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         }
         other => other,
     };
-    ending_at(cutoff, reply)
+    ending_at(cutoff, format, reply)
 }
 
 /// A streamed answer ends when `cutoff` fires, at the end of the time requests get to
 /// finish at shutdown. Its tracker then records what was used so far, in time for the
 /// usage database's last save; left open, the stream would die with the process, unrecorded.
-fn ending_at(cutoff: tokio_util::sync::CancellationToken, reply: Reply) -> Reply {
-    match reply {
-        Reply::Stream { frames, account } => {
-            Reply::Stream { frames: Box::pin(frames.take_until(cutoff.cancelled_owned())), account }
+/// The client is told with an error event, so a cut answer is not taken for a whole one.
+fn ending_at(cutoff: tokio_util::sync::CancellationToken, format: Format, reply: Reply) -> Reply {
+    let Reply::Stream { mut frames, account } = reply else { return reply };
+    let frames = Box::pin(async_stream::stream! {
+        let cut = loop {
+            let frame = tokio::select! {
+                biased;
+                _ = cutoff.cancelled() => break true,
+                frame = frames.next() => frame,
+            };
+            match frame {
+                Some(frame) => yield frame,
+                None => break false,
+            }
+        };
+        // Recorded before the client hears of it.
+        drop(frames);
+        if cut {
+            yield stream_error_frame(format, 503, STOPPED);
         }
-        other => other,
-    }
+    });
+    Reply::Stream { frames, account }
 }
 
 /// Builds a Responses turn's continuation history from the frames sent to the client.
