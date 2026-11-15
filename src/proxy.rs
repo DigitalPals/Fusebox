@@ -562,6 +562,9 @@ impl Tracker {
     }
 }
 
+/// The error of a request Fusebox ended because it was stopping.
+pub const STOPPED: &str = "Fusebox stopped before the answer was complete";
+
 impl Drop for Tracker {
     fn drop(&mut self) {
         if !self.done {
@@ -569,7 +572,14 @@ impl Drop for Tracker {
                 self.finish_stream();
             } else {
                 let usage = self.stream_usage.clone();
-                self.finish(499, &usage, Some("client disconnected".into()));
+                // Fusebox ended it, at shutdown: the client didn't leave.
+                let error = if self.app.cutoff.is_cancelled() {
+                    self.downstream.set("server_shutdown");
+                    STOPPED
+                } else {
+                    "client disconnected"
+                };
+                self.finish(499, &usage, Some(error.into()));
             }
         }
     }
@@ -1299,7 +1309,8 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
             capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default(),
         )
     });
-    match execute_models(app.clone(), call).await {
+    let cutoff = app.cutoff.clone();
+    let reply = match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
                 let mut history = History::default();
@@ -1328,6 +1339,19 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
                 app.sessions.save_async().await;
             }
             Reply::Json(v)
+        }
+        other => other,
+    };
+    ending_at(cutoff, reply)
+}
+
+/// A streamed answer ends when `cutoff` fires, at the end of the time requests get to
+/// finish at shutdown. Its tracker then records what was used so far, in time for the
+/// usage database's last save; left open, the stream would die with the process, unrecorded.
+fn ending_at(cutoff: tokio_util::sync::CancellationToken, reply: Reply) -> Reply {
+    match reply {
+        Reply::Stream { frames, account } => {
+            Reply::Stream { frames: Box::pin(frames.take_until(cutoff.cancelled_owned())), account }
         }
         other => other,
     }

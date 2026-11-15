@@ -378,7 +378,8 @@ async fn serve(app: Arc<App>) -> Result<()> {
     // Streamed answers are many small writes; without TCP_NODELAY, Nagle's algorithm
     // holds each one back until the client acknowledges the previous one.
     // On Ctrl-C or SIGTERM, stop taking connections, tell open sockets (the dashboard,
-    // Codex) to close, and give requests in flight up to DRAIN to finish. Then the
+    // Codex) to close, and give requests in flight time to finish. Those still open a
+    // second before DRAIN is up are ended, so that what they used is recorded. Then the
     // sessions and the usage database are saved, well inside systemd's or Docker's
     // stop timeout.
     let stopping = app.shutdown.clone();
@@ -386,6 +387,12 @@ async fn serve(app: Arc<App>) -> Result<()> {
         shutdown_signal().await;
         tracing::info!("shutting down; finishing requests in flight");
         stopping.cancel();
+    });
+    let ending = app.clone();
+    tokio::spawn(async move {
+        ending.shutdown.cancelled().await;
+        tokio::time::sleep(DRAIN - CUTOFF).await;
+        end_open_requests(&ending).await;
     });
     let forwarded =
         forwarded_listener.map(|l| tokio::spawn(serve_forwarded(app.clone(), l, tls.clone(), service.clone())));
@@ -427,6 +434,8 @@ async fn serve(app: Arc<App>) -> Result<()> {
             Ok(Ok(())) => {}
         }
     }
+    // Whatever is still open, when the servers stopped before the drain was up.
+    end_open_requests(&app).await;
     if let Some(task) = import_task {
         task.abort();
         let _ = task.await;
@@ -451,8 +460,30 @@ async fn serve(app: Arc<App>) -> Result<()> {
     result.context("serving requests")
 }
 
-/// How long requests in flight get to finish once Fusebox is asked to stop.
+/// How long Fusebox takes at most to stop serving once it is asked to stop.
 const DRAIN: Duration = Duration::from_secs(10);
+/// The end of it: requests still open are ended, and get this long to be recorded.
+const CUTOFF: Duration = Duration::from_secs(1);
+
+/// Ends the requests still open at shutdown, once, and waits briefly until each has
+/// recorded what it used.
+async fn end_open_requests(app: &App) {
+    let open = || app.stats.active.load(std::sync::atomic::Ordering::Relaxed);
+    if !app.cutoff.is_cancelled() {
+        if open() > 0 {
+            tracing::warn!(requests = open(), "ending requests still open at shutdown");
+        }
+        app.cutoff.cancel();
+    }
+    let recorded = async {
+        while open() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    if tokio::time::timeout(CUTOFF, recorded).await.is_err() {
+        tracing::warn!(requests = open(), "requests not recorded before stopping");
+    }
+}
 
 fn trusted_list(cfg: &Config) -> String {
     match &cfg.trusted_proxies {

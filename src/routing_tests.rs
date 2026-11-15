@@ -1236,6 +1236,80 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
 }
 
+/// A request still open when the time to finish runs out at shutdown would die with the
+/// process: no record of it, and what it used lost. Fusebox ends it instead, a streamed
+/// answer where it stands and a waiting one with a 503, and each is recorded as stopped
+/// by Fusebox, not as a client that left, with the usage it had by then.
+#[tokio::test]
+async fn requests_open_when_the_drain_runs_out_are_ended_and_recorded() {
+    use axum::body::{Body, Bytes};
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    let anthropic = serve(axum::Router::new().route(
+        "/v1/messages",
+        post(|body: String| async move {
+            if body.contains("never answered") {
+                std::future::pending::<()>().await;
+            }
+            let events = Body::from_stream(async_stream::stream! {
+                for value in [
+                    json!({"type":"message_start","message":{"id":"msg_open","usage":{"input_tokens":20,"cache_read_input_tokens":80}}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+                ] {
+                    yield Ok::<_, std::convert::Infallible>(Bytes::from(format!("data: {value}\n\n")));
+                }
+                std::future::pending::<()>().await;
+            });
+            ([("content-type", "text/event-stream")], events).into_response()
+        }),
+    ))
+    .await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.codex_api_key.clear();
+    cfg.claude_api_key =
+        vec![KeyEntry { api_key: "a".into(), base_url: Some(anthropic.url.clone()), ..Default::default() }];
+    fixture.app.set_config(cfg);
+    let ask = |prompt: &'static str, stream: bool| {
+        reqwest::Client::new()
+            .post(format!("{}/v1/messages", fixture.proxy.url))
+            .header("x-api-key", "client-one")
+            .json(&json!({"model":"claude-opus-5-5","max_tokens":16,"stream":stream,
+                "messages":[{"role":"user","content":prompt}]}))
+            .send()
+    };
+    let mut answer = ask("question", true).await.unwrap().bytes_stream();
+    let mut received = String::new();
+    while !received.contains("partial") {
+        received.push_str(&String::from_utf8_lossy(&answer.next().await.unwrap().unwrap()));
+    }
+    let waiting = tokio::spawn(ask("never answered", false));
+    let open = || fixture.app.stats.active.load(Ordering::Relaxed);
+    while open() < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    fixture.app.cutoff.cancel();
+    // The streamed answer ends where it stands, and the waiting request is told to try again.
+    while let Some(chunk) = answer.next().await {
+        received.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+    }
+    assert!(!received.contains("message_stop"), "{received}");
+    let waiting = waiting.await.unwrap().unwrap();
+    assert_eq!(waiting.status(), 503);
+    assert_eq!(waiting.headers()["retry-after"], "1");
+    let body: Value = waiting.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "Fusebox is restarting; try again");
+
+    let logs = fixture.logs(2).await;
+    for log in &logs {
+        assert_eq!(log.status, 499, "ended, not failed: no account is blamed");
+        assert_eq!(log.failure_kind, Some("server_shutdown"));
+        assert_eq!(log.error.as_deref(), Some(crate::proxy::STOPPED));
+    }
+    let streamed = logs.iter().find(|log| log.input_tokens > 0).expect("the streamed request keeps its usage");
+    assert_eq!((streamed.input_tokens, streamed.cache_tokens, streamed.usage_completeness), (20, 80, "partial"));
+    assert_eq!(open(), 0);
+}
+
 #[tokio::test]
 async fn a_claude_key_out_of_credit_sits_out_and_its_refusal_is_repeated() {
     let fixture = Fixture::new(Routing::FillFirst, false).await;

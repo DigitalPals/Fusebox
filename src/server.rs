@@ -45,6 +45,7 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(middleware::from_fn_with_state(app.clone(), request_body::decoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::encoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), client_auth))
+        .layer(middleware::from_fn_with_state(app.clone(), ending_at_shutdown))
         .layer(DefaultBodyLimit::max(request_body::MAX_BODY_SIZE))
         // Any origin, with no cookies or credentials. Headers a preflight asks for are
         // allowed by name: the `*` of `CorsLayer::permissive` doesn't cover `Authorization`.
@@ -132,6 +133,22 @@ fn provided_key(req: &Request) -> Option<String> {
                 url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned())
             })
         })
+}
+
+/// A request still waiting for its answer when the time to finish runs out at shutdown
+/// ends here: dropping it records it, with what it used, before the usage database is
+/// saved. Left alone it would die with the process, unrecorded. Answers are not touched.
+async fn ending_at_shutdown(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
+    let format = format_for_path(req.uri().path());
+    tokio::select! {
+        response = next.run(req) => response,
+        _ = app.cutoff.cancelled() => {
+            let body = formats::error_body(format, 503, "Fusebox is restarting; try again");
+            let mut response = (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            response
+        }
+    }
 }
 
 async fn client_auth(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
