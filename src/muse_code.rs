@@ -129,11 +129,18 @@ pub(crate) async fn relay(
         return error(404, "unknown Muse Code endpoint");
     }
     // A key limited to other models has no business with a Meta account. The models are
-    // the ones the Meta accounts list, under the names clients use for them.
+    // the ones the Meta accounts offer, under the names clients use for them: another
+    // provider's account may offer one by the same name.
     let allowed = client.is_none_or(|c| {
-        let listed = app.pool.models();
-        c.models.is_empty()
-            || listed.iter().any(|(model, by)| *by == Provider::Meta && crate::policy::model_allowed(c, model))
+        let offers = |a: &Arc<Account>| {
+            a.public_models().iter().any(|model| {
+                let prefixed = a.prefix.as_ref().map(|prefix| format!("{prefix}/{model}"));
+                crate::policy::model_allowed(c, model)
+                    || prefixed.is_some_and(|name| crate::policy::model_allowed(c, &name))
+            })
+        };
+        let meta = |a: &Arc<Account>| a.provider == Provider::Meta && !a.state.lock().disabled;
+        c.models.is_empty() || app.pool.all().iter().any(|a| meta(a) && offers(a))
     });
     if !allowed {
         return error(403, "this key can't use Muse models");
@@ -388,7 +395,15 @@ mod tests {
         cfg.meta_api_key[0].models =
             vec![crate::config::ModelAlias { name: "muse-spark-1.3".into(), alias: Some("coding".into()) }];
         cfg.named_clients.push(client("alias", "coding"));
+        // Another provider's model by the same name doesn't hide it.
+        cfg.claude_api_key = vec![KeyEntry {
+            api_key: "claude-key".into(),
+            models: vec![crate::config::ModelAlias { name: "claude-sonnet-5-5".into(), alias: Some("coding".into()) }],
+            ..Default::default()
+        }];
         fixture.app.set_config(cfg);
+        let listed = fixture.app.pool.models();
+        assert!(listed.contains(&("coding".to_string(), Provider::Claude)), "{listed:?}");
         assert_eq!(fixture.get("/muse-code/models", "fbx_alias").await.status(), 200);
         assert_eq!(
             fixture.get("/muse-code/models", "fbx_muse").await.status(),
