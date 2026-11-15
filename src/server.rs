@@ -5,8 +5,10 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{
+    DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Query, RawQuery, Request, State,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -39,6 +41,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/codex/models.json", get(codex_models))
         .route("/v1beta/models", get(gemini_models))
         .route("/v1beta/models/{*rest}", post(gemini))
+        .route("/muse-code/{endpoint}", get(muse_code_read).post(muse_code_send))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::decoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), request_body::encoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), client_auth))
@@ -584,6 +587,33 @@ pub async fn playground(
         pinned_account: None,
     };
     reply(Format::Chat, proxy::execute(app, call).await, false)
+}
+
+/// Muse Code's catalog and settings, from Meta (see [`crate::muse_code`]).
+async fn muse_code_read(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    Path(endpoint): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let cfg = app.cfg();
+    let client = auth.named(&cfg);
+    crate::muse_code::relay(&app, client, Method::GET, &endpoint, query.as_deref(), &headers, Bytes::new()).await
+}
+
+/// Muse Code's web search, to Meta.
+async fn muse_code_send(
+    State(app): State<Arc<App>>,
+    Extension(auth): Extension<ClientAuth>,
+    Path(endpoint): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let cfg = app.cfg();
+    let client = auth.named(&cfg);
+    crate::muse_code::relay(&app, client, Method::POST, &endpoint, query.as_deref(), &headers, body).await
 }
 
 async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Response {

@@ -64,6 +64,7 @@ curl http://127.0.0.1:8317/v1/messages \
 | `POST /v1/completions` | Legacy OpenAI completions |
 | `POST /v1/embeddings` | OpenAI embeddings, from OpenAI, OpenAI-compatible, Gemini and Vertex keys |
 | `GET /v1/models` · `GET /v1beta/models` | Model lists, model groups included |
+| `GET /muse-code/models` · `GET /muse-code/config` · `POST /muse-code/search` | Muse Code's own catalog, settings and web search, passed to Meta with a Meta account's key |
 | `GET /v1/fusebox/status` | Pool-level quota status for client keys (`?format=line` for one text line) |
 
 Clients authenticate with `Authorization: Bearer`, `x-api-key`, `x-goog-api-key` or `?key=`.
