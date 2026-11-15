@@ -935,9 +935,10 @@ pub(crate) fn protection_refused(provider: Provider, status: u16, message: &str)
 enum Dry {
     /// A refusal only the owner can fix, to give again: status and message.
     Refused(u16, String),
-    /// A rate limit, spent quota or a quota check, until then. With Anthropic's name for
-    /// the limit and its reset when a Claude subscription's limit is what it is.
-    Limit(chrono::DateTime<Utc>, Option<(&'static str, chrono::DateTime<Utc>)>),
+    /// A rate limit, spent quota or a quota check, until then: when an account is really
+    /// back, which is after its pause when its limit resets later. With Anthropic's name
+    /// for the limit when a Claude subscription's limit is what the wait is for.
+    Limit(chrono::DateTime<Utc>, Option<&'static str>),
     /// A stalled upstream, until then: no rate limit, but a short wait worth telling.
     Stalled(chrono::DateTime<Utc>),
     /// Anything else, such as a sign-in or permission pause: not a wait to advertise.
@@ -958,25 +959,28 @@ fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclud
     let (until, a) = paused.iter().min_by_key(|(until, _)| *until).cloned()?;
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
-        None if a.paused_by_limit(model) => Dry::Limit(until, awaited_limit(model, &paused)),
+        None if a.paused_by_limit(model) => {
+            let (back, claim) = awaited_limit(model, &paused).unwrap_or((until, None));
+            Dry::Limit(back, claim)
+        }
         None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
 }
 
-/// The subscription limit a client waits for while these accounts are away from `model`:
-/// that of the account really back first. An account is back when its limit resets, which
-/// can be long after its pause ends, or at the end of its pause when no limit is named
-/// for it. None when the one back first waits for no named limit.
+/// When the first of these accounts is really back for `model`, and the subscription
+/// limit that wait is for, if one is named. An account is back when its limit resets,
+/// which can be long after its pause ends, or at the end of its pause when no limit is
+/// named for it.
 fn awaited_limit(
     model: &str,
     paused: &[(chrono::DateTime<Utc>, Arc<Account>)],
-) -> Option<(&'static str, chrono::DateTime<Utc>)> {
-    let back = paused.iter().map(|(until, a)| {
-        let limit = a.spent_limit(model, *until);
-        (limit.map_or(*until, |(_, resets)| resets), limit)
+) -> Option<(chrono::DateTime<Utc>, Option<&'static str>)> {
+    let back = paused.iter().map(|(until, a)| match a.spent_limit(model, *until) {
+        Some((claim, resets)) => (resets, Some(claim)),
+        None => (*until, None),
     });
-    back.min_by_key(|(at, _)| *at)?.1
+    back.min_by_key(|(at, _)| *at)
 }
 
 /// Whether an account outside `exclude` could take `model` right now.
@@ -1053,20 +1057,18 @@ fn no_account_left(
             );
             (503, with_retry_after(formats::error_body(format, 503, &message), wait.min(ADVERTISED_WAIT_LIMIT)))
         }
-        Some(Dry::Limit(until, limit)) => {
-            let wait = seconds_until(until);
+        Some(Dry::Limit(back, claim)) => {
+            let wait = seconds_until(back);
             if wait <= ADVERTISED_WAIT_LIMIT {
                 (status, with_retry_after(body, wait))
-            } else if let (Format::Claude, Some((claim, resets))) = (format, limit) {
-                (status, with_limit_headers(body, claim, resets))
+            } else if let (Format::Claude, Some(claim)) = (format, claim) {
+                (status, with_limit_headers(body, claim, back))
             } else if matches!(format, Format::Chat | Format::Responses)
                 && body["error"]["type"] != "usage_limit_reached"
             {
                 let message = error_message(&body.to_string());
-                // A named limit's own reset, which can be long after the pause ends.
-                let resets = limit.map_or(until, |(_, resets)| resets);
                 let error = json!({"type": "usage_limit_reached", "code": "usage_limit_reached", "message": message,
-                    "resets_at": resets.timestamp(), "resets_in_seconds": seconds_until(resets)});
+                    "resets_at": back.timestamp(), "resets_in_seconds": wait});
                 (status, json!({ "error": error }))
             } else {
                 (status, body)
@@ -1416,6 +1418,7 @@ fn ends_answer(format: Format, frame: &Frame) -> bool {
         Some(event) => LAST.contains(&event),
         None => match format {
             Format::Chat => frame.data == "[DONE]",
+            // A quote inside the answer's text is escaped, so only the key matches.
             Format::Gemini => frame.data.contains("\"finishReason\""),
             Format::Claude | Format::Responses => {
                 LAST.iter().any(|last| frame.data.contains(last))

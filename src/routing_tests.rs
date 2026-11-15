@@ -1212,12 +1212,18 @@ async fn a_spent_claude_subscription_tells_claude_clients_which_limit_and_its_re
     let (status, headers, _) = ask_claude(&fixture, model).await;
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
     clear();
-    // A wait within a minute stays a Retry-After, which Claude Code sits out by itself.
-    account.rate_limit(model, chrono::Utc::now() + chrono::Duration::seconds(30), "429: limit");
-    account.name_limit(model, account.cooling_until(model).unwrap(), "five_hour", reset);
+    // A limit that resets within a minute stays a Retry-After, which Claude Code sits out
+    // by itself. A pause that short for a limit resetting later is no such wait.
+    let short = chrono::Utc::now() + chrono::Duration::seconds(30);
+    account.rate_limit(model, short, "429: limit");
+    account.name_limit(model, short, "five_hour", short);
     let (status, headers, _) = ask_claude(&fixture, model).await;
     assert_eq!((status, limit(&headers)), (429, (None, None, None)));
     assert!(headers.get("retry-after").is_some());
+    account.name_limit(model, short, "seven_day", reset);
+    let (status, headers, _) = ask_claude(&fixture, model).await;
+    assert_eq!((status, limit(&headers)), (429, told("seven_day", reset)));
+    assert!(headers.get("retry-after").is_none());
     clear();
     // A sign-in pause is no limit, whatever a usage reading says.
     account.cool(None, reset, "401: unauthorized");
@@ -1323,6 +1329,10 @@ async fn a_pool_of_spent_subscriptions_tells_the_reset_of_the_one_back_first() {
     session.rate_limit(model, hour, "429: slow down");
     let (status, headers, _) = ask_claude(&fixture, model).await;
     assert_eq!((status, told(&headers)), (429, (None, None)));
+    // An OpenAI client hears of that account's return, not of the pause ending first.
+    let (status, body, retry_after) = ask(&fixture, None, json!({"model":model,"input":"question"})).await;
+    assert_eq!((status, retry_after), (429, None));
+    assert_eq!(body["error"]["resets_at"], hour.timestamp(), "{body}");
     assert!(fixture.mock.calls.lock().is_empty(), "paused subscriptions are not called");
 }
 
