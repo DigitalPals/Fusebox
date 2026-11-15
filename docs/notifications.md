@@ -4,7 +4,7 @@ The dashboard can be installed as an app and send push notifications when someth
 
 ## What you need
 
-- **HTTPS**, or the dashboard on `localhost`. Browsers only allow service workers and push in a secure context. On a server, use Fusebox's own `tls` setting or a proxy such as `tailscale serve`, nginx or Caddy; see [HTTPS with Tailscale, nginx or Caddy](../README.md#https-with-tailscale-nginx-or-caddy). A self-signed certificate only works on devices that trust it.
+- **HTTPS**, or the dashboard on `localhost`. Browsers only allow service workers and push in a secure context. On a server, use Fusebox's own `tls` setting or a proxy such as `tailscale serve`, nginx or Caddy; see [HTTPS with Tailscale, nginx or Caddy](install.md#https-with-tailscale-nginx-or-caddy). A self-signed certificate only works on devices that trust it.
 - **A `management-key`** whenever a proxy is in front of Fusebox.
 - **On iPhone and iPad** (iOS 16.4 or later), the dashboard added to the Home Screen: in Safari tap **Share**, then **Add to Home Screen**, and open Fusebox from its icon. Safari tabs can't receive push notifications on iOS. The installed app keeps its own storage, so it asks for the management key once.
 - **Elsewhere**, any current Chrome, Edge, Firefox or Safari. Installing is optional on Android and desktops, but the app gets its own window and a fault count on its icon.

@@ -41,7 +41,7 @@ Provider sessions, routing assignments and prompt-cache keys have separate
 lifetimes. Saved routing assignments can survive restart. Session rotation does
 not itself rewrite a caller's `prompt_cache_key` or change derived cache-key
 scope. Cache reuse still depends on the provider, selected account and cache
-lifetime. See [coding sessions and prompt caching](../README.md#coding-sessions-and-prompt-caching).
+lifetime. See [coding sessions and prompt caching](routing.md#coding-sessions-and-prompt-caching).
 
 Routine access/refresh-token rotation keeps the account's sessions, connection
 pools and TLS resumption state. Codex refresh retains the explicitly selected

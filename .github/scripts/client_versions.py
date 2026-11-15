@@ -223,7 +223,7 @@ class Issues:
             reason = "not_planned" if client in pending_ids else "completed"
             self.close(issue, reason, "Superseded by the weekly Client compatibility review. "
                        "Bundled version drift alone does not imply an incompatibility. "
-                       "See README.md → Development → Client compatibility.")
+                       "See docs/development.md → Client compatibility.")
         return action + (f"; retired {len(self.legacy)} legacy version alerts" if self.legacy else "")
 
 
