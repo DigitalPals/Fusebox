@@ -125,11 +125,17 @@ Everything is served from the binary at `/`, with no external requests.
 </tr>
 <tr>
 <td valign="top"><img src="assets/screenshots/requests.png" alt="Live request log with one row expanded to show why the request went to its account"></td>
-<td valign="top"><img src="assets/screenshots/usage.png" alt="Usage page: a week of estimated cost by day and provider, top clients by name and each model's output speed"></td>
+<td valign="top"><img src="assets/screenshots/usage.png" alt="Usage page: a week of estimated cost by day and provider"></td>
 </tr>
 <tr>
 <td valign="top"><b>Requests:</b> every request as it happens. Click one to see why it went to that account, which key sent it and from where.</td>
-<td valign="top"><b>Usage:</b> what your traffic would cost at API list prices, by day, model, account and client, and how fast each model answers.</td>
+<td valign="top"><b>Usage:</b> what your traffic would cost at API list prices, by day, provider, model, account and client.</td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/screenshots/usage-speed.png" alt="Output speed by model: tokens a second and time to first token per model, Codex Fast and Standard apart, and speed by day"></td>
+</tr>
+<tr>
+<td colspan="2"><b>How fast each model answers:</b> output speed and time to first token per model, from the calls Fusebox served, with Codex Fast and Standard apart.</td>
 </tr>
 <tr>
 <td valign="top"><img src="assets/screenshots/clients.png" alt="Config, Clients: the endpoint, a shared key from before waiting to be named, and five clients with their own keys, last use and limits"></td>
