@@ -32,6 +32,8 @@ const REPLY_HEADERS: [HeaderName; 5] =
 /// No catalog or search reply comes near this.
 const MAX_REPLY: usize = 16 << 20;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a client waits at most, however many accounts are asked.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 
 fn error(status: u16, message: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -126,15 +128,28 @@ pub(crate) async fn relay(
     if !ENDPOINTS.iter().any(|(name, allowed)| *name == endpoint && *allowed == method) {
         return error(404, "unknown Muse Code endpoint");
     }
-    // A key limited to other models has no business with a Meta account.
-    let allowed = client
-        .is_none_or(|c| Provider::Meta.builtin_models().iter().any(|model| crate::policy::model_allowed(c, model)));
+    // A key limited to other models has no business with a Meta account. The models are
+    // the ones the Meta accounts list, under the names clients use for them.
+    let allowed = client.is_none_or(|c| {
+        let listed = app.pool.models();
+        c.models.is_empty()
+            || listed.iter().any(|(model, by)| *by == Provider::Meta && crate::policy::model_allowed(c, model))
+    });
     if !allowed {
         return error(403, "this key can't use Muse models");
     }
     let query = forwarded_query(query);
     let path =
         if query.is_empty() { format!("/muse-code/{endpoint}") } else { format!("/muse-code/{endpoint}?{query}") };
+    // One limit for all of it: the CLI waits on its catalog before it starts.
+    match tokio::time::timeout(DEADLINE, ask(app, &method, &path, headers, &body)).await {
+        Ok(response) => response,
+        Err(_) => error(504, "Meta did not answer in time"),
+    }
+}
+
+/// Asks the Meta accounts in turn, until one answers.
+async fn ask(app: &Arc<App>, method: &Method, path: &str, headers: &HeaderMap, body: &Bytes) -> Response {
     let mut last = None;
     for acct in app.pool.all().into_iter().filter(|a| a.provider == Provider::Meta) {
         if acct.state.lock().disabled || acct.held_out() || crate::oauth::ensure_ready(app, &acct).await.is_err() {
@@ -142,7 +157,7 @@ pub(crate) async fn relay(
         }
         let mut renewed = false;
         loop {
-            match send(app, &acct, &method, &path, headers, &body).await {
+            match send(app, &acct, method, path, headers, body).await {
                 // A refused key is minted again once; another account may still answer.
                 Ok(reply) if reply.status == StatusCode::UNAUTHORIZED => {
                     let renew = !renewed && acct.is_oauth();
@@ -367,5 +382,18 @@ mod tests {
         assert_eq!(response.status(), 403);
         assert!(fixture.asked.lock().is_empty());
         assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 200);
+
+        // A Meta model under another name counts by that name, as it does for requests.
+        let mut cfg = (*fixture.app.cfg()).clone();
+        cfg.meta_api_key[0].models =
+            vec![crate::config::ModelAlias { name: "muse-spark-1.3".into(), alias: Some("coding".into()) }];
+        cfg.named_clients.push(client("alias", "coding"));
+        fixture.app.set_config(cfg);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_alias").await.status(), 200);
+        assert_eq!(
+            fixture.get("/muse-code/models", "fbx_muse").await.status(),
+            403,
+            "no Muse model is left by that name"
+        );
     }
 }
