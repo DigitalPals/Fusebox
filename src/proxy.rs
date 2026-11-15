@@ -615,7 +615,8 @@ fn error_reply(format: Format, status: u16, msg: &str) -> Reply {
 
 /// Pulls a human readable message out of an upstream error body.
 pub fn error_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
+    let mut stripped = None;
+    if let Ok(mut v) = serde_json::from_str::<Value>(body) {
         let e = if v["error"].is_object() { &v["error"] } else { &v };
         for k in ["message", "detail", "error_description"] {
             if let Some(m) = e[k].as_str() {
@@ -625,8 +626,13 @@ pub fn error_message(body: &str) -> String {
         if let Some(m) = v["error"].as_str() {
             return m.to_string();
         }
+        // A body shown whole never shows what rides in it for `server::reply`.
+        if let Some(object) = v.as_object_mut().filter(|o| o.keys().any(|k| k.starts_with(PRIVATE_KEYS))) {
+            object.retain(|k, _| !k.starts_with(PRIVATE_KEYS));
+            stripped = Some(v.to_string());
+        }
     }
-    let t = body.trim();
+    let t = stripped.as_deref().unwrap_or(body).trim();
     if t.is_empty() { "upstream error".into() } else { t.chars().take(500).collect() }
 }
 
@@ -832,6 +838,8 @@ fn upstream_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 /// `Reply::Error` has no headers, so a Retry-After rides in the error body under this key
 /// until `server::reply` turns it into the header. No client sees the key.
 const RETRY_AFTER_KEY: &str = "__fusebox_retry_after";
+/// What every such key starts with.
+const PRIVATE_KEYS: &str = "__fusebox_";
 
 fn with_retry_after(mut body: Value, seconds: u64) -> Value {
     if let Some(object) = body.as_object_mut() {
@@ -872,8 +880,13 @@ fn with_limit_headers(mut body: Value, claim: &str, resets: chrono::DateTime<Utc
 }
 
 /// The subscription limit a Claude refusal names as the one it enforces, by Anthropic's
-/// name for it. Paid overage is none: its reset is the billing month's, which pauses nothing.
-fn claimed_limit(acct: &Account, headers: &reqwest::header::HeaderMap) -> Option<&'static str> {
+/// name for it, and when Anthropic says it resets. A pause can end sooner (a Retry-After
+/// counts for six hours at most), so the reset is kept apart from it. Paid overage is no
+/// such limit: its reset is the billing month's, which pauses nothing.
+fn claimed_limit(
+    acct: &Account,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<(&'static str, chrono::DateTime<Utc>)> {
     if acct.provider != Provider::Claude || !acct.is_oauth() {
         return None;
     }
@@ -881,10 +894,13 @@ fn claimed_limit(acct: &Account, headers: &reqwest::header::HeaderMap) -> Option
     if h("anthropic-ratelimit-unified-status") != Some("rejected") {
         return None;
     }
-    let claim = h("anthropic-ratelimit-unified-representative-claim")?;
-    ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included"]
+    let named = h("anthropic-ratelimit-unified-representative-claim")?;
+    let claim = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included"]
         .into_iter()
-        .find(|known| claim.eq_ignore_ascii_case(known))
+        .find(|known| named.eq_ignore_ascii_case(known))?;
+    let resets = h("anthropic-ratelimit-unified-reset")?.parse::<i64>().ok()?;
+    let resets = chrono::DateTime::from_timestamp(resets, 0).filter(|at| *at > Utc::now())?;
+    Some((claim, resets))
 }
 
 /// Takes the limit headers an error reply carries out of its body.
@@ -919,8 +935,9 @@ pub(crate) fn protection_refused(provider: Provider, status: u16, message: &str)
 enum Dry {
     /// A refusal only the owner can fix, to give again: status and message.
     Refused(u16, String),
-    /// A rate limit, spent quota or a quota check, until then. With Anthropic's name for
-    /// the limit when a Claude subscription's spent quota is what it is.
+    /// A rate limit, spent quota or a quota check, until then: when an account is really
+    /// back, which is after its pause when its limit resets later. With Anthropic's name
+    /// for the limit when a Claude subscription's limit is what the wait is for.
     Limit(chrono::DateTime<Utc>, Option<&'static str>),
     /// A stalled upstream, until then: no rate limit, but a short wait worth telling.
     Stalled(chrono::DateTime<Utc>),
@@ -930,25 +947,40 @@ enum Dry {
 
 /// None when an account for `model` is free: the request used up its own choices.
 fn dry_pool(app: &App, model: &str, only: Option<&crate::accounts::Only>, exclude: &[String]) -> Option<Dry> {
-    let mut next: Option<(chrono::DateTime<Utc>, Arc<Account>)> = None;
+    let mut paused: Vec<(chrono::DateTime<Utc>, Arc<Account>)> = Vec::new();
     for a in app.pool.all() {
         let disabled = a.state.lock().disabled;
         // As at selection: a held account is out until a sign-in, not back at some time.
         if exclude.contains(&a.id) || disabled || a.held_out() || app.pool.resolve_account(&a, model, only).is_none() {
             continue;
         }
-        let until = a.cooling_until(model)?;
-        if next.as_ref().is_none_or(|(t, _)| until < *t) {
-            next = Some((until, a));
-        }
+        paused.push((a.cooling_until(model)?, a));
     }
-    let (until, a) = next?;
+    let (until, a) = paused.iter().min_by_key(|(until, _)| *until).cloned()?;
     Some(match a.refusal() {
         Some((status, message)) => Dry::Refused(status, message),
-        None if a.paused_by_limit(model) => Dry::Limit(until, a.spent_claim(model, until)),
+        None if a.paused_by_limit(model) => {
+            let (back, claim) = awaited_limit(model, &paused).unwrap_or((until, None));
+            Dry::Limit(back, claim)
+        }
         None if a.paused_by_stall(model) => Dry::Stalled(until),
         None => Dry::Other,
     })
+}
+
+/// When the first of these accounts is really back for `model`, and the subscription
+/// limit that wait is for, if one is named. An account is back when its limit resets,
+/// which can be long after its pause ends, or at the end of its pause when no limit is
+/// named for it.
+fn awaited_limit(
+    model: &str,
+    paused: &[(chrono::DateTime<Utc>, Arc<Account>)],
+) -> Option<(chrono::DateTime<Utc>, Option<&'static str>)> {
+    let back = paused.iter().map(|(until, a)| match a.spent_limit(model, *until) {
+        Some((claim, resets)) => (resets, Some(claim)),
+        None => (*until, None),
+    });
+    back.min_by_key(|(at, _)| *at)
 }
 
 /// Whether an account outside `exclude` could take `model` right now.
@@ -1025,18 +1057,18 @@ fn no_account_left(
             );
             (503, with_retry_after(formats::error_body(format, 503, &message), wait.min(ADVERTISED_WAIT_LIMIT)))
         }
-        Some(Dry::Limit(until, claim)) => {
-            let wait = seconds_until(until);
+        Some(Dry::Limit(back, claim)) => {
+            let wait = seconds_until(back);
             if wait <= ADVERTISED_WAIT_LIMIT {
                 (status, with_retry_after(body, wait))
             } else if let (Format::Claude, Some(claim)) = (format, claim) {
-                (status, with_limit_headers(body, claim, until))
+                (status, with_limit_headers(body, claim, back))
             } else if matches!(format, Format::Chat | Format::Responses)
                 && body["error"]["type"] != "usage_limit_reached"
             {
                 let message = error_message(&body.to_string());
                 let error = json!({"type": "usage_limit_reached", "code": "usage_limit_reached", "message": message,
-                    "resets_at": until.timestamp(), "resets_in_seconds": wait});
+                    "resets_at": back.timestamp(), "resets_in_seconds": wait});
                 (status, json!({ "error": error }))
             } else {
                 (status, body)
@@ -1309,7 +1341,7 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
             capture.as_ref().map(|_| crate::affinity::input_items(&call.body)).unwrap_or_default(),
         )
     });
-    let cutoff = app.cutoff.clone();
+    let (cutoff, format) = (app.cutoff.clone(), call.format);
     let reply = match execute_models(app.clone(), call).await {
         Reply::Stream { mut frames, account } if lease.is_some() => {
             let frames = Box::pin(async_stream::stream! {
@@ -1342,19 +1374,71 @@ pub async fn execute(app: Arc<App>, mut call: Call) -> Reply {
         }
         other => other,
     };
-    ending_at(cutoff, reply)
+    ending_at(cutoff, format, reply)
 }
 
 /// A streamed answer ends when `cutoff` fires, at the end of the time requests get to
 /// finish at shutdown. Its tracker then records what was used so far, in time for the
 /// usage database's last save; left open, the stream would die with the process, unrecorded.
-fn ending_at(cutoff: tokio_util::sync::CancellationToken, reply: Reply) -> Reply {
-    match reply {
-        Reply::Stream { frames, account } => {
-            Reply::Stream { frames: Box::pin(frames.take_until(cutoff.cancelled_owned())), account }
+/// The client is told with an error event, so a cut answer is not taken for a whole one;
+/// an answer that already ended, with only its connection still open, gets none.
+fn ending_at(cutoff: tokio_util::sync::CancellationToken, format: Format, reply: Reply) -> Reply {
+    let Reply::Stream { mut frames, account } = reply else { return reply };
+    let frames = Box::pin(async_stream::stream! {
+        let mut ended = false;
+        let cut = loop {
+            let frame = tokio::select! {
+                biased;
+                _ = cutoff.cancelled() => break true,
+                frame = frames.next() => frame,
+            };
+            match frame {
+                Some(frame) => {
+                    ended |= ends_answer(format, &frame);
+                    yield frame;
+                }
+                None => break false,
+            }
+        };
+        // Recorded before the client hears of it.
+        drop(frames);
+        if cut && !ended {
+            yield stopped_frame(format);
         }
-        other => other,
+    });
+    Reply::Stream { frames, account }
+}
+
+/// Whether this frame is the last word on an answer: its end, or an error. An event with
+/// no name says what it is in its `type`; it is parsed only when it mentions an ending.
+fn ends_answer(format: Format, frame: &Frame) -> bool {
+    const LAST: [&str; 6] =
+        ["message_stop", "response.completed", "response.incomplete", "response.failed", "response.done", "error"];
+    match frame.event.as_deref() {
+        Some(event) => LAST.contains(&event),
+        None => match format {
+            Format::Chat => frame.data == "[DONE]",
+            // A quote inside the answer's text is escaped, so only the key matches.
+            Format::Gemini => frame.data.contains("\"finishReason\""),
+            Format::Claude | Format::Responses => {
+                LAST.iter().any(|last| frame.data.contains(last))
+                    && serde_json::from_str::<Value>(&frame.data)
+                        .is_ok_and(|event| event["type"].as_str().is_some_and(|kind| LAST.contains(&kind)))
+            }
+        },
     }
+}
+
+/// The error event that ends an answer cut at shutdown. Codex reads an error's `code`
+/// only as a string, and drops the whole event otherwise.
+fn stopped_frame(format: Format) -> Frame {
+    let mut body = formats::error_body(format, 503, STOPPED);
+    if format == Format::Responses {
+        body["type"] = "error".into();
+        body["status"] = 503.into();
+        body["error"]["code"] = formats::responses::error_code(503).into();
+    }
+    Frame::named("error", body.to_string())
 }
 
 /// Builds a Responses turn's continuation history from the frames sent to the client.
@@ -2286,6 +2370,11 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             if quota_exhausted(&acct, &model, status, &text) {
                 mark_quota_exhausted(&acct, &model, &headers, &text);
+                if let (Some((claim, resets)), Some(until)) =
+                    (claimed_limit(&acct, &headers), acct.cooling_until(&model))
+                {
+                    acct.name_limit(&model, until, claim, resets);
+                }
                 app.broadcast("accounts", Value::Null);
                 tried.push(acct.id.clone());
                 last_error = Some((status, client_body));
@@ -2352,8 +2441,8 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     // Quota exhaustion was handled above; this is a rate limit.
                     let until = reset_after(&headers, &text).unwrap_or_else(|| backoff(&acct));
                     acct.rate_limit(&model, until, &format!("429: {msg}"));
-                    if let Some(claim) = claimed_limit(&acct, &headers) {
-                        acct.name_limit(&model, until, claim);
+                    if let Some((claim, resets)) = claimed_limit(&acct, &headers) {
+                        acct.name_limit(&model, until, claim, resets);
                     }
                     app.broadcast("accounts", Value::Null);
                 }
@@ -3282,6 +3371,67 @@ pub fn estimate_tokens(body: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a stream cut at shutdown ends with, after these frames.
+    async fn cut_after(format: Format, sent: Vec<Frame>) -> Vec<Frame> {
+        let cutoff = tokio_util::sync::CancellationToken::new();
+        let frames: FrameStream = Box::pin(futures::stream::iter(sent).chain(futures::stream::pending()));
+        let Reply::Stream { mut frames, .. } =
+            ending_at(cutoff.clone(), format, Reply::Stream { frames, account: "a".into() })
+        else {
+            unreachable!()
+        };
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), frames.next()).await {
+                Ok(Some(frame)) => seen.push(frame),
+                Ok(None) => return seen,
+                // Everything sent has arrived and the answer hangs: the time to finish runs out.
+                Err(_) => cutoff.cancel(),
+            }
+        }
+    }
+
+    /// An answer cut at shutdown ends with an error event its client can read, so it isn't
+    /// taken for a whole one. An answer that had already ended, or failed, gets none: only
+    /// its connection was still open.
+    #[tokio::test]
+    async fn a_cut_answer_ends_with_an_error_unless_it_had_ended() {
+        let delta = || Frame::named("content_block_delta", r#"{"type":"content_block_delta"}"#);
+        let cut = cut_after(Format::Claude, vec![delta()]).await;
+        let last: Value = serde_json::from_str(&cut[1].data).unwrap();
+        assert_eq!((cut.len(), cut[1].event.as_deref()), (2, Some("error")));
+        assert_eq!((&last["type"], &last["error"]["message"]), (&json!("error"), &json!(STOPPED)));
+
+        // Codex reads an error's code only as a string, and drops the event otherwise.
+        let cut = cut_after(Format::Responses, vec![Frame::named("response.created", "{}")]).await;
+        let last: Value = serde_json::from_str(&cut[1].data).unwrap();
+        assert_eq!((&last["type"], &last["status"]), (&json!("error"), &json!(503)));
+        assert_eq!(last["error"]["code"], "server_is_overloaded");
+
+        for (format, end) in [
+            (Format::Claude, Frame::named("message_stop", r#"{"type":"message_stop"}"#)),
+            (Format::Claude, Frame::data(r#"{"type":"message_stop"}"#)),
+            (Format::Claude, Frame::named("error", r#"{"type":"error","error":{"message":"overloaded"}}"#)),
+            (Format::Responses, Frame::named("response.completed", r#"{"type":"response.completed"}"#)),
+            (Format::Responses, Frame::data(r#"{"type":"response.failed","response":{}}"#)),
+            (Format::Responses, Frame::named("response.done", r#"{"type":"response.done"}"#)),
+            (Format::Responses, Frame::data(r#"{"response": {"status":"completed"}, "type": "response.completed"}"#)),
+            (Format::Claude, Frame::data(r#"{ "type" : "message_stop" }"#)),
+            (Format::Chat, Frame::data("[DONE]")),
+            (Format::Gemini, Frame::data(r#"{"candidates":[{"finishReason":"STOP"}]}"#)),
+        ] {
+            let cut = cut_after(format, vec![delta(), end]).await;
+            assert_eq!(cut.len(), 2, "{format:?}: {:?}", cut.last().map(|frame| &frame.data));
+        }
+        // An event that only mentions an ending is not one.
+        for mention in
+            [r#"{"type":"response.completed_part"}"#, r#"{"type":"response.output_text.delta","delta":"error"}"#]
+        {
+            let cut = cut_after(Format::Responses, vec![Frame::data(mention)]).await;
+            assert_eq!((cut.len(), cut[1].event.as_deref()), (2, Some("error")), "{mention}");
+        }
+    }
 
     fn upstream_headers(pairs: &[(&'static str, String)]) -> reqwest::header::HeaderMap {
         pairs

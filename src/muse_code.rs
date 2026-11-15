@@ -32,6 +32,8 @@ const REPLY_HEADERS: [HeaderName; 5] =
 /// No catalog or search reply comes near this.
 const MAX_REPLY: usize = 16 << 20;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a client waits at most, however many accounts are asked.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 
 fn error(status: u16, message: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -126,15 +128,50 @@ pub(crate) async fn relay(
     if !ENDPOINTS.iter().any(|(name, allowed)| *name == endpoint && *allowed == method) {
         return error(404, "unknown Muse Code endpoint");
     }
-    // A key limited to other models has no business with a Meta account.
-    let allowed = client
-        .is_none_or(|c| Provider::Meta.builtin_models().iter().any(|model| crate::policy::model_allowed(c, model)));
-    if !allowed {
+    if !client.is_none_or(|c| c.models.is_empty() || may_use_meta(app, c)) {
         return error(403, "this key can't use Muse models");
     }
     let query = forwarded_query(query);
     let path =
         if query.is_empty() { format!("/muse-code/{endpoint}") } else { format!("/muse-code/{endpoint}?{query}") };
+    // One limit for all of it: the CLI waits on its catalog before it starts.
+    match tokio::time::timeout(DEADLINE, ask(app, &method, &path, headers, &body)).await {
+        Ok(response) => response,
+        Err(_) => error(504, "Meta did not answer in time"),
+    }
+}
+
+/// Whether a client with a model allowlist may use a model that a Meta account serves: a
+/// key limited to other models has no business with one. A model counts by a name the
+/// client may use that is routed to a Meta account, as its requests are: the account's
+/// own name for it, with the account's prefix or `meta/` in front, or a model group
+/// holding it. Another provider's model by the same name doesn't hide it, and a name
+/// that a forced prefix keeps from routing there doesn't count.
+fn may_use_meta(app: &App, client: &NamedClient) -> bool {
+    let accounts: Vec<_> =
+        app.pool.all().into_iter().filter(|a| a.provider == Provider::Meta && !a.state.lock().disabled).collect();
+    let reaches_meta = |name: &str| {
+        let (only, model) = app.pool.route(name);
+        accounts.iter().any(|a| app.pool.resolve_account(a, &model, only.as_ref()).is_some())
+    };
+    let usable = |name: &str| crate::policy::model_allowed(client, name) && reaches_meta(name);
+    let by_name = accounts.iter().any(|a| {
+        a.public_models().iter().any(|model| {
+            let prefixed = a.prefix.as_ref().map(|prefix| format!("{prefix}/{model}"));
+            usable(model)
+                || prefixed.is_some_and(|name| usable(&name))
+                || usable(&format!("{}/{model}", Provider::Meta.as_str()))
+        })
+    });
+    by_name
+        || app.cfg().model_groups.iter().any(|(group, members)| {
+            crate::policy::model_allowed(client, group)
+                && members.models.iter().any(|member| reaches_meta(&crate::ir::split_model_suffix(member).0))
+        })
+}
+
+/// Asks the Meta accounts in turn, until one answers.
+async fn ask(app: &Arc<App>, method: &Method, path: &str, headers: &HeaderMap, body: &Bytes) -> Response {
     let mut last = None;
     for acct in app.pool.all().into_iter().filter(|a| a.provider == Provider::Meta) {
         if acct.state.lock().disabled || acct.held_out() || crate::oauth::ensure_ready(app, &acct).await.is_err() {
@@ -142,7 +179,7 @@ pub(crate) async fn relay(
         }
         let mut renewed = false;
         loop {
-            match send(app, &acct, &method, &path, headers, &body).await {
+            match send(app, &acct, method, path, headers, body).await {
                 // A refused key is minted again once; another account may still answer.
                 Ok(reply) if reply.status == StatusCode::UNAUTHORIZED => {
                     let renew = !renewed && acct.is_oauth();
@@ -367,5 +404,42 @@ mod tests {
         assert_eq!(response.status(), 403);
         assert!(fixture.asked.lock().is_empty());
         assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 200);
+
+        // A Meta model under another name counts by that name, as it does for requests.
+        let mut cfg = (*fixture.app.cfg()).clone();
+        cfg.meta_api_key[0].models =
+            vec![crate::config::ModelAlias { name: "muse-spark-1.3".into(), alias: Some("coding".into()) }];
+        cfg.named_clients.push(client("alias", "coding"));
+        // Another provider's model by the same name doesn't hide it.
+        cfg.claude_api_key = vec![KeyEntry {
+            api_key: "claude-key".into(),
+            models: vec![crate::config::ModelAlias { name: "claude-sonnet-5-5".into(), alias: Some("coding".into()) }],
+            ..Default::default()
+        }];
+        fixture.app.set_config(cfg.clone());
+        let listed = fixture.app.pool.models();
+        assert!(listed.contains(&("coding".to_string(), Provider::Claude)), "{listed:?}");
+        assert_eq!(fixture.get("/muse-code/models", "fbx_alias").await.status(), 200);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 403, "no Muse model by that name");
+        // A group holding a Meta model counts by the group's name.
+        cfg.model_groups
+            .insert("team".into(), crate::config::ModelGroup { models: vec!["coding".into()], balance: false });
+        cfg.named_clients.push(client("group", "team"));
+        cfg.named_clients.push(client("provider", "meta/muse-spark-1.3"));
+        cfg.named_clients.push(client("prefix", "lab/*"));
+        fixture.app.set_config(cfg.clone());
+        assert_eq!(fixture.get("/muse-code/models", "fbx_group").await.status(), 200);
+
+        // The provider's name in front counts, as it routes requests.
+        cfg.meta_api_key[0].models.clear();
+        fixture.app.set_config(cfg.clone());
+        assert_eq!(fixture.get("/muse-code/models", "fbx_provider").await.status(), 200);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 200);
+        // With prefixes forced, a prefixed account serves only its prefixed names.
+        cfg.meta_api_key[0].prefix = Some("lab".into());
+        cfg.force_model_prefix = true;
+        fixture.app.set_config(cfg);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_prefix").await.status(), 200);
+        assert_eq!(fixture.get("/muse-code/models", "fbx_muse").await.status(), 403, "no bare name routes there");
     }
 }
