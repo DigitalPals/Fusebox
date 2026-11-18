@@ -478,8 +478,10 @@ impl Tracker {
         // The usage database times the call from this start; the request log keeps
         // the first content a client saw.
         let speed_start = self.speed_start(status, if self.log.chunks > 0 { &self.stream_usage } else { usage });
+        // Read once: the usage record and the request log keep the same total.
+        let latency_ms = self.started.elapsed().as_millis() as u64;
         if let Some(c) = self.usage_tap() {
-            c.metadata("request_latency_ms", self.started.elapsed().as_millis() as u64);
+            c.metadata("request_latency_ms", latency_ms);
             if let Some(start) = speed_start {
                 c.metadata("request_ttft_ms", start);
             }
@@ -519,7 +521,7 @@ impl Tracker {
         let usage = if self.log.chunks > 0 { &self.stream_usage } else { usage };
         let (input, output, cache) = crate::state::usage_tokens(usage);
         self.log.status = status;
-        self.log.latency_ms = self.started.elapsed().as_millis() as u64;
+        self.log.latency_ms = latency_ms;
         self.log.input_tokens = input;
         self.log.output_tokens = output;
         self.log.cache_tokens = cache;
