@@ -1,7 +1,175 @@
 {
-  "version": "2026-11-15.1",
+  "version": "2026-11-18.1",
   "verified_at": "2026-10-18",
   "rates": [
+    {
+      "provider": "openai",
+      "models": [
+        "gpt-6.2-astra"
+      ],
+      "effective_from": null,
+      "effective_until": "2027-03-01",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 8000,
+      "cache_read_nanos_per_token": 400,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 40000,
+      "cache_write_nanos_per_token": null,
+      "threshold_input_tokens": 272000,
+      "above_threshold_input_nanos_per_token": 16000,
+      "above_threshold_read_nanos_per_token": 800,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_output_nanos_per_token": 60000,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ],
+        "ultrafast": [
+          3,
+          1
+        ]
+      },
+      "cache_write_30m_nanos_per_token": 10000,
+      "cache_write_12h_nanos_per_token": 20000,
+      "above_threshold_write_30m_nanos_per_token": 20000,
+      "above_threshold_write_12h_nanos_per_token": 40000
+    },
+    {
+      "provider": "openai",
+      "models": [
+        "gpt-6.2-astra"
+      ],
+      "effective_from": "2027-03-01",
+      "effective_until": null,
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 8000,
+      "cache_read_nanos_per_token": 400,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 40000,
+      "cache_write_nanos_per_token": null,
+      "threshold_input_tokens": 272000,
+      "above_threshold_input_nanos_per_token": 16000,
+      "above_threshold_read_nanos_per_token": 800,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_output_nanos_per_token": 60000,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ],
+        "ultrafast": [
+          6,
+          1
+        ]
+      },
+      "cache_write_30m_nanos_per_token": 10000,
+      "cache_write_12h_nanos_per_token": 20000,
+      "above_threshold_write_30m_nanos_per_token": 20000,
+      "above_threshold_write_12h_nanos_per_token": 40000
+    },
+    {
+      "provider": "openai",
+      "models": [
+        "gpt-6.2-sol"
+      ],
+      "effective_from": null,
+      "effective_until": "2027-03-01",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 100,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 10000,
+      "cache_write_nanos_per_token": null,
+      "threshold_input_tokens": 272000,
+      "above_threshold_input_nanos_per_token": 4000,
+      "above_threshold_read_nanos_per_token": 200,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_output_nanos_per_token": 15000,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ],
+        "ultrafast": [
+          3,
+          1
+        ]
+      },
+      "cache_write_30m_nanos_per_token": 2500,
+      "cache_write_12h_nanos_per_token": 5000,
+      "above_threshold_write_30m_nanos_per_token": 5000,
+      "above_threshold_write_12h_nanos_per_token": 10000
+    },
+    {
+      "provider": "openai",
+      "models": [
+        "gpt-6.2-sol"
+      ],
+      "effective_from": "2027-03-01",
+      "effective_until": null,
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 100,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 10000,
+      "cache_write_nanos_per_token": null,
+      "threshold_input_tokens": 272000,
+      "above_threshold_input_nanos_per_token": 4000,
+      "above_threshold_read_nanos_per_token": 200,
+      "above_threshold_write_nanos_per_token": null,
+      "above_threshold_output_nanos_per_token": 15000,
+      "tier_multipliers": {
+        "batch": [
+          1,
+          2
+        ],
+        "fast": [
+          2,
+          1
+        ],
+        "priority": [
+          2,
+          1
+        ],
+        "ultrafast": [
+          6,
+          1
+        ]
+      },
+      "cache_write_30m_nanos_per_token": 2500,
+      "cache_write_12h_nanos_per_token": 5000,
+      "above_threshold_write_30m_nanos_per_token": 5000,
+      "above_threshold_write_12h_nanos_per_token": 10000
+    },
     {
       "provider": "openai",
       "models": [

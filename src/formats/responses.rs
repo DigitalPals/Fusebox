@@ -386,16 +386,19 @@ pub fn build_request(req: &Request, model: &str, opts: &BuildOpts) -> Value {
     out
 }
 
-/// Keep supported max reasoning intact and map disabled reasoning to Meta's
-/// shortest supported pass. Shared with native Meta Responses requests.
+/// Keep supported max reasoning intact and map disabled reasoning to the
+/// model's shortest supported pass. Shared with native Meta Responses requests.
 pub fn normalize_reasoning_effort<'a>(effort: &'a str, model: &str) -> &'a str {
     let supports_max = model.starts_with("gpt-5.6")
         || model.starts_with("gpt-6")
         || model.starts_with("muse-wonder-")
         || model.starts_with("muse-ember-")
         || model == "muse-spark-1.3";
+    // These take low to max only; OpenAI rejects `none` for them.
+    let low_floor = matches!(model, "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.2-astra" | "gpt-6.2-sol");
     match effort {
         "none" if model.starts_with("muse-") => "minimal",
+        "none" | "minimal" if low_floor => "low",
         "max" if !supports_max => "xhigh",
         _ => effort,
     }
