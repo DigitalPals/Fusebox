@@ -57,9 +57,10 @@ fn failed_covering_build_restores_the_old_index_and_journal() {
     conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
         AuthAction::CreateIndex { index_name: "usage_event_time", .. } => Authorization::Deny,
         _ => Authorization::Allow,
-    }));
+    }))
+    .unwrap();
     assert!(upgrade_dashboard_index(&mut conn).is_err());
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
     assert_eq!(columns(&conn), ["event_at_ms"]);
     let payload: String = conn
         .query_row("SELECT payload FROM usage_observations INDEXED BY usage_event_time", [], |row| row.get(0))

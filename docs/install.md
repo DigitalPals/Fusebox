@@ -4,7 +4,7 @@ The [README](../README.md#install) has a prompt that lets an AI agent do this fo
 
 ## Get it and start it
 
-**1. Get the binary.** Download it for macOS, Linux or Windows from [Releases](https://github.com/DigitalPals/Fusebox/releases/latest). The Linux builds need glibc 2.36 or newer (Debian 12, Ubuntu 24.04 or later), and `gh attestation verify <archive> -R DigitalPals/Fusebox` confirms a download was built here. Or build it with Rust 1.88 or newer:
+**1. Get the binary.** Download it for macOS, Linux or Windows from [Releases](https://github.com/DigitalPals/Fusebox/releases/latest). The Linux builds need glibc 2.36 or newer (Debian 12, Ubuntu 24.04 or later), and `gh attestation verify <archive> -R DigitalPals/Fusebox` confirms a download was built here. Or build it with Rust 1.89 or newer:
 
 ```sh
 cargo install --git https://github.com/DigitalPals/Fusebox

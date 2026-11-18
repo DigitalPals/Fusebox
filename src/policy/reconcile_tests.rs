@@ -215,9 +215,10 @@ async fn snapshot_does_not_lock_admission_or_record_and_preserves_racing_pending
                         }
                         false
                     }),
-                );
+                )
+                .unwrap();
                 let result = writer.reconcile(c);
-                c.progress_handler(0, None::<fn() -> bool>);
+                c.progress_handler(0, None::<fn() -> bool>).unwrap();
                 result
             })
             .await
@@ -274,9 +275,10 @@ async fn acknowledgment_sql_holds_no_request_lock_and_keeps_later_completions() 
                         wait.recv_timeout(Duration::from_secs(5)).unwrap();
                     }
                     Authorization::Allow
-                }));
+                }))
+                .unwrap();
                 let result = writer.reconcile(conn);
-                conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
                 result
             })
             .await
@@ -452,7 +454,7 @@ async fn incomplete_accounting_only_gates_the_affected_budget() {
     let path = db.dir.join("test.sqlite3");
     tokio::task::spawn_blocking(move || {
         let c = rusqlite::Connection::open(path).unwrap();
-        crate::usage::store::register_functions(&c).unwrap();
+        crate::usage::store::configure_connection(&c).unwrap();
         c.execute("UPDATE usage_observations SET cost_nanos=456 WHERE client_id='unpriced'", []).unwrap();
     })
     .await

@@ -60,14 +60,23 @@ fn document_fixture() -> (Connection, Vec<SqlValue>, String) {
 
 #[test]
 fn batch_decoder_reuses_identity_and_handles_mixed_dictionaries_and_corruption() {
-    let (conn, values, text) = document_fixture();
+    let (mut conn, values, text) = document_fixture();
+    // The authorizer needs the connection exclusively, so it is installed before the
+    // decoder borrows it and starts denying once the decoder is bound. The decoder
+    // prepares its identity query afresh each time, so the authorizer sees any later one.
+    let deny = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let denying = deny.clone();
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Read { table_name: "usage_meta", .. } if denying.load(std::sync::atomic::Ordering::Relaxed) => {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
     let mut decoder = codec::Decoder::new(&conn);
     assert_eq!(decoder.decode((&values[0]).into()).unwrap(), text);
     // Once bound, even switching dictionaries must not query database identity.
-    conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-        AuthAction::Read { table_name: "usage_meta", .. } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }));
+    deny.store(true, std::sync::atomic::Ordering::Relaxed);
     for value in [&values[0], &values[1], &values[0], &SqlValue::Text(text.clone())] {
         assert_eq!(decoder.decode(value.into()).unwrap(), text);
     }

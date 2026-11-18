@@ -357,6 +357,34 @@ async fn ingestion_metadata_only_and_price_snapshot_immutable() {
     invalid["prompt"] = json!("must never persist");
     assert!(serde_json::from_value::<Observation>(invalid).is_err());
 }
+/// SQLite 3.51+ prepares a cached statement again whenever a newly bound value could
+/// change its plan, unless plans are fixed per statement. The rebuild of an entry runs
+/// for every new record, so it must be prepared once, not once per run.
+#[tokio::test]
+async fn inserting_records_does_not_prepare_the_entry_rebuild_again() {
+    let p = path("reprepare");
+    let store = Store::open(&p, 1024, 90, None).unwrap();
+    let events = (0..200)
+        .map(|i| {
+            let mut o = event("proxy", &i.to_string());
+            o.logical_request_id = Some(format!("request-{i}"));
+            o
+        })
+        .collect::<Vec<_>>();
+    store.call(move |c| insert_batch(c, &events)).await.unwrap();
+    let counts = store
+        .call(|c| {
+            let statement = c.prepare_cached(&entry_rebuild_sql())?;
+            Ok((
+                statement.get_status(rusqlite::StatementStatus::Run),
+                statement.get_status(rusqlite::StatementStatus::RePrepare),
+            ))
+        })
+        .await
+        .unwrap();
+    assert!(counts.0 >= 200, "the cached rebuild ran for each record: {counts:?}");
+    assert_eq!(counts.1, 0, "prepared again on new values: {counts:?}");
+}
 #[tokio::test]
 async fn generated_history_measurement() {
     let p = path("performance");
