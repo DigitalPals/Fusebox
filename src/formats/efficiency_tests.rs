@@ -136,11 +136,46 @@ fn responses_preserves_max_on_documented_gpt_families() {
         ..Default::default()
     };
     let opts = responses::BuildOpts { chatgpt_backend: false, custom_tools: true, default_reasoning: false };
-    for model in ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra"] {
+    for model in [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-terra",
+    ] {
         assert_eq!(responses::build_request(&req, model, &opts)["reasoning"]["effort"], "max");
     }
     assert_eq!(responses::build_request(&req, "gpt-5.5", &opts)["reasoning"]["effort"], "xhigh");
     assert_eq!(responses::build_request(&req, "grok-4.7", &opts)["reasoning"]["effort"], "xhigh");
+}
+
+/// GPT-6.2 Astra and Sol, GPT-6.1 Sol and GPT-6 Astra take low to max: OpenAI
+/// rejects `none`, so turned-off thinking asks for the shortest pass instead.
+#[test]
+fn responses_sends_low_for_gpt_models_without_a_none_effort() {
+    let opts = responses::BuildOpts { chatgpt_backend: true, custom_tools: true, default_reasoning: false };
+    let effort = |effort: &str, model: &str| {
+        let req = Request {
+            reasoning: Some(Reasoning {
+                effort: Some(effort.into()),
+                disabled: effort == "none",
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        responses::build_request(&req, model, &opts)["reasoning"]["effort"].clone()
+    };
+    for model in ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-astra"] {
+        assert_eq!(effort("none", model), "low", "{model}");
+        assert_eq!(effort("minimal", model), "low", "{model}");
+        assert_eq!(effort("medium", model), "medium", "{model}");
+    }
+    for model in ["gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"] {
+        assert_eq!(effort("none", model), "none", "{model}");
+    }
 }
 
 #[test]

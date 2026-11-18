@@ -207,6 +207,8 @@ impl Provider {
                 "claude-haiku-4-5-20251001",
             ],
             Provider::Codex => &[
+                "gpt-6.2-astra",
+                "gpt-6.2-sol",
                 "gpt-6-astra",
                 "gpt-6.1-sol",
                 "gpt-6.1-terra",
@@ -3113,6 +3115,8 @@ oauth-model-alias:
         pool.reload(&cfg);
         assert_eq!(pool.canonical("gpt-6-1-sol", None), "gpt-6.1-sol");
         assert_eq!(pool.canonical("gpt-6-1-terra", None), "gpt-6.1-terra");
+        assert_eq!(pool.canonical("gpt-6-2-sol", None), "gpt-6.2-sol");
+        assert_eq!(pool.canonical("openai/gpt-6-2-astra", None), "gpt-6.2-astra");
         assert_eq!(pool.canonical("openai/gpt-6-astra", None), "gpt-6-astra");
         assert_eq!(pool.canonical("nothing-like-it", None), "nothing-like-it");
     }
@@ -3152,6 +3156,8 @@ oauth-model-alias:
     fn new_provider_models_keep_aggregator_variants_on_their_provider() {
         for (provider, model) in [
             (Provider::Codex, "gpt-6.1-terra"),
+            (Provider::Codex, "gpt-6.2-astra"),
+            (Provider::Codex, "gpt-6.2-sol"),
             (Provider::Codex, "gpt-image-2.5-sunburst"),
             (Provider::Codex, "gpt-image-2.5-flare"),
             (Provider::Claude, "claude-haiku-5-5"),

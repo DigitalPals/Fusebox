@@ -951,6 +951,44 @@ mod tier_tests {
         );
     }
     #[test]
+    fn gpt_6_2_prices_and_ultrafast_triples_until_march_2027_then_goes_to_six_times() {
+        // 1,000 input, 200 cache reads, 100 thirty-minute writes, 100 output.
+        let provider = Catalogue::provider_fixture();
+        let t3 = Catalogue::load(None).unwrap();
+        for (model, input, read, write, output) in
+            [("gpt-6.2-astra", 8000, 400, 10_000, 40_000), ("gpt-6.2-sol", 2000, 100, 2500, 10_000)]
+        {
+            let standard = 1000 * input + 200 * read + 100 * write + 100 * output;
+            let mut o = event("openai", model);
+            for (tier, cost) in [("standard", standard), ("batch", standard / 2), ("fast", standard * 2)] {
+                o.service_tier = Some(tier.into());
+                assert_eq!(provider.price(&o).cost_nanos, Some(cost), "{model} {tier}");
+            }
+            // Flex is not offered for GPT-6.2.
+            o.service_tier = Some("flex".into());
+            assert_eq!(provider.price(&o).basis, "unsupported_service_tier", "{model}");
+            o.service_tier = Some("ultrafast".into());
+            for (day, times) in [("2026-11-18", 3), ("2027-02-28", 3), ("2027-03-01", 6)] {
+                o.event_at_ms = date_ms(day).unwrap();
+                assert_eq!(provider.price(&o).cost_nanos, Some(standard * times), "{model} {day}");
+                let snapshot = t3.price(&o);
+                assert_eq!(snapshot.cost_nanos, Some(standard * times), "{model} {day}");
+                assert!(snapshot.assumptions.contains(&"published_provider_rate_fallback".into()), "{model}");
+            }
+            // Past 272K input tokens, cached and written ones included, input and
+            // cache double and output is one and a half times.
+            o.service_tier = Some("standard".into());
+            o.tokens.input = Some(271_700);
+            assert_eq!(provider.price(&o).cost_nanos, Some(standard + 270_700 * input), "{model}");
+            o.tokens.input = Some(271_701);
+            assert_eq!(
+                provider.price(&o).cost_nanos,
+                Some(271_701 * input * 2 + 200 * read * 2 + 100 * write * 2 + 100 * output * 3 / 2),
+                "{model}"
+            );
+        }
+    }
+    #[test]
     fn haiku_threshold_prices_each_cache_ttl_and_includes_cached_input() {
         let c = Catalogue::provider_fixture();
         let mut o = event("anthropic", "claude-haiku-5-5");

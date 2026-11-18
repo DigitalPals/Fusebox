@@ -105,15 +105,20 @@ def compile_catalogue(document, date, version):
     # Preserve existing published model support when LiteLLM has no matching ID.
     # These rows retain their official source URL, making the fallback auditable,
     # and the published speed multipliers the T3 calculation uses.
+    # Dated rows (a promotional speed price) keep their periods. OpenAI's default
+    # cache write lifetime is 30 minutes, Anthropic's 5 minutes.
     for row in provider["rates"]:
         missing = [name for name in row["models"] if name not in present]
         tiers = row.get("tier_multipliers") or {}
+        write = row.get("cache_write_5m_nanos_per_token")
+        if write is None:
+            write = row.get("cache_write_30m_nanos_per_token")
         if missing:
-            rates.append({"provider": row["provider"], "models": missing, "effective_from": None,
-                          "effective_until": None, "source_url": row["source_url"],
+            rates.append({"provider": row["provider"], "models": missing, "effective_from": row.get("effective_from"),
+                          "effective_until": row.get("effective_until"), "source_url": row["source_url"],
                           "input_nanos_per_token": row["input_nanos_per_token"],
                           "cache_read_nanos_per_token": row.get("cache_read_nanos_per_token"),
-                          "cache_write_nanos_per_token": row.get("cache_write_5m_nanos_per_token"),
+                          "cache_write_nanos_per_token": write,
                           "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
                           "output_nanos_per_token": row["output_nanos_per_token"],
                           "tier_multipliers": {speed: tiers[speed] for speed in ("fast", "ultrafast") if speed in tiers}})
