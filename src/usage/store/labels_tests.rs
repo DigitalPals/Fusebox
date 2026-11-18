@@ -41,7 +41,7 @@ struct Reads {
 // Both implementations prepare uncached SELECTs and immediately execute them.
 // SQLite's authorizer therefore observes one matching column authorization per
 // executed schema/label query. Instrument separately from timed runs.
-fn count_reads(conn: &Connection, action: impl FnOnce()) -> Value {
+fn count_reads(conn: &mut Connection, action: impl FnOnce(&Connection)) -> Value {
     let reads = Arc::new(Reads::default());
     let measured = reads.clone();
     conn.authorizer(Some(move |context: AuthContext<'_>| {
@@ -55,9 +55,10 @@ fn count_reads(conn: &Connection, action: impl FnOnce()) -> Value {
             _ => {}
         }
         Authorization::Allow
-    }));
-    action();
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    }))
+    .unwrap();
+    action(conn);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
     json!({"schema_queries":reads.schema.load(Ordering::Relaxed),"label_queries":reads.labels.load(Ordering::Relaxed)})
 }
 
@@ -73,36 +74,36 @@ fn collector_labels_current_output_matches_reference() {
 
 #[test]
 fn collector_labels_cache_positive_negative_and_absent_table_reads() {
-    let conn = fixture(2);
+    let mut conn = fixture(2);
     let origins =
         ["collector:0", "collector:1", "collector:missing", "collector:missing", "collector:0"].map(String::from);
     let expected = reference_page(&conn, &origins);
-    let reads = count_reads(&conn, || assert_eq!(current_page(&conn, &origins), expected));
+    let reads = count_reads(&mut conn, |conn| assert_eq!(current_page(conn, &origins), expected));
     assert_eq!(reads, json!({"schema_queries":1,"label_queries":3}));
 
     // Cached hits and misses require no further SQL, including schema checks.
     let mut labels = CollectorLabels::default();
     assert_eq!(labels.get(&conn, "collector:0").unwrap(), Some("Work laptop 0"));
     assert_eq!(labels.get(&conn, "collector:missing").unwrap(), None);
-    conn.authorizer(Some(|_: AuthContext<'_>| Authorization::Deny));
+    conn.authorizer(Some(|_: AuthContext<'_>| Authorization::Deny)).unwrap();
     assert_eq!(labels.get(&conn, "collector:0").unwrap(), Some("Work laptop 0"));
     assert_eq!(labels.get(&conn, "collector:missing").unwrap(), None);
     assert_eq!(labels.get(&conn, "local").unwrap(), None);
     assert!(labels.get(&conn, "collector:1").is_err(), "uncached SQL errors must propagate");
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
     assert_eq!(labels.get(&conn, "collector:1").unwrap(), Some("Work laptop 1"), "errors must not cache misses");
 
-    let absent = Connection::open_in_memory().unwrap();
+    let mut absent = Connection::open_in_memory().unwrap();
     assert_eq!(
-        count_reads(&absent, || {
-            current_page(&absent, &origins);
+        count_reads(&mut absent, |absent| {
+            current_page(absent, &origins);
         }),
         json!({"schema_queries":1,"label_queries":0})
     );
     let ordinary = ["local".to_owned(), "keeper:example".to_owned()];
     assert_eq!(
-        count_reads(&absent, || {
-            current_page(&absent, &ordinary);
+        count_reads(&mut absent, |absent| {
+            current_page(absent, &ordinary);
         }),
         json!({"schema_queries":0,"label_queries":0})
     );
@@ -217,7 +218,7 @@ fn usage_collector_labels_benchmark() {
     const WARMUPS: usize = 3;
     const ROUNDS: usize = 9;
     for distinct in [1, 10, 500] {
-        let conn = fixture(distinct);
+        let mut conn = fixture(distinct);
         let origins: Vec<_> = (0..ROWS).map(|i| format!("collector:{}", i % distinct)).collect();
         assert_eq!(current_page(&conn, &origins), reference_page(&conn, &origins));
         let measure = |lookup: fn(&Connection, &[String]) -> Vec<Option<String>>| {
@@ -241,11 +242,11 @@ fn usage_collector_labels_benchmark() {
                 before.push(measure(reference_page));
             }
         }
-        let before_reads = count_reads(&conn, || {
-            std::hint::black_box(reference_page(&conn, &origins));
+        let before_reads = count_reads(&mut conn, |conn| {
+            std::hint::black_box(reference_page(conn, &origins));
         });
-        let after_reads = count_reads(&conn, || {
-            std::hint::black_box(current_page(&conn, &origins));
+        let after_reads = count_reads(&mut conn, |conn| {
+            std::hint::black_box(current_page(conn, &origins));
         });
         println!(
             "{}",

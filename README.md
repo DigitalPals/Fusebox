@@ -10,7 +10,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 
 [![CI](https://img.shields.io/github/actions/workflow/status/DigitalPals/Fusebox/ci.yml?branch=main&style=flat-square&labelColor=0b0b0a&label=ci)](https://github.com/DigitalPals/Fusebox/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-f2efe8?style=flat-square&labelColor=0b0b0a)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-f2efe8?style=flat-square&labelColor=0b0b0a&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-f2efe8?style=flat-square&labelColor=0b0b0a&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Binary](https://img.shields.io/badge/single%20binary-embedded%20dashboard-f2efe8?style=flat-square&labelColor=0b0b0a)](https://github.com/DigitalPals/Fusebox/releases/latest)
 [![Dashboard](https://img.shields.io/badge/dashboard-built%20in-f2efe8?style=flat-square&labelColor=0b0b0a)](#the-dashboard)
 

@@ -6,7 +6,16 @@ use chrono::{DateTime, LocalResult, NaiveDate, Utc};
 #[cfg(test)]
 pub(crate) use client_totals::build as build_client_totals;
 pub(crate) use client_totals::start as client_totals_start;
-pub(crate) use codec::register as register_functions;
+/// Sets up every connection to the usage database: its SQL functions, and query plans
+/// that don't change with the values bound to a statement. Since SQLite 3.51, without
+/// this, a cached statement whose plan might depend on a bound value is prepared again
+/// each time the value changes. The rebuild of a usage entry was prepared afresh on
+/// every run, which made inserting records 4.7 times slower. Fusebox has no
+/// sqlite_stat tables and no `LIKE ?`, so the plans themselves stay the same.
+pub(crate) fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
+    codec::register(conn)
+}
 pub(crate) use codec::{Documents, decode as decode_document};
 use rusqlite::{Connection, OptionalExtension, params, types::Value as SqlValue};
 use serde::Deserialize;
@@ -332,7 +341,7 @@ impl Store {
         }
         let file_lock = compact::lock(path, false)?;
         let mut conn = Connection::open(path).context("open usage database")?;
-        codec::register(&conn)?;
+        configure_connection(&conn)?;
         #[cfg(test)]
         register_aggregates(&conn)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -910,8 +919,14 @@ fn canonical_key(o: &Observation) -> String {
 /// every observation is gone or suppressed is left without an entry.
 pub(super) fn rebuild_entries(conn: &Connection, key: &str) -> Result<()> {
     conn.prepare_cached("DELETE FROM usage_entries WHERE canonical_key=?1")?.execute([key])?;
-    conn.prepare_cached(&format!("INSERT INTO usage_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"))?.execute([key])?;
+    conn.prepare_cached(&entry_rebuild_sql())?.execute([key])?;
     Ok(())
+}
+/// Chooses the winning record of one canonical key as its entry.
+fn entry_rebuild_sql() -> String {
+    format!(
+        "INSERT INTO usage_entries SELECT {ENTRY_COLUMNS} FROM usage_observations INDEXED BY usage_canonical WHERE canonical_key=?1 AND NOT EXISTS(SELECT 1 FROM usage_suppressed s WHERE s.source=usage_observations.source AND s.source_event_id=usage_observations.source_event_id AND (s.origin_id='' OR s.origin_id=usage_observations.origin_id)) ORDER BY {WINNER_ORDER} LIMIT 1"
+    )
 }
 /// Copies the usage database to `to`, a new private file, with SQLite's online backup:
 /// safe while Fusebox is writing, and checked before it is called done.

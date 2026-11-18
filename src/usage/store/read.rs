@@ -161,9 +161,9 @@ where
             )?;
             *worker_control.interrupt.lock() = Some(conn.get_interrupt_handle());
             let progress = worker_control.clone();
-            conn.progress_handler(1000, Some(move || progress.check().is_err()));
+            conn.progress_handler(1000, Some(move || progress.check().is_err()))?;
             conn.busy_handler(Some(busy))?;
-            super::codec::register(&conn)?;
+            super::configure_connection(&conn)?;
             #[cfg(test)]
             super::register_aggregates(&conn)?;
             worker_control.check()?;
