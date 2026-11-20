@@ -28,7 +28,11 @@ pub const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https:/
 pub const BASE_DAILY: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const BASE_PROD: &str = "https://cloudcode-pa.googleapis.com";
 
-pub(crate) const FALLBACK_VERSION: &str = "2.29.0";
+pub(crate) const FALLBACK_VERSION: &str = "2.33.0";
+/// The build changelist (`cl=`) each reviewed release stamps into its language
+/// server (`changelist N with baseline M`). A release missing here omits it rather
+/// than claim another build's number.
+const CHANGELISTS: &[(&str, &str)] = &[("2.33.0", "1023160026")];
 const MANIFEST_URL: &str =
     "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
 const NODE_CLIENT: &str = "google-api-nodejs-client/10.3.0";
@@ -59,8 +63,16 @@ pub fn version() -> String {
     crate::clients::newest(crate::clients::ANTIGRAVITY, fetched)
 }
 
+/// The language server's form: `antigravity/hub/<release> (aidev_client; os_type=darwin;
+/// arch=arm64; cl=<changelist>)`.
 pub fn user_agent() -> String {
-    format!("antigravity/hub/{} darwin/arm64", version())
+    let version = version();
+    let changelist = CHANGELISTS
+        .iter()
+        .find(|(release, _)| *release == version)
+        .map(|(_, cl)| format!("; cl={cl}"))
+        .unwrap_or_default();
+    format!("antigravity/hub/{version} (aidev_client; os_type=darwin; arch=arm64{changelist})")
 }
 
 /// Keeps the advertised IDE version current (the backend rejects stale clients).
@@ -400,7 +412,11 @@ mod tests {
 
     #[test]
     fn fallback_user_agent_matches_the_current_release() {
-        assert_eq!(user_agent(), "antigravity/hub/2.29.0 darwin/arm64");
+        assert_eq!(user_agent(), "antigravity/hub/2.33.0 (aidev_client; os_type=darwin; arch=arm64; cl=1023160026)");
+        assert!(
+            CHANGELISTS.iter().any(|(release, _)| *release == FALLBACK_VERSION),
+            "the fallback needs its changelist"
+        );
     }
 
     #[test]
