@@ -18,6 +18,14 @@ Antigravity-only setup goes to the `-high` variant, Antigravity's default for al
 three. `-xhigh` (Antigravity's "Extra") is chosen by name. Models an account
 reports itself are still added and routed as before.
 
+This also fixes a routing mistake seen in the before/after test. With a Gemini API
+key and an Antigravity account, a bare `gemini-4-neon` used to become
+`gemini-4-neon-high` (the name Antigravity reported) and was then sent to the
+Gemini API key, which has no such model. Now the Gemini key gets `gemini-4-neon`,
+and `-high` names stay on Antigravity. A future model that only Antigravity's own
+list reports, with an effort suffix, could still take that path until it is added
+here.
+
 The Carbon and Hydrogen IDs are compiled into the Antigravity 2.33.0 language
 server. Neon launched the day after that build, so its IDs come from Antigravity's
 model page (`agy --model gemini-4-neon-xhigh`, efforts `low` to `xhigh`) and
