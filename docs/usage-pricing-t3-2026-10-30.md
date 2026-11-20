@@ -1,5 +1,9 @@
 # T3-compatible pricing, 30 October 2026
 
+Since 20 November 2026 the default calculation also follows T3 Code 0.1.11's
+long-prompt and one-hour cache-write rates; see
+[the 0.1.11 update](usage-pricing-t3-2026-11-20.md).
+
 The reconciliation found a real dated-model lookup failure and a separate
 calculation mismatch. `claude-haiku-4-5-20251001` was missing from Fusebox's
 catalogue. Codex Fast requests could return `service_tier: default`, so Fusebox

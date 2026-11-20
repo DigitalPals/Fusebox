@@ -1,6 +1,6 @@
 {
-  "source": "T3 Code 0.1.3 installed usagePricing.js, LiteLLM cache fetched 2026-10-29",
-  "binary_sha256": "e2b8d466d223f0993b31d9a6dafd22bb06558cc1a119a9f932d7b5d363f09b74",
+  "source": "T3 Code 0.1.11 installed usagePricing.js, LiteLLM fetched 2026-11-20",
+  "binary_sha256": "f13dd1f37eb2f719b41f45219b3800412799c80f724b022839b8a133e21aced1",
   "cases": [
     {
       "id": "sol-priority-returned-default",
@@ -42,7 +42,7 @@
         1000
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 611500000
+      "expected_nanos": 1218000000
     },
     {
       "id": "haiku-dated",
@@ -56,7 +56,8 @@
         100
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 1645000
+      "expected_nanos": 1645000,
+      "write_1h": 0
     },
     {
       "id": "haiku-long",
@@ -70,7 +71,8 @@
         1000
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 11526000
+      "expected_nanos": 57705000,
+      "write_1h": 200
     },
     {
       "id": "opus-fast-1h",
@@ -84,7 +86,8 @@
         400
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 27800000
+      "expected_nanos": 29600000,
+      "write_1h": 300
     },
     {
       "id": "sonnet-cache",
@@ -98,7 +101,8 @@
         50
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 100750000
+      "expected_nanos": 100750000,
+      "write_1h": 0
     },
     {
       "id": "gpt55-long-fast",
@@ -196,7 +200,8 @@
         100
       ],
       "reported_cost_nanos": 12345678,
-      "expected_nanos": 12345678
+      "expected_nanos": 12345678,
+      "write_1h": 0
     },
     {
       "id": "reported-unknown-model",
@@ -210,7 +215,8 @@
         100
       ],
       "reported_cost_nanos": 12345678,
-      "expected_nanos": 12345678
+      "expected_nanos": 12345678,
+      "write_1h": 0
     },
     {
       "id": "synthetic",
@@ -224,7 +230,8 @@
         100
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": null
+      "expected_nanos": null,
+      "write_1h": 0
     },
     {
       "id": "claude-fast-with-batch-tier",
@@ -239,7 +246,8 @@
         400
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 27800000
+      "expected_nanos": 29600000,
+      "write_1h": 300
     },
     {
       "id": "claude-priority-is-not-codex-fast",
@@ -254,7 +262,110 @@
         400
       ],
       "reported_cost_nanos": null,
-      "expected_nanos": 13900000
+      "expected_nanos": 14800000,
+      "write_1h": 300
+    },
+    {
+      "id": "opus-mixed-cache-lifetimes",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "speed": "standard",
+      "tokens": [
+        1000,
+        2000,
+        300,
+        400
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 14200000,
+      "write_1h": 100
+    },
+    {
+      "id": "fable-fast-1h",
+      "provider": "anthropic",
+      "model": "claude-fable-5-2",
+      "speed": "fast",
+      "tokens": [
+        10,
+        5000,
+        2000,
+        300
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 90160000,
+      "write_1h": 2000
+    },
+    {
+      "id": "haiku-at-threshold",
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "speed": "standard",
+      "tokens": [
+        99000,
+        900,
+        100,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 10421500,
+      "write_1h": 0
+    },
+    {
+      "id": "sol62-long-fast",
+      "provider": "openai",
+      "model": "gpt-6.2-sol",
+      "speed": "fast",
+      "tokens": [
+        100000,
+        200000,
+        0,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 910000000
+    },
+    {
+      "id": "astra62-long-ultrafast",
+      "provider": "openai",
+      "model": "gpt-6.2-astra",
+      "speed": "ultrafast",
+      "tokens": [
+        272001,
+        0,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 13074048000
+    },
+    {
+      "id": "sol61-long-ultrafast",
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "speed": "ultrafast",
+      "tokens": [
+        280000,
+        0,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 6729000000
+    },
+    {
+      "id": "gpt54-long-fast-uses-base-fast",
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "speed": "fast",
+      "tokens": [
+        300000,
+        0,
+        0,
+        100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 1503000000
     }
-  ]
+  ],
+  "litellm_sha256": "d342612f90560be6c6c0a2b85e034a6cb9c2459ddcc0a4ba13946e0cd2759452"
 }
