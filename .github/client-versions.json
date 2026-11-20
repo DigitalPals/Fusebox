@@ -51,7 +51,7 @@
       "version": "2.33.0",
       "reviewed": "2.33.0",
       "source": { "kind": "yaml-line", "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml", "key": "version" },
-      "where": "src/antigravity.rs: FALLBACK_VERSION (Fusebox reads the current version from this manifest at runtime; the constant is only its fallback)"
+      "where": "src/antigravity.rs: FALLBACK_VERSION and CHANGELISTS (python3 scripts/antigravity-build.py prints a release's build number; Fusebox reads the current release and its build number at runtime, so these are only the fallback)"
     }
   ]
 }

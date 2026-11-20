@@ -83,7 +83,7 @@ def parse(version):
 IDENTITIES = {
     "claude-code": "Learns newer identities from real Claude Code requests; also accepts client-identities.",
     "codex": "Learns newer identities from real Codex requests; also accepts client-identities.",
-    "antigravity": "Fetches its current identity from the update manifest every 3 hours; the bundled version is a fallback.",
+    "antigravity": "Fetches its current release from the update manifest every 3 hours and reads a new release's build number from the release itself; the bundled release and CHANGELISTS are the fallback.",
     "grok-build": "Uses the bundled identity unless client-identities sets a newer version.",
     "devin-cli": "Uses the bundled identity unless client-identities sets a newer version.",
     "muse-code": "Uses a bundled version AND build hash; a version override alone cannot update this identity.",

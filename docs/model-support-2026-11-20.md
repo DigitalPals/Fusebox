@@ -115,11 +115,10 @@ language server sends since 2.23.0:
     antigravity/hub/2.33.0 (aidev_client; os_type=darwin; arch=arm64; cl=1023160026)
 
 `cl` is the build changelist stamped into each release's language server
-(`changelist 1023160026 with baseline 1022452901` in 2.33.0). Fusebox knows it only
-for reviewed releases; when the manifest names a newer release, the `cl` part is
-left out rather than pair the new release with an older build's number. Reviewing a
-release now includes reading its changelist (see
-[client compatibility](client-compatibility.md#antigravity-2330)).
+(`changelist 1023160026 with baseline 1022452901` in 2.33.0). When the manifest
+names a newer release, Fusebox reads that release's number from the release itself
+and keeps claiming the newest release it has a number for until then (see
+[client compatibility](client-compatibility.md#antigravity-build-numbers)).
 
 ## Evidence
 

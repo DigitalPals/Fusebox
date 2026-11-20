@@ -26,6 +26,42 @@ before a release allows it by default.
 
 ## 2026-11-20
 
+### Antigravity build numbers
+
+Fusebox now reads a new release's build number itself. When Google's update
+manifest names a release missing from `CHANGELISTS`, the updater reads the
+release's ZIP directory and then the language server's compressed bytes, with
+HTTP range requests, inflating them as they arrive until the stamp
+(`changelist N with baseline M`) appears: about 37 MB of the 208 MB 2.33.0 ZIP,
+in under three seconds, with nothing written to disk
+([`src/antigravity/release.rs`](../src/antigravity/release.rs)). It follows only
+URLs in Google's `antigravity-public` storage named for that release. Until the
+number is known, or if it can't be read (tried again a day later), Fusebox keeps
+claiming the newest release whose number it knows, as an IDE that has not updated
+yet would. A release never goes out with another build's number or with none.
+Only a release set in `client-identities` that Fusebox has no number for goes
+without one.
+
+How others do it, checked on 2026-11-20:
+
+- **T3 Code 0.1.11** (and its source on that date) runs Google's own Antigravity
+  CLI for chats: it downloads the release named in Google's CLI manifest, checks
+  its SHA-512 and lets the real binary talk to Google, so that traffic always
+  carries a real identity. Only its own quota check calls Cloud Code directly,
+  with a fixed `antigravity/hub/2.24.0 (...; cl=963137146)`: nine releases old,
+  with the host's own OS and architecture names (Node's `win32`/`x64`, not the
+  language server's). Its number for 2.24.0 differs from CLIProxyAPI's
+  (`1000335682`); old releases can't be listed in Google's storage, so which is
+  right could not be checked.
+- **CLIProxyAPI** keeps a hand-written table (2.23.0 to 2.33.0) and, for a
+  release missing from it, claims the newest release in the table. Fusebox
+  takes that rule as its fallback.
+
+To read a release's number for a review, run
+`python3 scripts/antigravity-build.py` (the manifest's current release) or
+`python3 scripts/antigravity-build.py <ZIP URL>`. On 2.33.0 it prints
+`cl=1023160026 (baseline 1022452901)`, matching the number below.
+
 ### Antigravity 2.33.0
 
 The official update manifest advertises 2.33.0. Verified the macOS arm64 ZIP
@@ -369,9 +405,10 @@ the review here, then advance `reviewed`. If a bundled identity changes, update
 `version` and the corresponding Rust constants together, and use the actual build
 hash where required. Run Rust and Python checks before publishing the changes.
 
-For Antigravity, also read the release's build changelist from its language
-server (`changelist N with baseline M`) and add it to `CHANGELISTS` in
-`src/antigravity.rs`; until then the user agent omits `cl`.
+For Antigravity, also add the release's build number to `CHANGELISTS` in
+`src/antigravity.rs`: `python3 scripts/antigravity-build.py` prints it. Fusebox
+reads it from the release by itself at run time, so this keeps the fallback current
+for when that read fails.
 
 For clients without public protocol source, release manifests establish the
 identity but do not prove unchanged request encoding. Keep the next release in
