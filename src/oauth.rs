@@ -615,7 +615,12 @@ async fn refresh_and_report(
     loop {
         let result = refresh_locked(acct, http.clone(), old.clone()).await;
         let Err(error) = &result else {
-            acct.state.lock().refresh_backoff = None;
+            let mut st = acct.state.lock();
+            st.refresh_backoff = None;
+            // A passing failure (a 503, a timeout) ends with the refresh that worked.
+            if st.last_error(Utc::now()).is_some_and(refresh_failure) {
+                st.clear_error();
+            }
             return result;
         };
         let failure = error.downcast_ref::<OAuthResponseFailure>().copied();
@@ -647,6 +652,11 @@ async fn refresh_and_report(
         }
         return result;
     }
+}
+
+/// An error a refresh left, which a later refresh or a sign-in ends.
+pub(crate) fn refresh_failure(message: &str) -> bool {
+    message.starts_with("refresh failed:") || message.starts_with("token refresh paused after invalid_client")
 }
 
 /// The credential file's copy when it has another refresh token than the refused one,
@@ -1413,6 +1423,36 @@ mod tests {
         assert!(!final_refresh_answer(Provider::Codex, &failure(401, Some("invalid_client"))));
         assert!(!final_refresh_answer(Provider::Codex, &failure(503, None)));
         assert!(!final_refresh_answer(Provider::Codex, &failure(400, Some("invalid_request"))));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_works_ends_a_passing_refresh_error() {
+        let fresh = json!({"access_token":"FAKE_RENEWED", "refresh_token":"FAKE_NEXT", "expires_in":3600});
+        let endpoint = TokenEndpoint::new(vec![
+            ("FAKE_UNAVAILABLE", 503, json!({"error":"temporarily_unavailable"})),
+            ("FAKE_WORKS", 200, fresh),
+            ("FAKE_NEXT", 200, json!({"access_token":"FAKE_LATER", "refresh_token":"FAKE_LAST", "expires_in":3600})),
+        ])
+        .await;
+        let directory = Directory::new();
+        let app = signed_in(&directory, &endpoint, "FAKE_UNAVAILABLE", -chrono::Duration::minutes(1));
+        let account = app.pool.all().pop().unwrap();
+        assert!(ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.is_err());
+        let error = account.state.lock().last_error(Utc::now()).map(String::from);
+        assert_eq!(
+            error.as_deref(),
+            Some("refresh failed: OAuth endpoint returned HTTP 503 (temporarily_unavailable)")
+        );
+        // The endpoint answers again (here: for another refresh token of the same account).
+        if let Credential::OAuth(o) = &mut *account.cred.write() {
+            o.refresh_token = "FAKE_WORKS".into();
+        }
+        ensure_fresh(&app, &account, chrono::Duration::minutes(5), false).await.unwrap();
+        assert_eq!(account.state.lock().last_error(Utc::now()), None);
+        // Other errors are not the refresh's to clear.
+        account.state.lock().set_error("500: upstream exploded");
+        ensure_fresh(&app, &account, chrono::Duration::hours(2), false).await.unwrap();
+        assert_eq!(account.state.lock().last_error(Utc::now()), Some("500: upstream exploded"));
     }
 
     #[tokio::test]

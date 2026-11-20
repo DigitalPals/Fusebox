@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::accounts::{Account, Credential, Provider};
+use crate::quota::Window;
 use crate::state::App;
 pub use automation::{Policy, automatic_check, plan, priority_expiry};
 use ledger::{Ledger, Operation};
@@ -405,11 +406,13 @@ async fn execute<P: Api + Sync>(
         let guard = QuotaGuard::new(app, acct, account);
         let outcome =
             api.redeem(organization, &operation.grant_id, &operation.request_id).await.unwrap_or(Outcome::Unknown);
+        // The cleared windows as they were, to tell a reading from before the reset.
+        let mut cleared = Vec::new();
         match outcome {
             Outcome::Applied => {
                 operation.status = "applied".into();
                 operation.message = "One banked reset applied".into();
-                guard.invalidate(&operation.clears);
+                cleared = guard.invalidate(&operation.clears);
             }
             Outcome::AlreadyUsed => {
                 operation.status = "already_used".into();
@@ -436,7 +439,7 @@ async fn execute<P: Api + Sync>(
         if automatic {
             notices::outcome(app, acct, &operation, expiry_due);
         }
-        let read = api.read().await;
+        let read = read_after_reset(api, acct.provider, &cleared).await;
         drop(guard);
         let (inventory, error) = match read {
             Ok((inventory, usage)) => {
@@ -445,6 +448,7 @@ async fn execute<P: Api + Sync>(
             }
             Err(e) => (None, Some(format!("Reset result saved; quota refresh failed: {e}"))),
         };
+        recheck_after_reset(app, acct, account, cleared);
         let mut view = view(ledger, inventory, error, None);
         view.retryable &= acct.provider == Provider::Claude;
         store(app, acct, account, ledger, &view);
@@ -468,6 +472,54 @@ async fn execute<P: Api + Sync>(
     store(app, acct, account, ledger, &view);
     Ok(view)
 }
+/// Waits between reads while the usage endpoint still shows a cleared window as it was
+/// before the reset: it can take a few seconds to catch up.
+#[cfg(not(test))]
+const RESET_READ_WAITS: [u64; 3] = [3, 6, 12];
+#[cfg(test)]
+const RESET_READ_WAITS: [u64; 3] = [0, 0, 0];
+
+/// The provider's reading after a reset, read again a few times (about 20 seconds in
+/// all) while it still shows the cleared windows as they were.
+async fn read_after_reset<P: Api + Sync>(
+    api: &P,
+    provider: Provider,
+    cleared: &[Window],
+) -> Result<(Inventory, Value)> {
+    let mut read = api.read().await;
+    for wait in RESET_READ_WAITS {
+        let Ok((_, usage)) = &read else { break };
+        if !before_reset(provider, cleared, usage) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        read = api.read().await;
+    }
+    read
+}
+
+fn before_reset(provider: Provider, cleared: &[Window], usage: &Value) -> bool {
+    let mut reading = crate::accounts::AccountState::default();
+    crate::quota::usage(&mut reading, provider, usage);
+    crate::quota::shows_before_reset(cleared, &reading.quota.windows)
+}
+
+/// When the reading still shows the reset's windows as they were, the quota poll keeps
+/// reading them for a few minutes rather than waiting its usual 5 to 30.
+fn recheck_after_reset(app: &App, acct: &Account, account: &str, cleared: Vec<Window>) {
+    if cleared.iter().all(|w| w.used <= 0.0) {
+        return;
+    }
+    for other in app.pool.all() {
+        if other.provider == acct.provider && account_id(&other).ok().as_deref() == Some(account) {
+            let mut st = other.state.lock();
+            if crate::quota::shows_before_reset(&cleared, &st.quota.windows) {
+                st.quota.reset_recheck = Some((Utc::now() + crate::quota::reset_recheck_for(), cleared.clone()));
+            }
+        }
+    }
+}
+
 fn reconcile(app: &App, acct: &Account, account: &str, usage: &Value) {
     for other in app.pool.all() {
         if other.provider == acct.provider && account_id(&other).ok().as_deref() == Some(account) {
@@ -498,7 +550,9 @@ impl QuotaGuard {
         }
         Self { accounts, account: account.into() }
     }
-    fn invalidate(&self, clears: &[String]) {
+    /// Forgets the windows a reset cleared, and returns them as they were.
+    fn invalidate(&self, clears: &[String]) -> Vec<Window> {
+        let mut cleared = Vec::new();
         for a in &self.accounts {
             if account_id(a).ok().as_deref() != Some(self.account.as_str()) {
                 continue;
@@ -524,6 +578,9 @@ impl QuotaGuard {
             for model in removable {
                 st.quota_cooldowns.remove(&model);
             }
+            if cleared.is_empty() {
+                cleared = st.quota.windows.iter().filter(|w| affected(w)).cloned().collect();
+            }
             st.quota.windows.retain(|w| !affected(w));
             if clears.iter().any(|w| w == "5h" || w == "*")
                 && let Some(view) = st.window_starter.as_mut()
@@ -538,6 +595,7 @@ impl QuotaGuard {
             st.quota.refreshed_at = None;
             // Keep cooldowns whose scope cannot be proven to match this grant.
         }
+        cleared
     }
 }
 impl Drop for QuotaGuard {

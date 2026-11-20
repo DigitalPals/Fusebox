@@ -226,7 +226,10 @@ async fn save_sign_in(
         }
         *a.cred.write() = Credential::OAuth(saved);
         let mut st = a.state.lock();
-        if st.last_error(chrono::Utc::now()).is_some_and(crate::push::signin_error) {
+        if st
+            .last_error(chrono::Utc::now())
+            .is_some_and(|e| crate::push::signin_error(e) || crate::oauth::refresh_failure(e))
+        {
             st.clear_error();
         }
     }
@@ -2199,6 +2202,14 @@ mod tests {
         let again = crate::accounts::OAuth { refresh_token: "fresher".into(), ..o };
         save_sign_in(&app, Provider::Claude, &again, "claude-x@example.test.json", &[]).await.unwrap();
         assert_eq!(app.pool.all()[0].state.lock().last_error(chrono::Utc::now()), Some("500: upstream exploded"));
+        // A passing refresh failure is: the sign-in brings a working token.
+        app.pool.all()[0]
+            .state
+            .lock()
+            .set_error("refresh failed: OAuth endpoint returned HTTP 503 (temporarily_unavailable)");
+        let latest = crate::accounts::OAuth { refresh_token: "freshest".into(), ..again };
+        save_sign_in(&app, Provider::Claude, &latest, "claude-x@example.test.json", &[]).await.unwrap();
+        assert_eq!(app.pool.all()[0].state.lock().last_error(chrono::Utc::now()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
