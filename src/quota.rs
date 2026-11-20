@@ -42,6 +42,10 @@ const POLL_CONCURRENCY: usize = 4;
 /// what its Retry-After asks for, up to the longest wait.
 const USAGE_WAIT_MIN: i64 = 60;
 const USAGE_WAIT_MAX: i64 = 30 * 60;
+/// After a banked reset, while the usage endpoint still shows the cleared windows as
+/// they were: read again at every poll round (once a minute), for this long.
+const RESET_RECHECK_FOR: i64 = 5 * 60;
+const RESET_RECHECK_EVERY: i64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Window {
@@ -174,6 +178,31 @@ pub struct Quota {
     /// Only a mint sets or clears it; stream frames kept coming while it was lapsed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub subscription_inactive: bool,
+    /// Windows a banked reset cleared, as they were before it, while the usage endpoint
+    /// may not show the reset yet; and until when to keep reading it.
+    #[serde(skip)]
+    pub(crate) reset_recheck: Option<(DateTime<Utc>, Vec<Window>)>,
+}
+
+pub(crate) fn reset_recheck_for() -> chrono::Duration {
+    chrono::Duration::seconds(RESET_RECHECK_FOR)
+}
+
+/// Whether a reading still shows any of the windows a banked reset cleared as it was
+/// before: same window (resets at the same time) and no less used. The usage endpoint
+/// can answer from before the reset for a little while.
+pub(crate) fn shows_before_reset(before: &[Window], windows: &[Window]) -> bool {
+    before.iter().filter(|old| old.used > 0.0).any(|old| {
+        windows.iter().any(|new| {
+            new.name == old.name
+                && new.model == old.model
+                && new.used >= old.used
+                && match (new.resets_at, old.resets_at) {
+                    (Some(a), Some(b)) => (a - b).num_seconds().abs() < 600,
+                    (a, b) => a.is_none() && b.is_none(),
+                }
+        })
+    })
 }
 
 /// A usage-endpoint call skipped because the provider asked to wait.
@@ -322,9 +351,13 @@ impl Quota {
     }
 
     /// `pauses`: when the account's quota pauses end.
-    fn needs_refresh(&self, now: DateTime<Utc>, pauses: impl IntoIterator<Item = DateTime<Utc>>) -> bool {
+    pub(crate) fn needs_refresh(&self, now: DateTime<Utc>, pauses: impl IntoIterator<Item = DateTime<Utc>>) -> bool {
         if self.usage_wait(now).is_some() {
             return false;
+        }
+        // A banked reset the usage endpoint did not show yet: read again soon.
+        if self.reset_recheck.as_ref().is_some_and(|(until, _)| *until > now) {
+            return self.checked_at.is_none_or(|at| (now - at).num_seconds() >= RESET_RECHECK_EVERY);
         }
         // A check that brought no data waits 2, 4, 8 ... up to 30 minutes before the next.
         if self.check_failures > 0
@@ -795,6 +828,14 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
     }
     st.quota.updated_at = Some(Utc::now());
     st.quota.refreshed_at = st.quota.updated_at;
+    if st
+        .quota
+        .reset_recheck
+        .as_ref()
+        .is_some_and(|(until, before)| *until <= Utc::now() || !shows_before_reset(before, &st.quota.windows))
+    {
+        st.quota.reset_recheck = None;
+    }
     let quota = &st.quota;
     st.quota_cooldowns.retain(|model, _| {
         !covered.contains(model) || quota.pressure(if model == "*" { "" } else { model }).is_none_or(|u| u >= 100.0)

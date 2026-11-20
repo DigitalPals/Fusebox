@@ -40,6 +40,8 @@ struct Mock {
     grants: Mutex<Vec<String>>,
     reads: AtomicUsize,
     fail_after: usize,
+    /// Usage answers for the next reads, before `usage` again.
+    answers: Mutex<VecDeque<Value>>,
 }
 impl Mock {
     fn new(outcomes: &[Outcome]) -> Self {
@@ -51,6 +53,7 @@ impl Mock {
             grants: Mutex::new(vec![]),
             reads: AtomicUsize::new(0),
             fail_after: usize::MAX,
+            answers: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -58,7 +61,8 @@ impl Api for Mock {
     async fn read(&self) -> Result<(Inventory, Value)> {
         let n = self.reads.fetch_add(1, Ordering::Relaxed);
         ensure!(n < self.fail_after, "Mock read unavailable");
-        Ok((self.inventory.clone(), self.usage.clone()))
+        let usage = self.answers.lock().pop_front().unwrap_or_else(|| self.usage.clone());
+        Ok((self.inventory.clone(), usage))
     }
     async fn identity(&self) -> Result<String> {
         Ok("organization-1".into())
@@ -1518,4 +1522,77 @@ async fn a_rate_limited_usage_read_waits_with_the_other_callers() {
     assert!(view.error.as_deref().is_some_and(|e| e.contains("rate limited")), "{:?}", view.error);
     assert_eq!(reads.load(Ordering::SeqCst), 1, "no second read while the provider asked to wait");
     server.abort();
+}
+
+#[tokio::test]
+async fn a_reading_from_before_the_reset_is_read_again_until_it_shows_the_reset() {
+    let now = Utc::now();
+    let week_ends = now + chrono::Duration::days(3);
+    let usage = |weekly: f64| {
+        let mut usage = expiring_usage(weekly, 0.0, 120);
+        usage["seven_day"]["resets_at"] = json!(week_ends);
+        usage
+    };
+    let week = |acct: &Account| acct.state.lock().quota.windows.iter().find(|w| w.name == "week").map(|w| w.used);
+
+    // The usage endpoint shows the reset on the third read after it.
+    let (temp, app, acct) = fixture(Provider::Claude, 1);
+    let mock = Mock::new(&[Outcome::Applied]);
+    let mut mock = mock;
+    mock.usage = usage(100.0);
+    mock.inventory = provider::claude(&mock.usage, now).unwrap();
+    crate::quota::usage(&mut acct.state.lock(), Provider::Claude, &mock.usage);
+    // Before the spend, then two answers from before the reset, then the reset.
+    *mock.answers.lock() = [usage(100.0), usage(100.0), usage(100.0), usage(0.0)].into();
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    let request = quote(&app, &mock, &ledger);
+    let view = run(&app, &acct, &mock, &mut ledger, action(&request, "redeem")).await.unwrap();
+    assert_eq!(view.operation.unwrap().status, "applied");
+    assert_eq!(mock.reads.load(Ordering::Relaxed), 4);
+    assert_eq!(week(&acct), Some(0.0), "the bar shows the reset");
+    assert!(acct.state.lock().quota.reset_recheck.is_none());
+
+    // It still doesn't after the quick reads: the quota poll keeps reading it.
+    let (temp, app, acct) = fixture(Provider::Claude, 1);
+    let mut mock = Mock::new(&[Outcome::Applied]);
+    mock.usage = usage(100.0);
+    mock.inventory = provider::claude(&mock.usage, now).unwrap();
+    crate::quota::usage(&mut acct.state.lock(), Provider::Claude, &mock.usage);
+    acct.state.lock().quota.checked_at = Some(Utc::now() - chrono::Duration::seconds(40));
+    let mut ledger = Ledger::open(&temp.0, "claude:organization-1").unwrap();
+    let request = quote(&app, &mock, &ledger);
+    run(&app, &acct, &mock, &mut ledger, action(&request, "redeem")).await.unwrap();
+    assert_eq!(mock.reads.load(Ordering::Relaxed), 1 + 1 + RESET_READ_WAITS.len());
+    assert_eq!(week(&acct), Some(100.0));
+    {
+        let st = acct.state.lock();
+        assert!(st.quota.reset_recheck.is_some());
+        assert!(st.quota.needs_refresh(Utc::now(), []), "read again at the next round");
+    }
+    // Another answer from before the reset keeps it checking; the reset ends it.
+    crate::quota::usage(&mut acct.state.lock(), Provider::Claude, &usage(100.0));
+    assert!(acct.state.lock().quota.reset_recheck.is_some());
+    crate::quota::usage(&mut acct.state.lock(), Provider::Claude, &usage(2.0));
+    assert!(acct.state.lock().quota.reset_recheck.is_none());
+    assert_eq!(week(&acct), Some(2.0));
+}
+
+#[test]
+fn only_an_unchanged_cleared_window_counts_as_before_the_reset() {
+    let at = Utc::now() + chrono::Duration::days(3);
+    let w = |name: &str, used: f64, resets_at| crate::quota::Window { name: name.into(), used, resets_at, model: None };
+    let before = [w("week", 90.0, Some(at))];
+    assert!(crate::quota::shows_before_reset(&before, &[w("week", 90.0, Some(at))]));
+    assert!(crate::quota::shows_before_reset(&before, &[w("week", 95.0, Some(at + chrono::Duration::seconds(2)))]));
+    assert!(!crate::quota::shows_before_reset(&before, &[w("week", 1.0, Some(at))]), "used dropped");
+    assert!(
+        !crate::quota::shows_before_reset(&before, &[w("week", 90.0, Some(at + chrono::Duration::days(4)))]),
+        "a new window"
+    );
+    assert!(!crate::quota::shows_before_reset(&before, &[w("5h", 90.0, Some(at))]), "another window");
+    assert!(!crate::quota::shows_before_reset(&before, &[]));
+    assert!(
+        !crate::quota::shows_before_reset(&[w("week", 0.0, Some(at))], &[w("week", 0.0, Some(at))]),
+        "nothing to clear"
+    );
 }
