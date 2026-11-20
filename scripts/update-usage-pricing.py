@@ -25,6 +25,10 @@ CONTEXT_TIER_KEY = re.compile(r"^input_cost_per_token_above_(\d{1,7})k_tokens(?:
 SPEEDS = ("fast", "ultrafast")
 # Rate tuples: (input, cache read, cache write, one-hour cache write, output).
 INPUT, READ, WRITE, WRITE_1H, OUTPUT = range(5)
+# The prices a dated rate card period sets; LiteLLM lists only today's.
+LIST_PRICES = ("input_nanos_per_token", "cache_read_nanos_per_token", "output_nanos_per_token")
+LONG_PROMPT = ("threshold_input_tokens", "above_threshold_input_nanos_per_token",
+               "above_threshold_read_nanos_per_token", "above_threshold_output_nanos_per_token")
 
 
 def token_rates(entry, suffix="", standard=None, output_fallback=None):
@@ -197,8 +201,9 @@ def compile_catalogue(document, date, version):
     day = datetime.date.fromisoformat(date).isoformat()
     rows = []
     for name, rate in rate_table(document).items():
-        # Fusebox's bundled scope is direct OpenAI/Anthropic model families.
-        # Cloud reseller price cards are distinct and need explicit overrides.
+        # Fusebox's bundled scope is the makers' own model families. Bare names
+        # take the maker's price (Google's from `gemini/`); cloud reseller price
+        # cards are distinct and need explicit overrides.
         if "/" in name and name.split("/", 1)[0] not in ("openai", "anthropic"):
             continue
         bare = name.rsplit("/", 1)[-1]
@@ -209,15 +214,39 @@ def compile_catalogue(document, date, version):
         if name not in dated:
             rows.append(row)
             continue
-        # A published speed price change keeps the rate card's dated periods.
-        # LiteLLM must agree with the period that covers the release date.
+        # A published price change keeps the rate card's dated periods: a speed
+        # multiple (OpenAI's Ultrafast promotion) or the list price itself (Google's
+        # introductory Gemini prices). LiteLLM must agree with the period that
+        # covers the release date; the other periods take the rate card's prices.
+        # A rate card that names no speed for the model (Google's Priority is a
+        # service tier, not a speed) keeps LiteLLM's.
+        card_speeds = any(speed in (period.get("tier_multipliers") or {}) for period in dated[name] for speed in SPEEDS)
         for period in dated[name]:
-            speeds = {s: m for s, m in (period.get("tier_multipliers") or {}).items() if s in SPEEDS}
+            speeds = row["tier_multipliers"]
+            if card_speeds:
+                speeds = {s: m for s, m in (period.get("tier_multipliers") or {}).items() if s in SPEEDS}
             current = (period.get("effective_from") or "") <= day < (period.get("effective_until") or "9999")
             if current and speeds != row["tier_multipliers"]:
                 raise ValueError(f"{name}: LiteLLM speed rates differ from the rate card's current period")
-            rows.append({**row, "effective_from": period.get("effective_from"),
-                         "effective_until": period.get("effective_until"), "tier_multipliers": speeds})
+            priced = {**row, "effective_from": period.get("effective_from"),
+                      "effective_until": period.get("effective_until"), "tier_multipliers": speeds}
+            listed = [period[key] for key in LIST_PRICES]
+            if listed != [row[key] for key in LIST_PRICES]:
+                if current:
+                    raise ValueError(f"{name}: LiteLLM prices differ from the rate card's current period")
+                if "threshold_input_tokens" in row or "threshold_input_tokens" in period:
+                    raise ValueError(f"{name}: a dated long-prompt price requires a script update")
+                # The other cache rates keep their ratio to input, as T3 does for a missing one.
+                ratio = Fraction(period["input_nanos_per_token"], row["input_nanos_per_token"])
+                for key in ("cache_write_nanos_per_token", "cache_write_1h_nanos_per_token"):
+                    if priced.get(key) is not None:
+                        value = priced[key] * ratio
+                        if value.denominator != 1:
+                            raise ValueError(f"{name}: unsupported sub-nanodollar rate")
+                        priced[key] = int(value)
+                priced.update(zip(LIST_PRICES, listed))
+                priced["source_url"] = period["source_url"]
+            rows.append(priced)
     present = {name for row in rows for name in row["models"]}
     # Preserve existing published model support when LiteLLM has no matching ID.
     # These rows retain their official source URL, making the fallback auditable,
@@ -238,7 +267,9 @@ def compile_catalogue(document, date, version):
                          "cache_write_nanos_per_token": write,
                          "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
                          "output_nanos_per_token": row["output_nanos_per_token"],
-                         "tier_multipliers": {speed: tiers[speed] for speed in SPEEDS if speed in tiers}})
+                         "tier_multipliers": {speed: tiers[speed] for speed in SPEEDS if speed in tiers},
+                         # A long-prompt price; omitted cache rates keep their ratio to input.
+                         **{key: row[key] for key in LONG_PROMPT if row.get(key) is not None}})
     groups = {}
     for row in rows:
         key = json.dumps({k: v for k, v in row.items() if k != "models"}, sort_keys=True)

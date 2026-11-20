@@ -365,6 +365,118 @@
       ],
       "reported_cost_nanos": null,
       "expected_nanos": 1503000000
+    },
+    {
+      "id": "gemini-4-neon",
+      "provider": "gemini",
+      "model": "gemini-4-neon",
+      "speed": "standard",
+      "tokens": [
+        12000,
+        48000,
+        0,
+        3100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 89700000
+    },
+    {
+      "id": "gemini-4-neon-priority",
+      "provider": "gemini",
+      "model": "gemini-4-neon",
+      "speed": "fast",
+      "tokens": [
+        12000,
+        48000,
+        0,
+        3100
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 161460000
+    },
+    {
+      "id": "gemini-4-carbon",
+      "provider": "vertex",
+      "model": "gemini-4-carbon",
+      "speed": "standard",
+      "tokens": [
+        5000,
+        120000,
+        0,
+        9000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 112000000
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "provider": "gemini",
+      "model": "gemini-4-hydrogen",
+      "speed": "standard",
+      "tokens": [
+        800,
+        0,
+        0,
+        2500
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 19950000
+    },
+    {
+      "id": "gemini-3.1-pro-long-prompt",
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "speed": "standard",
+      "tokens": [
+        150000,
+        60000,
+        0,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 642000000
+    },
+    {
+      "id": "gemini-3.1-pro-at-threshold",
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "speed": "standard",
+      "tokens": [
+        140000,
+        60000,
+        0,
+        1000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 304000000
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "provider": "vertex",
+      "model": "gemini-3.8-flash",
+      "speed": "standard",
+      "tokens": [
+        30000,
+        70000,
+        0,
+        4000
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 42750000
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite",
+      "speed": "standard",
+      "tokens": [
+        2000,
+        1000,
+        0,
+        300
+      ],
+      "reported_cost_nanos": null,
+      "expected_nanos": 1380000
     }
   ],
   "litellm_sha256": "d342612f90560be6c6c0a2b85e034a6cb9c2459ddcc0a4ba13946e0cd2759452"

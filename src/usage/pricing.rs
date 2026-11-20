@@ -302,11 +302,13 @@ impl Catalogue {
         let Some(actual_model) = o.actual_model.as_ref() else {
             return snapshot;
         };
+        let (provider, actual_model, assumption) = rate_key(&o.provider, actual_model);
+        let actual_model = &actual_model;
         let model = normalize_model(actual_model);
         // Custom identifiers retain their exact match before display-only aliases are normalized.
-        let exact = self.rates.iter().any(|r| r.provider == o.provider && r.models.contains(actual_model));
+        let exact = self.rates.iter().any(|r| r.provider == provider && r.models.contains(actual_model));
         let matches = |r: &Rate| {
-            r.provider == o.provider
+            r.provider == provider
                 && r.models.iter().any(|m| if exact { m == actual_model } else { normalize_model(m) == model })
         };
         let mut rates = self.rates.iter().filter(|r| matches(r));
@@ -323,6 +325,10 @@ impl Catalogue {
             return snapshot;
         };
         snapshot.rate = Some(rate.clone());
+        if let Some(assumption) = assumption {
+            snapshot.assumptions.push(assumption.into());
+            snapshot.partial = true;
+        }
         if o.provider == "meta" && model.starts_with("muse-wonder-full") {
             // Subscription-only, so Meta publishes no price; the catalogue uses Wonder's.
             snapshot.assumptions.push("wonder_full_priced_at_wonder_rate".into());
@@ -630,6 +636,33 @@ impl T3Rates {
                 .map_or_else(|| scaled(base.write_1h, write), i128::from),
             output: i128::from(above_output),
         }
+    }
+}
+
+/// The rate card that prices a record: the model's maker and the name it sells it under.
+/// Google's models cost Google's list price whichever Google service ran them (AI Studio,
+/// Vertex or Antigravity). Antigravity also serves Anthropic's models, and names each
+/// variant by its effort (`gemini-4-neon-xhigh`, `claude-opus-5-5-max`,
+/// `claude-opus-4-6-thinking`), which the price does not depend on. Claude there reports
+/// its usage the Gemini way, without cache writes, so it is an estimate at Anthropic's rate.
+fn rate_key<'a>(provider: &'a str, model: &str) -> (&'a str, String, Option<&'static str>) {
+    match provider {
+        "gemini" | "vertex" => ("google", model.to_owned(), None),
+        "antigravity" => {
+            let name = normalize_model(model);
+            let base = ["-thinking", "-xhigh", "-high", "-medium", "-low", "-max"]
+                .iter()
+                .find_map(|effort| name.strip_suffix(effort))
+                .unwrap_or(&name);
+            if base.starts_with("gemini-") {
+                ("google", base.to_owned(), None)
+            } else if base.starts_with("claude-") {
+                ("anthropic", base.to_owned(), Some("antigravity_claude_priced_at_anthropic_rate"))
+            } else {
+                (provider, model.to_owned(), None)
+            }
+        }
+        _ => (provider, model.to_owned(), None),
     }
 }
 
@@ -1008,6 +1041,101 @@ mod tier_tests {
             provider.price(&o).cost_nanos,
             Some(1000 * 10_000 + 200 * 250 + 50 * 12_500 + 50 * 20_000 + 100 * 50_000)
         );
+    }
+    /// Google's list price applies whichever Google service ran the model. Antigravity's
+    /// effort-named variants cost what the model costs, and its Claude models are
+    /// estimates at Anthropic's rates.
+    #[test]
+    fn google_models_cost_googles_price_on_ai_studio_vertex_and_antigravity() {
+        let provider = Catalogue::provider_fixture();
+        let t3 = Catalogue::load(None).unwrap();
+        let google = |service: &str, model: &str, day: &str| {
+            let mut o = event(service, model);
+            o.event_at_ms = date_ms(day).unwrap();
+            o.service_tier = Some("standard".into());
+            // Gemini reports no cache writes; its thinking is part of the output.
+            o.tokens = Tokens {
+                input: Some(10_000),
+                cache_read: Some(40_000),
+                cache_write: Some(0),
+                output: Some(2_000),
+                reasoning: Some(500),
+                ..Default::default()
+            };
+            o
+        };
+        let cost = |input: i64, read: i64, output: i64| 10_000 * input + 40_000 * read + 2_000 * output;
+        for (model, antigravity, day, (input, read, output)) in [
+            ("gemini-4-neon", "gemini-4-neon-xhigh", "2026-11-20", (3000, 150, 15_000)),
+            ("gemini-4-hydrogen", "gemini-4-hydrogen-low", "2026-11-20", (1500, 75, 7500)),
+            // Carbon and Argon double on 1 December 2026, the Flash models on 1 January 2027.
+            ("gemini-4-carbon", "gemini-4-carbon-medium", "2026-11-30", (2000, 100, 10_000)),
+            ("gemini-4-carbon", "gemini-4-carbon-high", "2026-12-01", (4000, 200, 20_000)),
+            ("gemini-4-argon", "gemini-4-argon-high", "2026-11-30", (2000, 100, 10_000)),
+            ("gemini-4-argon", "gemini-4-argon-low", "2026-12-01", (4000, 200, 20_000)),
+            ("gemini-3.8-flash", "gemini-3.8-flash-high", "2026-12-31", (750, 75, 3750)),
+            ("gemini-3.8-flash", "gemini-3.8-flash-high", "2027-01-01", (1500, 150, 7500)),
+            ("gemini-3.7-flash", "gemini-3.7-flash-high", "2026-12-31", (750, 75, 3750)),
+            ("gemini-3.7-flash", "gemini-3.7-flash-high", "2027-01-01", (1500, 150, 7500)),
+            ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "2026-11-20", (300, 30, 2500)),
+        ] {
+            for (service, name) in [("gemini", model), ("vertex", model), ("antigravity", antigravity)] {
+                let o = google(service, name, day);
+                for catalogue in [&provider, &t3] {
+                    let price = catalogue.price(&o);
+                    assert_eq!(price.cost_nanos, Some(cost(input, read, output)), "{service} {name} {day}");
+                    assert_eq!(price.rate.unwrap().provider, "google");
+                }
+            }
+        }
+        // Batch and Flex halve every category and Priority is 1.8 times, on the rate card.
+        let mut o = google("gemini", "gemini-4-neon", "2026-11-20");
+        for (tier, times) in [("batch", [1, 2]), ("flex", [1, 2]), ("priority", [9, 5])] {
+            o.service_tier = Some(tier.into());
+            assert_eq!(provider.price(&o).cost_nanos, Some(cost(3000, 150, 15_000) * times[0] / times[1]), "{tier}");
+        }
+        // Flash-Lite's Flex and Priority cache reads break the ratio, so only Batch is priced.
+        let mut o = google("gemini", "gemini-3.5-flash-lite", "2026-11-20");
+        o.service_tier = Some("flex".into());
+        assert_eq!(provider.price(&o).basis, "unsupported_service_tier");
+        // 3.1 Pro costs more for a prompt of more than 200,000 tokens, cached ones included.
+        for (service, name) in [("gemini", "gemini-3.1-pro-preview"), ("antigravity", "gemini-3.1-pro-low")] {
+            let mut o = google(service, name, "2026-11-20");
+            o.tokens.input = Some(160_000);
+            assert_eq!(provider.price(&o).cost_nanos, Some(cost(2000, 200, 12_000) + 150_000 * 2000), "{name}");
+            assert_eq!(t3.price(&o).cost_nanos, Some(cost(2000, 200, 12_000) + 150_000 * 2000), "{name}");
+            o.tokens.input = Some(160_001);
+            let above = 160_001 * 4000 + 40_000 * 400 + 2_000 * 18_000;
+            assert_eq!(provider.price(&o).cost_nanos, Some(above), "{name}");
+            assert_eq!(t3.price(&o).cost_nanos, Some(above), "{name}");
+        }
+        // Claude on Antigravity is an estimate at Anthropic's price for the same model.
+        for (antigravity, anthropic) in
+            [("claude-opus-5-5-max", "claude-opus-5-5"), ("claude-opus-4-6-thinking", "claude-opus-4-6")]
+        {
+            let resold = google("antigravity", antigravity, "2026-11-20");
+            let direct = google("anthropic", anthropic, "2026-11-20");
+            for catalogue in [&provider, &t3] {
+                let price = catalogue.price(&resold);
+                assert!(price.cost_nanos.is_some(), "{antigravity}");
+                assert_eq!(price.cost_nanos, catalogue.price(&direct).cost_nanos, "{antigravity}");
+                assert!(price.partial);
+                assert!(price.assumptions.contains(&"antigravity_claude_priced_at_anthropic_rate".into()));
+            }
+        }
+        // No guessed prices: models without a published rate, and other makers' names on Google.
+        for (service, name) in [
+            ("antigravity", "gpt-oss-120b-medium"),
+            ("antigravity", "gemini-pro-agent"),
+            ("antigravity", "gemini-3-flash"),
+            ("gemini", "claude-opus-5-5"),
+            ("vertex", "gemini-2.5-pro"),
+        ] {
+            let o = google(service, name, "2026-11-20");
+            for catalogue in [&provider, &t3] {
+                assert_eq!(catalogue.price(&o).basis, "unknown_model", "{service} {name}");
+            }
+        }
     }
     #[test]
     fn gpt_6_2_prices_and_ultrafast_triples_until_march_2027_then_goes_to_six_times() {
