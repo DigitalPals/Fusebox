@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Compile the supported model families using T3 Code's pricing rules (0.1.3, plus
-its 2026-11-01 maker-first rule for bare model names).
+"""Compile the supported model families using T3 Code's pricing rules (0.1.11).
+
+T3 reads LiteLLM's standard, Fast (priority or a `fast` multiple) and Ultrafast
+rates, a one-hour cache-write rate, and long-prompt rates that apply when a
+request's whole prompt (uncached, cached and written) is above a threshold.
+A bare model name takes the maker's own price over a cloud's or reseller's.
 
 Accepts LiteLLM's public document or T3's cached {fetchedAtMs, document} wrapper.
 No runtime network dependency. Keep the input hash and date with the release.
@@ -17,21 +21,82 @@ ROOT = Path(__file__).resolve().parents[1]
 # LiteLLM prefixes for the model makers' own APIs, as in T3's usagePricing.ts.
 FIRST_PARTY = {"anthropic", "deepseek", "gemini", "meta", "mistral", "openai", "xai"}
 SOURCE = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+CONTEXT_TIER_KEY = re.compile(r"^input_cost_per_token_above_(\d{1,7})k_tokens(?:_priority|_ultrafast)?$")
+SPEEDS = ("fast", "ultrafast")
+# Rate tuples: (input, cache read, cache write, one-hour cache write, output).
+INPUT, READ, WRITE, WRITE_1H, OUTPUT = range(5)
 
 
-def token_rates(entry, suffix="", standard=None):
+def token_rates(entry, suffix="", standard=None, output_fallback=None):
+    """T3's readTokenRates: a missing cache rate keeps the standard rate's ratio to input."""
     def number(key):
         value = entry.get(key + suffix)
         return Fraction(str(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    inp, out = number("input_cost_per_token"), number("output_cost_per_token")
+    inp = number("input_cost_per_token")
+    out = number("output_cost_per_token")
+    if out is None:
+        out = output_fallback
     if inp is None or out is None:
         return None
-    cache = []
-    for i, key in enumerate(("cache_read_input_token_cost", "cache_creation_input_token_cost"), 1):
+
+    def cache(key, field, fallback):
         value = number(key)
-        cache.append(value if value is not None else standard[i] / standard[0] * inp if standard and standard[0] > 0 else inp)
-    return (inp, *cache, out)
+        if value is not None:
+            return value
+        return standard[field] / standard[INPUT] * inp if standard and standard[INPUT] > 0 else fallback
+
+    write = cache("cache_creation_input_token_cost", WRITE, inp)
+    read = cache("cache_read_input_token_cost", READ, inp)
+    return (inp, read, write, cache("cache_creation_input_token_cost_above_1hr", WRITE_1H, write), out)
+
+
+def speed_rates(entry, standard, suffix=""):
+    """T3's readSpeedRates: a `fast` multiple scales the standard rates, else the priority rates."""
+    specific = entry.get("provider_specific_entry")
+    multiple = specific.get("fast") if isinstance(specific, dict) else None
+    if isinstance(multiple, (int, float)) and not isinstance(multiple, bool) and multiple > 0:
+        fast = tuple(n * Fraction(str(multiple)) for n in standard)
+    else:
+        fast = token_rates(entry, suffix + "_priority", standard)
+    return {"standard": standard, "fast": fast, "ultrafast": token_rates(entry, suffix + "_ultrafast", standard)}
+
+
+def context_tiers(entry, base):
+    """T3's readContextTiers, highest threshold first."""
+    thresholds = {int(m.group(1)) for m in map(CONTEXT_TIER_KEY.match, entry) if m}
+    tiers = []
+    for threshold in sorted(thresholds, reverse=True):
+        suffix = f"_above_{threshold}k_tokens"
+        standard = token_rates(entry, suffix, base, base[OUTPUT]) or base
+        tiers.append((threshold * 1000, speed_rates(entry, standard, suffix)))
+    return tiers
+
+
+def merge_speeds(a, b):
+    fast, ultra = a["fast"] or b["fast"], a["ultrafast"] or b["ultrafast"]
+    if a["standard"] != b["standard"] or (b["fast"] or fast) != fast or (b["ultrafast"] or ultra) != ultra:
+        return None
+    return {"standard": a["standard"], "fast": fast, "ultrafast": ultra}
+
+
+def merge_alias(a, b):
+    """T3's mergeAliasRate: aliases of the same standing must agree, or the name stays unpriced."""
+    speeds = merge_speeds(a, b)
+    if speeds is None:
+        return None
+    if not a["tiers"] or not b["tiers"]:
+        tiers = a["tiers"] or b["tiers"]
+    elif len(a["tiers"]) != len(b["tiers"]):
+        return None
+    else:
+        tiers = []
+        for (ta, ra), (tb, rb) in zip(a["tiers"], b["tiers"]):
+            merged = merge_speeds(ra, rb)
+            if ta != tb or merged is None:
+                return None
+            tiers.append((ta, merged))
+    return {**speeds, "tiers": tiers}
 
 
 def rate_table(document):
@@ -42,36 +107,96 @@ def rate_table(document):
         standard = token_rates(entry)
         if standard is None:
             continue
-        specific = entry.get("provider_specific_entry") or {}
-        multiple = specific.get("fast") if isinstance(specific, dict) else None
-        fast = tuple(n * Fraction(str(multiple)) for n in standard) if isinstance(multiple, (int, float)) and multiple > 0 else token_rates(entry, "_priority", standard)
-        table[name.strip().lower()] = (standard, fast, token_rates(entry, "_ultrafast", standard))
+        key = name.strip().lower()
+        if key:
+            table[key] = {**speed_rates(entry, standard), "tiers": context_tiers(entry, standard)}
     # A bare name takes the maker's own price over a cloud's or reseller's (T3 #28004);
     # entries of the same standing must agree, or the name stays unpriced.
     candidates = {}
     for name, rate in table.items():
-        bare = name.rsplit("/", 1)[-1]
-        if bare == name or bare in table:
+        alias = name.rsplit("/", 1)[-1] if "/" in name else name.removeprefix("anthropic.")
+        if not alias or alias == name or alias in table:
             continue
-        first_party = name.split("/", 1)[0] in FIRST_PARTY
-        held = candidates.get(bare)
+        first_party = "/" in name and name.split("/", 1)[0] in FIRST_PARTY
+        held = candidates.get(alias)
         if held is None or (first_party and not held[1]):
-            candidates[bare] = (rate, first_party)
+            candidates[alias] = (rate, first_party)
         elif held[0] is not None and first_party == held[1]:
-            old = held[0]
-            merged = (old[0], old[1] or rate[1], old[2] or rate[2])
-            agree = old[0] == rate[0] and all(rate[i] is None or rate[i] == merged[i] for i in (1, 2))
-            candidates[bare] = (merged if agree else None, first_party)
+            candidates[alias] = (merge_alias(held[0], rate), first_party)
     table.update({name: rate for name, (rate, _) in candidates.items() if rate is not None})
     return table
+
+
+def nanos(rates, name):
+    out = tuple(n * 1_000_000_000 for n in rates)
+    if any(n.denominator != 1 or n < 0 for n in out):
+        raise ValueError(f"{name}: unsupported sub-nanodollar rate")
+    return tuple(int(n) for n in out)
+
+
+def multiple(standard, rates, name):
+    """One ratio for every category, as Fusebox stores a speed as a multiplier."""
+    ratios = {b / a for a, b in zip(standard, rates) if a}
+    if len(ratios) != 1 or any(not a and b for a, b in zip(standard, rates)):
+        raise ValueError(f"{name}: nonuniform speed rates require a rate schema update")
+    ratio = ratios.pop()
+    return [ratio.numerator, ratio.denominator]
+
+
+def scaled(base, field, tier_input):
+    """The code's fallback for an omitted long-prompt cache rate (T3's ratio rule)."""
+    return Fraction(base[field] * tier_input, base[INPUT]) if base[INPUT] else None
+
+
+def model_row(provider, name, rate):
+    standard = rate["standard"]
+    base = nanos(standard, name)
+    tiers = {speed: multiple(standard, rate[speed], name) for speed in SPEEDS if rate[speed] is not None}
+    row = {"provider": provider, "models": [name], "effective_from": None, "effective_until": None,
+           "source_url": SOURCE, "input_nanos_per_token": base[INPUT],
+           "cache_read_nanos_per_token": base[READ], "cache_write_nanos_per_token": base[WRITE],
+           "cache_write_5m_nanos_per_token": None,
+           # Only a one-hour rate that differs; the code falls back to the write rate.
+           "cache_write_1h_nanos_per_token": base[WRITE_1H] if base[WRITE_1H] != base[WRITE] else None,
+           "output_nanos_per_token": base[OUTPUT], "tier_multipliers": tiers}
+    if len(rate["tiers"]) > 1:
+        raise ValueError(f"{name}: several long-prompt thresholds require a rate schema update")
+    for threshold, tier in rate["tiers"]:
+        above = nanos(tier["standard"], name)
+        row.update({"threshold_input_tokens": threshold,
+                    "above_threshold_input_nanos_per_token": above[INPUT],
+                    "above_threshold_read_nanos_per_token": above[READ],
+                    "above_threshold_write_nanos_per_token": above[WRITE],
+                    "above_threshold_output_nanos_per_token": above[OUTPUT]})
+        # Omitted when the code's fallback gives the same rate: releases before 0.6
+        # cannot read a long-prompt lifetime rate, and a downgrade drops its row.
+        if scaled(base, WRITE_1H, above[INPUT]) != above[WRITE_1H]:
+            row["above_threshold_write_1h_nanos_per_token"] = above[WRITE_1H]
+        # T3 prices a long prompt at a speed with the tier's speed rate when it has
+        # one, else with the base speed rate: those speeds skip the long-prompt rates.
+        excluded = []
+        for speed in SPEEDS:
+            if tier[speed] is None:
+                if rate[speed] is not None:
+                    excluded.append(speed)
+            elif rate[speed] is None or multiple(tier["standard"], tier[speed], name) != tiers[speed]:
+                raise ValueError(f"{name}: long-prompt speed rates require a rate schema update")
+        if excluded:
+            row["long_context_excluded_tiers"] = excluded
+    return row
 
 
 def compile_catalogue(document, date, version):
     provider = json.loads((ROOT / "src/usage/rates.json").read_text())
     families = {name: row["provider"] for row in provider["rates"] for name in row["models"]}
-    table = rate_table(document)
-    groups = {}
-    for name, (standard, fast, ultra) in table.items():
+    dated = {}
+    for row in provider["rates"]:
+        if row.get("effective_from") or row.get("effective_until"):
+            for name in row["models"]:
+                dated.setdefault(name, []).append(row)
+    day = datetime.date.fromisoformat(date).isoformat()
+    rows = []
+    for name, rate in rate_table(document).items():
         # Fusebox's bundled scope is direct OpenAI/Anthropic model families.
         # Cloud reseller price cards are distinct and need explicit overrides.
         if "/" in name and name.split("/", 1)[0] not in ("openai", "anthropic"):
@@ -80,28 +205,20 @@ def compile_catalogue(document, date, version):
         family = re.sub(r"-\d{8}$", "", bare)
         if family not in families:
             continue
-        nanos = tuple(n * 1_000_000_000 for n in standard)
-        if any(n.denominator != 1 or n < 0 for n in nanos):
-            raise ValueError(f"{name}: unsupported sub-nanodollar rate")
-        tiers = {}
-        for speed, rates in (("fast", fast), ("ultrafast", ultra)):
-            if rates is None:
-                continue
-            ratios = {b / a for a, b in zip(standard, rates) if a}
-            if len(ratios) != 1 or any(not a and b for a, b in zip(standard, rates)):
-                raise ValueError(f"{name}: nonuniform speed rates require a rate schema update")
-            multiple = ratios.pop()
-            tiers[speed] = [multiple.numerator, multiple.denominator]
-        key = (families[family], nanos, json.dumps(tiers, sort_keys=True))
-        if key not in groups:
-            groups[key] = {"provider": key[0], "models": [], "effective_from": None, "effective_until": None,
-                           "source_url": SOURCE, "input_nanos_per_token": int(nanos[0]),
-                           "cache_read_nanos_per_token": int(nanos[1]), "cache_write_nanos_per_token": int(nanos[2]),
-                           "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
-                           "output_nanos_per_token": int(nanos[3]), "tier_multipliers": tiers}
-        groups[key]["models"].append(name)
-    rates = list(groups.values())
-    present = {name for row in rates for name in row["models"]}
+        row = model_row(families[family], name, rate)
+        if name not in dated:
+            rows.append(row)
+            continue
+        # A published speed price change keeps the rate card's dated periods.
+        # LiteLLM must agree with the period that covers the release date.
+        for period in dated[name]:
+            speeds = {s: m for s, m in (period.get("tier_multipliers") or {}).items() if s in SPEEDS}
+            current = (period.get("effective_from") or "") <= day < (period.get("effective_until") or "9999")
+            if current and speeds != row["tier_multipliers"]:
+                raise ValueError(f"{name}: LiteLLM speed rates differ from the rate card's current period")
+            rows.append({**row, "effective_from": period.get("effective_from"),
+                         "effective_until": period.get("effective_until"), "tier_multipliers": speeds})
+    present = {name for row in rows for name in row["models"]}
     # Preserve existing published model support when LiteLLM has no matching ID.
     # These rows retain their official source URL, making the fallback auditable,
     # and the published speed multipliers the T3 calculation uses.
@@ -114,17 +231,22 @@ def compile_catalogue(document, date, version):
         if write is None:
             write = row.get("cache_write_30m_nanos_per_token")
         if missing:
-            rates.append({"provider": row["provider"], "models": missing, "effective_from": row.get("effective_from"),
-                          "effective_until": row.get("effective_until"), "source_url": row["source_url"],
-                          "input_nanos_per_token": row["input_nanos_per_token"],
-                          "cache_read_nanos_per_token": row.get("cache_read_nanos_per_token"),
-                          "cache_write_nanos_per_token": write,
-                          "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
-                          "output_nanos_per_token": row["output_nanos_per_token"],
-                          "tier_multipliers": {speed: tiers[speed] for speed in ("fast", "ultrafast") if speed in tiers}})
+            rows.append({"provider": row["provider"], "models": missing, "effective_from": row.get("effective_from"),
+                         "effective_until": row.get("effective_until"), "source_url": row["source_url"],
+                         "input_nanos_per_token": row["input_nanos_per_token"],
+                         "cache_read_nanos_per_token": row.get("cache_read_nanos_per_token"),
+                         "cache_write_nanos_per_token": write,
+                         "cache_write_5m_nanos_per_token": None, "cache_write_1h_nanos_per_token": None,
+                         "output_nanos_per_token": row["output_nanos_per_token"],
+                         "tier_multipliers": {speed: tiers[speed] for speed in SPEEDS if speed in tiers}})
+    groups = {}
+    for row in rows:
+        key = json.dumps({k: v for k, v in row.items() if k != "models"}, sort_keys=True)
+        groups.setdefault(key, {**row, "models": []})["models"].extend(row["models"])
+    rates = list(groups.values())
     for row in rates:
         row["models"].sort()
-    rates.sort(key=lambda row: (row["provider"], row["models"][0]))
+    rates.sort(key=lambda row: (row["provider"], row["models"][0], row["effective_from"] or ""))
     return {"version": version, "verified_at": date, "calculation": "t3", "rates": rates, "currency": "USD"}
 
 

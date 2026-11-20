@@ -179,7 +179,7 @@ impl Catalogue {
     pub fn basis(&self) -> &'static str {
         match self.calculation {
             Calculation::T3 => {
-                "T3 Code category-rate equivalent using requested Codex speed and reported Claude speed; no context, region or cache-lifetime premiums; never subscription bill"
+                "T3 Code category-rate equivalent using requested Codex speed and reported Claude speed, long-prompt rates and one-hour Claude cache writes; no region or other cache-lifetime premiums; never subscription bill"
             }
             Calculation::Provider => {
                 "API list-price equivalent estimate using the configured tier, context, region and cache-lifetime rules; never subscription bill"
@@ -516,14 +516,11 @@ impl Catalogue {
             }
             .into(),
         );
-        let multiplier = if speed == Speed::Standard {
-            [1, 1]
-        } else if let Some(multiplier) = rate.tier_multipliers.get(speed.as_str()) {
-            *multiplier
-        } else {
+        let speed_multiplier = (speed != Speed::Standard).then(|| rate.tier_multipliers.get(speed.as_str())).flatten();
+        if speed != Speed::Standard && speed_multiplier.is_none() {
             snapshot.assumptions.push("speed_rate_unavailable_standard_rate_used".into());
-            [1, 1]
-        };
+        }
+        let multiplier = speed_multiplier.copied().unwrap_or([1, 1]);
         snapshot.tier_multiplier = multiplier;
         if o.tokens.validate().is_err() {
             snapshot.basis = "invalid_tokens".into();
@@ -542,15 +539,28 @@ impl Catalogue {
             snapshot.basis = "missing_tokens".into();
             return snapshot;
         };
+        // A prompt above the threshold prices every category at the long-prompt
+        // rates. A speed listed in `long_context_excluded_tiers` has no long-prompt
+        // speed rate, so T3 uses the base speed rate for it.
+        let prompt = u128::from(input) + u128::from(read) + u128::from(write);
+        let above = rate.threshold_input_tokens.is_some_and(|n| prompt > u128::from(n))
+            && !(speed_multiplier.is_some() && rate.long_context_excluded_tiers.iter().any(|t| t == speed.as_str()));
+        if above {
+            snapshot.assumptions.push("t3_long_prompt_rates".into());
+        }
+        let rates = T3Rates::of(rate, above);
+        // Claude reports one-hour cache writes; T3 prices them at their own rate.
+        let one_hour = o.tokens.write_1h.unwrap_or(0).min(write);
         let costs = [
-            (input, rate.input_nanos_per_token),
-            (read, rate.cache_read_nanos_per_token.unwrap_or(rate.input_nanos_per_token)),
-            (write, rate.cache_write_nanos_per_token.unwrap_or(rate.input_nanos_per_token)),
-            (output, rate.output_nanos_per_token),
+            (input, rates.input),
+            (read, rates.read),
+            (write - one_hour, rates.write),
+            (one_hour, rates.write_1h),
+            (output, rates.output),
         ];
-        let sum = costs.into_iter().try_fold(0_i128, |total, (tokens, price)| {
-            total.checked_add(i128::from(tokens).checked_mul(i128::from(price))?)
-        });
+        let sum = costs
+            .into_iter()
+            .try_fold(0_i128, |total, (tokens, price)| total.checked_add(i128::from(tokens).checked_mul(price)?));
         let [n, d] = multiplier.map(i128::from);
         snapshot.cost_nanos = sum
             .and_then(|sum| sum.checked_mul(n)?.checked_add(d / 2)?.checked_div(d))
@@ -575,6 +585,51 @@ impl Catalogue {
     #[cfg(test)]
     pub(crate) fn provider_fixture() -> Self {
         serde_json::from_str(include_str!("rates.json")).unwrap()
+    }
+}
+
+/// Per-token rates for one T3 estimate, with T3 Code 0.1.11's fallbacks: a missing
+/// cache rate is the input rate, a missing one-hour write rate is the write rate,
+/// and a missing long-prompt cache rate keeps the base rate's ratio to input.
+struct T3Rates {
+    input: i128,
+    read: i128,
+    write: i128,
+    write_1h: i128,
+    output: i128,
+}
+impl T3Rates {
+    fn of(rate: &Rate, above: bool) -> Self {
+        let input = i128::from(rate.input_nanos_per_token);
+        let read = rate.cache_read_nanos_per_token.map_or(input, i128::from);
+        let write = rate.cache_write_nanos_per_token.map_or(input, i128::from);
+        let base = Self {
+            input,
+            read,
+            write,
+            write_1h: rate.cache_write_1h_nanos_per_token.map_or(write, i128::from),
+            output: i128::from(rate.output_nanos_per_token),
+        };
+        let (Some(above_input), Some(above_output), true) =
+            (rate.above_threshold_input_nanos_per_token, rate.above_threshold_output_nanos_per_token, above)
+        else {
+            return base;
+        };
+        let above_input = i128::from(above_input);
+        let scaled = |n: i128, fallback: i128| {
+            if base.input > 0 { (n * above_input + base.input / 2) / base.input } else { fallback }
+        };
+        let write =
+            rate.above_threshold_write_nanos_per_token.map_or_else(|| scaled(base.write, above_input), i128::from);
+        Self {
+            input: above_input,
+            read: rate.above_threshold_read_nanos_per_token.map_or_else(|| scaled(base.read, above_input), i128::from),
+            write,
+            write_1h: rate
+                .above_threshold_write_1h_nanos_per_token
+                .map_or_else(|| scaled(base.write_1h, write), i128::from),
+            output: i128::from(above_output),
+        }
     }
 }
 
@@ -632,7 +687,9 @@ mod t3_tests {
                 cache_read: case["tokens"][1].as_u64(),
                 cache_write: case["tokens"][2].as_u64(),
                 output: case["tokens"][3].as_u64(),
-                write_1h: if provider == "anthropic" { case["tokens"][2].as_u64() } else { None },
+                // Claude splits its writes by lifetime; T3 prices the one-hour part on its own.
+                write_5m: case["write_1h"].as_u64().map(|h| case["tokens"][2].as_u64().unwrap() - h),
+                write_1h: case["write_1h"].as_u64(),
                 write_12h: if provider == "openai" { case["tokens"][2].as_u64() } else { None },
                 reasoning: case["tokens"][3].as_u64(),
                 ..Default::default()
@@ -716,16 +773,19 @@ mod meta_t3_tests {
     }
 
     /// Muse Ember at Meta's published rates: $0.10 input, $0.004 cached input and $0.50
-    /// output per million tokens. The default calculation is flat, as T3 Code's is: it
-    /// leaves out Meta's higher rates for requests of more than 200,000 input tokens.
+    /// output per million tokens, three times that once a request's input, cached input
+    /// included, is above 200,000 tokens, as T3 Code 0.1.11 prices it.
     #[test]
     fn muse_ember_prices_at_metas_rates() {
         let ember = muse("muse-ember-1.0", [Some(3048), Some(15_217), Some(0), Some(431)]);
         assert_eq!(ember.cost_nanos, Some(3048 * 100 + 15_217 * 4 + 431 * 500));
         assert!(!ember.partial, "{:?}", ember.assumptions);
-        assert!(ember.assumptions.contains(&"published_provider_rate_fallback".into()));
+        assert!(!ember.assumptions.contains(&"t3_long_prompt_rates".into()));
+        let edge = muse("muse-ember-1.0", [Some(50_000), Some(150_000), Some(0), Some(431)]);
+        assert_eq!(edge.cost_nanos, Some(50_000 * 100 + 150_000 * 4 + 431 * 500));
         let long = muse("muse-ember-1.0", [Some(50_000), Some(150_001), Some(0), Some(431)]);
-        assert_eq!(long.cost_nanos, Some(50_000 * 100 + 150_001 * 4 + 431 * 500));
+        assert_eq!(long.cost_nanos, Some(50_000 * 300 + 150_001 * 12 + 431 * 1500));
+        assert!(long.assumptions.contains(&"t3_long_prompt_rates".into()));
     }
 }
 
@@ -923,8 +983,8 @@ mod tier_tests {
         let provider = Catalogue::provider_fixture();
         let t3 = Catalogue::load(None).unwrap();
         let standard = 1000 * 8000 + 200 * 200 + 50 * 10_000 + 50 * 16_000 + 100 * 40_000;
-        // T3's flat calculation prices every cache write at the five-minute rate.
-        let t3_standard = 1000 * 8000 + 200 * 200 + 100 * 10_000 + 100 * 40_000;
+        // T3 prices one-hour writes at their own rate too, but has no Batch discount.
+        let t3_standard = standard;
         for model in ["claude-fable-5-2", "claude-mythos-5-2"] {
             let mut o = event("anthropic", model);
             for (tier, cost, t3_cost) in [
@@ -936,7 +996,6 @@ mod tier_tests {
                 assert_eq!(provider.price(&o).cost_nanos, Some(cost), "{model} {tier}");
                 let snapshot = t3.price(&o);
                 assert_eq!(snapshot.cost_nanos, Some(t3_cost), "{model} {tier}");
-                assert!(snapshot.assumptions.contains(&"published_provider_rate_fallback".into()), "{model}");
                 assert!(!snapshot.assumptions.contains(&"speed_rate_unavailable_standard_rate_used".into()));
             }
             o.inference_geo = Some("us".into());
@@ -973,19 +1032,20 @@ mod tier_tests {
                 assert_eq!(provider.price(&o).cost_nanos, Some(standard * times), "{model} {day}");
                 let snapshot = t3.price(&o);
                 assert_eq!(snapshot.cost_nanos, Some(standard * times), "{model} {day}");
-                assert!(snapshot.assumptions.contains(&"published_provider_rate_fallback".into()), "{model}");
             }
             // Past 272K input tokens, cached and written ones included, input and
             // cache double and output is one and a half times.
             o.service_tier = Some("standard".into());
             o.tokens.input = Some(271_700);
             assert_eq!(provider.price(&o).cost_nanos, Some(standard + 270_700 * input), "{model}");
+            assert_eq!(t3.price(&o).cost_nanos, Some(standard + 270_700 * input), "{model}");
             o.tokens.input = Some(271_701);
-            assert_eq!(
-                provider.price(&o).cost_nanos,
-                Some(271_701 * input * 2 + 200 * read * 2 + 100 * write * 2 + 100 * output * 3 / 2),
-                "{model}"
-            );
+            let long = 271_701 * input * 2 + 200 * read * 2 + 100 * write * 2 + 100 * output * 3 / 2;
+            assert_eq!(provider.price(&o).cost_nanos, Some(long), "{model}");
+            // T3 too, and its long-prompt rates have their own Ultrafast price.
+            assert_eq!(t3.price(&o).cost_nanos, Some(long), "{model}");
+            o.service_tier = Some("ultrafast".into());
+            assert_eq!(t3.price(&o).cost_nanos, Some(long * 6), "{model}");
         }
     }
     #[test]
