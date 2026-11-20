@@ -1,5 +1,5 @@
 {
-  "version": "t3-2026-11-20.1",
+  "version": "t3-2026-11-20.2",
   "verified_at": "2026-11-20",
   "calculation": "t3",
   "rates": [
@@ -259,6 +259,225 @@
       "cache_write_1h_nanos_per_token": 4000,
       "output_nanos_per_token": 10000,
       "tier_multipliers": {}
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.1-pro"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://aistudio.google.com/docs/pricing",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 200,
+      "cache_write_nanos_per_token": null,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 12000,
+      "tier_multipliers": {},
+      "threshold_input_tokens": 200000,
+      "above_threshold_input_nanos_per_token": 4000,
+      "above_threshold_read_nanos_per_token": 400,
+      "above_threshold_output_nanos_per_token": 18000
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.1-pro-preview"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 200,
+      "cache_write_nanos_per_token": 2000,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 12000,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      },
+      "threshold_input_tokens": 200000,
+      "above_threshold_input_nanos_per_token": 4000,
+      "above_threshold_read_nanos_per_token": 400,
+      "above_threshold_write_nanos_per_token": 4000,
+      "above_threshold_output_nanos_per_token": 18000
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.5-flash-lite"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 300,
+      "cache_read_nanos_per_token": 30,
+      "cache_write_nanos_per_token": 300,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 2500,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash"
+      ],
+      "effective_from": null,
+      "effective_until": "2027-01-01",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 750,
+      "cache_read_nanos_per_token": 75,
+      "cache_write_nanos_per_token": 750,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 3750,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.6-flash",
+        "gemini-3.8-flash"
+      ],
+      "effective_from": "2027-01-01",
+      "effective_until": null,
+      "source_url": "https://aistudio.google.com/docs/pricing",
+      "input_nanos_per_token": 1500,
+      "cache_read_nanos_per_token": 150,
+      "cache_write_nanos_per_token": 1500,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 7500,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-3.7-flash"
+      ],
+      "effective_from": "2027-01-01",
+      "effective_until": null,
+      "source_url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "input_nanos_per_token": 1500,
+      "cache_read_nanos_per_token": 150,
+      "cache_write_nanos_per_token": 1500,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 7500,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-4-argon",
+        "gemini-4-carbon"
+      ],
+      "effective_from": null,
+      "effective_until": "2026-12-01",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 2000,
+      "cache_read_nanos_per_token": 100,
+      "cache_write_nanos_per_token": 2000,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 10000,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-4-argon",
+        "gemini-4-carbon"
+      ],
+      "effective_from": "2026-12-01",
+      "effective_until": null,
+      "source_url": "https://aistudio.google.com/docs/pricing",
+      "input_nanos_per_token": 4000,
+      "cache_read_nanos_per_token": 200,
+      "cache_write_nanos_per_token": 4000,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 20000,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-4-hydrogen"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 1500,
+      "cache_read_nanos_per_token": 75,
+      "cache_write_nanos_per_token": 1500,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 7500,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
+    },
+    {
+      "provider": "google",
+      "models": [
+        "gemini-4-neon"
+      ],
+      "effective_from": null,
+      "effective_until": null,
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "input_nanos_per_token": 3000,
+      "cache_read_nanos_per_token": 150,
+      "cache_write_nanos_per_token": 3000,
+      "cache_write_5m_nanos_per_token": null,
+      "cache_write_1h_nanos_per_token": null,
+      "output_nanos_per_token": 15000,
+      "tier_multipliers": {
+        "fast": [
+          9,
+          5
+        ]
+      }
     },
     {
       "provider": "meta",

@@ -24,6 +24,37 @@ Forwarding one is a deliberate change (one header per commit), usually through
 the `upstream-header-allowlist` config escape hatch for operators who need it
 before a release allows it by default.
 
+## 2026-11-20
+
+### Antigravity 2.33.0
+
+The official update manifest advertises 2.33.0. Verified the macOS arm64 ZIP
+against the manifest's SHA-512
+(`akGKBoAWOxZmddrQyvSHDxmnCtaaLnz7jaBTDg+8g8vG/lytBldvIkHRPxXA+WWsm6Xq2FP+fSzWD/BKFmsBvQ==`)
+and inspected its language server as data. It still calls `loadCodeAssist`,
+`onboardUser`, `fetchAvailableModels` (with `deprecatedModelIds`),
+`streamGenerateContent` and `retrieveUserQuotaSummary` on the daily and prod
+Cloud Code hosts, and still uses the `requestType`, `image_gen` and `sessionId`
+fields Fusebox sends.
+
+Two things changed for Fusebox:
+
+- **Models.** The server compiles in `gemini-4-carbon-{high,medium,low}` and
+  `gemini-4-hydrogen-{xhigh,high,medium,low}` and a `THINKING_LEVEL_XHIGH`
+  value. Gemini 4 Neon came out a day after this build. See
+  [model support](model-support-2026-11-20.md).
+- **User agent.** Since 2.23.0 the language server sends
+  `antigravity/hub/<release> (aidev_client; os_type=darwin; arch=arm64; cl=<changelist>)`
+  (format strings `%s/%s (%s)`, `aidev_client`, `os_type=%s`, `cl=%d`; the full
+  string as captured in CLIProxyAPI #6619). Fusebox sent
+  `antigravity/hub/<release> darwin/arm64`. It now sends the language server's
+  form. The changelist is per build: 2.33.0 says
+  `changelist 1023160026 with baseline 1022452901`, which matches CLIProxyAPI's
+  table. Releases Fusebox has not reviewed are sent without `cl`.
+
+Releases 2.29.1 to 2.32.2 were not inspected individually. Their changelog lists
+no change to the Cloud Code methods above.
+
 ## 2026-11-04
 
 Reviewed every client in the weekly compatibility issue (#48) and refreshed the
@@ -337,6 +368,10 @@ protocol fixtures for actual wire changes. Record the evidence and any limits of
 the review here, then advance `reviewed`. If a bundled identity changes, update
 `version` and the corresponding Rust constants together, and use the actual build
 hash where required. Run Rust and Python checks before publishing the changes.
+
+For Antigravity, also read the release's build changelist from its language
+server (`changelist N with baseline M`) and add it to `CHANGELISTS` in
+`src/antigravity.rs`; until then the user agent omits `cl`.
 
 For clients without public protocol source, release manifests establish the
 identity but do not prove unchanged request encoding. Keep the next release in

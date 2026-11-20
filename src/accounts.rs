@@ -54,6 +54,17 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "claude-sonnet-5-5-low",
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-neon-xhigh",
+    "gemini-4-neon-high",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-low",
+    "gemini-4-carbon-high",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-low",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-low",
     "gemini-4-argon-high",
     "gemini-4-argon-medium",
     "gemini-4-argon-low",
@@ -223,6 +234,9 @@ impl Provider {
                 "gpt-image-2.5-sunburst",
             ],
             Provider::Gemini => &[
+                "gemini-4-neon",
+                "gemini-4-carbon",
+                "gemini-4-hydrogen",
                 "gemini-4-argon",
                 "gemini-3.8-flash",
                 "gemini-3.7-flash",
@@ -237,6 +251,9 @@ impl Provider {
                 "gemini-2.5-flash",
             ],
             Provider::Vertex => &[
+                "gemini-4-neon",
+                "gemini-4-carbon",
+                "gemini-4-hydrogen",
                 "gemini-4-argon",
                 "gemini-3.8-flash",
                 "gemini-3.7-flash",
@@ -3101,6 +3118,31 @@ oauth-model-alias:
     }
 
     #[test]
+    fn bare_gemini_4_names_reach_antigravity_at_its_default_effort() {
+        let dir = std::env::temp_dir().join(format!("fusebox-antigravity-gemini4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred =
+            serde_json::json!({"type":"antigravity","access_token":"t","email":"a@example.invalid","project_id":"p"});
+        std::fs::write(dir.join("antigravity-a.json"), cred.to_string()).unwrap();
+        let pool = Pool::default();
+        pool.reload(&Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() });
+        let _ = std::fs::remove_dir_all(&dir);
+        // Neon, Carbon and Hydrogen default to High in Antigravity; Extra is asked for by name.
+        for (asked, upstream) in [
+            ("gemini-4-neon", "gemini-4-neon-high"),
+            ("gemini-4-carbon", "gemini-4-carbon-high"),
+            ("gemini-4-hydrogen", "gemini-4-hydrogen-high"),
+            ("google/gemini-4-neon", "gemini-4-neon-high"),
+            ("gemini-4-neon-xhigh", "gemini-4-neon-xhigh"),
+            ("gemini-4-hydrogen-low", "gemini-4-hydrogen-low"),
+        ] {
+            assert_eq!(pool.canonical(asked, None), upstream, "{asked}");
+        }
+        let names: Vec<String> = pool.models().into_iter().map(|(m, _)| m).collect();
+        assert!(names.iter().any(|m| m == "gemini-4-neon-xhigh"), "{names:?}");
+    }
+
+    #[test]
     fn close_model_names_resolve() {
         assert_eq!(dot_versions("gemini-3-8-flash"), "gemini-3.8-flash");
         assert_eq!(dot_versions("gpt-6-1-sol"), "gpt-6.1-sol");
@@ -3163,6 +3205,12 @@ oauth-model-alias:
             (Provider::Claude, "claude-haiku-5-5"),
             (Provider::Gemini, "gemini-4-argon"),
             (Provider::Vertex, "gemini-4-argon"),
+            (Provider::Gemini, "gemini-4-neon"),
+            (Provider::Gemini, "gemini-4-carbon"),
+            (Provider::Gemini, "gemini-4-hydrogen"),
+            (Provider::Vertex, "gemini-4-neon"),
+            (Provider::Vertex, "gemini-4-carbon"),
+            (Provider::Vertex, "gemini-4-hydrogen"),
             (Provider::Kimi, "kimi-k3.1-pro"),
             (Provider::Kimi, "kimi-k3.1-pro-highspeed"),
             (Provider::Xai, "grok-imagine-video-1.5-lite"),
@@ -3170,12 +3218,17 @@ oauth-model-alias:
             (Provider::Devin, "claude-haiku-5-5"),
             (Provider::Antigravity, "gemini-4-argon-high"),
             (Provider::Antigravity, "claude-sonnet-5-5-max"),
+            (Provider::Antigravity, "gemini-4-neon-xhigh"),
+            (Provider::Antigravity, "gemini-4-carbon-low"),
+            (Provider::Antigravity, "gemini-4-hydrogen-xhigh"),
         ] {
             assert!(provider.serves(model), "{} serves {model}", provider.as_str());
         }
         assert!(!Provider::Codex.serves("gpt-6-1-sol"));
         assert!(!Provider::Codex.serves("gemini-4-argon-high"));
         assert!(!Provider::Gemini.serves("gemini-4-argon-high"));
+        assert!(!Provider::Gemini.serves("gemini-4-neon-xhigh"));
+        assert!(!Provider::Vertex.serves("gemini-4-hydrogen-xhigh"));
         assert!(!Provider::Claude.serves("claude-sonnet-5-5-max"));
         assert!(!Provider::Antigravity.family("gpt-6.1-terra"));
         assert!(!Provider::Devin.family("gpt-6.1-terra"));

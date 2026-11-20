@@ -38,6 +38,14 @@ LiteLLM does not list OpenAI's 1 March 2027 Ultrafast change for GPT-6.2. The
 script keeps the rate card's dated rows for a model and fails if LiteLLM's
 speed prices disagree with the period that covers the release date.
 
+### Google, later the same day
+
+Catalogue `t3-2026-11-20.2` adds Google's Gemini families from the same LiteLLM
+file: 72 identifiers in 49 rows. No earlier row changed. Google's dated price
+changes come from the rate card, and LiteLLM must agree with the period that
+covers the release date; a rate card row LiteLLM lacks now keeps its long-prompt
+price. See [Gemini 4 and Antigravity](model-support-2026-11-20.md).
+
 ## Effect on production
 
 Measured read-only over the 30 days to 2026-11-20 (about $43,000 of
@@ -56,8 +64,9 @@ JavaScript taken from the binary), binary SHA-256
 input SHA-256
 `d342612f90560be6c6c0a2b85e034a6cb9c2459ddcc0a4ba13946e0cd2759452`.
 
-The 25 golden examples in `tests/fixtures/usage/t3-pricing.json` were evaluated
-by that implementation with that input. Seven are new: mixed cache lifetimes,
+The 33 golden examples in `tests/fixtures/usage/t3-pricing.json` were evaluated
+by that implementation with that input; eight of them, for Gemini, came with
+`t3-2026-11-20.2`. Seven are new: mixed cache lifetimes,
 Fable Fast with one-hour writes, Haiku exactly at its threshold, long GPT-6.2
 Sol Fast, long GPT-6.2 Astra Ultrafast, long GPT-6.1 Sol Ultrafast, and a long
 GPT-5.4 Fast request that keeps the ordinary Fast rate. Five older examples

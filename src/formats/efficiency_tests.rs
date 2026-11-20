@@ -191,6 +191,27 @@ fn gemini4_effort_and_nano_banana_image_translation() {
             assert!(tc.get("thinkingBudget").is_none());
         }
     }
+    // Neon and Hydrogen accept `xhigh`; Carbon and Argon stop at `high`.
+    for (model, effort, expected) in [
+        ("gemini-4-neon", "xhigh", "xhigh"),
+        ("gemini-4-neon", "max", "xhigh"),
+        ("gemini-4-hydrogen", "XHigh", "xhigh"),
+        ("gemini-4-hydrogen-xhigh", "max", "xhigh"),
+        ("gemini-4-neon-high", "high", "high"),
+        ("gemini-4-neon", "minimal", "low"),
+        ("gemini-4-carbon", "xhigh", "high"),
+        ("gemini-4-carbon-high", "max", "high"),
+        ("gemini-4-argon", "xhigh", "high"),
+        ("gemini-3.8-flash", "xhigh", "high"),
+    ] {
+        let r = Reasoning { effort: Some(effort.into()), ..Default::default() };
+        let mut native = json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}});
+        gemini::apply_native_reasoning(&mut native, &r, model);
+        let translated = gemini::build_request(&Request { reasoning: Some(r), ..Default::default() }, model);
+        for body in [native, translated] {
+            assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingLevel"], expected, "{model} {effort}");
+        }
+    }
     let model = "gemini-nano-banana-2.1";
     let body = gemini::build_request(&Request::default(), model);
     assert_eq!(body["generationConfig"]["responseModalities"], json!(["TEXT", "IMAGE"]));
