@@ -84,7 +84,7 @@ fn state() -> &'static RwLock<State> {
     return STATE.with(|s| *s);
 }
 
-fn parse(v: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse(v: &str) -> Option<(u32, u32, u32)> {
     if v.is_empty() || v.len() > 32 {
         return None;
     }

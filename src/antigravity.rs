@@ -4,7 +4,7 @@
 //! chunk in `{"response": ...}`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use parking_lot::RwLock;
@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use crate::accounts::{Account, Credential};
 use crate::schema;
 use crate::state::App;
+
+mod release;
 
 pub const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 pub const CLIENT_SECRET: &str = "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";
@@ -30,15 +32,19 @@ pub const BASE_PROD: &str = "https://cloudcode-pa.googleapis.com";
 
 pub(crate) const FALLBACK_VERSION: &str = "2.33.0";
 /// The build changelist (`cl=`) each reviewed release stamps into its language
-/// server (`changelist N with baseline M`). A release missing here omits it rather
-/// than claim another build's number.
+/// server (`changelist N with baseline M`). Fusebox reads a newer release's number
+/// from the release itself (see `release`); this table is what it knows without that.
 const CHANGELISTS: &[(&str, &str)] = &[("2.33.0", "1023160026")];
+/// How long a release whose build number could not be read waits for another try.
+const RETRY_UNREAD: Duration = Duration::from_secs(24 * 3600);
 const MANIFEST_URL: &str =
     "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
 const NODE_CLIENT: &str = "google-api-nodejs-client/10.3.0";
 const GOOG_API_CLIENT: &str = "gl-node/22.21.1";
 
 static VERSION: RwLock<String> = RwLock::new(String::new());
+/// A release missing from `CHANGELISTS` and the build number read from it.
+static LEARNED: RwLock<Option<(String, String)>> = RwLock::new(None);
 /// Deprecated model id -> its replacement, from `fetchAvailableModels`
 /// (`gemini-3.1-pro-high` -> `gemini-pro-agent`). Old ids still list but fail.
 static RENAMED: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
@@ -53,34 +59,84 @@ pub fn current_id(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
-/// The IDE release from Google's update manifest (or the built-in fallback), unless
-/// `client-identities` names a newer one.
+/// The IDE release Fusebox claims (see `identity`).
 pub fn version() -> String {
-    let fetched = {
-        let v = VERSION.read();
-        if v.is_empty() { FALLBACK_VERSION.to_string() } else { v.clone() }
-    };
-    crate::clients::newest(crate::clients::ANTIGRAVITY, fetched)
+    identity().0
 }
 
 /// The language server's form: `antigravity/hub/<release> (aidev_client; os_type=darwin;
 /// arch=arm64; cl=<changelist>)`.
 pub fn user_agent() -> String {
-    let version = version();
-    let changelist = CHANGELISTS
-        .iter()
-        .find(|(release, _)| *release == version)
-        .map(|(_, cl)| format!("; cl={cl}"))
-        .unwrap_or_default();
+    let (version, changelist) = identity();
+    let changelist = changelist.map(|cl| format!("; cl={cl}")).unwrap_or_default();
     format!("antigravity/hub/{version} (aidev_client; os_type=darwin; arch=arm64{changelist})")
 }
 
-/// Keeps the advertised IDE version current (the backend rejects stale clients).
+/// The release from Google's update manifest (or the built-in fallback), unless
+/// `client-identities` names a newer one, with its build number.
+fn identity() -> (String, Option<String>) {
+    let fetched = {
+        let v = VERSION.read();
+        if v.is_empty() { FALLBACK_VERSION.to_string() } else { v.clone() }
+    };
+    let wanted = crate::clients::newest(crate::clients::ANTIGRAVITY, fetched.clone());
+    choose(&fetched, &wanted, LEARNED.read().as_ref())
+}
+
+/// A release goes out with its own build number, never another's and never none: until
+/// Fusebox knows a new release's number, it stays on the newest release whose number it
+/// knows, as an IDE that hasn't updated yet would. Only a release set in
+/// `client-identities` that Fusebox has no number for goes without: the operator's choice.
+fn choose(fetched: &str, wanted: &str, learned: Option<&(String, String)>) -> (String, Option<String>) {
+    let known = || CHANGELISTS.iter().map(|(v, cl)| (*v, *cl)).chain(learned.map(|(v, cl)| (v.as_str(), cl.as_str())));
+    if let Some((_, cl)) = known().find(|(v, _)| *v == wanted) {
+        return (wanted.to_string(), Some(cl.to_string()));
+    }
+    if wanted != fetched {
+        return (wanted.to_string(), None);
+    }
+    known()
+        .max_by_key(|(v, _)| crate::clients::parse(v))
+        .map(|(v, cl)| (v.to_string(), Some(cl.to_string())))
+        .unwrap_or_else(|| (wanted.to_string(), None))
+}
+
+fn knows_build(version: &str) -> bool {
+    CHANGELISTS.iter().any(|(v, _)| *v == version) || LEARNED.read().as_ref().is_some_and(|(v, _)| v == version)
+}
+
+/// Keeps the advertised IDE release current (Cloud Code refuses newer models to older
+/// clients), reading a new release's build number from the release itself.
 pub async fn version_updater(app: Arc<App>) {
+    // A release whose build number could not be read, and when.
+    let mut unread: Option<(String, Instant)> = None;
     loop {
         if app.pool.all().iter().any(|a| a.provider == crate::accounts::Provider::Antigravity) {
-            match fetch_version(&app).await {
-                Ok(v) => *VERSION.write() = v,
+            match fetch_manifest(&app).await {
+                Ok((version, url)) => {
+                    *VERSION.write() = version.clone();
+                    let due = unread.as_ref().is_none_or(|(v, at)| *v != version || at.elapsed() >= RETRY_UNREAD);
+                    if !knows_build(&version) && due {
+                        let read = match &url {
+                            Some(url) => release::read_build(&app.http.client(None), url).await,
+                            None => Err(anyhow!("the update manifest names no release in Google's storage")),
+                        };
+                        match read {
+                            Ok(cl) => {
+                                tracing::info!("antigravity {version}: build {cl}, read from Google's release");
+                                *LEARNED.write() = Some((version, cl));
+                                unread = None;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "antigravity {version}: build number not readable ({e:#}); claiming {} until it is",
+                                    self::version()
+                                );
+                                unread = Some((version, Instant::now()));
+                            }
+                        }
+                    }
+                }
                 Err(e) => tracing::debug!("antigravity version check failed: {e:#}"),
             }
         }
@@ -88,13 +144,17 @@ pub async fn version_updater(app: Arc<App>) {
     }
 }
 
-async fn fetch_version(app: &App) -> Result<String> {
+/// The manifest's release and the URL of its macOS ZIP.
+async fn fetch_manifest(app: &App) -> Result<(String, Option<String>)> {
     let text = app.http.client(None).get(MANIFEST_URL).timeout(Duration::from_secs(10)).send().await?.text().await?;
-    text.lines()
+    let version = text
+        .lines()
         .find_map(|l| l.strip_prefix("version:"))
         .map(|v| v.trim().trim_matches(['"', '\'']).to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| anyhow!("no version in manifest"))
+        .filter(|v| crate::clients::parse(v).is_some())
+        .ok_or_else(|| anyhow!("no version in manifest"))?;
+    let url = release::release_url(&text, &version);
+    Ok((version, url))
 }
 
 fn base(acct: &Account, default: &str) -> String {
@@ -417,6 +477,21 @@ mod tests {
             CHANGELISTS.iter().any(|(release, _)| *release == FALLBACK_VERSION),
             "the fallback needs its changelist"
         );
+    }
+
+    #[test]
+    fn a_release_goes_out_only_with_its_own_build() {
+        let pair = |v: &str, cl: Option<&str>| (v.to_string(), cl.map(String::from));
+        assert_eq!(choose("2.33.0", "2.33.0", None), pair("2.33.0", Some("1023160026")));
+        // A new release whose number isn't known yet: stay on the newest one that is.
+        assert_eq!(choose("2.34.0", "2.34.0", None), pair("2.33.0", Some("1023160026")));
+        let learned = ("2.34.0".to_string(), "1024000001".to_string());
+        assert_eq!(choose("2.34.0", "2.34.0", Some(&learned)), pair("2.34.0", Some("1024000001")));
+        // Learned for an older manifest, then the manifest moves on again.
+        assert_eq!(choose("2.35.0", "2.35.0", Some(&learned)), pair("2.34.0", Some("1024000001")));
+        // `client-identities` named it: the operator's choice, with its number if known.
+        assert_eq!(choose("2.33.0", "2.34.0", Some(&learned)), pair("2.34.0", Some("1024000001")));
+        assert_eq!(choose("2.33.0", "2.36.0", Some(&learned)), pair("2.36.0", None));
     }
 
     #[test]
