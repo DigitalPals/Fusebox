@@ -32,10 +32,15 @@ model page (`agy --model gemini-4-neon-xhigh`, efforts `low` to `xhigh`) and
 follow Hydrogen's. Vertex's model page lists Carbon and Hydrogen; its pricing page
 also lists Neon.
 
+Google removes Claude Sonnet and Opus 4.6 and GPT-OSS 120B from Antigravity on
+30 November 2026, and Fusebox stopped offering them on 20 November. An Antigravity
+account whose own model list still reports them serves them until then. A Claude or
+Codex account never takes `claude-opus-4-6-thinking` or `gpt-oss-120b-medium`:
+they are Antigravity's names, not Anthropic's or OpenAI's. `claude-sonnet-4-6` is
+also Anthropic's own model and stays on Claude accounts.
+
 Not changed:
 
-- Claude Sonnet and Opus 4.6 and GPT-OSS 120B stay listed until Google removes
-  them from Antigravity on 30 November 2026.
 - Gemini 3.7 Flash, 3.6 Flash and 3.1 Pro stay listed: Antigravity now offers them
   to Enterprise accounts only, and an account's own model list shows what it has.
 - The Orchestrator options are not models. They plan with one model and hand the

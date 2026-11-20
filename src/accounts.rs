@@ -52,8 +52,6 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "claude-sonnet-5-5-high",
     "claude-sonnet-5-5-medium",
     "claude-sonnet-5-5-low",
-    "claude-opus-4-6-thinking",
-    "claude-sonnet-4-6",
     "gemini-4-neon-xhigh",
     "gemini-4-neon-high",
     "gemini-4-neon-medium",
@@ -77,8 +75,13 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-image",
-    "gpt-oss-120b-medium",
 ];
+
+/// Antigravity names Google retired on 30 November 2026. Fusebox no longer offers
+/// them, but they were never the vendor's own models: a Claude or Codex account must
+/// not claim them by their `claude-`/`gpt-` prefix while an Antigravity account still
+/// reports them.
+const ANTIGRAVITY_RETIRED: &[&str] = &["claude-opus-4-6-thinking", "gpt-oss-120b-medium"];
 
 const DEVIN_MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -165,7 +168,8 @@ impl Provider {
     pub fn serves(self, model: &str) -> bool {
         let aggregator_only = || {
             let known = |list: &[&str]| list.iter().any(|m| m.eq_ignore_ascii_case(model));
-            (known(ANTIGRAVITY_MODELS) || known(DEVIN_MODELS)) && !known(self.builtin_models())
+            (known(ANTIGRAVITY_MODELS) || known(ANTIGRAVITY_RETIRED) || known(DEVIN_MODELS))
+                && !known(self.builtin_models())
         };
         self.family(model) && (matches!(self, Provider::Antigravity | Provider::Devin) || !aggregator_only())
     }
@@ -2001,7 +2005,7 @@ impl Pool {
         seen.into_iter().collect()
     }
 
-    /// Splits an optional `provider/` prefix off a model name (`antigravity/claude-sonnet-4-6`).
+    /// Splits an optional `provider/` prefix off a model name (`antigravity/claude-sonnet-5-5`).
     /// Names that some account serves verbatim (`openai/gpt-oss` on OpenRouter) are left alone.
     pub fn route(&self, model: &str) -> (Option<Only>, String) {
         if let Some((prefix, rest)) = model.split_once('/')
@@ -3027,6 +3031,48 @@ mod tests {
         assert!(!Provider::Antigravity.first_party("claude-sonnet-4-6"));
         assert!(Provider::Antigravity.first_party("gemini-3.8-flash-high"));
         assert!(Provider::Kimi.serves("kimi-k3") && !Provider::Devin.first_party("kimi-k3"));
+    }
+
+    #[test]
+    fn retired_antigravity_models_stay_off_the_list_and_off_vendor_accounts() {
+        let dir = std::env::temp_dir().join(format!("fusebox-antigravity-retired-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred =
+            serde_json::json!({"type":"antigravity","access_token":"t","email":"a@example.invalid","project_id":"p"});
+        std::fs::write(dir.join("antigravity-a.json"), cred.to_string()).unwrap();
+        let key = |k: &str| vec![crate::config::KeyEntry { api_key: k.into(), ..Default::default() }];
+        let cfg = Config {
+            auth_dir: dir.to_string_lossy().into(),
+            claude_api_key: key("claude"),
+            codex_api_key: key("codex"),
+            ..Default::default()
+        };
+        let pool = Pool::default();
+        pool.reload(&cfg);
+        let _ = std::fs::remove_dir_all(&dir);
+        let retired = ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b-medium"];
+        let names: Vec<String> = pool.models().into_iter().map(|(m, _)| m).collect();
+        let antigravity_names: Vec<String> =
+            pool.models().into_iter().filter(|(_, p)| *p == Provider::Antigravity).map(|(m, _)| m).collect();
+        for model in retired {
+            assert!(!ANTIGRAVITY_MODELS.contains(&model), "{model}");
+            assert!(!antigravity_names.contains(&model.to_string()), "{model}");
+        }
+        assert!(!names.iter().any(|m| m == "gpt-oss-120b-medium" || m == "claude-opus-4-6-thinking"), "{names:?}");
+        let picked = |model: &str| match pool.pick(model, &[], &cfg, None, None, &HashMap::new()) {
+            Pick::Ok(a, _) => Some(a.provider),
+            _ => None,
+        };
+        // Not the vendor's models, though the names look like theirs.
+        assert_eq!(picked("claude-opus-4-6-thinking"), None);
+        assert_eq!(picked("gpt-oss-120b-medium"), None);
+        // An account that still reports them keeps serving them until Google turns them off.
+        let antigravity = pool.all().into_iter().find(|a| a.provider == Provider::Antigravity).unwrap();
+        antigravity.discovered.write().extend(retired.map(String::from));
+        assert_eq!(picked("claude-opus-4-6-thinking"), Some(Provider::Antigravity));
+        assert_eq!(picked("gpt-oss-120b-medium"), Some(Provider::Antigravity));
+        // Sonnet 4.6 is also Anthropic's own model, so the vendor answers first.
+        assert_eq!(picked("claude-sonnet-4-6"), Some(Provider::Claude));
     }
 
     #[test]
