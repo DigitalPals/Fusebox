@@ -32,10 +32,15 @@ model page (`agy --model gemini-4-neon-xhigh`, efforts `low` to `xhigh`) and
 follow Hydrogen's. Vertex's model page lists Carbon and Hydrogen; its pricing page
 also lists Neon.
 
+Google removes Claude Sonnet and Opus 4.6 and GPT-OSS 120B from Antigravity on
+30 November 2026, and Fusebox stopped offering them on 20 November. An Antigravity
+account whose own model list still reports them serves them until then. A Claude or
+Codex account never takes `claude-opus-4-6-thinking` or `gpt-oss-120b-medium`:
+they are Antigravity's names, not Anthropic's or OpenAI's. `claude-sonnet-4-6` is
+also Anthropic's own model and stays on Claude accounts.
+
 Not changed:
 
-- Claude Sonnet and Opus 4.6 and GPT-OSS 120B stay listed until Google removes
-  them from Antigravity on 30 November 2026.
 - Gemini 3.7 Flash, 3.6 Flash and 3.1 Pro stay listed: Antigravity now offers them
   to Enterprise accounts only, and an account's own model list shows what it has.
 - The Orchestrator options are not models. They plan with one model and hand the
@@ -110,11 +115,10 @@ language server sends since 2.23.0:
     antigravity/hub/2.33.0 (aidev_client; os_type=darwin; arch=arm64; cl=1023160026)
 
 `cl` is the build changelist stamped into each release's language server
-(`changelist 1023160026 with baseline 1022452901` in 2.33.0). Fusebox knows it only
-for reviewed releases; when the manifest names a newer release, the `cl` part is
-left out rather than pair the new release with an older build's number. Reviewing a
-release now includes reading its changelist (see
-[client compatibility](client-compatibility.md#antigravity-2330)).
+(`changelist 1023160026 with baseline 1022452901` in 2.33.0). When the manifest
+names a newer release, Fusebox reads that release's number from the release itself
+and keeps claiming the newest release it has a number for until then (see
+[client compatibility](client-compatibility.md#antigravity-build-numbers)).
 
 ## Evidence
 

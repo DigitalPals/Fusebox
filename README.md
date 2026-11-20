@@ -104,7 +104,7 @@ Fusebox speaks OpenAI Chat Completions and Responses (with WebSockets), Anthropi
 ```text
 gpt-6-astra(high)                  reasoning effort
 claude-sonnet-4-5-20250929(16000)  thinking budget in tokens
-antigravity/claude-sonnet-4-6      pick the provider yourself
+antigravity/claude-sonnet-5-5      pick the provider yourself
 gpt-6-1-sol                        forgiving names: finds gpt-6.1-sol
 ```
 

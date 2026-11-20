@@ -87,7 +87,7 @@ JSON API requests and multipart image edits support `Content-Encoding: gzip` or 
 | Codex / ChatGPT | OAuth (Plus / Pro / Team) or OpenAI API key | `gpt-*`, `o*`, `codex-*`, `gpt-image-*` | Responses (+ WebSocket) |
 | Gemini | API key | `gemini-*`, `gemma-*` | Gemini |
 | Vertex AI | Service account or express API key | `gemini-*`, `imagen-*` | Gemini |
-| Antigravity | Google OAuth | Gemini and Claude models such as `gemini-3.8-flash-high`, `claude-opus-4-6-thinking` | Cloud Code (Gemini) |
+| Antigravity | Google OAuth | Gemini and Claude models such as `gemini-4-neon-high`, `claude-opus-5-5-max` | Cloud Code (Gemini) |
 | Grok (xAI) | Device code (SuperGrok / X Premium) or API key | `grok-*`, `grok-imagine-*` | Responses |
 | Kimi | Device code (Kimi Code) or API key | `kimi-*` | Chat, Anthropic or Responses, whichever the client speaks |
 | Meta | Device code or API key | `muse-*` | Responses |
@@ -96,7 +96,7 @@ JSON API requests and multipart image edits support `Content-Encoding: gzip` or 
 
 Model names are forgiving: `gpt-6-1-sol` finds `gpt-6.1-sol`, and `gemini-3-8-flash` finds Antigravity's `gemini-3.8-flash-high` when that's the account you have.
 
-When more than one provider has a model, the vendor's own accounts answer first and Antigravity or Devin take the overflow when those are rate limited. To choose a provider yourself, prefix the model: `antigravity/claude-sonnet-4-6`, `devin/gpt-6-astra`, `vertex/gemini-3.1-pro`.
+When more than one provider has a model, the vendor's own accounts answer first and Antigravity or Devin take the overflow when those are rate limited. To choose a provider yourself, prefix the model: `antigravity/claude-sonnet-5-5`, `devin/gpt-6-astra`, `vertex/gemini-3.1-pro`.
 
 ## New models
 
