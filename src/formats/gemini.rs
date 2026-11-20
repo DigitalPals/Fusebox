@@ -213,6 +213,8 @@ fn strip_schema(v: &Value) -> Value {
 /// model suffixes, so `none` and `medium` cannot turn into high effort in one path.
 pub fn thinking_config(reasoning: Option<&Reasoning>, model: &str) -> Value {
     let uses_levels = model.starts_with("gemini-3") || model.starts_with("gemini-4");
+    // Only Neon and Hydrogen go above `high` (Antigravity calls it "Extra").
+    let has_xhigh = model.starts_with("gemini-4-neon") || model.starts_with("gemini-4-hydrogen");
     match reasoning {
         Some(r) if r.disabled => {
             if uses_levels {
@@ -222,9 +224,10 @@ pub fn thinking_config(reasoning: Option<&Reasoning>, model: &str) -> Value {
             }
         }
         Some(r) if uses_levels => {
-            let level = match r.effort_level().as_deref() {
+            let level = match r.effort_level().map(|e| e.to_ascii_lowercase()).as_deref() {
                 Some("minimal") | Some("low") => "low",
                 Some("medium") => "medium",
+                Some("xhigh") | Some("max") if has_xhigh => "xhigh",
                 _ => "high",
             };
             json!({ "includeThoughts": true, "thinkingLevel": level })
