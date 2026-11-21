@@ -227,6 +227,44 @@ struct RulesTests {
         #expect(abs(pace - (1 - 42.0 / 168)) < 1e-9, "a model's week is a week long, so it has an even-pace mark")
     }
 
+    /// Antigravity's per-group limits, as production stored them on 2026-11-21 (usage invented),
+    /// become windows as on the dashboard (ui/app.js `groupWindows`): Gemini's are the account's
+    /// own 5H and WK, Claude & GPT's a child group, and other limits stay limits.
+    @Test func antigravityModelGroupsBecomeWindows() throws {
+        let json = """
+        {"id":"g","provider":"antigravity","label":"g","kind":"oauth",
+         "cooldowns":{"claude-opus-5-5-high":"2026-11-08T12:00:00Z"},"cooldown_kinds":{"claude-opus-5-5-high":"quota"},
+         "quota":{"windows":[],"plan":"g1-ultra-tier","plan_name":"Google AI Ultra","limits":[
+          {"id":"antigravity:Gemini Models:weekly","name":"Gemini Models · weekly","scope":{"kind":"model_families","value":["gemini-"]},"used_percent":21,"resets_at":"2026-11-08T12:00:00Z"},
+          {"id":"antigravity:Gemini Models:5h","name":"Gemini Models · 5h","scope":{"kind":"model_families","value":["gemini-"]},"used_percent":38,"resets_at":"2026-11-01T15:00:00Z"},
+          {"id":"antigravity:Claude and GPT models:weekly","name":"Claude and GPT models · weekly","scope":{"kind":"model_families","value":["claude-","gpt-"]},"used_percent":81,"resets_at":"2026-11-08T12:00:00Z"},
+          {"id":"antigravity:Claude and GPT models:5h","name":"Claude and GPT models · 5h","scope":{"kind":"model_families","value":["claude-","gpt-"]},"used_percent":64,"resets_at":"2026-11-01T16:00:00Z"},
+          {"id":"x","name":"Agent credits","scope":{"kind":"feature","value":"x"},"used_percent":5}
+         ]}}
+        """
+        let a = try JSONDecoder.fusebox.decode(Account.self, from: Data(json.utf8))
+        let windows = try #require(a.quota?.windows)
+        #expect(windows.map(\.name) == ["5h", "week", "5h", "week"])
+        #expect(windows.map(\.model) == [nil, nil, "Claude & GPT", "Claude & GPT"])
+        #expect(windows.map(\.used) == [38, 21, 64, 81])
+        #expect(a.quota?.limits?.map(\.id) == ["x"], "anything else stays a limit")
+        #expect(a.planName == "Ultra")
+        #expect(a.subtitle == "Antigravity · Ultra")
+        #expect(a.window(short: true, now: now)?.used == 38)
+        #expect(a.window(short: false, now: now)?.used == 21)
+        #expect(Quotas.title(try #require(a.window(short: false, now: now))) == "Gemini weekly")
+        let scoped = a.scopedWindows(now: now)
+        #expect(scoped.map(\.name) == ["5h", "week"])
+        #expect(scoped.map(Quotas.scopedTitle) == ["Claude & GPT 5-hour", "Claude & GPT weekly"])
+        // A Claude cooldown until the group's renewal spends only that group's week.
+        #expect(a.windowSpent(scoped[1]))
+        #expect(!a.windowSpent(a.window(short: false, now: now)))
+        // Saved and read again (the widgets' snapshot), it stays the same.
+        let again = try JSONDecoder.fusebox.decode(Account.self, from: JSONEncoder.fusebox.encode(a))
+        #expect(again.quota?.windows == windows)
+        #expect(again.quota?.limits?.map(\.id) == ["x"])
+    }
+
     @Test func routingSentence() throws {
         let r = try decode([RequestLog].self, "requests")
         let reused = try #require(r.first { $0.routingReason == "session_reused" })
