@@ -110,11 +110,16 @@ pub struct Share {
     pub by_tokens: f64,
     /// Attempts finished after this wait for the next rise.
     cursor: DateTime<Utc>,
+    /// The model families the window limits, when it isn't the account's or one model's
+    /// (an Antigravity group: `gemini-`, `!gemini-*carbon*`; see `quota::in_families`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
 }
 
 impl Share {
-    fn start(w: &Window, now: DateTime<Utc>, before: f64) -> Self {
+    fn start(w: &Window, covers: &[String], now: DateTime<Utc>, before: f64) -> Self {
         Self {
+            covers: covers.to_vec(),
             name: w.name.clone(),
             model: w.model.clone(),
             resets_at: w.resets_at,
@@ -182,11 +187,19 @@ impl Attribution {
 
     /// A quota reading. Windows the reading leaves out keep their state.
     pub fn reading(&mut self, windows: &[Window], now: DateTime<Utc>) {
-        crate::outlook::History::observe(&mut self.history, windows, now);
-        for w in windows {
+        let windows: Vec<(Window, Vec<String>)> = windows.iter().map(|w| (w.clone(), Vec::new())).collect();
+        self.reading_scoped(&windows, now);
+    }
+
+    /// A reading of windows that each limit only the model families given with them
+    /// (none: the account's, or the window's model).
+    pub fn reading_scoped(&mut self, scoped: &[(Window, Vec<String>)], now: DateTime<Utc>) {
+        let windows: Vec<Window> = scoped.iter().map(|(w, _)| w.clone()).collect();
+        crate::outlook::History::observe(&mut self.history, &windows, now);
+        for (w, covers) in scoped {
             let Some(i) = self.current.iter().position(|s| s.same_window(w)) else {
                 // First sight: what is used already happened before Fusebox looked.
-                self.current.push(Share::start(w, now, w.used));
+                self.current.push(Share::start(w, covers, now, w.used));
                 self.dirty = true;
                 continue;
             };
@@ -214,7 +227,7 @@ impl Attribution {
             // A new window: it renewed, or a banked reset cleared it. What it shows
             // already was used since it opened.
             let opened = w.resets_at.zip(length(&w.name)).map(|(r, d)| r - d).filter(|o| *o <= now);
-            let mut next = Share::start(w, now, 0.0);
+            let mut next = Share::start(w, covers, now, 0.0);
             match opened {
                 Some(opened) => next.cursor = opened.max(self.current[i].cursor),
                 None => next.before = w.used,
@@ -242,11 +255,13 @@ impl Attribution {
     /// Splits a rise over the attempts that finished since the window's last rise.
     fn attribute(&mut self, i: usize, rise: f64, now: DateTime<Utc>) {
         let (cursor, scope) = (self.current[i].cursor, self.current[i].model.clone());
-        let pending: Vec<&Use> = self
-            .uses
-            .iter()
-            .filter(|u| u.at > cursor && u.at <= now && in_scope(scope.as_deref(), u.model.as_deref()))
-            .collect();
+        let covers = self.current[i].covers.clone();
+        let counts = |model: Option<&str>| match covers.is_empty() {
+            true => in_scope(scope.as_deref(), model),
+            false => model.is_some_and(|m| crate::quota::in_families(&covers, m)),
+        };
+        let pending: Vec<&Use> =
+            self.uses.iter().filter(|u| u.at > cursor && u.at <= now && counts(u.model.as_deref())).collect();
         let share = &mut self.current[i];
         share.cursor = now;
         if pending.is_empty() {

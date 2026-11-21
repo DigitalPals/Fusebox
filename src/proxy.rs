@@ -2514,6 +2514,9 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 last_error = Some((status, client_body));
                 continue;
             }
+            let google_hold = (status == 403 && provider == Provider::Antigravity)
+                .then(|| crate::antigravity::hold_of(&text))
+                .flatten();
             match status {
                 429 => {
                     // Quota exhaustion was handled above; this is a rate limit.
@@ -2522,6 +2525,15 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     if let Some((claim, resets)) = claimed_limit(&acct, &headers) {
                         acct.name_limit(&model, until, claim, resets);
                     }
+                    app.broadcast("accounts", Value::Null);
+                }
+                // Google suspended the account, or wants it verified: no token fixes that, and
+                // asking again only adds refusals. It sits out until its owner acts.
+                403 if google_hold.is_some() => {
+                    let hold = google_hold.expect("checked");
+                    tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                        reason = ?hold.kind, "Google holds this Antigravity account out; trying another");
+                    acct.hold_for_google(hold);
                     app.broadcast("accounts", Value::Null);
                 }
                 // Meta refuses this client's tools, not the account: no new key, pause or
@@ -2558,6 +2570,19 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                         log_codex_401(&acct, bearer(&prepared.headers), tracker.log.id);
                     }
                     acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}"))
+                }
+                // Google offers each Antigravity account its own models and answers 404 for
+                // the rest ("Requested entity was not found"): another account may have it.
+                404 if provider == Provider::Antigravity => {
+                    app.models.forget(&acct, &upstream_model);
+                    acct.not_offered(
+                        &model,
+                        Utc::now() + Duration::hours(6),
+                        &format!("{status}: {msg} (Google does not offer {upstream_model} to this account)"),
+                    );
+                    tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                        model = %upstream_model, "Antigravity does not offer this model to the account; trying another");
+                    app.broadcast("accounts", Value::Null);
                 }
                 // A gateway timeout may still be generating upstream: answer, don't repeat.
                 400 | 404 | 413 | 422 | 504 => {

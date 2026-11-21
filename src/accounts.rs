@@ -43,12 +43,12 @@ pub const PROVIDERS: [Provider; 10] = [
     Provider::Compat,
 ];
 
+/// What Antigravity offered on 21 November 2026, used until an account reports its own
+/// list (`fetchAvailableModels`); from then on only the account's list counts.
 const ANTIGRAVITY_MODELS: &[&str] = &[
-    "claude-opus-5-5-max",
     "claude-opus-5-5-high",
     "claude-opus-5-5-medium",
     "claude-opus-5-5-low",
-    "claude-sonnet-5-5-max",
     "claude-sonnet-5-5-high",
     "claude-sonnet-5-5-medium",
     "claude-sonnet-5-5-low",
@@ -67,21 +67,28 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "gemini-4-argon-medium",
     "gemini-4-argon-low",
     "gemini-3.8-flash-high",
-    "gemini-3.7-flash-high",
-    "gemini-3.6-flash-high",
-    "gemini-pro-agent",
-    "gemini-3.1-pro-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
     "gemini-3-flash",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-image",
 ];
 
-/// Antigravity names Google retired on 30 November 2026. Fusebox no longer offers
-/// them, but they were never the vendor's own models: a Claude or Codex account must
-/// not claim them by their `claude-`/`gpt-` prefix while an Antigravity account still
-/// reports them.
-const ANTIGRAVITY_RETIRED: &[&str] = &["claude-opus-4-6-thinking", "gpt-oss-120b-medium"];
+/// Antigravity names Google retired (on 30 November 2026, or before 21 November). Fusebox
+/// no longer offers them, but they were never the vendor's own models: a Claude, Codex,
+/// Gemini or Vertex account must not claim them by their prefix while an Antigravity
+/// account still reports them.
+const ANTIGRAVITY_RETIRED: &[&str] = &[
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
+    "claude-opus-5-5-max",
+    "claude-sonnet-5-5-max",
+    "gemini-3.7-flash-high",
+    "gemini-3.6-flash-high",
+    "gemini-pro-agent",
+    "gemini-3.1-pro-low",
+];
 
 const DEVIN_MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -555,6 +562,8 @@ pub struct AccountState {
     pub strikes: u32,
     /// A refresh token the token endpoint refused for good.
     pub refresh_hold: Option<RefreshHold>,
+    /// Google holds this Antigravity account out (suspended, or to be verified).
+    pub google_hold: Option<crate::antigravity::Hold>,
     /// After `invalid_client`, no refresh before this time; and how many came in a row.
     pub refresh_backoff: Option<(DateTime<Utc>, u32)>,
     /// The access token (SHA-256) whose missing refresh token was already reported.
@@ -594,6 +603,7 @@ impl AccountState {
         self.attribution.dirty = true;
         self.strikes = 0;
         self.refresh_hold = None;
+        self.google_hold = None;
         self.refresh_backoff = None;
         self.no_refresh_reported = None;
         self.clear_error();
@@ -671,6 +681,10 @@ impl AccountState {
             return false;
         }
         self.clear_error();
+        // Dismissing Google's hold is the owner saying the account may serve again.
+        if self.google_hold.as_ref().is_some_and(|h| h.error_id.as_deref() == Some(id)) {
+            self.google_hold = None;
+        }
         true
     }
 
@@ -888,10 +902,22 @@ impl Account {
             return None;
         }
         let aggregator = matches!(self.provider, Provider::Antigravity | Provider::Devin);
-        let known = if forced { aggregator || self.provider.family(model) } else { self.provider.serves(model) }
+        let builtin = if forced {
+            aggregator || self.provider.family(model)
+        } else {
+            !self.lists_own_models() && self.provider.serves(model)
+        };
+        let known = builtin
             || self.discovered.read().iter().any(|m| m.eq_ignore_ascii_case(model))
             || self.extra.iter().any(|m| m.eq_ignore_ascii_case(model));
         known.then(|| self.upstream_name(model))
+    }
+
+    /// An Antigravity account that reported its models serves only those (and `extra-models`):
+    /// Google offers each account its own list and refuses the rest with a 404. Until it
+    /// reports, the built-in list stands in.
+    pub fn lists_own_models(&self) -> bool {
+        self.provider == Provider::Antigravity && !self.discovered.read().is_empty()
     }
 
     /// Kimi Code exposes `k3`, `kimi-for-coding`, ... while clients use `kimi-*` names.
@@ -928,7 +954,8 @@ impl Account {
                 && !self.excludes(m)
                 && !self.aliases.iter().any(|a| a.name.eq_ignore_ascii_case(m) && !a.fork)
         };
-        let first = match self.provider.builtin_models().iter().find(|m| same(m)) {
+        let builtin: &[&str] = if self.lists_own_models() { &[] } else { self.provider.builtin_models() };
+        let first = match builtin.iter().find(|m| same(m)) {
             Some(m) => Some(shown(m)),
             None => match self.discovered.read().iter().find(|m| same(m)) {
                 Some(m) => Some(shown(m)),
@@ -942,7 +969,8 @@ impl Account {
         if !self.models.is_empty() {
             return self.models.iter().filter(|m| !self.excludes(&m.name)).map(|m| m.public().to_string()).collect();
         }
-        let mut out: Vec<String> = self.provider.builtin_models().iter().map(|s| s.to_string()).collect();
+        let builtin: &[&str] = if self.lists_own_models() { &[] } else { self.provider.builtin_models() };
+        let mut out: Vec<String> = builtin.iter().map(|s| s.to_string()).collect();
         for m in self.discovered.read().iter().chain(&self.extra) {
             if !out.iter().any(|o| o.eq_ignore_ascii_case(m)) {
                 out.push(m.clone());
@@ -1046,6 +1074,20 @@ impl Account {
         st.set_error(reason);
     }
 
+    /// Keeps `model` off an account its provider says doesn't offer it, until its model
+    /// list is read again. Not a fault of the account: the error clears itself.
+    pub fn not_offered(&self, model: &str, until: DateTime<Utc>, reason: &str) {
+        // Gone from the account's own list, it no longer routes here; else it pauses.
+        let listed = self.resolve(model).is_some();
+        let mut st = self.state.lock();
+        if listed {
+            st.cooldowns.insert(model.to_string(), until);
+            st.limit_pauses.remove(model);
+            st.stall_pauses.remove(model);
+        }
+        st.set_temporary_error(reason, Utc::now() + chrono::Duration::minutes(10));
+    }
+
     /// Pauses a model whose upstream sent nothing before the first-token deadline, so its
     /// next requests go to another account. The error stays until a request succeeds.
     pub fn stall(&self, model: &str, until: DateTime<Utc>, reason: &str) {
@@ -1126,6 +1168,8 @@ impl Account {
     pub fn record_ok(&self) {
         let mut st = self.state.lock();
         st.strikes = 0;
+        // Google served it, so whatever held it is over.
+        st.google_hold = None;
         // Serving on until the access token expires doesn't end the need to sign in again.
         let holding = st.refresh_hold.as_ref().filter(|hold| match &*self.cred.read() {
             Credential::OAuth(o) => hold.applies(o),
@@ -1136,10 +1180,36 @@ impl Account {
         }
     }
 
-    /// Out of rotation until a sign-in: its refresh token was refused for good and its
-    /// access token can't serve any more (see [`RefreshHold`]).
+    /// Google holds this account out, and why (see [`crate::antigravity::Hold`]).
+    pub fn google_hold(&self) -> Option<crate::antigravity::Hold> {
+        self.state.lock().google_hold.clone()
+    }
+
+    /// Takes the account out of rotation for Google's reason, with an error that says
+    /// what to do. A new sign-in, a served request, dismissing the error or (for a
+    /// verification) Google's own `loadCodeAssist` ends it.
+    pub fn hold_for_google(&self, mut hold: crate::antigravity::Hold) {
+        let mut st = self.state.lock();
+        st.set_error(hold.error_text());
+        hold.error_id = st.last_error.as_ref().map(|e| e.id.clone());
+        st.google_hold = Some(hold);
+    }
+
+    pub fn release_google_hold(&self) {
+        let mut st = self.state.lock();
+        let Some(hold) = st.google_hold.take() else { return };
+        if let Some(id) = hold.error_id {
+            st.clear_error_if(&id);
+        }
+    }
+
+    /// Out of rotation until its owner acts: its refresh token was refused for good and its
+    /// access token can't serve any more (see [`RefreshHold`]), or Google holds it out.
     pub fn held_out(&self) -> bool {
         let st = self.state.lock();
+        if st.google_hold.is_some() {
+            return true;
+        }
         let Some(hold) = &st.refresh_hold else { return false };
         match &*self.cred.read() {
             Credential::OAuth(o) => hold.applies(o) && hold.out(o, Utc::now()),
@@ -1194,6 +1264,7 @@ impl Account {
             "priority": self.priority,
             "quota": st.quota,
             "banked_resets": st.banked_resets,
+            "google_hold": st.google_hold,
             "window_starter": st.window_starter,
             "models": self.public_models(),
             "takes_billing": self.takes_billing(),
@@ -2195,6 +2266,8 @@ impl Pool {
             let Some(upstream) = self.resolve_account(a, model, only) else { continue };
             if a.state.lock().disabled {
                 rest.push(RouteStep::new(a, upstream, "disabled", None));
+            } else if a.google_hold().is_some() {
+                rest.push(RouteStep::new(a, upstream, "held", None));
             } else if a.held_out() {
                 rest.push(RouteStep::new(a, upstream, "signin", None));
             } else if let Some(until) = a.cooling_until(model) {
@@ -2253,7 +2326,7 @@ impl Pool {
             step.fallback = true;
             steps.push(step);
         }
-        rest.sort_by_key(|s| (s.state == "disabled", s.state == "signin", s.until));
+        rest.sort_by_key(|s| (s.state == "disabled", s.state == "signin" || s.state == "held", s.until));
         steps.extend(rest);
         steps
     }
@@ -2409,7 +2482,8 @@ impl Pool {
 pub struct RouteStep {
     pub account: String,
     pub upstream: String,
-    /// "ready", "cooling", "signin" (held out until a sign-in) or "disabled".
+    /// "ready", "cooling", "signin" (held out until a sign-in), "held" (Google holds the
+    /// account out) or "disabled".
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<DateTime<Utc>>,
@@ -3189,6 +3263,36 @@ oauth-model-alias:
     }
 
     #[test]
+    fn an_antigravity_accounts_own_list_decides_what_it_serves() {
+        let dir = std::env::temp_dir().join(format!("fusebox-antigravity-own-list-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred =
+            serde_json::json!({"type":"antigravity","access_token":"t","email":"a@example.invalid","project_id":"p"});
+        std::fs::write(dir.join("antigravity-a.json"), cred.to_string()).unwrap();
+        let pool = Pool::default();
+        pool.reload(&Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() });
+        let _ = std::fs::remove_dir_all(&dir);
+        let acct = pool.all()[0].clone();
+        // Until the account reports, the built-in list stands in; Google's retired names are gone.
+        assert!(!acct.lists_own_models());
+        assert!(acct.resolve("gemini-4-neon-low").is_some());
+        assert!(acct.resolve("gemini-3.8-flash-low").is_some());
+        assert!(acct.resolve("gemini-3.1-pro-low").is_none());
+        // Google once answered a bare Gemini 3.1 Pro with the retired `-low` (a 404).
+        assert_eq!(pool.canonical("gemini-3.1-pro", None), "gemini-3.1-pro");
+        *acct.discovered.write() = vec!["gemini-4-neon-high".into(), "gemini-pro-orchestrator".into()];
+        assert!(acct.lists_own_models());
+        assert!(acct.resolve("gemini-4-neon-high").is_some());
+        assert!(acct.resolve("gemini-4-neon-low").is_none(), "built in, but not offered to this account");
+        assert!(acct.resolve("gemini-pro-orchestrator").is_some());
+        assert_eq!(acct.public_models(), ["gemini-4-neon-high", "gemini-pro-orchestrator"]);
+        assert!(!acct.lists("gemini-4-neon-low") && acct.lists("gemini-4-neon-high"));
+        assert_eq!(pool.canonical("gemini-4-neon", None), "gemini-4-neon-high");
+        // Named with its provider, a model still goes: the client chose it.
+        assert!(acct.resolve_with("gemini-4-neon-low", true).is_some());
+    }
+
+    #[test]
     fn close_model_names_resolve() {
         assert_eq!(dot_versions("gemini-3-8-flash"), "gemini-3.8-flash");
         assert_eq!(dot_versions("gpt-6-1-sol"), "gpt-6.1-sol");
@@ -3263,7 +3367,8 @@ oauth-model-alias:
             (Provider::Devin, "gpt-6-1-sol"),
             (Provider::Devin, "claude-haiku-5-5"),
             (Provider::Antigravity, "gemini-4-argon-high"),
-            (Provider::Antigravity, "claude-sonnet-5-5-max"),
+            (Provider::Antigravity, "claude-sonnet-5-5-high"),
+            (Provider::Antigravity, "gemini-3.8-flash-low"),
             (Provider::Antigravity, "gemini-4-neon-xhigh"),
             (Provider::Antigravity, "gemini-4-carbon-low"),
             (Provider::Antigravity, "gemini-4-hydrogen-xhigh"),
@@ -3275,7 +3380,9 @@ oauth-model-alias:
         assert!(!Provider::Gemini.serves("gemini-4-argon-high"));
         assert!(!Provider::Gemini.serves("gemini-4-neon-xhigh"));
         assert!(!Provider::Vertex.serves("gemini-4-hydrogen-xhigh"));
-        assert!(!Provider::Claude.serves("claude-sonnet-5-5-max"));
+        assert!(!Provider::Claude.serves("claude-sonnet-5-5-max"), "retired from Antigravity, never Anthropic's");
+        assert!(!Provider::Antigravity.serves("claude-sonnet-5-5-max"));
+        assert!(!Provider::Gemini.serves("gemini-3.1-pro-low"));
         assert!(!Provider::Antigravity.family("gpt-6.1-terra"));
         assert!(!Provider::Devin.family("gpt-6.1-terra"));
         assert!(!Provider::Devin.first_party("claude-haiku-5-5"));

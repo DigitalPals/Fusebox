@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -211,6 +213,145 @@ fn default_tier(v: &Value) -> String {
         .to_string()
 }
 
+/// Why Google keeps an Antigravity account from serving, until its owner acts: a
+/// suspension for a terms-of-service violation (`TOS_VIOLATION`), or a check that the
+/// account is a real person's (`VALIDATION_REQUIRED`). Google answers both with a 403
+/// that names a page to appeal or verify at; the account's token and model list keep
+/// working, so only this reason tells the account apart from a working one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hold {
+    pub kind: HoldKind,
+    /// Google's own words.
+    pub message: String,
+    /// Where the owner appeals or verifies: an `https` page on a Google domain, shown and
+    /// never opened by Fusebox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_text: Option<String>,
+    pub since: DateTime<Utc>,
+    /// The account error that tells of it; dismissing that error ends the hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldKind {
+    /// Suspended for a terms-of-service violation: out until the owner says otherwise.
+    Suspended,
+    /// To be verified: back once `loadCodeAssist` no longer asks for it.
+    Verify,
+}
+
+/// How long a verification hold waits between free `loadCodeAssist` checks.
+pub const VERIFY_RECHECK: chrono::Duration = chrono::Duration::minutes(10);
+
+impl Hold {
+    /// The account error: what happened, and where to go.
+    pub fn error_text(&self) -> String {
+        let what = match self.kind {
+            HoldKind::Suspended => "Google suspended this account for a terms-of-service violation",
+            HoldKind::Verify => "Google asks you to verify this account",
+        };
+        let link = self
+            .link
+            .as_deref()
+            .map(|l| format!(" {}: {l}", self.link_text.as_deref().unwrap_or("Open")))
+            .unwrap_or_default();
+        format!("{what}: {}.{link}", self.message.trim_end_matches('.'))
+    }
+}
+
+/// A link Google gave, if it is safe to show: `https` on google.com or one of its subdomains.
+fn safe_link(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    (parsed.scheme() == "https" && (host == "google.com" || host.ends_with(".google.com"))).then(|| parsed.to_string())
+}
+
+/// The hold a 403 from Cloud Code reports, if it is one.
+pub fn hold_of(body: &str) -> Option<Hold> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let error = &v["error"];
+    let details = error["details"].as_array()?;
+    let info = details.iter().find(|d| d["@type"].as_str().is_some_and(|t| t.ends_with("google.rpc.ErrorInfo")))?;
+    let meta = &info["metadata"];
+    let text = |v: &Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let kind = match info["reason"].as_str()? {
+        "TOS_VIOLATION" => HoldKind::Suspended,
+        "VALIDATION_REQUIRED" => HoldKind::Verify,
+        _ => return None,
+    };
+    // A Help detail's first link comes first, as in Google's Gemini CLI.
+    let help = details
+        .iter()
+        .find(|d| d["@type"].as_str().is_some_and(|t| t.ends_with("google.rpc.Help")))
+        .and_then(|h| h["links"].get(0));
+    let (link, link_text) = match kind {
+        HoldKind::Suspended => (text(&meta["appeal_url"]), text(&meta["appeal_url_link_text"])),
+        HoldKind::Verify => match help.and_then(|l| text(&l["url"])) {
+            Some(url) => (Some(url), help.and_then(|l| text(&l["description"]))),
+            None => (
+                text(&meta["validation_url"]).or_else(|| text(&meta["validation_link"])),
+                text(&meta["validation_url_link_text"]),
+            ),
+        },
+    };
+    let link = link.as_deref().and_then(safe_link);
+    Some(Hold {
+        kind,
+        message: text(&error["message"]).unwrap_or_else(|| "Google refused this account".into()),
+        link_text: link.as_ref().and(link_text),
+        link,
+        since: Utc::now(),
+        error_id: None,
+    })
+}
+
+/// What `loadCodeAssist` says beyond the plan: the Google AI credit balance and whether
+/// Google still wants the account verified.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Standing {
+    pub plan: Option<String>,
+    pub plan_name: Option<String>,
+    /// Google AI credits (`GOOGLE_ONE_AI`): the balance, and the least a request needs.
+    pub credits: Option<(f64, Option<f64>)>,
+    /// Still to be verified, with Google's link.
+    pub verify: Option<Hold>,
+}
+
+/// The `loadCodeAssist` answer's credits and verification request (see `Standing`).
+pub fn standing(v: &Value) -> Standing {
+    let (plan, plan_name) = tier(v);
+    let number = |v: &Value| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()).filter(|n: &f64| n.is_finite());
+    let credits = v["paidTier"]["availableCredits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| c["creditType"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("GOOGLE_ONE_AI")))
+        // A zero balance is left out of Google's JSON, as protobuf leaves out every zero.
+        .map(|c| (number(&c["creditAmount"]).unwrap_or(0.0), number(&c["minimumCreditAmountForUsage"])));
+    let text = |v: &Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let verify =
+        v["ineligibleTiers"].as_array().into_iter().flatten().find(|t| t["reasonCode"] == "VALIDATION_REQUIRED").map(
+            |t| {
+                let link = text(&t["validationUrl"]).as_deref().and_then(safe_link);
+                Hold {
+                    kind: HoldKind::Verify,
+                    message: text(&t["validationErrorMessage"])
+                        .or_else(|| text(&t["reasonMessage"]))
+                        .unwrap_or_else(|| "Verify your account to continue".into()),
+                    link_text: link.as_ref().and(text(&t["validationUrlLinkText"])),
+                    link,
+                    since: Utc::now(),
+                    error_id: None,
+                }
+            },
+        );
+    Standing { plan, plan_name, credits, verify }
+}
+
 /// The account's Google AI plan from a `loadCodeAssist` answer: the identifier and
 /// Google's name for it. A subscription is `paidTier` (`g1-ultra-tier`, "Google AI
 /// Ultra"); without one `currentTier` names only the free tier, and its name is the
@@ -224,12 +365,9 @@ pub fn tier(v: &Value) -> (Option<String>, Option<String>) {
     }
 }
 
-/// Reads the account's plan (see `tier`) without using model tokens.
-pub async fn load_tier(
-    http: &reqwest::Client,
-    acct: &Account,
-    token: &str,
-) -> Result<(Option<String>, Option<String>)> {
+/// Reads the account's plan, credits and verification request (see `Standing`) without
+/// using model tokens.
+pub async fn load_standing(http: &reqwest::Client, acct: &Account, token: &str) -> Result<Standing> {
     let resp = http
         .post(format!("{}/v1internal:loadCodeAssist", base(acct, BASE_PROD)))
         .bearer_auth(token)
@@ -241,10 +379,11 @@ pub async fn load_tier(
         .await?
         .error_for_status()?;
     let v: Value = resp.json().await?;
-    match tier(&v) {
-        (None, _) => bail!("loadCodeAssist names no tier"),
-        found => Ok(found),
+    let found = standing(&v);
+    if found.plan.is_none() {
+        bail!("loadCodeAssist names no tier");
     }
+    Ok(found)
 }
 
 /// Finds (or provisions) the Cloud project behind an Antigravity account.
@@ -308,23 +447,23 @@ pub async fn ensure_ready(app: &App, acct: &Arc<Account>) -> Result<()> {
             }
         }
     }
-    if acct.discovered.read().is_empty() {
-        let app_http = app.http.control_for_account(acct);
-        if let Ok(models) = fetch_models(&app_http, &request_base(acct), &token(acct)).await
-            && !models.is_empty()
-        {
-            *acct.discovered.write() = models;
-        }
-    }
     Ok(())
 }
 
-pub async fn fetch_models(http: &reqwest::Client, base: &str, token: &str) -> Result<Vec<String>> {
+/// The models Google offers this account (`fetchAvailableModels`, asked for its project
+/// as the IDE and CLIProxyAPI do), with their display names. `discovery` asks every six
+/// hours; an empty answer is an error, so a failed check never leaves an account serving
+/// nothing.
+pub async fn fetch_models(acct: &Account, http: &reqwest::Client) -> Result<Vec<crate::discovery::Listed>> {
+    let body = match project(acct) {
+        Some(p) => json!({ "project": p }),
+        None => json!({}),
+    };
     let resp = http
-        .post(format!("{base}/v1internal:fetchAvailableModels"))
-        .bearer_auth(token)
+        .post(format!("{}/v1internal:fetchAvailableModels", request_base(acct)))
+        .bearer_auth(token(acct))
         .header("user-agent", user_agent())
-        .json(&json!({}))
+        .json(&body)
         .timeout(Duration::from_secs(15))
         .send()
         .await?;
@@ -332,13 +471,10 @@ pub async fn fetch_models(http: &reqwest::Client, base: &str, token: &str) -> Re
         bail!("fetchAvailableModels returned {}", resp.status());
     }
     let v: Value = resp.json().await?;
-    let mut out: Vec<String> = match &v["models"] {
-        // Internal helpers (tab completion, tiered routers) have no display name.
-        Value::Object(m) => m.iter().filter(|(_, v)| v.get("displayName").is_some()).map(|(k, _)| k.clone()).collect(),
-        Value::Array(a) => a.iter().filter_map(|x| x["id"].as_str().or(x["name"].as_str()).map(String::from)).collect(),
-        _ => vec![],
-    };
-    out.retain(|m| !m.starts_with("chat_") && !m.starts_with("tab_") && !m.starts_with("gemini-2.5"));
+    let out = models_of(&v);
+    if out.is_empty() {
+        bail!("fetchAvailableModels listed no models");
+    }
     if let Some(Value::Object(dep)) = v.get("deprecatedModelIds") {
         let renamed: Vec<(String, String)> = dep
             .iter()
@@ -346,8 +482,36 @@ pub async fn fetch_models(http: &reqwest::Client, base: &str, token: &str) -> Re
             .collect();
         *RENAMED.write() = renamed;
     }
-    out.sort();
     Ok(out)
+}
+
+/// The chat models in a `fetchAvailableModels` answer, sorted by ID.
+fn models_of(v: &Value) -> Vec<crate::discovery::Listed> {
+    let listed = |id: &str, name: Option<&str>| crate::discovery::Listed {
+        id: id.to_string(),
+        name: name.map(String::from),
+        ..Default::default()
+    };
+    let mut out: Vec<crate::discovery::Listed> = match &v["models"] {
+        // Internal helpers (tab completion, tiered routers) have no display name.
+        Value::Object(m) => m
+            .iter()
+            .filter_map(|(id, info)| Some(listed(id, Some(info.get("displayName")?.as_str().unwrap_or(id)))))
+            .collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|x| Some(listed(x["id"].as_str().or(x["name"].as_str())?, x["displayName"].as_str())))
+            .collect(),
+        _ => vec![],
+    };
+    out.retain(|m| {
+        crate::discovery::valid_model_id(&m.id)
+            && !m.id.starts_with("chat_")
+            && !m.id.starts_with("tab_")
+            && !m.id.starts_with("gemini-2.5")
+    });
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
 }
 
 /// Stable per-conversation session id derived from the first user message.
@@ -503,7 +667,7 @@ pub fn unwrap(v: Value) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -530,6 +694,104 @@ mod tests {
             pair(Some("free-tier"), None)
         );
         assert_eq!(tier(&json!({"paidTier": {"id": " "}, "currentTier": {}})), pair(None, None));
+    }
+
+    /// Google's 403 for a suspended account, as CLIProxyAPI #7296 quotes it.
+    pub(crate) fn tos_violation() -> Value {
+        json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+            "message": "This service has been disabled in this account for violation of Terms of Service.",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "TOS_VIOLATION",
+                "domain": "cloudcode-pa.googleapis.com",
+                "metadata": {"appeal_url": "https://support.google.com/accounts/contact/appeal?case=1",
+                    "appeal_url_link_text": "Submit an appeal"}}]}})
+    }
+
+    #[test]
+    fn google_says_when_it_holds_an_account_and_where_to_go() {
+        let hold = hold_of(&tos_violation().to_string()).unwrap();
+        assert_eq!(hold.kind, HoldKind::Suspended);
+        assert_eq!(hold.link.as_deref(), Some("https://support.google.com/accounts/contact/appeal?case=1"));
+        assert_eq!(hold.link_text.as_deref(), Some("Submit an appeal"));
+        assert_eq!(
+            hold.error_text(),
+            "Google suspended this account for a terms-of-service violation: This service has been disabled in this \
+             account for violation of Terms of Service. Submit an appeal: https://support.google.com/accounts/contact/appeal?case=1"
+        );
+        // As Google answered an unverified account's first request on 2026-11-21.
+        let verify = json!({"error": {"code": 403, "message": "Verify your account to continue.", "status": "PERMISSION_DENIED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "VALIDATION_REQUIRED",
+                "domain": "cloudcode-pa.googleapis.com",
+                "metadata": {"validation_url_link_text": "Verify your account",
+                    "validation_url": "https://accounts.google.com/v3/signin/continue?plt=x&flowName=GlifWebSignIn"}}]}});
+        let hold = hold_of(&verify.to_string()).unwrap();
+        assert_eq!(hold.kind, HoldKind::Verify);
+        assert_eq!(hold.message, "Verify your account to continue.");
+        assert_eq!(
+            hold.link.as_deref(),
+            Some("https://accounts.google.com/v3/signin/continue?plt=x&flowName=GlifWebSignIn")
+        );
+        assert_eq!(hold.link_text.as_deref(), Some("Verify your account"));
+        // A link anywhere but Google is not shown; the hold stands.
+        let mut elsewhere = tos_violation();
+        elsewhere["error"]["details"][0]["metadata"]["appeal_url"] = "https://google.com.example.net/appeal".into();
+        let hold = hold_of(&elsewhere.to_string()).unwrap();
+        assert_eq!((hold.link, hold.link_text), (None, None));
+        for other in [
+            json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "no",
+                "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SOMETHING_ELSE"}]}}),
+            json!({"error": {"code": 403, "message": "Permission denied"}}),
+        ] {
+            assert_eq!(hold_of(&other.to_string()), None);
+        }
+        assert_eq!(hold_of("not json"), None);
+    }
+
+    #[test]
+    fn load_code_assist_gives_the_plan_credits_and_any_verification_request() {
+        // As Google answered before the owner verified (2026-11-21), with the link shortened.
+        let before = json!({
+            "currentTier": {"id": "standard-tier", "name": "Antigravity"},
+            "ineligibleTiers": [{"reasonCode": "VALIDATION_REQUIRED", "tierId": "free-tier",
+                "validationErrorMessage": "Verify your account to continue.",
+                "validationUrlLinkText": "Verify your account",
+                "validationUrl": "https://accounts.google.com/v3/signin/continue?plt=x"}],
+            "paidTier": {"id": "g1-ultra-tier", "name": "Google AI Ultra",
+                "availableCredits": [{"creditType": "GOOGLE_ONE_AI", "minimumCreditAmountForUsage": "50"}]}
+        });
+        let s = standing(&before);
+        assert_eq!((s.plan.as_deref(), s.plan_name.as_deref()), (Some("g1-ultra-tier"), Some("Google AI Ultra")));
+        assert_eq!(s.credits, Some((0.0, Some(50.0))), "Google leaves a zero balance out");
+        let verify = s.verify.unwrap();
+        assert_eq!(verify.link.as_deref(), Some("https://accounts.google.com/v3/signin/continue?plt=x"));
+        let mut after = before.clone();
+        after.as_object_mut().unwrap().remove("ineligibleTiers");
+        after["paidTier"]["availableCredits"][0]["creditAmount"] = "1250".into();
+        let s = standing(&after);
+        assert_eq!(s.verify, None);
+        assert_eq!(s.credits, Some((1250.0, Some(50.0))));
+        assert_eq!(standing(&json!({"currentTier": {"id": "free-tier"}})).credits, None);
+    }
+
+    #[test]
+    fn the_model_list_keeps_named_chat_models() {
+        // Part of Google's answer on 2026-11-21.
+        let v = json!({"models": {
+            "gemini-4-neon-high": {"displayName": "Gemini 4 Neon (High)"},
+            "claude-opus-5-5-medium": {"displayName": "Claude Opus 5.5 (Medium)"},
+            "gemini-3.8-flash-tiered": {},
+            "tab_flash_lite_preview": {},
+            "gemini-2.5-pro": {"displayName": "Gemini 2.5 Pro"},
+            "gemini-pro-orchestrator": {"displayName": "Orchestrator (Carbon)"}
+        }});
+        let listed: Vec<(String, Option<String>)> = models_of(&v).into_iter().map(|m| (m.id, m.name)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("claude-opus-5-5-medium".to_string(), Some("Claude Opus 5.5 (Medium)".to_string())),
+                ("gemini-4-neon-high".into(), Some("Gemini 4 Neon (High)".into())),
+                ("gemini-pro-orchestrator".into(), Some("Orchestrator (Carbon)".into())),
+            ]
+        );
     }
 
     #[test]

@@ -101,3 +101,23 @@ test('a successful response cannot overwrite a newer account snapshot received w
   assert.equal(d.context.S.accounts[0].last_error_id, 'occurrence-2');
   assert.match(d.render(), /500: newer failure/);
 });
+
+test('an account Google holds out shows why, links only to Google, and says clearing puts it back', () => {
+  const d = dashboard();
+  const holds = source.slice(source.indexOf('const holdTitle ='), source.indexOf('function runAlert('));
+  vm.runInContext(holds + '\n' + piece('function holdHTML('), d.context);
+  d.a.provider = 'antigravity';
+  d.a.last_error = 'Google suspended this account for a terms-of-service violation: disabled.';
+  d.a.google_hold = { kind: 'suspended', message: 'disabled', link: 'https://support.google.com/accounts/contact/appeal?case=1', link_text: 'Submit an appeal' };
+  const html = d.render();
+  assert.match(html, /href="https:\/\/support.google.com\/accounts\/contact\/appeal\?case=1" target="_blank" rel="noopener noreferrer">Submit an appeal<\/a>/);
+  assert.match(html, /Requests skip it until you appeal and clear its error\. Clearing the error puts it back in rotation\./);
+  assert.doesNotMatch(html, /A new failure will appear again/);
+  d.a.google_hold = { kind: 'verify', message: 'Verify your account to continue.', link: 'https://accounts.google.com/v3/signin/continue?plt=x' };
+  assert.match(d.render(), />Verify with Google<\/a>/);
+  assert.match(d.render(), /Fusebox checks every 10 minutes/);
+  for (const link of ['https://google.com.example.net/x', 'javascript:alert(1)', 'http://accounts.google.com/x']) {
+    d.a.google_hold = { kind: 'verify', message: 'x', link };
+    assert.doesNotMatch(d.render(), /<a /, link);
+  }
+});

@@ -2358,3 +2358,169 @@ async fn embedding_cache_hits_name_their_account_without_counting_an_attempt() {
     assert!(!hit.account_id.is_empty());
     assert_eq!((hit.provider, hit.account_id, hit.attempts), (first.provider, first.account_id, 0));
 }
+
+/// Google's Cloud Code for two Antigravity accounts: `ag-a`'s token gets `refusal`,
+/// `ag-b`'s a normal answer.
+struct Google {
+    refusal: (StatusCode, Value),
+    calls: Mutex<Vec<String>>,
+    /// `fetchAvailableModels` requests: the token and the body.
+    model_lists: Mutex<Vec<(String, Value)>>,
+}
+
+async fn google(State(g): State<Arc<Google>>, uri: axum::http::Uri, headers: HeaderMap, body: String) -> Response {
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let token = token.trim_start_matches("Bearer ").to_string();
+    if uri.path().ends_with(":fetchAvailableModels") {
+        g.model_lists.lock().push((token, serde_json::from_str(&body).unwrap_or_default()));
+        return Json(json!({"models": {"gemini-3-flash": {"displayName": "Gemini 3 Flash"},
+            "gemini-4-neon-high": {"displayName": "Gemini 4 Neon (High)"}, "tab_flash_lite_preview": {}}}))
+        .into_response();
+    }
+    g.calls.lock().push(token.clone());
+    if token == "ag-a" {
+        return (g.refusal.0, Json(g.refusal.1.clone())).into_response();
+    }
+    let chunk = json!({"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "from b"}]},
+        "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5}}});
+    ([("content-type", "text/event-stream")], format!("data: {chunk}\n\n")).into_response()
+}
+
+struct GoogleSetup {
+    app: Arc<App>,
+    proxy: Server,
+    google: Arc<Google>,
+    _upstream: Server,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for GoogleSetup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Two Antigravity sign-ins against the mock; `a` goes first.
+async fn antigravity_pair(refusal: (StatusCode, Value)) -> GoogleSetup {
+    let google = Arc::new(Google { refusal, calls: Mutex::default(), model_lists: Mutex::default() });
+    let upstream = serve(axum::Router::new().fallback(post(self::google)).with_state(google.clone())).await;
+    let dir = std::env::temp_dir().join(format!("fusebox-antigravity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, priority) in [("a", 10), ("b", 0)] {
+        let file = json!({"type": "antigravity", "access_token": format!("ag-{name}"), "refresh_token": "r",
+            "expired": "2099-01-01T00:00:00Z", "email": format!("{name}@example.invalid"), "project_id": "p",
+            "base_url": upstream.url, "priority": priority});
+        std::fs::write(dir.join(format!("antigravity-{name}.json")), file.to_string()).unwrap();
+    }
+    let cfg = Config { auth_dir: dir.to_string_lossy().into(), api_keys: vec!["client".into()], ..Default::default() };
+    let app = App::new(cfg, dir.join("config.yaml"));
+    let proxy = serve(crate::server::router(app.clone())).await;
+    GoogleSetup { app, proxy, google, _upstream: upstream, dir }
+}
+
+impl GoogleSetup {
+    async fn chat(&self, model: &str) -> (u16, String) {
+        let body = json!({"model": model, "messages": [{"role": "user", "content": "hello"}]});
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", self.proxy.url))
+            .bearer_auth("client")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        (resp.status().as_u16(), resp.text().await.unwrap())
+    }
+
+    fn account(&self, name: &str) -> Arc<crate::accounts::Account> {
+        self.app.pool.all().into_iter().find(|a| a.label.starts_with(name)).unwrap()
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.google.calls.lock().clone()
+    }
+}
+
+#[tokio::test]
+async fn a_model_google_does_not_offer_an_antigravity_account_goes_to_another() {
+    let not_found =
+        json!({"error": {"code": 404, "message": "Requested entity was not found.", "status": "NOT_FOUND"}});
+    let s = antigravity_pair((StatusCode::NOT_FOUND, not_found)).await;
+    let (status, body) = s.chat("gemini-4-neon-high").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("from b"), "{body}");
+    assert_eq!(s.calls(), ["ag-a", "ag-b"]);
+    // Until its list is read again, `a` is not asked for it; its other models still go to it.
+    let a = s.account("a");
+    assert!(a.cooling_until("gemini-4-neon-high").is_some());
+    assert!(a.state.lock().last_error(chrono::Utc::now()).is_some_and(|e| e.contains("does not offer")));
+    assert_eq!(s.chat("gemini-4-neon-high").await.0, 200);
+    assert_eq!(s.calls(), ["ag-a", "ag-b", "ag-b"]);
+    assert!(a.cooling_until("gemini-3-flash").is_none());
+
+    // With a list of its own, the model leaves the list instead.
+    *a.discovered.write() = vec!["gemini-3-flash".into(), "gemini-4-carbon-high".into()];
+    assert_eq!(s.chat("gemini-4-carbon-high").await.0, 200);
+    assert_eq!(*a.discovered.read(), ["gemini-3-flash"]);
+    assert!(a.resolve("gemini-4-carbon-high").is_none());
+    assert!(a.cooling_until("gemini-4-carbon-high").is_none(), "no pause needed: it no longer routes here");
+}
+
+#[tokio::test]
+async fn an_antigravity_account_google_suspends_sits_out_until_its_owner_clears_it() {
+    let tos = crate::antigravity::tests::tos_violation();
+    let s = antigravity_pair((StatusCode::FORBIDDEN, tos)).await;
+    let (status, body) = s.chat("gemini-4-neon-high").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(s.calls(), ["ag-a", "ag-b"]);
+    let a = s.account("a");
+    let hold = a.google_hold().expect("held");
+    assert_eq!(hold.kind, crate::antigravity::HoldKind::Suspended);
+    assert!(a.held_out());
+    let shown = a.snapshot();
+    assert_eq!(shown["google_hold"]["link"], "https://support.google.com/accounts/contact/appeal?case=1");
+    assert!(shown["last_error"].as_str().unwrap().starts_with("Google suspended this account"));
+    let order = s.app.pool.route_order("gemini-4-neon-high", &s.app.cfg(), None, &HashMap::new());
+    let step = order.iter().find(|step| step.account == a.id).unwrap();
+    assert_eq!(step.state, "held");
+    // Nothing more goes to it, whatever the model.
+    assert_eq!(s.chat("gemini-3-flash").await.0, 200);
+    assert_eq!(s.calls(), ["ag-a", "ag-b", "ag-b"]);
+    // A restart keeps it out.
+    let saved = crate::quota::Saved::of(&s.app.pool);
+    let restarted = crate::accounts::Pool::default();
+    restarted.reload(&s.app.cfg());
+    saved.restore(&restarted);
+    let again = restarted.all().into_iter().find(|x| x.id == a.id).unwrap();
+    assert_eq!(again.google_hold().map(|h| h.kind), Some(crate::antigravity::HoldKind::Suspended));
+    // Clearing its error is the owner's word that it may serve again.
+    let id = hold.error_id.unwrap();
+    assert!(a.state.lock().clear_error_if(&id));
+    assert!(a.google_hold().is_none() && !a.held_out());
+}
+
+#[tokio::test]
+async fn antigravity_accounts_learn_their_own_models_for_their_project() {
+    let not_found =
+        json!({"error": {"code": 404, "message": "Requested entity was not found.", "status": "NOT_FOUND"}});
+    let s = antigravity_pair((StatusCode::NOT_FOUND, not_found)).await;
+    let a = s.account("a");
+    assert!(a.resolve("gemini-4-carbon-high").is_some(), "the built-in list until it reports");
+    assert!(crate::discovery::refresh_due(&s.app).await);
+    let mut asked = s.google.model_lists.lock().clone();
+    asked.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(asked, [("ag-a".to_string(), json!({"project": "p"})), ("ag-b".to_string(), json!({"project": "p"}))]);
+    assert_eq!(*a.discovered.read(), ["gemini-3-flash", "gemini-4-neon-high"]);
+    assert!(a.resolve("gemini-4-carbon-high").is_none(), "not offered to it");
+    let names: Vec<String> = s.app.pool.models().into_iter().map(|(m, _)| m).collect();
+    assert_eq!(names, ["gemini-3-flash", "gemini-4-neon-high"]);
+    // Not asked again for six hours.
+    assert!(!crate::discovery::refresh_due(&s.app).await);
+    assert_eq!(s.google.model_lists.lock().len(), 2);
+    // A 404 takes the model off `a`'s list until the next check, here and after a restart.
+    assert_eq!(s.chat("gemini-4-neon-high").await.0, 200);
+    assert_eq!(*a.discovered.read(), ["gemini-3-flash"]);
+    s.app.models.apply(&s.app.pool);
+    assert_eq!(*a.discovered.read(), ["gemini-3-flash"]);
+    let b = s.account("b");
+    assert_eq!(*b.discovered.read(), ["gemini-3-flash", "gemini-4-neon-high"]);
+}

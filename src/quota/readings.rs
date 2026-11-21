@@ -382,25 +382,64 @@ pub(super) fn meta(v: &Value) -> Reading {
     out
 }
 
+/// The models one Antigravity quota bucket meters, from its `bucketId` prefix (as Google
+/// labels them and T3 Code reads them): Gemini Argon and Carbon have quotas of their own
+/// when Google sends them, other `gemini-` buckets meter the rest of Gemini, and `3p-`
+/// buckets meter Claude and GPT. The name is the group the bucket is drawn under.
+fn antigravity_family(bucket_id: &str) -> Option<(&'static str, Vec<String>)> {
+    let id = bucket_id.to_ascii_lowercase();
+    if id.starts_with("gemini-argon-") {
+        Some(("Gemini Argon", vec!["gemini-*argon*".into()]))
+    } else if id.starts_with("gemini-carbon-") {
+        Some(("Gemini Carbon", vec!["gemini-*carbon*".into()]))
+    } else if id.starts_with("gemini-") {
+        Some(("Gemini Models", vec!["gemini-".into()]))
+    } else if id.starts_with("3p-") {
+        Some(("Claude and GPT models", vec!["claude-".into(), "gpt-".into()]))
+    } else {
+        None
+    }
+}
+
+/// Antigravity's `retrieveUserQuotaSummary`: groups of buckets (`{groups: [{displayName,
+/// buckets}]}`), or the buckets alone (`{buckets}`). Each bucket is a window
+/// (`remainingFraction`, `resetTime`, `window`) of the models its `bucketId` names. A
+/// disabled bucket is kept, marked so, and limits nothing.
 pub(super) fn antigravity(v: &Value) -> Reading {
     let mut out = Reading::default();
-    for (i, group) in v["groups"].as_array().into_iter().flatten().enumerate() {
-        let name =
-            text(field(group, "display_name", "displayName")).unwrap_or_else(|| format!("Quota group {}", i + 1));
+    let top = serde_json::json!([{ "buckets": v["buckets"] }]);
+    let groups = match v["groups"].as_array() {
+        Some(groups) if !groups.is_empty() => groups,
+        _ => top.as_array().expect("an array"),
+    };
+    // Argon and Carbon buckets take their models out of the general Gemini one.
+    let own: Vec<&str> = groups
+        .iter()
+        .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
+        .filter_map(|b| text(field(b, "bucket_id", "bucketId")))
+        .filter_map(|id| match antigravity_family(&id)?.0 {
+            "Gemini Argon" => Some("argon"),
+            "Gemini Carbon" => Some("carbon"),
+            _ => None,
+        })
+        .collect();
+    for (i, group) in groups.iter().enumerate() {
+        let named = text(field(group, "display_name", "displayName"));
         let models: Vec<String> =
             field(group, "model_ids", "modelIds").as_array().into_iter().flatten().filter_map(text).collect();
-        // These are the provider's two documented group labels. Unknown groups
-        // remain informative until the provider supplies explicit model IDs.
-        let scope = if !models.is_empty() {
-            Scope::Models(models)
-        } else {
+        // The provider's two documented group labels; an unknown group without a bucket
+        // ID or model IDs remains informative.
+        let group_scope = |name: &str| {
+            if !models.is_empty() {
+                return Scope::Models(models.clone());
+            }
             match name.to_ascii_lowercase().as_str() {
                 "gemini models" => Scope::ModelFamilies(vec!["gemini-".into()]),
                 "claude and gpt models" => Scope::ModelFamilies(vec!["claude-".into(), "gpt-".into()]),
-                _ => Scope::Feature(name.clone()),
+                _ => Scope::Feature(name.to_string()),
             }
         };
-        let group_id = text(&group["id"]).unwrap_or_else(|| name.clone());
+        let group_id = text(&group["id"]).or_else(|| named.clone()).unwrap_or_else(|| format!("group-{}", i + 1));
         for (j, bucket) in group["buckets"].as_array().into_iter().flatten().enumerate() {
             let raw = field(bucket, "remaining_fraction", "remainingFraction");
             let remaining = number(raw).or_else(|| {
@@ -413,14 +452,39 @@ pub(super) fn antigravity(v: &Value) -> Reading {
                     .filter(|n| n.is_finite())
                     .map(|n| n / 100.0)
             });
-            let Some(remaining) = remaining else { continue };
+            let disabled = bucket["disabled"].as_bool() == Some(true);
+            if remaining.is_none() && !disabled {
+                continue;
+            }
             let window = text(&bucket["window"])
                 .or_else(|| text(field(bucket, "display_name", "displayName")))
                 .unwrap_or_else(|| format!("Window {}", j + 1));
-            let id = text(&bucket["id"]).unwrap_or_else(|| window.clone());
-            let mut l =
-                limit(&format!("antigravity:{group_id}:{id}"), &format!("{name} · {window}"), scope.clone(), bucket);
-            l.used_percent = Some((100.0 - remaining * 100.0).clamp(0.0, 100.0));
+            let bucket_id = text(field(bucket, "bucket_id", "bucketId")).or_else(|| text(&bucket["id"]));
+            let family = bucket_id.as_deref().and_then(antigravity_family).filter(|_| models.is_empty());
+            let (name, scope) = match family {
+                Some((family, mut patterns)) => {
+                    if family == "Gemini Models" {
+                        patterns.extend(own.iter().map(|f| format!("!gemini-*{f}*")));
+                    }
+                    // A family of its own is drawn under its own name; the rest keep the group's.
+                    let name = match family {
+                        "Gemini Argon" | "Gemini Carbon" => family.to_string(),
+                        _ => named.clone().unwrap_or_else(|| family.to_string()),
+                    };
+                    (name, Scope::ModelFamilies(patterns))
+                }
+                None => {
+                    let name = named.clone().unwrap_or_else(|| format!("Quota group {}", i + 1));
+                    let scope = group_scope(&name);
+                    (name, scope)
+                }
+            };
+            let id = bucket_id.unwrap_or_else(|| window.clone());
+            let mut l = limit(&format!("antigravity:{group_id}:{id}"), &format!("{name} · {window}"), scope, bucket);
+            l.used_percent = remaining.map(|r| (100.0 - r * 100.0).clamp(0.0, 100.0));
+            if disabled {
+                l.enabled = Some(false);
+            }
             out.limits.push(l);
         }
     }
@@ -535,6 +599,74 @@ mod tests {
         );
         assert!(st.quota.exhausted("gemini-pro"));
         assert!(!st.quota.exhausted("claude-sonnet"));
+    }
+
+    #[test]
+    fn antigravity_buckets_limit_the_models_their_ids_name() {
+        let mut st = crate::accounts::AccountState::default();
+        usage(
+            &mut st,
+            Provider::Antigravity,
+            &json!({"groups":[
+                {"displayName":"Gemini Models","buckets":[
+                    {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.9,"resetTime":"2099-01-01T00:00:00Z"},
+                    {"bucketId":"gemini-carbon-weekly","window":"weekly","remainingFraction":0,"resetTime":"2099-01-03T00:00:00Z"},
+                    {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.5}]},
+                {"displayName":"Claude and GPT models","buckets":[
+                    {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1},
+                    {"bucketId":"3p-5h","window":"5h","disabled":true,"remainingFraction":0}]}]}),
+        );
+        let q = &st.quota;
+        let ids: Vec<&str> = q.limits.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "antigravity:Gemini Models:gemini-5h",
+                "antigravity:Gemini Models:gemini-carbon-weekly",
+                "antigravity:Gemini Models:gemini-weekly",
+                "antigravity:Claude and GPT models:3p-weekly",
+                "antigravity:Claude and GPT models:3p-5h"
+            ]
+        );
+        assert_eq!(q.limits[1].name, "Gemini Carbon · weekly");
+        assert_eq!(q.limits[2].name, "Gemini Models · weekly");
+        // A spent Carbon quota stops Carbon only; the general Gemini one no longer covers it.
+        assert!(q.exhausted("gemini-4-carbon-high"));
+        assert!(!q.exhausted("gemini-4-neon-high"));
+        assert_eq!(q.pressure("gemini-4-neon-high"), Some(50.0));
+        assert_eq!(q.pressure("gemini-4-carbon-low"), Some(100.0));
+        // A disabled bucket is shown as such and limits nothing.
+        assert_eq!(q.limits[4].enabled, Some(false));
+        assert!(!q.exhausted("claude-opus-5-5-high"));
+        assert_eq!(q.pressure("claude-opus-5-5-high"), Some(0.0));
+
+        // Buckets without groups, labelled by their IDs alone.
+        let mut st = crate::accounts::AccountState::default();
+        usage(
+            &mut st,
+            Provider::Antigravity,
+            &json!({"buckets":[
+                {"bucketId":"gemini-argon-weekly","window":"weekly","remainingFraction":"0%"},
+                {"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.25}]}),
+        );
+        let q = &st.quota;
+        assert_eq!(q.limits[0].name, "Gemini Argon · weekly");
+        assert_eq!(q.limits[1].name, "Claude and GPT models · weekly");
+        assert!(q.exhausted("gemini-4-argon-high"));
+        assert!(!q.exhausted("gemini-4-neon-high"), "no general Gemini bucket was sent");
+        assert_eq!(q.pressure("gpt-oss-120b-medium"), Some(75.0));
+    }
+
+    #[test]
+    fn model_families_take_prefixes_patterns_and_exclusions() {
+        let fam =
+            |p: &[&str], m: &str| crate::quota::in_families(&p.iter().map(|s| s.to_string()).collect::<Vec<_>>(), m);
+        assert!(fam(&["gemini-"], "Gemini-4-Neon-High"));
+        assert!(fam(&["gemini-*carbon*"], "gemini-4-carbon-low"));
+        assert!(!fam(&["gemini-*carbon*"], "gemini-4-neon-low"));
+        assert!(!fam(&["gemini-", "!gemini-*carbon*"], "gemini-4-carbon-low"));
+        assert!(fam(&["gemini-", "!gemini-*carbon*"], "gemini-3-flash"));
+        assert!(!fam(&["!gemini-*carbon*"], "claude-opus-5-5"), "exclusions alone cover nothing");
     }
 
     #[test]

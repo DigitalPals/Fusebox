@@ -99,4 +99,8 @@ test('a route step held out until a sign-in says so, even when the account shows
   assert.deepEqual(text({ state: 'signin' }, { id: 'a' }), { txt: 'Sign-in expired · skipped', short: 'Sign-in expired', cls: 'err' });
   assert.equal(text({ state: 'disabled' }, { id: 'a' }).short, 'Disabled');
   assert.equal(text({ state: 'ready' }, { id: 'a' }).txt, 'Ready');
+  // Google's hold on an Antigravity account, by its kind.
+  assert.deepEqual(text({ state: 'held' }, { id: 'a' }), { txt: 'Suspended by Google · skipped', short: 'Suspended by Google', cls: 'err' });
+  context.acctState = () => ({ cls: 'error', hold: { kind: 'verify' } });
+  assert.equal(text({ state: 'held' }, { id: 'a' }).short, 'Verify with Google');
 });

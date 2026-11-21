@@ -147,12 +147,19 @@ public struct QuotaWindow: Codable, Sendable, Equatable, Hashable {
         self.group = group; self.covers = covers
     }
 
-    /// Whether this window limits `model`: every window without a model group does.
+    /// Whether this window limits `model`: every window without a model group does. Families
+    /// are name prefixes or `*` patterns, less `!` ones (as `in_families` in src/quota.rs).
     public func covers(model: String) -> Bool {
         guard let covers, model != "*" else { return true }
         let id = model.lowercased()
         let values = covers.value ?? []
-        return covers.kind == "models" ? values.contains { $0.lowercased() == id } : values.contains { id.hasPrefix($0) }
+        if covers.kind == "models" { return values.contains { $0.lowercased() == id } }
+        func matches(_ p: String) -> Bool {
+            guard p.contains("*") else { return id.hasPrefix(p.lowercased()) }
+            let pattern = "^" + p.lowercased().components(separatedBy: "*").map(NSRegularExpression.escapedPattern).joined(separator: ".*") + "$"
+            return id.range(of: pattern, options: .regularExpression) != nil
+        }
+        return values.contains { !$0.hasPrefix("!") && matches($0) } && !values.contains { $0.hasPrefix("!") && matches(String($0.dropFirst())) }
     }
 }
 
@@ -244,7 +251,7 @@ public struct Quota: Codable, Sendable, Equatable {
         var rest: [QuotaLimit] = []
         for l in all {
             let parts = l.name.components(separatedBy: " · ")
-            guard parts.count == 2, let name = names[parts[1].lowercased()], let used = l.usedPercent,
+            guard parts.count == 2, let name = names[parts[1].lowercased()], let used = l.usedPercent, l.enabled != false,
                   ["model_families", "models"].contains(l.scope?.kind ?? "") else { rest.append(l); continue }
             let group = parts[0].replacingOccurrences(of: #"\s+models$"#, with: "", options: [.regularExpression, .caseInsensitive])
                 .replacingOccurrences(of: #"\s+and\s+"#, with: " & ", options: [.regularExpression, .caseInsensitive])
@@ -253,7 +260,8 @@ public struct Quota: Codable, Sendable, Equatable {
         guard !found.isEmpty else { return }
         var groups: [String] = []
         for w in found where !groups.contains(w.group ?? "") { groups.append(w.group ?? "") }
-        let main = groups.first { $0.range(of: "gemini", options: .caseInsensitive) != nil } ?? groups[0]
+        let main = groups.first { $0.lowercased() == "gemini" }
+            ?? groups.first { $0.range(of: "gemini", options: .caseInsensitive) != nil } ?? groups[0]
         let order = { (w: QuotaWindow) in (w.group == main ? 0 : 1, groups.firstIndex(of: w.group ?? "") ?? 0, Quotas.seconds(w) ?? 0) }
         windows = found.map { w in
             var w = w
