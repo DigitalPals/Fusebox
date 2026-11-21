@@ -232,7 +232,7 @@ struct RulesTests {
     /// own 5H and WK, Claude & GPT's a child group, and other limits stay limits.
     @Test func antigravityModelGroupsBecomeWindows() throws {
         let json = """
-        {"id":"g","provider":"antigravity","label":"g","kind":"oauth",
+        {"id":"g","provider":"antigravity","label":"g","kind":"oauth","disabled":false,
          "cooldowns":{"claude-opus-5-5-high":"2026-11-08T12:00:00Z"},"cooldown_kinds":{"claude-opus-5-5-high":"quota"},
          "quota":{"windows":[],"plan":"g1-ultra-tier","plan_name":"Google AI Ultra","limits":[
           {"id":"antigravity:Gemini Models:weekly","name":"Gemini Models · weekly","scope":{"kind":"model_families","value":["gemini-"]},"used_percent":21,"resets_at":"2026-11-08T12:00:00Z"},
