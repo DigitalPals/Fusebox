@@ -253,8 +253,8 @@ pub fn same_plan(a: &str, b: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
-    /// The plan identifier and the provider's display name.
-    Claude(Option<String>, Option<String>),
+    /// The plan identifier and the provider's display name (Claude's, Antigravity's).
+    Named(Option<String>, Option<String>),
     /// The subscription SKU and the renewal.
     Codex(Option<String>, Option<Renewal>),
 }
@@ -429,7 +429,7 @@ impl Quota {
         match details {
             Some(details) => {
                 match details {
-                    PlanDetails::Claude(plan, name) => {
+                    PlanDetails::Named(plan, name) => {
                         self.plan = plan;
                         self.plan_name = name;
                     }
@@ -715,9 +715,10 @@ fn codex_plan(value: &Value) -> anyhow::Result<PlanDetails> {
     Ok(PlanDetails::Codex(subscription_plan, Renewal::from_codex(value)))
 }
 
-/// Reads Claude plan names and ChatGPT subscription SKUs without using model tokens.
+/// Reads Claude and Antigravity plan names and ChatGPT subscription SKUs without using
+/// model tokens.
 pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
-    if !matches!(acct.provider, Provider::Claude | Provider::Codex) {
+    if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity) {
         return Ok(());
     }
     let epoch = acct.quota_epoch();
@@ -728,7 +729,7 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let http = app.http.control_for_account(acct);
     let details = match acct.provider {
         Provider::Claude => crate::oauth::claude_profile(&http, &token).await.map(|profile| {
-            PlanDetails::Claude(crate::oauth::claude_plan(&profile), crate::oauth::claude_plan_name(&profile))
+            PlanDetails::Named(crate::oauth::claude_plan(&profile), crate::oauth::claude_plan_name(&profile))
         }),
         Provider::Codex => {
             async {
@@ -751,6 +752,9 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
                 codex_plan(&value)
             }
             .await
+        }
+        Provider::Antigravity => {
+            crate::antigravity::load_tier(&http, acct, &token).await.map(|(plan, name)| PlanDetails::Named(plan, name))
         }
         _ => unreachable!(),
     };
@@ -933,7 +937,7 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     if matches!(acct.provider, Provider::Claude | Provider::Codex) {
         changed |= crate::banked_resets::automatic_check(app, &acct).await;
     }
-    let plan_due = matches!(acct.provider, Provider::Claude | Provider::Codex)
+    let plan_due = matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity)
         && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
         && (acct.provider != Provider::Codex || o.account_id.as_ref().is_some_and(|id| !id.is_empty())))
         && {
@@ -1538,12 +1542,12 @@ mod tests {
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         assert!(q.plan_due(now + secs(PLAN_EVERY)));
         // A good read ends the backoff, and its plan replaces the last one, even with none.
-        q.plan_read(now, Some(PlanDetails::Claude(Some("max_20x".into()), Some("Ultra".into()))));
+        q.plan_read(now, Some(PlanDetails::Named(Some("max_20x".into()), Some("Ultra".into()))));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref(), q.plan_failures), (Some("max_20x"), Some("Ultra"), 0));
         assert!(!q.plan_due(now + secs(PLAN_EVERY - 1)));
         q.plan_read(now, None);
         assert_eq!(q.plan.as_deref(), Some("max_20x"), "a failed read keeps the plan");
-        q.plan_read(now, Some(PlanDetails::Claude(None, None)));
+        q.plan_read(now, Some(PlanDetails::Named(None, None)));
         assert_eq!((q.plan.as_deref(), q.plan_name.as_deref()), (None, None));
         // Usage readings without a plan (Claude's) leave it alone.
         q.plan = Some("max_5x".into());
