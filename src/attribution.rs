@@ -210,6 +210,13 @@ impl Attribution {
             };
             let dropped = w.used + NOISE_POINTS < s.used || (w.used < 0.5 && s.used >= 2.0);
             if same && !dropped {
+                // The models a window counts can change mid-window (a family gets a
+                // limit of its own): this reading's list counts from now on.
+                if !covers.is_empty() && self.current[i].covers != *covers {
+                    self.current[i].covers = covers.clone();
+                    self.dirty = true;
+                }
+                let s = &self.current[i];
                 let rise = w.used - s.used;
                 if rise > 1e-9 {
                     self.attribute(i, rise, now);
@@ -371,6 +378,25 @@ mod tests {
             session: Some(format!("{client}-session")),
             model: Some(model.into()),
         }
+    }
+
+    #[test]
+    fn a_window_counts_the_models_its_latest_reading_names() {
+        let mut a = Attribution::default();
+        let gemini = |covers: &[&str]| covers.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        a.reading_scoped(&[(window("week", 10.0, 5000), gemini(&["gemini-"]))], at(0));
+        a.record(used("neon", 1, Some(1.0), 1.0, "gemini-4-neon-high"));
+        a.record(used("carbon", 2, Some(1.0), 1.0, "gemini-4-carbon-high"));
+        // Carbon got a limit of its own mid-week: the Gemini window no longer counts it.
+        a.reading_scoped(&[(window("week", 12.0, 5000), gemini(&["gemini-", "!gemini-*carbon*"]))], at(3));
+        let s = &a.current[0];
+        assert_eq!(s.covers, gemini(&["gemini-", "!gemini-*carbon*"]));
+        assert_eq!(s.clients.keys().collect::<Vec<_>>(), ["neon"]);
+        // One model exactly, not every name it starts.
+        a.reading_scoped(&[(window("week", 12.0, 5000), gemini(&["=gemini-3-flash"]))], at(4));
+        a.record(used("lite", 5, Some(1.0), 1.0, "gemini-3-flash-lite"));
+        a.reading_scoped(&[(window("week", 13.0, 5000), gemini(&["=gemini-3-flash"]))], at(6));
+        assert!(!a.current[0].clients.contains_key("lite"));
     }
 
     #[test]
