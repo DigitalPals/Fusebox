@@ -74,6 +74,20 @@ struct Entry {
     failures: u32,
     /// Codex's list version, compared with the `x-models-etag` responses carry.
     etag: Option<String>,
+    /// The credential the list was read for: a file signed in as someone else starts afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
+}
+
+impl Entry {
+    /// Read for the credential the account has now (lists saved before this was kept count).
+    fn belongs(&self, identity: &str) -> bool {
+        self.identity.as_deref().is_none_or(|id| id == identity)
+    }
+}
+
+fn identity(acct: &Account) -> String {
+    acct.state.lock().credential_identity.clone()
 }
 
 /// An `extra-models` entry dropped because Fusebox came to know the model.
@@ -205,14 +219,17 @@ impl Store {
 
     /// Puts the stored lists on the accounts, e.g. after a restart or an account reload.
     pub fn apply(&self, pool: &crate::accounts::Pool) {
-        let stored = self.stored.lock();
         for acct in pool.all() {
             if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity) {
                 continue;
             }
-            let ids: Vec<String> = stored
+            let identity = identity(&acct);
+            let ids: Vec<String> = self
+                .stored
+                .lock()
                 .accounts
                 .get(&acct.id)
+                .filter(|e| e.belongs(&identity))
                 .map(|e| e.models.iter().map(|m| m.id.clone()).collect())
                 .unwrap_or_default();
             let mut discovered = acct.discovered.write();
@@ -244,8 +261,9 @@ impl Store {
         if !eligible(acct) {
             return false;
         }
+        let identity = identity(acct);
         let stored = self.stored.lock();
-        let Some(e) = stored.accounts.get(&acct.id) else { return true };
+        let Some(e) = stored.accounts.get(&acct.id).filter(|e| e.belongs(&identity)) else { return true };
         if e.checked_at.is_some_and(|t| (now - t).num_seconds() < MIN_GAP) {
             return false;
         }
@@ -297,8 +315,13 @@ impl Store {
         now: DateTime<Utc>,
         result: Result<(Vec<Listed>, Option<String>)>,
     ) -> Result<bool> {
+        let identity = identity(acct);
         let mut stored = self.stored.lock();
         let entry = stored.accounts.entry(acct.id.clone()).or_default();
+        if !entry.belongs(&identity) {
+            *entry = Entry::default();
+        }
+        entry.identity = Some(identity);
         entry.provider = Some(acct.provider.as_str().into());
         entry.checked_at = Some(now);
         let outcome = match result {
@@ -328,11 +351,12 @@ impl Store {
     /// list until the next check brings it back. True when it was listed.
     pub fn forget(&self, acct: &Account, model: &str) -> bool {
         let same = |m: &str| m.eq_ignore_ascii_case(model);
+        let identity = identity(acct);
         let mut stored = self.stored.lock();
         // Never down to nothing: an empty list would bring back the built-in one.
-        let listed = stored.accounts.get_mut(&acct.id).is_some_and(|e| {
+        let listed = stored.accounts.get_mut(&acct.id).filter(|e| e.belongs(&identity)).is_some_and(|e| {
             let before = e.models.len();
-            if before > 1 {
+            if e.models.iter().any(|m| !same(&m.id)) {
                 e.models.retain(|m| !same(&m.id));
             }
             e.models.len() != before
@@ -341,7 +365,7 @@ impl Store {
             self.save(&stored);
         }
         let mut discovered = acct.discovered.write();
-        if discovered.iter().any(|m| same(m)) && discovered.len() > 1 {
+        if discovered.iter().any(|m| !same(m)) {
             discovered.retain(|m| !same(m));
         }
         listed
@@ -395,6 +419,7 @@ async fn refresh(app: &App, acct: &Arc<Account>, manual: bool) -> Option<bool> {
     .await;
     match app.models.record(acct, now, result) {
         Ok(changed) => {
+            acct.offers_again();
             app.models.apply(&app.pool);
             app.models.publish_caps();
             if changed {
@@ -881,6 +906,34 @@ mod tests {
         let models = parse_codex(&v);
         assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6.2-sol", "gpt-6-luna"]);
         assert_eq!(models[0].efforts, ["low", "high"]);
+    }
+
+    #[test]
+    fn a_list_belongs_to_the_credential_it_was_read_for_and_never_runs_empty() {
+        let f = RefreshFixture::new();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&f.cfg);
+        let acct = pool.all()[0].clone();
+        *acct.cred.write() = Credential::OAuth(crate::accounts::OAuth::default());
+        let listed = |ids: &[&str]| {
+            Ok((ids.iter().map(|id| Listed { id: id.to_string(), ..Default::default() }).collect(), None))
+        };
+        f.store.record(&acct, Utc::now(), listed(&["m-1", "m-2"])).unwrap();
+        f.store.apply(&pool);
+        assert_eq!(*acct.discovered.read(), ["m-1", "m-2"]);
+        // A 404 takes a model off, but never the last one.
+        assert!(f.store.forget(&acct, "M-1"));
+        assert!(!f.store.forget(&acct, "m-2"));
+        assert_eq!(*acct.discovered.read(), ["m-2"]);
+        // The file now holds someone else: their list is not this one's, and it is due.
+        acct.state.lock().credential_identity = "someone-else".into();
+        f.store.apply(&pool);
+        assert!(acct.discovered.read().is_empty());
+        assert!(f.store.due(&acct, Utc::now()));
+        assert!(!f.store.forget(&acct, "m-2"));
+        f.store.record(&acct, Utc::now(), Err(anyhow::anyhow!("offline"))).unwrap_err();
+        f.store.apply(&pool);
+        assert!(acct.discovered.read().is_empty(), "a failed read starts afresh too");
     }
 
     #[test]

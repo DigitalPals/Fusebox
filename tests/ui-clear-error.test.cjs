@@ -120,4 +120,18 @@ test('an account Google holds out shows why, links only to Google, and says clea
     d.a.google_hold = { kind: 'verify', message: 'x', link };
     assert.doesNotMatch(d.render(), /<a /, link);
   }
+  // A hold never goes quiet, even with no error to show.
+  d.a.last_error = null;
+  assert.match(d.render(), /Fusebox checks every 10 minutes/);
+});
+
+test('clearing the error that tells of a hold ends it in the dashboard too', async () => {
+  const d = dashboard();
+  vm.runInContext(source.slice(source.indexOf('const holdTitle ='), source.indexOf('function runAlert(')) + '\n' + piece('function holdHTML('), d.context);
+  d.a.google_hold = { kind: 'suspended', message: 'disabled', error_id: 'occurrence-1' };
+  const operation = d.clear();
+  d.resolve({ last_error: null, last_error_id: null, last_error_until: null, google_hold: null });
+  await operation;
+  assert.equal(d.a.google_hold, null);
+  assert.equal(d.render(), '');
 });

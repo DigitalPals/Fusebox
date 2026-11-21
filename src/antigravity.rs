@@ -263,11 +263,17 @@ impl Hold {
     }
 }
 
-/// A link Google gave, if it is safe to show: `https` on google.com or one of its subdomains.
+/// A link Google gave, if it is safe to show: `https` on google.com or one of its
+/// subdomains, without a user name, password or port (the dashboard checks the same).
 fn safe_link(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url.trim()).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
-    (parsed.scheme() == "https" && (host == "google.com" || host.ends_with(".google.com"))).then(|| parsed.to_string())
+    (parsed.scheme() == "https"
+        && (host == "google.com" || host.ends_with(".google.com"))
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none())
+    .then(|| parsed.to_string())
 }
 
 /// The hold a 403 from Cloud Code reports, if it is one.
@@ -288,17 +294,16 @@ pub fn hold_of(body: &str) -> Option<Hold> {
         .iter()
         .find(|d| d["@type"].as_str().is_some_and(|t| t.ends_with("google.rpc.Help")))
         .and_then(|h| h["links"].get(0));
+    // The first one safe to show; a Help link elsewhere leaves the metadata's.
+    let safe = |link: Option<String>, link_text: Option<String>| Some((safe_link(&link?)?, link_text));
     let (link, link_text) = match kind {
-        HoldKind::Suspended => (text(&meta["appeal_url"]), text(&meta["appeal_url_link_text"])),
-        HoldKind::Verify => match help.and_then(|l| text(&l["url"])) {
-            Some(url) => (Some(url), help.and_then(|l| text(&l["description"]))),
-            None => (
-                text(&meta["validation_url"]).or_else(|| text(&meta["validation_link"])),
-                text(&meta["validation_url_link_text"]),
-            ),
-        },
-    };
-    let link = link.as_deref().and_then(safe_link);
+        HoldKind::Suspended => safe(text(&meta["appeal_url"]), text(&meta["appeal_url_link_text"])),
+        HoldKind::Verify => safe(help.and_then(|l| text(&l["url"])), help.and_then(|l| text(&l["description"])))
+            .or_else(|| safe(text(&meta["validation_url"]), text(&meta["validation_url_link_text"])))
+            .or_else(|| safe(text(&meta["validation_link"]), text(&meta["validation_url_link_text"])))
+            .or_else(|| safe(text(&meta["validation_learn_more_url"]), None)),
+    }
+    .map_or((None, None), |(link, text)| (Some(link), text));
     Some(Hold {
         kind,
         message: text(&error["message"]).unwrap_or_else(|| "Google refused this account".into()),
@@ -736,6 +741,22 @@ pub(crate) mod tests {
         elsewhere["error"]["details"][0]["metadata"]["appeal_url"] = "https://google.com.example.net/appeal".into();
         let hold = hold_of(&elsewhere.to_string()).unwrap();
         assert_eq!((hold.link, hold.link_text), (None, None));
+        for odd in ["https://user@support.google.com/appeal", "https://support.google.com:8443/appeal"] {
+            elsewhere["error"]["details"][0]["metadata"]["appeal_url"] = odd.into();
+            assert_eq!(hold_of(&elsewhere.to_string()).unwrap().link, None, "{odd}");
+        }
+        // A Help link Fusebox can't show leaves the one in Google's metadata.
+        let mut help = verify.clone();
+        help["error"]["details"].as_array_mut().unwrap().push(json!({"@type": "type.googleapis.com/google.rpc.Help",
+            "links": [{"description": "Short link", "url": "https://goo.gl/abc"}]}));
+        let hold = hold_of(&help.to_string()).unwrap();
+        assert_eq!(
+            (hold.link.as_deref(), hold.link_text.as_deref()),
+            (
+                Some("https://accounts.google.com/v3/signin/continue?plt=x&flowName=GlifWebSignIn"),
+                Some("Verify your account")
+            )
+        );
         for other in [
             json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "no",
                 "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SOMETHING_ELSE"}]}}),

@@ -632,7 +632,12 @@ impl AccountState {
     }
 
     /// Records a problem that stays until a request succeeds or the account is reset.
+    /// While Google holds the account out, its hold is the error shown: what to do
+    /// matters more than a passing failure, and dismissing it must stay possible.
     pub fn set_error(&mut self, message: impl Into<String>) {
+        if self.google_hold.is_some() {
+            return;
+        }
         self.last_error = Some(AccountError {
             id: uuid::Uuid::new_v4().to_string(),
             message: message.into(),
@@ -643,6 +648,9 @@ impl AccountState {
 
     /// A recent upstream failure, without requiring another inference to clear it.
     pub fn set_temporary_error(&mut self, message: impl Into<String>, until: DateTime<Utc>) {
+        if self.google_hold.is_some() {
+            return;
+        }
         self.last_error = Some(AccountError {
             id: uuid::Uuid::new_v4().to_string(),
             message: message.into(),
@@ -651,8 +659,30 @@ impl AccountState {
         });
     }
 
+    /// Clears the error shown. Google's hold, if any, shows again: only dismissing
+    /// that one ([`Self::clear_error_if`]) or another way out ends it.
     pub fn clear_error(&mut self) {
         self.last_error = None;
+        self.show_google_hold();
+    }
+
+    /// Shows Google's hold as the account's error, with the ID that dismisses it.
+    fn show_google_hold(&mut self) {
+        let Some(text) = self.google_hold.as_ref().map(|h| h.error_text()) else { return };
+        let id = uuid::Uuid::new_v4().to_string();
+        self.last_error = Some(AccountError { id: id.clone(), message: text, until: None, pause: None });
+        if let Some(hold) = self.google_hold.as_mut() {
+            hold.error_id = Some(id);
+        }
+    }
+
+    /// Google's hold is over (a new sign-in, verified, or its owner said so): it and the
+    /// error telling of it go.
+    pub fn end_google_hold(&mut self) {
+        let Some(hold) = self.google_hold.take() else { return };
+        if hold.error_id.is_some() && self.last_error.as_ref().map(|e| &e.id) == hold.error_id.as_ref() {
+            self.last_error = None;
+        }
     }
 
     /// A held account just went out of rotation: show its sign-in error again, once, in
@@ -677,14 +707,15 @@ impl AccountState {
     /// Dismiss the displayed occurrence without losing a newer failure, including
     /// a repeated failure with the same message. An already-cleared error is OK.
     pub fn clear_error_if(&mut self, id: &str) -> bool {
+        // Dismissing Google's hold is the owner saying the account may serve again.
+        if self.google_hold.as_ref().is_some_and(|h| h.error_id.as_deref() == Some(id)) {
+            self.end_google_hold();
+            return true;
+        }
         if self.last_error.as_ref().is_some_and(|error| error.id != id) {
             return false;
         }
         self.clear_error();
-        // Dismissing Google's hold is the owner saying the account may serve again.
-        if self.google_hold.as_ref().is_some_and(|h| h.error_id.as_deref() == Some(id)) {
-            self.google_hold = None;
-        }
         true
     }
 
@@ -791,6 +822,9 @@ pub struct Account {
     pub session_id: String,
     /// Models the upstream lists for this account (Antigravity, Claude and Codex sign-ins).
     pub discovered: RwLock<Vec<String>>,
+    /// Models the provider answered 404 for on this account (Antigravity), until when:
+    /// they don't route here until its model list is read again or the time passes.
+    pub unoffered: RwLock<HashMap<String, DateTime<Utc>>>,
     /// Models added from the dashboard (`extra-models`) until Fusebox knows them.
     pub extra: Vec<String>,
     /// Clients reach this account as `prefix/model`.
@@ -884,7 +918,13 @@ impl Account {
 
     /// `forced`: the client named this provider explicitly, so any model of its family goes.
     pub fn resolve_with(&self, model: &str, forced: bool) -> Option<String> {
-        self.resolve_inner(model, forced).filter(|m| !self.excludes(m))
+        self.resolve_inner(model, forced).filter(|m| !self.excludes(m) && !self.is_unoffered(m))
+    }
+
+    fn is_unoffered(&self, upstream: &str) -> bool {
+        let unoffered = self.unoffered.read();
+        !unoffered.is_empty()
+            && unoffered.iter().any(|(m, until)| m.eq_ignore_ascii_case(upstream) && *until > Utc::now())
     }
 
     fn resolve_inner(&self, model: &str, forced: bool) -> Option<String> {
@@ -1074,18 +1114,22 @@ impl Account {
         st.set_error(reason);
     }
 
-    /// Keeps `model` off an account its provider says doesn't offer it, until its model
-    /// list is read again. Not a fault of the account: the error clears itself.
-    pub fn not_offered(&self, model: &str, until: DateTime<Utc>, reason: &str) {
-        // Gone from the account's own list, it no longer routes here; else it pauses.
-        let listed = self.resolve(model).is_some();
-        let mut st = self.state.lock();
-        if listed {
-            st.cooldowns.insert(model.to_string(), until);
-            st.limit_pauses.remove(model);
-            st.stall_pauses.remove(model);
-        }
-        st.set_temporary_error(reason, Utc::now() + chrono::Duration::minutes(10));
+    /// Keeps `upstream` off an account its provider says doesn't offer it, until its
+    /// model list is read again ([`Self::offers_again`]) or `until`, even when a client
+    /// names the provider. Not a pause and not a fault of the account: it routes as before
+    /// for every other model, and the error clears itself.
+    pub fn not_offered(&self, upstream: &str, until: DateTime<Utc>, reason: &str) {
+        let mut unoffered = self.unoffered.write();
+        let now = Utc::now();
+        unoffered.retain(|_, t| *t > now);
+        unoffered.insert(upstream.to_string(), until);
+        drop(unoffered);
+        self.state.lock().set_temporary_error(reason, now + chrono::Duration::minutes(10));
+    }
+
+    /// A fresh model list says what the account offers now; earlier 404s are answered.
+    pub fn offers_again(&self) {
+        self.unoffered.write().clear();
     }
 
     /// Pauses a model whose upstream sent nothing before the first-token deadline, so its
@@ -1168,8 +1212,6 @@ impl Account {
     pub fn record_ok(&self) {
         let mut st = self.state.lock();
         st.strikes = 0;
-        // Google served it, so whatever held it is over.
-        st.google_hold = None;
         // Serving on until the access token expires doesn't end the need to sign in again.
         let holding = st.refresh_hold.as_ref().filter(|hold| match &*self.cred.read() {
             Credential::OAuth(o) => hold.applies(o),
@@ -1186,21 +1228,18 @@ impl Account {
     }
 
     /// Takes the account out of rotation for Google's reason, with an error that says
-    /// what to do. A new sign-in, a served request, dismissing the error or (for a
-    /// verification) Google's own `loadCodeAssist` ends it.
-    pub fn hold_for_google(&self, mut hold: crate::antigravity::Hold) {
+    /// what to do. A new sign-in, dismissing the error or (for a verification) Google's
+    /// own `loadCodeAssist` ends it; a request that was already running when it came
+    /// doesn't. The first verification check waits its full interval from now.
+    pub fn hold_for_google(&self, hold: crate::antigravity::Hold) {
         let mut st = self.state.lock();
-        st.set_error(hold.error_text());
-        hold.error_id = st.last_error.as_ref().map(|e| e.id.clone());
         st.google_hold = Some(hold);
+        st.show_google_hold();
+        st.quota.plan_checked_at = Some(Utc::now());
     }
 
     pub fn release_google_hold(&self) {
-        let mut st = self.state.lock();
-        let Some(hold) = st.google_hold.take() else { return };
-        if let Some(id) = hold.error_id {
-            st.clear_error_if(&id);
-        }
+        self.state.lock().end_google_hold();
     }
 
     /// Out of rotation until its owner acts: its refresh token was refused for good and its
@@ -1881,6 +1920,7 @@ impl Pool {
             }
             let previous_identity = old.get(&s.id).filter(|_| !identity_changed);
             let discovered = previous_identity.map(|p| p.discovered.read().clone()).unwrap_or_default();
+            let unoffered = previous_identity.map(|p| p.unoffered.read().clone()).unwrap_or_default();
             let mut state = old
                 .get(&s.id)
                 .map(|p| {
@@ -1964,6 +2004,7 @@ impl Pool {
                 device_id,
                 session_id,
                 discovered: RwLock::new(discovered),
+                unoffered: RwLock::new(unoffered),
                 extra: s.extra,
                 prefix: s.prefix,
                 excluded: s.excluded,
@@ -2042,13 +2083,19 @@ impl Pool {
     pub fn knows(&self, provider: Provider, model: &str) -> bool {
         let same =
             |m: &str| m.eq_ignore_ascii_case(model) || dot_versions(m).eq_ignore_ascii_case(&dot_versions(model));
-        provider.builtin_models().iter().any(|m| same(m))
-            || self
-                .accounts
-                .read()
-                .iter()
-                .filter(|a| a.provider == provider)
-                .any(|a| a.discovered.read().iter().any(|m| same(m)))
+        let builtin = provider.builtin_models().iter().any(|m| same(m));
+        let accounts = self.accounts.read();
+        let mut mine = accounts.iter().filter(|a| a.provider == provider).peekable();
+        // Each Antigravity account serves its own list once it has one (see
+        // `Account::lists_own_models`): a model is known only when every account serves
+        // it without `extra-models`, so one added for an account that lacks it stays.
+        if provider == Provider::Antigravity && mine.peek().is_some() {
+            return mine.all(|a| {
+                let listed = a.discovered.read();
+                if listed.is_empty() { builtin } else { listed.iter().any(|m| same(m)) }
+            });
+        }
+        builtin || mine.any(|a| a.discovered.read().iter().any(|m| same(m)))
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Account>> {
@@ -3290,6 +3337,13 @@ oauth-model-alias:
         assert_eq!(pool.canonical("gemini-4-neon", None), "gemini-4-neon-high");
         // Named with its provider, a model still goes: the client chose it.
         assert!(acct.resolve_with("gemini-4-neon-low", true).is_some());
+        // Fusebox knows a model only when the account serves it without `extra-models`:
+        // one added for it stays added, though built in.
+        assert!(!pool.knows(Provider::Antigravity, "gemini-4-neon-low"));
+        assert!(pool.knows(Provider::Antigravity, "gemini-pro-orchestrator"));
+        acct.discovered.write().clear();
+        assert!(pool.knows(Provider::Antigravity, "gemini-4-neon-low"));
+        assert!(!pool.knows(Provider::Antigravity, "gemini-pro-orchestrator"));
     }
 
     #[test]
@@ -3508,6 +3562,7 @@ claude-api-key:
             device_id: String::new(),
             session_id: String::new(),
             discovered: RwLock::new(vec![]),
+            unoffered: RwLock::default(),
             extra: vec![],
             prefix: None,
             excluded: vec![],

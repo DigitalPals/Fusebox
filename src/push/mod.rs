@@ -610,6 +610,7 @@ fn views(app: &App) -> Vec<AccountView> {
                     .collect(),
                 renewal: a.renewal(&st.quota).and_then(|r| r.next(now)),
                 usage_refused: st.quota.refusal_fault(now),
+                google_hold: st.google_hold.as_ref().map(|h| h.kind),
             }
         })
         .collect()

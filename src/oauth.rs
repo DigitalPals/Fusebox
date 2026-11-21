@@ -995,6 +995,11 @@ pub async fn refresher(app: Arc<App>) {
                     if !acct.is_oauth() || acct.state.lock().disabled {
                         return;
                     }
+                    // A suspended account serves nothing until its owner acts; a new token
+                    // wouldn't change that, and a failed refresh only adds noise.
+                    if acct.google_hold().is_some_and(|h| h.kind == crate::antigravity::HoldKind::Suspended) {
+                        return;
+                    }
                     // `ensure_fresh` logs and shows its failures, once each.
                     if let Err(e) = ensure_fresh(app, &acct, chrono::Duration::minutes(10), false).await {
                         tracing::debug!(account = %acct.label, "token refresh: {e:#}");
