@@ -265,6 +265,25 @@ struct RulesTests {
         #expect(again.quota?.limits?.map(\.id) == ["x"])
     }
 
+    @Test func antigravityFamiliesWithTheirOwnQuotaKeepTheirModels() throws {
+        let json = """
+        {"id":"g","provider":"antigravity","label":"g","kind":"oauth","disabled":false,"quota":{"windows":[],"limits":[
+          {"id":"antigravity:g:c","name":"Gemini Carbon · weekly","scope":{"kind":"model_families","value":["gemini-*carbon*"]},"used_percent":100},
+          {"id":"antigravity:g:w","name":"Gemini Models · weekly","scope":{"kind":"model_families","value":["gemini-","!gemini-*carbon*"]},"used_percent":40},
+          {"id":"antigravity:g:5","name":"Claude and GPT models · 5h","scope":{"kind":"model_families","value":["claude-","gpt-"]},"used_percent":0,"enabled":false},
+          {"id":"antigravity:credits","name":"Google AI credits","scope":{"kind":"credits"},"remaining":0}
+         ]}}
+        """
+        let a = try JSONDecoder.fusebox.decode(Account.self, from: Data(json.utf8))
+        let windows = try #require(a.quota?.windows)
+        #expect(windows.map(\.model) == [nil, "Gemini Carbon"])
+        #expect(windows[0].covers(model: "gemini-4-neon-high"))
+        #expect(!windows[0].covers(model: "gemini-4-carbon-high"))
+        #expect(windows[1].covers(model: "gemini-4-carbon-high"))
+        #expect(!windows[1].covers(model: "gemini-4-neon-high"))
+        #expect(a.quota?.limits?.map(\.id) == ["antigravity:g:5", "antigravity:credits"], "disabled buckets and credits stay limits")
+    }
+
     @Test func routingSentence() throws {
         let r = try decode([RequestLog].self, "requests")
         let reused = try #require(r.first { $0.routingReason == "session_reused" })
