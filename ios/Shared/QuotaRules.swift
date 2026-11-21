@@ -151,8 +151,13 @@ public enum Quotas {
         return short ? "5H" : w?.name == "day" ? "DAY" : "WK"
     }
 
-    /// "5-hour", "Weekly", "Daily", "Weekly · fable".
+    /// "5-hour", "Weekly", "Daily", "Weekly · fable"; a model group's own window "Gemini weekly".
     public static func title(_ w: QuotaWindow) -> String {
+        if let group = w.group, w.model == nil {
+            var plain = w
+            plain.group = nil
+            return "\(group) \(title(plain).lowercased())"
+        }
         if isShort(w) { return "\(w.name.dropLast())-hour" }
         if w.name == "day" { return "Daily" }
         if w.name == "week" { return "Weekly" }
@@ -201,6 +206,10 @@ extension Account {
         let claude = ["max_5x": "Max", "max_20x": "Ultra"]
         if provider == "codex", let n = quota?.subscriptionPlan.flatMap({ codex[$0] }) { return n }
         // A provider-reported display name (Claude's, Meta's tier name) wins over any tier identifier.
+        // Google names Antigravity's plans "Google AI Ultra", "Google AI Pro": the list says "Ultra".
+        if provider == "antigravity", let n = quota?.planName, !n.isEmpty {
+            return n.replacingOccurrences(of: #"^Google AI\s+"#, with: "", options: [.regularExpression, .caseInsensitive])
+        }
         if let n = quota?.planName, !n.isEmpty { return n }
         if provider == "claude", let n = quota?.plan.flatMap({ claude[$0] }) { return n }
         guard let plan = quota?.plan, !plan.isEmpty else { return nil }
@@ -256,9 +265,11 @@ extension Account {
     /// Verified Claude Ultra and ChatGPT Pro accounts have no 5-hour limit.
     public var noShortLimit: Bool { (quota?.noFiveHourLimit ?? false) && window(short: true) == nil }
 
-    /// Windows limited to one model ("week fable"), shown on the account page.
+    /// Windows limited to one model ("week fable") or model group (Antigravity's Claude & GPT:
+    /// 5-hour, then weekly), shown on the account page.
     public func scopedWindows(now: Date = .now) -> [QuotaWindow] {
-        (quota?.windows ?? []).filter { $0.model != nil && QuotaReading($0, now: now) != nil }.sorted { $0.name < $1.name }
+        (quota?.windows ?? []).filter { $0.model != nil && QuotaReading($0, now: now) != nil }
+            .sorted { ($0.model ?? "", Quotas.seconds($0) ?? 0, $0.name) < ($1.model ?? "", Quotas.seconds($1) ?? 0, $1.name) }
     }
 
     public func state(now: Date = .now) -> AccountState {
@@ -304,7 +315,8 @@ extension Account {
     public func windowSpent(_ w: QuotaWindow?) -> Bool {
         guard let renews = w?.resetsAt?.addingTimeInterval(-60) else { return false }
         return (cooldowns ?? [:]).contains { model, until in
-            cooldownKinds?[model] == "quota" && (FuseboxDate.parse(until).map { $0 >= renews } ?? false)
+            cooldownKinds?[model] == "quota" && w?.covers(model: model) != false
+                && (FuseboxDate.parse(until).map { $0 >= renews } ?? false)
         }
     }
 

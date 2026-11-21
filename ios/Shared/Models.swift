@@ -134,11 +134,25 @@ public struct QuotaWindow: Codable, Sendable, Equatable, Hashable {
     public var used: Double?
     public var resetsAt: Date?
     public var model: String?
+    /// The model group a window came from ("Gemini", "Claude & GPT"), and which models it
+    /// limits: Antigravity's, made from its limits (see `Quota.groupWindows`).
+    public var group: String?
+    public var covers: QuotaLimit.Scope?
 
-    enum CodingKeys: String, CodingKey { case name, used, model, resetsAt = "resets_at" }
+    enum CodingKeys: String, CodingKey { case name, used, model, group, covers, resetsAt = "resets_at" }
 
-    public init(name: String, used: Double?, resetsAt: Date? = nil, model: String? = nil) {
+    public init(name: String, used: Double?, resetsAt: Date? = nil, model: String? = nil,
+                group: String? = nil, covers: QuotaLimit.Scope? = nil) {
         self.name = name; self.used = used; self.resetsAt = resetsAt; self.model = model
+        self.group = group; self.covers = covers
+    }
+
+    /// Whether this window limits `model`: every window without a model group does.
+    public func covers(model: String) -> Bool {
+        guard let covers, model != "*" else { return true }
+        let id = model.lowercased()
+        let values = covers.value ?? []
+        return covers.kind == "models" ? values.contains { $0.lowercased() == id } : values.contains { id.hasPrefix($0) }
     }
 }
 
@@ -160,8 +174,24 @@ public struct QuotaLimit: Codable, Sendable, Equatable, Identifiable {
         case usedPercent = "used_percent", resetsAt = "resets_at"
     }
 
-    public struct Scope: Codable, Sendable, Equatable {
+    /// `value` is a model or feature name, or a list of models or model-name prefixes.
+    public struct Scope: Codable, Sendable, Equatable, Hashable {
         public var kind: String?
+        public var value: [String]?
+
+        enum CodingKeys: String, CodingKey { case kind, value }
+
+        public init(kind: String?, value: [String]? = nil) { self.kind = kind; self.value = value }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            kind = try c.decodeIfPresent(String.self, forKey: .kind)
+            if let list = try? c.decodeIfPresent([String].self, forKey: .value) {
+                value = list
+            } else {
+                value = (try? c.decodeIfPresent(String.self, forKey: .value)).flatMap { $0.map { [$0] } }
+            }
+        }
     }
 }
 
@@ -186,6 +216,51 @@ public struct Quota: Codable, Sendable, Equatable {
                 noFiveHourLimit: Bool? = nil, subscriptionPlan: String? = nil, renewal: Renewal? = nil) {
         self.windows = windows; self.limits = limits; self.plan = plan; self.planName = planName
         self.noFiveHourLimit = noFiveHourLimit; self.subscriptionPlan = subscriptionPlan; self.renewal = renewal
+        groupWindows()
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        windows = try c.decodeIfPresent([QuotaWindow].self, forKey: .windows)
+        limits = try c.decodeIfPresent([QuotaLimit].self, forKey: .limits)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
+        plan = try c.decodeIfPresent(String.self, forKey: .plan)
+        planName = try c.decodeIfPresent(String.self, forKey: .planName)
+        noFiveHourLimit = try c.decodeIfPresent(Bool.self, forKey: .noFiveHourLimit)
+        subscriptionPlan = try c.decodeIfPresent(String.self, forKey: .subscriptionPlan)
+        renewal = try c.decodeIfPresent(Renewal.self, forKey: .renewal)
+        groupWindows()
+    }
+
+    /// Antigravity reports a 5-hour and a weekly limit for each group of models ("Gemini
+    /// Models", "Claude and GPT models"), not for the account, as limits named "<group> ·
+    /// <window>". They become windows, as the dashboard draws them (ui/app.js `groupWindows`):
+    /// Gemini's are the account's own, every other group's are limited to the group, shown
+    /// as a child row ("↳ Claude & GPT"). Anything else stays a limit.
+    mutating func groupWindows() {
+        guard (windows ?? []).isEmpty, let all = limits, !all.isEmpty else { return }
+        let names = ["5h": "5h", "weekly": "week", "week": "week", "daily": "day", "day": "day"]
+        var found: [QuotaWindow] = []
+        var rest: [QuotaLimit] = []
+        for l in all {
+            let parts = l.name.components(separatedBy: " · ")
+            guard parts.count == 2, let name = names[parts[1].lowercased()], let used = l.usedPercent,
+                  ["model_families", "models"].contains(l.scope?.kind ?? "") else { rest.append(l); continue }
+            let group = parts[0].replacingOccurrences(of: #"\s+models$"#, with: "", options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: #"\s+and\s+"#, with: " & ", options: [.regularExpression, .caseInsensitive])
+            found.append(QuotaWindow(name: name, used: used, resetsAt: l.resetsAt, group: group, covers: l.scope))
+        }
+        guard !found.isEmpty else { return }
+        var groups: [String] = []
+        for w in found where !groups.contains(w.group ?? "") { groups.append(w.group ?? "") }
+        let main = groups.first { $0.range(of: "gemini", options: .caseInsensitive) != nil } ?? groups[0]
+        let order = { (w: QuotaWindow) in (w.group == main ? 0 : 1, groups.firstIndex(of: w.group ?? "") ?? 0, Quotas.seconds(w) ?? 0) }
+        windows = found.map { w in
+            var w = w
+            if w.group != main { w.model = w.group }
+            return w
+        }.sorted { order($0) < order($1) }
+        limits = rest
     }
 }
 

@@ -339,9 +339,17 @@ struct AccountMeters: View {
             if !account.noShortLimit { row(short: true) }
             row(short: false)
             if scoped {
-                ForEach(account.scopedWindows(), id: \.self) { w in
-                    MeterRow(label: Fmt.capitalized(w.model ?? ""), title: Quotas.scopedTitle(w), reading: QuotaReading(w),
-                             pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout, labelWidth: labelWidth, child: true)
+                let list = account.scopedWindows()
+                ForEach(Array(list.enumerated()), id: \.element) { i, w in
+                    // A model group with several windows (Antigravity's Claude & GPT: 5-hour and
+                    // weekly) gets its name on a line of its own, then a 5H and a WK row.
+                    let several = list.filter { $0.model == w.model }.count > 1
+                    if several && (i == 0 || list[i - 1].model != w.model) {
+                        ChildHeading(name: Fmt.capitalized(w.model ?? ""))
+                    }
+                    MeterRow(label: several ? Quotas.label(w, short: Quotas.isShort(w)) : Fmt.capitalized(w.model ?? ""),
+                             title: Quotas.scopedTitle(w), reading: QuotaReading(w),
+                             pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout, labelWidth: labelWidth, child: !several)
                 }
             }
         }
@@ -353,6 +361,22 @@ struct AccountMeters: View {
                         title: w.map(Quotas.title) ?? (short ? "5-hour" : "Weekly"),
                         reading: QuotaReading(w), pace: Quotas.elapsed(w), window: w, mode: mode, knockout: knockout,
                         labelWidth: labelWidth)
+    }
+}
+
+/// A model group's name above its own 5H and WK rows: "↳ Claude & GPT".
+struct ChildHeading: View {
+    var name: String
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("↳ ").accessibilityHidden(true)
+            Text(name)
+        }
+        .font(Typeface.small)
+        .foregroundStyle(Palette.fg3)
+        .lineLimit(1)
+        .padding(.top, 2)
     }
 }
 
