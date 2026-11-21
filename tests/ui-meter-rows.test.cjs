@@ -189,6 +189,26 @@ test('the overview draws a model’s week, such as Claude’s Fable, as a child 
   assert.doesNotMatch(run(`scopedRowsHTML(${JSON.stringify(odd)}, true)`), /<b>/);
 });
 
+test('antigravity families with quotas of their own keep their models, and disabled buckets stay limits', () => {
+  const run = load();
+  const limit = (group, window, used, value, extra = {}) => ({ id: `antigravity:g:${group}${window}`, name: `${group} · ${window}`,
+    scope: { kind: 'model_families', value }, used_percent: used, resets_at: RESET, ...extra });
+  const a = { id: 'g', provider: 'antigravity', kind: 'oauth', cooldowns: {}, cooldown_kinds: {}, quota: { windows: [], limits: [
+    limit('Gemini Carbon', 'weekly', 100, ['gemini-*carbon*']),
+    limit('Gemini Models', 'weekly', 40, ['gemini-', '!gemini-*carbon*']),
+    limit('Claude and GPT models', '5h', 0, ['claude-', 'gpt-'], { enabled: false }),
+  ] } };
+  const g = JSON.parse(run(`JSON.stringify(groupWindows(${JSON.stringify(a)}))`));
+  assert.deepEqual(g.quota.windows.map((w) => [w.name, w.model || null, w.group]), [['week', null, 'Gemini'], ['week', 'Gemini Carbon', 'Gemini Carbon']]);
+  assert.deepEqual(g.quota.limits.map((l) => l.name), ['Claude and GPT models · 5h']);
+  const covers = (i, model) => run(`covers(${JSON.stringify(g.quota.windows[i])}, ${JSON.stringify(model)})`);
+  assert.equal(covers(0, 'gemini-4-neon-high'), true);
+  assert.equal(covers(0, 'gemini-4-carbon-high'), false, 'Carbon has its own quota');
+  assert.equal(covers(1, 'gemini-4-carbon-high'), true);
+  assert.equal(covers(1, 'gemini-4-neon-high'), false);
+  assert.equal(covers(1, 'claude-opus-5-5-high'), false);
+});
+
 test('antigravity model groups become meters: Gemini as the account, others as a child row', () => {
   const run = load();
   run('S.quotaDisplay = "used"');

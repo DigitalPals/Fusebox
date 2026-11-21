@@ -582,7 +582,14 @@ fn views(app: &App) -> Vec<AccountView> {
                 disabled: st.disabled,
                 pauses: st.pauses(now),
                 last_error: st.last_error(now).map(String::from),
-                windows: st.quota.windows.clone(),
+                // Antigravity reports limits per model group; its pools and pace warnings
+                // take them as the dashboard draws them (see `Quota::group_windows`).
+                windows: match a.provider {
+                    Provider::Antigravity if st.quota.windows.is_empty() => {
+                        st.quota.group_windows().into_iter().map(|(w, _)| w).collect()
+                    }
+                    _ => st.quota.windows.clone(),
+                },
                 history: st.attribution.history.clone(),
                 failures,
                 clients: st

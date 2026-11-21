@@ -940,6 +940,8 @@ const SIGNIN_ERR = /invalid_grant|refresh token|sign in again|re-?authenticat|un
 // What state an account is in, and the word the dashboard uses for it.
 function acctState(a) {
   if (a.disabled) return { cls: 'disabled', dot: 'idle', word: 'Disabled' };
+  // Google holds an Antigravity account out until its owner appeals or verifies.
+  if (a.google_hold) return { cls: 'error', dot: 'err', word: a.google_hold.kind === 'suspended' ? 'Suspended' : 'Verify', hold: a.google_hold };
   const cds = Object.entries(a.cooldowns || {}).sort((x, y) => Date.parse(y[1]) - Date.parse(x[1]));
   if (cds.length) {
     const [model, until] = cds[0];
@@ -1044,12 +1046,12 @@ function groupWindows(a) {
     const m = /^(.+) · (\S+)$/.exec(l.name || '');
     const name = m && GROUP_WINDOWS[m[2].toLowerCase()];
     const kind = l.scope?.kind;
-    if (!name || !['model_families', 'models'].includes(kind) || typeof l.used_percent !== 'number') rest.push(l);
+    if (!name || !['model_families', 'models'].includes(kind) || typeof l.used_percent !== 'number' || l.enabled === false) rest.push(l);
     else found.push({ group: groupLabel(m[1]), name, used: l.used_percent, resets_at: l.resets_at, covers: l.scope });
   }
   if (!found.length) return a;
   const groups = [...new Set(found.map((w) => w.group))];
-  const main = groups.find((g) => /gemini/i.test(g)) || groups[0];
+  const main = groups.find((g) => /^gemini$/i.test(g)) || groups.find((g) => /gemini/i.test(g)) || groups[0];
   const windows = found.map((w) => (w.group === main ? w : { ...w, model: w.group }))
     .sort((x, y) => (x.group === main ? 0 : 1) - (y.group === main ? 0 : 1) || groups.indexOf(x.group) - groups.indexOf(y.group)
       || (windowSeconds(x) || 0) - (windowSeconds(y) || 0));
@@ -1059,11 +1061,15 @@ function groupWindows(a) {
 const withGroupWindows = (list) => list.map(groupWindows);
 
 // Whether a window's model group limits `model` (every window without a group does).
+// Families are name prefixes or `*` patterns, less `!` ones (as `in_families` in src/quota.rs).
 function covers(w, model) {
   const scope = w?.covers;
   if (!scope || model === '*') return true;
   const id = String(model).toLowerCase();
-  return scope.kind === 'models' ? scope.value.some((m) => m.toLowerCase() === id) : scope.value.some((p) => id.startsWith(p));
+  if (scope.kind === 'models') return scope.value.some((m) => m.toLowerCase() === id);
+  const literal = (x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  const match = (p) => (p.includes('*') ? new RegExp('^' + p.split('*').map(literal).join('.*') + '$', 'i').test(id) : id.startsWith(p.toLowerCase()));
+  return scope.value.some((p) => !p.startsWith('!') && match(p)) && !scope.value.some((p) => p.startsWith('!') && match(p.slice(1)));
 }
 
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
@@ -1329,7 +1335,9 @@ function alertsList() {
       out.push({ lvl: 'warn', id: a.id, title: 'Rate limited',
         detail: `${st.model === '*' ? 'Every model' : st.model} is paused until ${when(st.until)}, in ${left(st.until)}.`, act: 'View' });
     }
-    if (st.cls === 'error') {
+    if (st.hold) {
+      out.push({ lvl: 'err', id: a.id, title: holdTitle(st.hold), detail: holdDetail(st.hold), act: 'View' });
+    } else if (st.cls === 'error') {
       out.push(st.signin
         ? { lvl: 'err', id: a.id, title: 'Sign-in expired', detail: 'Token refresh failed. Sign in again to put it back in rotation.', act: 'Sign in', signin: true }
         : { lvl: 'err', id: a.id, title: 'Account error', detail: String(hideEmails(a.last_error)).slice(0, 160), act: 'View' });
@@ -1342,6 +1350,14 @@ function alertsList() {
   }
   return out.sort((x, y) => (x.lvl === y.lvl ? 0 : x.lvl === 'err' ? -1 : 1));
 }
+
+// Google's hold on an Antigravity account: suspended, or waiting to be verified.
+const holdTitle = (h) => (h.kind === 'suspended' ? 'Suspended by Google' : 'Google asks to verify this account');
+const holdDetail = (h) => (h.kind === 'suspended'
+  ? 'Google suspended it for a terms-of-service violation. Requests skip it until you appeal and clear its error.'
+  : 'Requests skip it until you verify it with Google. Fusebox checks every 10 minutes.');
+// Google's appeal or verify page, shown only as an https link to a Google domain.
+const holdLink = (h) => (h?.link && /^https:\/\/([a-z0-9-]+\.)*google\.com(\/|$)/i.test(h.link) ? h.link : null);
 
 function runAlert(i) {
   const al = faultsList()[Number(i)];
@@ -2066,10 +2082,17 @@ function accountErrorHTML(a) {
   return `<section class="account-error block" aria-label="Last error" aria-busy="${!!local?.busy}">
     ${a.last_error ? `<div class="account-error-head"><span class="label">Last error</span><button class="btn sm" type="button" data-act="clear-error" data-id="${esc(a.id)}" aria-label="Clear error for ${esc(acctLabel(a))}" ${local?.busy || !a.last_error_id ? 'disabled' : ''}>${local?.busy ? 'Clearing…' : 'Clear error'}</button></div>
     <div class="errbox">${esc(hideEmails(a.last_error))}</div>
-    <p class="meta">Clears the saved message. A new failure will appear again.</p>
+    ${a.google_hold ? holdHTML(a.google_hold) : '<p class="meta">Clears the saved message. A new failure will appear again.</p>'}
     ${billing ? '<a class="link" href="https://claude.ai/settings/usage" target="_blank" rel="noopener noreferrer">Manage extra usage</a>' : ''}` : ''}
     ${local?.error ? `<p class="msg err" role="alert">${esc(local.error)}</p>` : ''}
   </section>`;
+}
+
+function holdHTML(h) {
+  const link = holdLink(h);
+  const what = h.kind === 'suspended' ? 'Appeal with Google' : 'Verify with Google';
+  return `<p class="meta">${esc(holdDetail(h))} Clearing the error puts it back in rotation.</p>
+    ${link ? `<a class="link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">${esc(h.link_text || what)}</a>` : ''}`;
 }
 
 function drawerHTML(a) {
@@ -3409,6 +3432,10 @@ function routeStepText(step, a) {
   if (step.state === 'disabled' || a.disabled) return { txt: 'Disabled · skipped', short: 'Disabled', cls: 'off' };
   // Held out until a sign-in, even after its error was cleared or the account reset.
   if (step.state === 'signin') return { txt: 'Sign-in expired · skipped', short: 'Sign-in expired', cls: 'err' };
+  if (step.state === 'held' || st.hold) {
+    const short = st.hold?.kind === 'verify' ? 'Verify with Google' : 'Suspended by Google';
+    return { txt: `${short} · skipped`, short, cls: 'err' };
+  }
   if (step.state === 'cooling' || st.cls === 'cooling') {
     if (st.resetUnknown) return { txt: 'Quota used up · Reset time unknown', short: 'Quota used up', cls: 'warn' };
     const until = step.until || st.until;

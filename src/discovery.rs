@@ -1,5 +1,7 @@
 //! Model lists from the providers themselves, so a new Claude or Codex model is
-//! listed (and its thinking rules known) without waiting for a Fusebox release.
+//! listed (and its thinking rules known) without waiting for a Fusebox release. An
+//! Antigravity account's list is the whole of what it serves (see
+//! `Account::lists_own_models`): Google offers each account its own models.
 //!
 //! Checks are rare. Each signed-in account asks once every 6 hours, spread by up
 //! to an hour so accounts don't ask together; failures retry after 15 minutes,
@@ -137,11 +139,17 @@ pub fn valid_model_id(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
 }
 
-/// Signed-in Claude and Codex accounts on the official endpoints have a model list.
+/// Signed-in Claude and Codex accounts on the official endpoints, and Antigravity sign-ins,
+/// have a model list. An account Google holds out (suspended, or to be verified) is not asked.
 fn eligible(acct: &Account) -> bool {
-    matches!(acct.provider, Provider::Claude | Provider::Codex)
-        && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none())
+    let official = match &*acct.cred.read() {
+        Credential::OAuth(o) => o.base_url.is_none() || acct.provider == Provider::Antigravity,
+        Credential::ApiKey { .. } => false,
+    };
+    matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity)
+        && official
         && !acct.state.lock().disabled
+        && acct.google_hold().is_none()
 }
 
 fn next_after_success(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -199,7 +207,7 @@ impl Store {
     pub fn apply(&self, pool: &crate::accounts::Pool) {
         let stored = self.stored.lock();
         for acct in pool.all() {
-            if !matches!(acct.provider, Provider::Claude | Provider::Codex) {
+            if !matches!(acct.provider, Provider::Claude | Provider::Codex | Provider::Antigravity) {
                 continue;
             }
             let ids: Vec<String> = stored
@@ -218,7 +226,9 @@ impl Store {
     fn publish_caps(&self) {
         let stored = self.stored.lock();
         let mut caps = CAPS.write();
-        for m in stored.accounts.values().flat_map(|e| &e.models) {
+        // Antigravity lists names only; its entries must not stand in for a vendor's rules.
+        let vendor = |e: &&Entry| e.provider.as_deref() != Some(Provider::Antigravity.as_str());
+        for m in stored.accounts.values().filter(vendor).flat_map(|e| &e.models) {
             caps.insert(m.id.to_ascii_lowercase(), m.clone());
         }
     }
@@ -314,6 +324,29 @@ impl Store {
         outcome
     }
 
+    /// Antigravity refused `model` on this account as not found: it leaves the account's
+    /// list until the next check brings it back. True when it was listed.
+    pub fn forget(&self, acct: &Account, model: &str) -> bool {
+        let same = |m: &str| m.eq_ignore_ascii_case(model);
+        let mut stored = self.stored.lock();
+        // Never down to nothing: an empty list would bring back the built-in one.
+        let listed = stored.accounts.get_mut(&acct.id).is_some_and(|e| {
+            let before = e.models.len();
+            if before > 1 {
+                e.models.retain(|m| !same(&m.id));
+            }
+            e.models.len() != before
+        });
+        if listed {
+            self.save(&stored);
+        }
+        let mut discovered = acct.discovered.write();
+        if discovered.iter().any(|m| same(m)) && discovered.len() > 1 {
+            discovered.retain(|m| !same(m));
+        }
+        listed
+    }
+
     /// Keeps the client releases `clients` has seen for the next start.
     pub fn save_clients(&self) {
         let mut stored = self.stored.lock();
@@ -352,6 +385,10 @@ async fn refresh(app: &App, acct: &Arc<Account>, manual: bool) -> Option<bool> {
         match acct.provider {
             Provider::Claude => fetch_claude(&http, &token).await.map(|m| (m, None)),
             Provider::Codex => fetch_codex(&http, &token, account_id.as_deref()).await,
+            Provider::Antigravity => {
+                crate::antigravity::ensure_ready(app, acct).await?;
+                crate::antigravity::fetch_models(acct, &http).await.map(|m| (m, None))
+            }
             _ => bail!("no model list"),
         }
     }

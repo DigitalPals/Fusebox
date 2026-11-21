@@ -27,6 +27,10 @@ pub use saved::{FILE as SAVED_FILE, Saved};
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_SUBSCRIPTION: &str = "https://chatgpt.com/backend-api/subscriptions";
+/// The Google AI credit balance an Antigravity plan comes with (`loadCodeAssist`), shown
+/// with the account's limits. Credits never route: they pay for nothing Fusebox sends.
+const GOOGLE_CREDITS: &str = "antigravity:credits";
+
 /// Accounts without quota data count as half used.
 pub const UNKNOWN: f64 = 50.0;
 const POLL_EVERY: i64 = 5 * 60;
@@ -95,7 +99,7 @@ impl Limit {
             Scope::Account => true,
             Scope::Model(m) => m.eq_ignore_ascii_case(model),
             Scope::Models(models) => models.iter().any(|m| m.eq_ignore_ascii_case(model)),
-            Scope::ModelFamilies(prefixes) => prefixes.iter().any(|p| model.to_ascii_lowercase().starts_with(p)),
+            Scope::ModelFamilies(patterns) => in_families(patterns, model),
             _ => false,
         }
     }
@@ -103,6 +107,28 @@ impl Limit {
     fn live(&self) -> bool {
         self.enabled != Some(false) && self.unlimited != Some(true) && self.resets_at.is_none_or(|r| r > Utc::now())
     }
+}
+
+/// "Claude and GPT models" -> "Claude & GPT", as `groupLabel` in ui/app.js.
+fn group_label(name: &str) -> String {
+    let name = name.trim();
+    let name = match name.len().checked_sub(" models".len()) {
+        Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(" models") => &name[..at],
+        _ => name,
+    };
+    name.split_whitespace().map(|w| if w.eq_ignore_ascii_case("and") { "&" } else { w }).collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `model` is in a family list: a name prefix (`gemini-`), or a `*` pattern
+/// (`gemini-*carbon*`), less any entry starting with `!` (`!gemini-*carbon*`), which
+/// takes out a family that has a limit of its own.
+pub fn in_families(patterns: &[String], model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let matches = |p: &str| {
+        if p.contains('*') { crate::accounts::wildcard(p, &model) } else { model.starts_with(&p.to_ascii_lowercase()) }
+    };
+    patterns.iter().any(|p| !p.starts_with('!') && matches(p))
+        && !patterns.iter().filter_map(|p| p.strip_prefix('!')).any(matches)
 }
 
 #[derive(Default)]
@@ -253,13 +279,66 @@ pub fn same_plan(a: &str, b: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PlanDetails {
-    /// The plan identifier and the provider's display name (Claude's, Antigravity's).
+    /// The plan identifier and the provider's display name (Claude's).
     Named(Option<String>, Option<String>),
+    /// Antigravity's plan, Google AI credits and verification request.
+    Google(crate::antigravity::Standing),
     /// The subscription SKU and the renewal.
     Codex(Option<String>, Option<Renewal>),
 }
 
 impl Quota {
+    /// Antigravity's group limits as windows, the way the dashboard draws them: the Gemini
+    /// group's as the account's own ("5h", "week"), every other group's under its name
+    /// ("week" of "Claude & GPT"), each with the model families it limits. For combined
+    /// limits, pace warnings and attribution only: routing keeps reading the limits, as a
+    /// window without a model would limit every model.
+    pub fn group_windows(&self) -> Vec<(Window, Vec<String>)> {
+        let mut found: Vec<(String, Window, Vec<String>)> = Vec::new();
+        for l in self.limits.iter().filter(|l| l.id.starts_with("antigravity:") && l.enabled != Some(false)) {
+            let Some((group, window)) = l.name.rsplit_once(" · ") else { continue };
+            let name = match window.to_ascii_lowercase().as_str() {
+                "5h" => "5h",
+                "weekly" | "week" => "week",
+                "daily" | "day" => "day",
+                _ => continue,
+            };
+            let covers = match &l.scope {
+                Scope::ModelFamilies(patterns) => patterns.clone(),
+                Scope::Models(models) => models.clone(),
+                _ => continue,
+            };
+            let Some(used) = l.used_percent else { continue };
+            let label = group_label(group);
+            let window = Window { name: name.into(), used, resets_at: l.resets_at, model: None };
+            found.push((label, window, covers));
+        }
+        let groups: Vec<String> = found.iter().fold(Vec::new(), |mut seen, (g, ..)| {
+            if !seen.contains(g) {
+                seen.push(g.clone());
+            }
+            seen
+        });
+        // Plain Gemini first; a family with a quota of its own (Gemini Carbon) is a group too.
+        let main = groups
+            .iter()
+            .find(|g| g.eq_ignore_ascii_case("gemini"))
+            .or_else(|| groups.iter().find(|g| g.to_ascii_lowercase().contains("gemini")))
+            .or(groups.first())
+            .cloned();
+        let order = |g: &String| (Some(g) != main.as_ref(), groups.iter().position(|x| x == g));
+        found.sort_by_key(|(g, w, _)| (order(g), crate::attribution::length(&w.name)));
+        found
+            .into_iter()
+            .map(|(g, mut w, covers)| {
+                if Some(&g) != main.as_ref() {
+                    w.model = Some(g);
+                }
+                (w, covers)
+            })
+            .collect()
+    }
+
     pub fn limit_remaining(&self, model: &str) -> Option<f64> {
         self.limit_pressure(model).map(|u| 100.0 - u.clamp(0.0, 100.0)).reduce(f64::min)
     }
@@ -416,10 +495,14 @@ impl Quota {
     /// The plan is read every 6 hours; after a failed read, again after 5, 10, 20 ...
     /// minutes, up to the same 6 hours.
     fn plan_due(&self, now: DateTime<Utc>) -> bool {
+        self.plan_due_within(now, PLAN_EVERY)
+    }
+
+    fn plan_due_within(&self, now: DateTime<Utc>, every: i64) -> bool {
         let Some(at) = self.plan_checked_at else { return true };
         let wait = match self.plan_failures {
-            0 => PLAN_EVERY,
-            n => (300i64 << (n - 1).min(7)).min(PLAN_EVERY),
+            0 => every,
+            n => (300i64 << (n - 1).min(7)).min(every),
         };
         (now - at).num_seconds() >= wait
     }
@@ -432,6 +515,26 @@ impl Quota {
                     PlanDetails::Named(plan, name) => {
                         self.plan = plan;
                         self.plan_name = name;
+                    }
+                    PlanDetails::Google(standing) => {
+                        self.plan = standing.plan;
+                        self.plan_name = standing.plan_name;
+                        self.limits.retain(|l| l.id != GOOGLE_CREDITS);
+                        if let Some((balance, _)) = standing.credits {
+                            self.limits.push(Limit {
+                                id: GOOGLE_CREDITS.into(),
+                                name: "Google AI credits".into(),
+                                scope: Scope::Credits,
+                                used_percent: None,
+                                used: None,
+                                limit: None,
+                                remaining: Some(balance),
+                                unit: None,
+                                unlimited: None,
+                                enabled: None,
+                                resets_at: None,
+                            });
+                        }
                     }
                     // Usage remains the source of the broad Codex plan. The web
                     // subscription API can use different names for the same tier.
@@ -753,11 +856,14 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
             }
             .await
         }
-        Provider::Antigravity => {
-            crate::antigravity::load_tier(&http, acct, &token).await.map(|(plan, name)| PlanDetails::Named(plan, name))
-        }
+        Provider::Antigravity => crate::antigravity::load_standing(&http, acct, &token).await.map(PlanDetails::Google),
         _ => unreachable!(),
     };
+    if let Ok(PlanDetails::Google(standing)) = &details
+        && acct.quota_epoch() == epoch
+    {
+        verified(acct, standing);
+    }
     let mut st = acct.state.lock();
     // A different account signed in to this file while the plan was read.
     if st.quota_epoch == epoch {
@@ -771,6 +877,15 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
         }
     }
     details.map(drop)
+}
+
+/// Google no longer asks for verification: the account serves again. Only a refused
+/// request starts a hold; this answer alone never takes a serving account out.
+fn verified(acct: &Account, standing: &crate::antigravity::Standing) {
+    if standing.verify.is_none() && acct.google_hold().is_some_and(|h| h.kind == crate::antigravity::HoldKind::Verify) {
+        tracing::info!(account = %acct.label, "Google no longer asks to verify this Antigravity account");
+        acct.release_google_hold();
+    }
 }
 
 /// Provider usage is authoritative, but absent windows cannot prove a cooldown has ended.
@@ -829,6 +944,11 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
     for limit in limits {
         st.quota.limits.retain(|old| old.id != limit.id || old.scope != limit.scope);
         st.quota.limits.push(limit);
+    }
+    // Antigravity's group limits are windows to attribution: each counts its own models.
+    let groups = st.quota.group_windows();
+    if !groups.is_empty() {
+        st.attribution.reading_scoped(&groups, Utc::now());
     }
     st.quota.updated_at = Some(Utc::now());
     st.quota.refreshed_at = st.quota.updated_at;
@@ -903,14 +1023,16 @@ async fn poll_batch<F: std::future::Future<Output = bool>>(checks: impl IntoIter
 
 async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
     let mut changed = false;
-    // Learn an Antigravity account's real model list without waiting for a request.
+    // Find an Antigravity account's project without waiting for a request; its model
+    // list and quota need it.
     if acct.provider == Provider::Antigravity
         && acct.is_oauth()
-        && acct.discovered.read().is_empty()
+        && crate::antigravity::project(&acct).is_none()
         && !acct.state.lock().disabled
+        && !acct.held_out()
     {
         match crate::oauth::ensure_ready(app, &acct).await {
-            Ok(()) => changed |= !acct.discovered.read().is_empty(),
+            Ok(()) => changed = true,
             Err(e) => tracing::debug!(account = %acct.label, "antigravity setup failed: {e:#}"),
         }
     }
@@ -941,8 +1063,17 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         && matches!(&*acct.cred.read(), Credential::OAuth(o) if o.base_url.is_none()
         && (acct.provider != Provider::Codex || o.account_id.as_ref().is_some_and(|id| !id.is_empty())))
         && {
+            // A verification hold is checked again every ten minutes; a suspension is not.
+            let hold = acct.google_hold().map(|h| h.kind);
             let st = acct.state.lock();
-            !st.disabled && st.quota.plan_due(Utc::now())
+            !st.disabled
+                && match hold {
+                    None => st.quota.plan_due(Utc::now()),
+                    Some(crate::antigravity::HoldKind::Verify) => {
+                        st.quota.plan_due_within(Utc::now(), crate::antigravity::VERIFY_RECHECK.num_seconds())
+                    }
+                    Some(crate::antigravity::HoldKind::Suspended) => false,
+                }
         };
     if plan_due && crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_ok() {
         let before = {
@@ -955,9 +1086,11 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
         let st = acct.state.lock();
         changed |= (st.quota.plan.clone(), st.quota.subscription_plan.clone()) != before;
     }
+    // Google holds the account out: its usage can wait until it serves again.
+    let held = acct.google_hold().is_some();
     let stale = {
         let st = acct.state.lock();
-        !st.disabled && st.quota.needs_refresh(Utc::now(), st.quota_cooldowns.values().copied())
+        !held && !st.disabled && st.quota.needs_refresh(Utc::now(), st.quota_cooldowns.values().copied())
     };
     if !stale || crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
         return changed;
@@ -1009,6 +1142,124 @@ fn refused(result: &anyhow::Result<()>) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn antigravity_groups_are_windows_for_pools_and_attribution_but_never_for_routing() {
+        let mut st = crate::accounts::AccountState::default();
+        let use_of = |model: &str, client: &str| crate::attribution::Use {
+            at: Utc::now(),
+            cost: Some(1.0),
+            tokens: 1.0,
+            client: client.into(),
+            session: None,
+            model: Some(model.into()),
+        };
+        let reading = |gemini_week: f64, claude_week: f64| {
+            json!({"groups": [
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": claude_week, "resetTime": "2099-01-03T00:00:00Z"},
+                    {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 1}]},
+                {"displayName": "Gemini Models", "buckets": [
+                    {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": gemini_week, "resetTime": "2099-01-02T00:00:00Z"},
+                    {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.5}]}]})
+        };
+        usage(&mut st, Provider::Antigravity, &reading(0.9, 0.9));
+        assert!(st.quota.windows.is_empty(), "routing keeps reading the limits");
+        let shown: Vec<(String, Option<String>, f64)> =
+            st.quota.group_windows().into_iter().map(|(w, _)| (w.name, w.model, w.used.round())).collect();
+        let row = |name: &str, model: Option<&str>, used: f64| (name.to_string(), model.map(String::from), used);
+        assert_eq!(
+            shown,
+            [
+                row("5h", None, 50.0),
+                row("week", None, 10.0),
+                row("5h", Some("Claude & GPT"), 0.0),
+                row("week", Some("Claude & GPT"), 10.0)
+            ]
+        );
+        let keys: Vec<String> = st.attribution.current.iter().map(crate::attribution::window_key).collect();
+        assert_eq!(keys, ["5h", "week", "5h · Claude & GPT", "week · Claude & GPT"]);
+        // Each group's rise goes to the clients of its own models.
+        st.attribution.record(use_of("gemini-4-neon-high", "gemini-client"));
+        st.attribution.record(use_of("claude-opus-5-5-high", "claude-client"));
+        usage(&mut st, Provider::Antigravity, &reading(0.0, 0.8));
+        let share = |key: &str| {
+            let s = st.attribution.current.iter().find(|s| crate::attribution::window_key(s) == key).unwrap();
+            s.clients.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(share("week"), ["gemini-client"]);
+        assert_eq!(share("week · Claude & GPT"), ["claude-client"]);
+        // A spent Gemini group leaves Claude routable.
+        assert!(st.quota.exhausted("gemini-4-neon-high"));
+        assert!(!st.quota.exhausted("claude-opus-5-5-high"));
+        // The weekly Gemini window is the account's own history for the forecast.
+        assert!(st.attribution.history.iter().any(|h| h.name == "week" && h.model.is_none()));
+    }
+
+    #[test]
+    fn the_google_ai_credit_balance_is_shown_with_the_limits_and_kept_across_readings() {
+        let mut q = Quota::default();
+        let standing = |credits| crate::antigravity::Standing {
+            plan: Some("g1-ultra-tier".into()),
+            plan_name: Some("Google AI Ultra".into()),
+            credits,
+            verify: None,
+        };
+        q.plan_read(Utc::now(), Some(PlanDetails::Google(standing(Some((1250.0, Some(50.0)))))));
+        assert_eq!(q.plan_name.as_deref(), Some("Google AI Ultra"));
+        let credits = q.limits.iter().find(|l| l.id == GOOGLE_CREDITS).unwrap();
+        assert_eq!((credits.scope.clone(), credits.remaining), (Scope::Credits, Some(1250.0)));
+        assert!(!q.exhausted("claude-opus-5-5-high"), "credits route nothing");
+        let mut st = crate::accounts::AccountState::default();
+        st.quota = q;
+        usage(
+            &mut st,
+            Provider::Antigravity,
+            &json!({"groups": [{"displayName": "Gemini Models", "buckets": [{"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 1}]}]}),
+        );
+        assert!(st.quota.limits.iter().any(|l| l.id == GOOGLE_CREDITS), "a usage reading keeps the balance");
+        st.quota.plan_read(Utc::now(), Some(PlanDetails::Google(standing(None))));
+        assert!(!st.quota.limits.iter().any(|l| l.id == GOOGLE_CREDITS));
+    }
+
+    #[test]
+    fn google_lifts_a_verification_hold_once_it_no_longer_asks() {
+        let dir = std::env::temp_dir().join(format!("fusebox-verify-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = json!({"type": "antigravity", "access_token": "t", "email": "a@example.invalid", "project_id": "p"});
+        std::fs::write(dir.join("antigravity-a.json"), file.to_string()).unwrap();
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&crate::config::Config { auth_dir: dir.to_string_lossy().into(), ..Default::default() });
+        let _ = std::fs::remove_dir_all(&dir);
+        let acct = pool.all()[0].clone();
+        let hold = |kind| crate::antigravity::Hold {
+            kind,
+            message: "Verify your account to continue.".into(),
+            link: None,
+            link_text: None,
+            since: Utc::now(),
+            error_id: None,
+        };
+        let still = crate::antigravity::Standing {
+            verify: Some(hold(crate::antigravity::HoldKind::Verify)),
+            ..Default::default()
+        };
+        let cleared = crate::antigravity::Standing::default();
+        acct.hold_for_google(hold(crate::antigravity::HoldKind::Verify));
+        verified(&acct, &still);
+        assert!(acct.held_out());
+        verified(&acct, &cleared);
+        assert!(!acct.held_out());
+        assert!(acct.state.lock().last_error(Utc::now()).is_none(), "its error goes with it");
+        // A suspension waits for its owner, whatever loadCodeAssist says.
+        acct.hold_for_google(hold(crate::antigravity::HoldKind::Suspended));
+        verified(&acct, &cleared);
+        assert!(acct.held_out());
+        // Nor does a request-free check ever start a hold.
+        acct.release_google_hold();
+        verified(&acct, &still);
+        assert!(!acct.held_out());
+    }
     use super::*;
     use serde_json::json;
 

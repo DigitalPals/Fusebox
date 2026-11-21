@@ -3,7 +3,9 @@
 //! reading can confirm the first, and that endpoint may be rate limited for a while
 //! after a restart; meanwhile the dashboard would show a 5-hour meter the account
 //! doesn't have. Meta has no usage endpoint at all: its windows arrive with its
-//! responses, so an idle Meta account would show no meters after every restart.
+//! responses, so an idle Meta account would show no meters after every restart. Google's
+//! hold on an Antigravity account (suspended, or to be verified) is kept too: a restart
+//! must not send requests to a suspended account again.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +27,15 @@ pub struct Saved {
     /// Account ID → the Meta account's last reported windows.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     meta: BTreeMap<String, Reading>,
+    /// Account ID → Google's hold on it, for the credential it was given.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    google_holds: BTreeMap<String, GoogleHold>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct GoogleHold {
+    identity: String,
+    hold: crate::antigravity::Hold,
 }
 
 /// A Meta account's windows as last reported, for the credential they belong to.
@@ -52,6 +63,10 @@ impl Saved {
             if st.quota.no_five_hour_limit {
                 saved.no_five_hour_limit.insert(a.id.clone(), st.credential_identity.clone());
             }
+            if let Some(hold) = &st.google_hold {
+                let hold = GoogleHold { identity: st.credential_identity.clone(), hold: hold.clone() };
+                saved.google_holds.insert(a.id.clone(), hold);
+            }
             if a.provider == Provider::Meta && !st.quota.windows.is_empty() {
                 let reading = Reading {
                     identity: st.credential_identity.clone(),
@@ -70,6 +85,13 @@ impl Saved {
     /// replaces it.
     pub fn restore(&self, pool: &Pool) {
         for a in pool.all() {
+            if let Some(h) = self.google_holds.get(&a.id)
+                && a.provider == Provider::Antigravity
+                && h.identity == a.state.lock().credential_identity
+                && a.google_hold().is_none()
+            {
+                a.hold_for_google(h.hold.clone());
+            }
             let mut st = a.state.lock();
             if let Some(identity) = self.no_five_hour_limit.get(&a.id)
                 && *identity == st.credential_identity

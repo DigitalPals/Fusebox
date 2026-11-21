@@ -656,9 +656,13 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
     for a in &accounts {
         *providers.entry(a.provider.as_str()).or_default() += 1;
         let held = a.held_out();
+        // Google's hold isn't a sign-in to redo: the account sits out like a paused one.
+        let google = a.google_hold().is_some();
         let st = a.state.lock();
         if st.disabled {
             disabled += 1;
+        } else if google {
+            cooling += 1;
         } else if held {
             // Out of rotation until a sign-in.
             signin += 1;
