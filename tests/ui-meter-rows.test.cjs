@@ -27,11 +27,12 @@ function load() {
     piece('function quotaOf(w'), piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('const metered ='),
     piece('function windowOf(a, short) {'), piece('const NO_SHORT_LIMIT ='), piece('const noShortLimit ='), piece('const noShortNote ='),
-    piece('const windowLabel ='), piece('const windowTitle ='), piece('function windowSeconds(w) {'),
+    piece('const windowLabel ='), piece('const windowTitle ='), piece('const plainTitle ='), piece('function windowSeconds(w) {'),
+    piece('const GROUP_WINDOWS ='), piece('const groupLabel ='), piece('function groupWindows(a) {'), piece('function covers(w, model) {'),
     piece('function windowElapsed(w'), piece('function windowSpent(a, w) {'),
     piece('const segsHTML ='), piece('function meterHTML(q'), piece('function pctHTML(w) {'), piece('function meterRowHTML(a, short) {'), piece('const meterRowsHTML ='),
     piece('const metersHTML ='), piece('const cap = (s)'), piece('const scopedWindows ='), piece('const scopedTitle ='),
-    piece('function childRowHTML(model, cells, cls, wide) {'), piece('function scopedRowsHTML(a, wide) {'),
+    piece('function childRowHTML('), piece('function scopedRowsHTML(a, wide) {'),
     piece('function windowBlockHTML(a, w, title, size) {'), piece('function miniMetersHTML(a) {'), piece('function windowHTML(a, short, size) {'),
     piece('function noShortBlockHTML(size) {'), piece('function quotaWindowsHTML(a'),
   ].join('\n'), context);
@@ -186,4 +187,48 @@ test('the overview draws a model’s week, such as Claude’s Fable, as a child 
   // Names reach the page escaped.
   const odd = { ...ultra, quota: { ...ultra.quota, windows: [{ ...ultra.quota.windows[1], name: 'week <b>', model: '<b>' }] } };
   assert.doesNotMatch(run(`scopedRowsHTML(${JSON.stringify(odd)}, true)`), /<b>/);
+});
+
+test('antigravity model groups become meters: Gemini as the account, others as a child row', () => {
+  const run = load();
+  run('S.quotaDisplay = "used"');
+  // As production stored an Antigravity account on 2026-11-21 (usage invented).
+  const limit = (group, window, used, resets_at, value) => ({ id: `antigravity:${group}:${window}`, name: `${group} · ${window}`,
+    scope: { kind: 'model_families', value }, used_percent: used, resets_at });
+  const a = { id: 'g', provider: 'antigravity', kind: 'oauth', cooldowns: {}, cooldown_kinds: {}, quota: { windows: [], limits: [
+    limit('Gemini Models', 'weekly', 21, '2026-10-28T16:00:00Z', ['gemini-']),
+    limit('Gemini Models', '5h', 38, RESET, ['gemini-']),
+    limit('Claude and GPT models', 'weekly', 81, '2026-10-28T16:00:00Z', ['claude-', 'gpt-']),
+    limit('Claude and GPT models', '5h', 64, '2026-10-23T17:40:00Z', ['claude-', 'gpt-']),
+    { id: 'x', name: 'Agent credits', scope: { kind: 'feature', value: 'x' }, used_percent: 5 },
+  ] } };
+  const g = JSON.parse(run(`JSON.stringify(groupWindows(${JSON.stringify(a)}))`));
+  assert.deepEqual(g.quota.windows.map((w) => [w.name, w.model || null, w.group, w.used]), [
+    ['5h', null, 'Gemini', 38], ['week', null, 'Gemini', 21], ['5h', 'Claude & GPT', 'Claude & GPT', 64], ['week', 'Claude & GPT', 'Claude & GPT', 81],
+  ]);
+  assert.deepEqual(g.quota.limits.map((l) => l.id), ['x'], 'anything else stays a limit');
+  const json = JSON.stringify(g);
+  // Gemini's windows are the account's 5H and WK rows, titled by their group.
+  const rows = run(`meterRowsHTML(${json})`);
+  assert.match(rows, /<span class="capsm">5H<\/span>.*aria-valuenow="38".*title="Gemini 5-hour window resets/s);
+  assert.match(rows, /<span class="capsm">WK<\/span>.*aria-valuenow="21"/s);
+  // The other group: one child line per window, named once, each labelled by its window.
+  const wide = run(`scopedRowsHTML(${json}, true)`);
+  assert.equal((wide.match(/class="subline"/g) || []).length, 2);
+  assert.equal((wide.match(/Claude &amp; GPT<\/span>/g) || []).length, 1);
+  assert.match(wide, /<span class="capsm">5H<\/span>.*aria-valuenow="64".*<span class="capsm">WK<\/span>.*aria-valuenow="81"/s);
+  assert.match(wide, /Claude &amp; GPT weekly window quota used/);
+  const phone = run(`scopedRowsHTML(${json}, false)`);
+  assert.match(phone, /^<div class="mrow sub-row sub-head"><span class="sub-label">.*Claude &amp; GPT<\/span><\/div><div class="mrow sub-row"><span class="capsm">5H<\/span>/s);
+  // The account page names every window.
+  const blocks = run(`quotaWindowsHTML(${json})`);
+  for (const title of ['Gemini 5-hour', 'Gemini weekly', 'Claude &amp; GPT 5-hour', 'Claude &amp; GPT weekly']) assert.ok(blocks.includes(`${title} window`), title);
+  // A Claude cooldown until the group's renewal marks only that group's window as spent.
+  const cooled = { ...g, cooldowns: { 'claude-opus-5-5-high': '2026-10-28T16:00:00Z' }, cooldown_kinds: { 'claude-opus-5-5-high': 'quota' } };
+  const c = JSON.stringify(cooled);
+  assert.equal(run(`windowSpent(${c}, ${c}.quota.windows[3])`), true);
+  assert.equal(run(`windowSpent(${c}, ${c}.quota.windows[1])`), false);
+  // Accounts with ordinary windows are left alone.
+  const claude = account();
+  assert.equal(run(`groupWindows(${JSON.stringify(claude)}).quota.windows.length`), 2);
 });

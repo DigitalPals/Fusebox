@@ -211,6 +211,42 @@ fn default_tier(v: &Value) -> String {
         .to_string()
 }
 
+/// The account's Google AI plan from a `loadCodeAssist` answer: the identifier and
+/// Google's name for it. A subscription is `paidTier` (`g1-ultra-tier`, "Google AI
+/// Ultra"); without one `currentTier` names only the free tier, and its name is the
+/// product's ("Antigravity"), so it gives no plan name.
+pub fn tier(v: &Value) -> (Option<String>, Option<String>) {
+    let text = |t: &Value| t.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let paid = &v["paidTier"];
+    match text(&paid["id"]) {
+        Some(id) => (Some(id), text(&paid["name"])),
+        None => (text(&v["currentTier"]["id"]), None),
+    }
+}
+
+/// Reads the account's plan (see `tier`) without using model tokens.
+pub async fn load_tier(
+    http: &reqwest::Client,
+    acct: &Account,
+    token: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let resp = http
+        .post(format!("{}/v1internal:loadCodeAssist", base(acct, BASE_PROD)))
+        .bearer_auth(token)
+        .header("user-agent", user_agent())
+        .header("accept", "*/*")
+        .json(&json!({ "metadata": { "ideType": "ANTIGRAVITY" } }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?
+        .error_for_status()?;
+    let v: Value = resp.json().await?;
+    match tier(&v) {
+        (None, _) => bail!("loadCodeAssist names no tier"),
+        found => Ok(found),
+    }
+}
+
 /// Finds (or provisions) the Cloud project behind an Antigravity account.
 pub async fn fetch_project(app: &App, http: &reqwest::Client, base: &str, token: &str) -> Result<String> {
     let resp = http
@@ -477,6 +513,23 @@ mod tests {
             CHANGELISTS.iter().any(|(release, _)| *release == FALLBACK_VERSION),
             "the fallback needs its changelist"
         );
+    }
+
+    #[test]
+    fn the_plan_is_the_paid_tier_or_else_the_free_one_without_a_name() {
+        let pair = |id: Option<&str>, name: Option<&str>| (id.map(String::from), name.map(String::from));
+        // As Google answered for an AI Ultra account on 2026-11-21.
+        let ultra = json!({
+            "currentTier": {"id": "free-tier", "name": "Antigravity"},
+            "allowedTiers": [{"id": "free-tier", "name": "Antigravity", "isDefault": true}],
+            "paidTier": {"id": "g1-ultra-tier", "name": "Google AI Ultra"}
+        });
+        assert_eq!(tier(&ultra), pair(Some("g1-ultra-tier"), Some("Google AI Ultra")));
+        assert_eq!(
+            tier(&json!({"currentTier": {"id": "free-tier", "name": "Antigravity"}})),
+            pair(Some("free-tier"), None)
+        );
+        assert_eq!(tier(&json!({"paidTier": {"id": " "}, "currentTier": {}})), pair(None, None));
     }
 
     #[test]

@@ -558,6 +558,7 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
 .subline > .sub-label { padding-left: 32px; }
 .sub-row > .sub-label { width: 52px; flex: none; font-size: 12px; }
 .stack-list.scoped .meters .capsm { width: 52px; }
+.sub-head > .sub-label { width: auto; }
 [data-level="warn"] > .sub-label, [data-level="warn"] .rst { color: var(--warn); }
 [data-level="err"] > .sub-label, [data-level="err"] .rst { color: var(--err); }
 .metaline { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--fg-3); }
