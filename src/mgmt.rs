@@ -226,6 +226,8 @@ async fn save_sign_in(
         }
         *a.cred.write() = Credential::OAuth(saved);
         let mut st = a.state.lock();
+        // Signing in again is the owner's answer to Google's hold too.
+        st.end_google_hold();
         if st
             .last_error(chrono::Utc::now())
             .is_some_and(|e| crate::push::signin_error(e) || crate::oauth::refresh_failure(e))
@@ -1099,6 +1101,13 @@ async fn test_account(
         Json(json!({ "ok": false, "status": status, "model": model, "ms": 0, "reply": "", "error": error, "sent": false }))
             .into_response()
     };
+    if let Some(hold) = acct.google_hold() {
+        let why = match hold.kind {
+            crate::antigravity::HoldKind::Suspended => "Google suspended this account",
+            crate::antigravity::HoldKind::Verify => "Google asks to verify this account",
+        };
+        return not_now(403, format!("{why}; nothing was sent"));
+    }
     if acct.held_out() {
         return not_now(401, "this account is waiting for a sign-in; nothing was sent".into());
     }

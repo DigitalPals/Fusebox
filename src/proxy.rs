@@ -2576,7 +2576,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 404 if provider == Provider::Antigravity => {
                     app.models.forget(&acct, &upstream_model);
                     acct.not_offered(
-                        &model,
+                        &upstream_model,
                         Utc::now() + Duration::hours(6),
                         &format!("{status}: {msg} (Google does not offer {upstream_model} to this account)"),
                     );

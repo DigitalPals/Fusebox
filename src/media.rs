@@ -470,7 +470,7 @@ where
             last = Some(fail(401, format!("token refresh failed: {e}")));
             continue;
         }
-        match op(acct.clone(), upstream_model).await {
+        match op(acct.clone(), upstream_model.clone()).await {
             Ok(v) => {
                 tracker.observe_wire(&v);
                 acct.record_ok();
@@ -498,8 +498,25 @@ where
                     last = Some((status, body));
                     continue;
                 }
+                let google_hold = (status == 403 && acct.provider == Provider::Antigravity)
+                    .then(|| crate::antigravity::hold_of(&body.to_string()))
+                    .flatten();
                 match status {
                     429 => acct.rate_limit(&model, Utc::now() + Duration::seconds(60), &format!("429: {msg}")),
+                    // As for chat: Google holds the account out, or doesn't offer it this model.
+                    403 if google_hold.is_some() => {
+                        acct.hold_for_google(google_hold.expect("checked"));
+                        app.broadcast("accounts", Value::Null);
+                    }
+                    404 if acct.provider == Provider::Antigravity => {
+                        app.models.forget(&acct, &upstream_model);
+                        acct.not_offered(
+                            &upstream_model,
+                            Utc::now() + Duration::hours(6),
+                            &format!("{status}: {msg} (Google does not offer {upstream_model} to this account)"),
+                        );
+                        app.broadcast("accounts", Value::Null);
+                    }
                     401 | 403 => acct.cool(None, Utc::now() + Duration::minutes(10), &format!("{status}: {msg}")),
                     // A gateway timeout can leave a generation running upstream.
                     // Answer it without starting the same work on another account.

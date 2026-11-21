@@ -171,6 +171,8 @@ pub struct AccountView {
     pub renewal: Option<crate::quota::NextRenewal>,
     /// A sustained run of refused usage reads: (HTTP status, since when).
     pub usage_refused: Option<(u16, DateTime<Utc>)>,
+    /// Google holds this Antigravity account out (suspended, or to be verified).
+    pub google_hold: Option<crate::antigravity::HoldKind>,
 }
 
 impl AccountView {
@@ -183,9 +185,10 @@ impl AccountView {
             disabled: self.disabled,
             windows: &self.windows,
             history: &self.history,
-            forecast_available: !self.signin_error(),
+            forecast_available: !self.signin_error() && self.google_hold.is_none(),
             no_five_hour: self.no_five_hour,
-            paused: matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit"))),
+            paused: matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit")))
+                || self.google_hold.is_some(),
         }
     }
 
@@ -198,9 +201,12 @@ impl AccountView {
         !self.api_key && self.last_error.as_deref().is_some_and(signin_error)
     }
 
-    /// Can't take any request now: paused whole for a limit, or its sign-in expired.
+    /// Can't take any request now: paused whole for a limit, its sign-in expired, or
+    /// Google holds it out.
     fn unavailable(&self) -> bool {
-        matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit"))) || self.signin_error()
+        matches!(self.pauses.get("*"), Some((_, "quota" | "rate_limit" | "credit")))
+            || self.signin_error()
+            || self.google_hold.is_some()
     }
 
     fn path(&self) -> String {
@@ -271,6 +277,28 @@ pub fn faults(accounts: &[AccountView], now: DateTime<Utc>) -> Vec<Fault> {
             provider_name: a.provider_name.clone(),
             ..Default::default()
         };
+        // Google's hold comes first, as in the dashboard: until its owner acts, nothing
+        // else about the account matters.
+        if let Some(kind) = a.google_hold {
+            let (summary, detail) = match kind {
+                crate::antigravity::HoldKind::Suspended => (
+                    "Suspended by Google",
+                    "Google suspended it for a terms-of-service violation. Requests skip it until you appeal and clear its error.",
+                ),
+                crate::antigravity::HoldKind::Verify => (
+                    "Google asks to verify this account",
+                    "Requests skip it until you verify it with Google. Fusebox checks every 10 minutes.",
+                ),
+            };
+            out.push(Fault {
+                kind: "hold",
+                level: "err",
+                summary: summary.into(),
+                detail: Some(detail.into()),
+                ..fault("hold", Event::AccountErrors, format!("{}: {}", a.label, summary.to_lowercase()), detail.into())
+            });
+            continue;
+        }
         // The latest pause decides the state, as in the dashboard.
         let pause = a.pauses.iter().max_by_key(|(_, (until, _))| *until);
         let error = pause.is_none() && a.last_error.is_some();
@@ -784,6 +812,38 @@ mod tests {
         let back = recovered(&[a, b], "claude").unwrap();
         assert_eq!(back.title, "Claude is back");
         assert_eq!(back.body, "b@example.com can take requests again.");
+    }
+
+    #[test]
+    fn an_account_google_holds_out_is_named_so_and_counts_as_out() {
+        let now = Utc::now();
+        let google = |id: &str| AccountView {
+            provider_name: "Antigravity".into(),
+            group_name: "Antigravity".into(),
+            ..acct(id, "antigravity")
+        };
+        let mut held = google("a");
+        held.google_hold = Some(crate::antigravity::HoldKind::Suspended);
+        held.last_error = Some("Google suspended this account: This service has been disabled.".into());
+        // Even with a model cooling, the hold is what it says.
+        held.pauses.insert("gemini-3-flash".into(), (now + Duration::minutes(5), "rate_limit"));
+        let f = faults(&[held.clone()], now);
+        let hold = f.iter().find(|f| f.key == "hold:a").unwrap();
+        assert_eq!((hold.kind, hold.level, hold.summary.as_str()), ("hold", "err", "Suspended by Google"));
+        assert_eq!(hold.event, Event::AccountErrors);
+        assert!(!keys(&f).contains(&"error:a") && !keys(&f).contains(&"rate_limit:a"));
+        assert_eq!(
+            f.iter().find(|f| f.key == "provider:antigravity").unwrap().title,
+            "No Antigravity account can take requests"
+        );
+        // The combined limit doesn't count on it.
+        let m = held.member();
+        assert!(m.paused && !m.forecast_available);
+        let mut verify = google("b");
+        verify.google_hold = Some(crate::antigravity::HoldKind::Verify);
+        let f = faults(&[verify, google("c")], now);
+        assert_eq!(f.iter().find(|f| f.key == "hold:b").unwrap().summary, "Google asks to verify this account");
+        assert!(!keys(&f).contains(&"provider:antigravity"), "another account still serves");
     }
 
     /// A Claude subscription with these windows.

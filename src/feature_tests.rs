@@ -2445,21 +2445,32 @@ async fn a_model_google_does_not_offer_an_antigravity_account_goes_to_another() 
     let not_found =
         json!({"error": {"code": 404, "message": "Requested entity was not found.", "status": "NOT_FOUND"}});
     let s = antigravity_pair((StatusCode::NOT_FOUND, not_found)).await;
-    let (status, body) = s.chat("gemini-4-neon-high").await;
+    // Named with its provider or not, the request goes on to an account that has it.
+    let (status, body) = s.chat("antigravity/gemini-4-neon-high").await;
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("from b"), "{body}");
     assert_eq!(s.calls(), ["ag-a", "ag-b"]);
-    // Until its list is read again, `a` is not asked for it; its other models still go to it.
+    // Until its list is read again, `a` is not asked for it, even by a client that names
+    // Antigravity; its other models still go to it, and nothing is paused or rate limited.
     let a = s.account("a");
-    assert!(a.cooling_until("gemini-4-neon-high").is_some());
+    assert!(a.resolve("gemini-4-neon-high").is_none());
+    assert!(a.resolve_with("gemini-4-neon-high", true).is_none());
+    assert!(a.cooling_until("gemini-4-neon-high").is_none());
+    assert!(a.state.lock().pauses(chrono::Utc::now()).is_empty());
     assert!(a.state.lock().last_error(chrono::Utc::now()).is_some_and(|e| e.contains("does not offer")));
     assert_eq!(s.chat("gemini-4-neon-high").await.0, 200);
     assert_eq!(s.calls(), ["ag-a", "ag-b", "ag-b"]);
-    assert!(a.cooling_until("gemini-3-flash").is_none());
+    assert!(a.resolve("gemini-3-flash").is_some());
+    // A fresh model list answers it.
+    a.offers_again();
+    assert!(a.resolve("gemini-4-neon-high").is_some());
 
     // With a list of its own, the model leaves the list instead.
     *a.discovered.write() = vec!["gemini-3-flash".into(), "gemini-4-carbon-high".into()];
-    assert_eq!(s.chat("gemini-4-carbon-high").await.0, 200);
+    // (Only `a` lists it, so the request goes there whatever account the session had.)
+    *s.account("b").discovered.write() = vec!["gemini-3-flash".into()];
+    assert_eq!(s.chat("gemini-4-carbon-high").await.0, 404);
+    assert_eq!(s.calls().last().map(String::as_str), Some("ag-a"));
     assert_eq!(*a.discovered.read(), ["gemini-3-flash"]);
     assert!(a.resolve("gemini-4-carbon-high").is_none());
     assert!(a.cooling_until("gemini-4-carbon-high").is_none(), "no pause needed: it no longer routes here");
@@ -2492,10 +2503,25 @@ async fn an_antigravity_account_google_suspends_sits_out_until_its_owner_clears_
     saved.restore(&restarted);
     let again = restarted.all().into_iter().find(|x| x.id == a.id).unwrap();
     assert_eq!(again.google_hold().map(|h| h.kind), Some(crate::antigravity::HoldKind::Suspended));
+    // Nothing else hides it or ends it: not another error, not clearing cooldowns (or a
+    // refresh that worked), not a request that was already running when it came.
+    a.state.lock().set_error("refresh failed: 503 Service Unavailable");
+    a.state.lock().set_temporary_error("404: gone", chrono::Utc::now() + chrono::Duration::minutes(1));
+    assert_eq!(a.state.lock().last_error_id(chrono::Utc::now()), hold.error_id.as_deref());
+    a.state.lock().clear_error();
+    a.record_ok();
+    let shown = a.google_hold().expect("still held");
+    assert!(a.held_out());
+    let id = a.state.lock().last_error_id(chrono::Utc::now()).map(String::from);
+    assert!(id.is_some() && id != hold.error_id, "shown again, with an ID that dismisses it");
+    assert_eq!(shown.error_id, id);
+    assert!(a.snapshot()["last_error"].as_str().unwrap().starts_with("Google suspended this account"));
+    // An older error's ID ends nothing.
+    assert!(!a.state.lock().clear_error_if(&hold.error_id.unwrap()));
     // Clearing its error is the owner's word that it may serve again.
-    let id = hold.error_id.unwrap();
-    assert!(a.state.lock().clear_error_if(&id));
+    assert!(a.state.lock().clear_error_if(&id.unwrap()));
     assert!(a.google_hold().is_none() && !a.held_out());
+    assert!(a.state.lock().last_error(chrono::Utc::now()).is_none());
 }
 
 #[tokio::test]

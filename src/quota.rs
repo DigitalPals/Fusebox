@@ -121,11 +121,18 @@ fn group_label(name: &str) -> String {
 
 /// Whether `model` is in a family list: a name prefix (`gemini-`), or a `*` pattern
 /// (`gemini-*carbon*`), less any entry starting with `!` (`!gemini-*carbon*`), which
-/// takes out a family that has a limit of its own.
+/// takes out a family that has a limit of its own. An entry starting with `=` is one
+/// model exactly (how [`Quota::group_windows`] passes on a [`Scope::Models`] list).
 pub fn in_families(patterns: &[String], model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     let matches = |p: &str| {
-        if p.contains('*') { crate::accounts::wildcard(p, &model) } else { model.starts_with(&p.to_ascii_lowercase()) }
+        if let Some(exact) = p.strip_prefix('=') {
+            model.eq_ignore_ascii_case(exact)
+        } else if p.contains('*') {
+            crate::accounts::wildcard(&p.to_ascii_lowercase(), &model)
+        } else {
+            model.starts_with(&p.to_ascii_lowercase())
+        }
     };
     patterns.iter().any(|p| !p.starts_with('!') && matches(p))
         && !patterns.iter().filter_map(|p| p.strip_prefix('!')).any(matches)
@@ -144,6 +151,10 @@ struct Reading {
     subscription_active: Option<bool>,
     /// The provider confirms the account has no 5-hour limit.
     no_five_hour: bool,
+    /// The reading lists every limit whose ID starts with this: earlier ones it no longer
+    /// carries are gone, and one whose scope changed replaces its old self. (Antigravity's
+    /// summary, whose buckets come and go; its credit balance comes from another read.)
+    replaces_limits: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -305,7 +316,7 @@ impl Quota {
             };
             let covers = match &l.scope {
                 Scope::ModelFamilies(patterns) => patterns.clone(),
-                Scope::Models(models) => models.clone(),
+                Scope::Models(models) => models.iter().map(|m| format!("={m}")).collect(),
                 _ => continue,
             };
             let Some(used) = l.used_percent else { continue };
@@ -895,7 +906,8 @@ pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window
 }
 
 fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
-    let Reading { windows, limits, plan, plan_name, tier, subscription_active, no_five_hour } = reading;
+    let Reading { windows, limits, plan, plan_name, tier, subscription_active, no_five_hour, replaces_limits } =
+        reading;
     if tier.is_some() {
         st.quota.meta_tier = tier;
     }
@@ -939,6 +951,9 @@ fn apply_reading(st: &mut crate::accounts::AccountState, reading: Reading) {
         st.quota.windows.retain(|w| !retired(w));
         st.quota.no_five_hour_limit = true;
         st.attribution.retire("5h");
+    }
+    if let Some(prefix) = replaces_limits {
+        st.quota.limits.retain(|old| !old.id.starts_with(prefix) || old.id == GOOGLE_CREDITS);
     }
     // An omitted scope cannot erase a spending cap learned on an earlier read.
     for limit in limits {
@@ -1076,15 +1091,16 @@ async fn poll_account(app: &Arc<App>, acct: Arc<Account>) -> bool {
                 }
         };
     if plan_due && crate::oauth::ensure_fresh(app, &acct, chrono::Duration::minutes(5), false).await.is_ok() {
-        let before = {
-            let st = acct.state.lock();
-            (st.quota.plan.clone(), st.quota.subscription_plan.clone())
+        // What the dashboard shows from it: the plan, Google's hold and the credit balance.
+        let shown = |st: &crate::accounts::AccountState| {
+            let credits = st.quota.limits.iter().find(|l| l.id == GOOGLE_CREDITS).cloned();
+            (st.quota.plan.clone(), st.quota.subscription_plan.clone(), st.google_hold.is_some(), credits)
         };
+        let before = shown(&acct.state.lock());
         if let Err(e) = poll_plan(app, &acct).await {
             tracing::debug!(account = %acct.label, "plan check failed: {e:#}");
         }
-        let st = acct.state.lock();
-        changed |= (st.quota.plan.clone(), st.quota.subscription_plan.clone()) != before;
+        changed |= shown(&acct.state.lock()) != before;
     }
     // Google holds the account out: its usage can wait until it serves again.
     let held = acct.google_hold().is_some();
@@ -1246,6 +1262,10 @@ mod tests {
         };
         let cleared = crate::antigravity::Standing::default();
         acct.hold_for_google(hold(crate::antigravity::HoldKind::Verify));
+        // The first check waits its ten minutes from the refusal, not from the last plan read.
+        let every = crate::antigravity::VERIFY_RECHECK.num_seconds();
+        assert!(!acct.state.lock().quota.plan_due_within(Utc::now(), every));
+        assert!(acct.state.lock().quota.plan_due_within(Utc::now() + chrono::Duration::seconds(every), every));
         verified(&acct, &still);
         assert!(acct.held_out());
         verified(&acct, &cleared);

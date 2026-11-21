@@ -405,17 +405,28 @@ fn antigravity_family(bucket_id: &str) -> Option<(&'static str, Vec<String>)> {
 /// buckets}]}`), or the buckets alone (`{buckets}`). Each bucket is a window
 /// (`remainingFraction`, `resetTime`, `window`) of the models its `bucketId` names. A
 /// disabled bucket is kept, marked so, and limits nothing.
+/// A bucket's `remainingFraction`: a number, or a percentage in text.
+fn antigravity_remaining(bucket: &Value) -> Option<f64> {
+    let raw = field(bucket, "remaining_fraction", "remainingFraction");
+    number(raw).or_else(|| {
+        raw.as_str()?.trim().strip_suffix('%')?.trim().parse::<f64>().ok().filter(|n| n.is_finite()).map(|n| n / 100.0)
+    })
+}
+
 pub(super) fn antigravity(v: &Value) -> Reading {
-    let mut out = Reading::default();
+    let mut out = Reading { replaces_limits: Some("antigravity:"), ..Default::default() };
     let top = serde_json::json!([{ "buckets": v["buckets"] }]);
     let groups = match v["groups"].as_array() {
         Some(groups) if !groups.is_empty() => groups,
         _ => top.as_array().expect("an array"),
     };
-    // Argon and Carbon buckets take their models out of the general Gemini one.
-    let own: Vec<&str> = groups
+    // Argon and Carbon buckets that limit their models take them out of the general
+    // Gemini one; a disabled or unread one leaves them to it.
+    let mut own: Vec<&str> = groups
         .iter()
+        .filter(|g| field(g, "model_ids", "modelIds").as_array().is_none_or(|ids| ids.is_empty()))
         .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
+        .filter(|b| b["disabled"].as_bool() != Some(true) && antigravity_remaining(b).is_some())
         .filter_map(|b| text(field(b, "bucket_id", "bucketId")))
         .filter_map(|id| match antigravity_family(&id)?.0 {
             "Gemini Argon" => Some("argon"),
@@ -423,6 +434,8 @@ pub(super) fn antigravity(v: &Value) -> Reading {
             _ => None,
         })
         .collect();
+    own.sort_unstable();
+    own.dedup();
     for (i, group) in groups.iter().enumerate() {
         let named = text(field(group, "display_name", "displayName"));
         let models: Vec<String> =
@@ -441,17 +454,7 @@ pub(super) fn antigravity(v: &Value) -> Reading {
         };
         let group_id = text(&group["id"]).or_else(|| named.clone()).unwrap_or_else(|| format!("group-{}", i + 1));
         for (j, bucket) in group["buckets"].as_array().into_iter().flatten().enumerate() {
-            let raw = field(bucket, "remaining_fraction", "remainingFraction");
-            let remaining = number(raw).or_else(|| {
-                raw.as_str()?
-                    .trim()
-                    .strip_suffix('%')?
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|n| n.is_finite())
-                    .map(|n| n / 100.0)
-            });
+            let remaining = antigravity_remaining(bucket);
             let disabled = bucket["disabled"].as_bool() == Some(true);
             if remaining.is_none() && !disabled {
                 continue;
@@ -667,6 +670,56 @@ mod tests {
         assert!(!fam(&["gemini-", "!gemini-*carbon*"], "gemini-4-carbon-low"));
         assert!(fam(&["gemini-", "!gemini-*carbon*"], "gemini-3-flash"));
         assert!(!fam(&["!gemini-*carbon*"], "claude-opus-5-5"), "exclusions alone cover nothing");
+        assert!(fam(&["=gemini-3-flash"], "Gemini-3-Flash"));
+        assert!(!fam(&["=gemini-3-flash"], "gemini-3-flash-lite"), "`=` is one model exactly");
+    }
+
+    #[test]
+    fn antigravity_summaries_replace_their_limits_and_disabled_families_stay_covered() {
+        let mut st = crate::accounts::AccountState::default();
+        let read = |st: &mut crate::accounts::AccountState, buckets: Value| {
+            usage(st, Provider::Antigravity, &json!({"groups":[{"displayName":"Gemini Models","buckets":buckets}]}));
+        };
+        read(&mut st, json!([{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.1}]));
+        st.quota
+            .limits
+            .push(crate::quota::Limit { id: crate::quota::GOOGLE_CREDITS.into(), ..st.quota.limits[0].clone() });
+        assert!(st.quota.pressure("gemini-4-carbon-high").is_some_and(|p| p > 89.0));
+        // A Carbon bucket arrives: the general one changes scope and replaces itself.
+        read(
+            &mut st,
+            json!([
+                {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.9},
+                {"bucketId":"gemini-carbon-5h","window":"5h","remainingFraction":1},
+                {"bucketId":"gemini-carbon-weekly","window":"weekly","remainingFraction":1}]),
+        );
+        let ids: Vec<&str> = st.quota.limits.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "antigravity:credits",
+                "antigravity:Gemini Models:gemini-weekly",
+                "antigravity:Gemini Models:gemini-carbon-5h",
+                "antigravity:Gemini Models:gemini-carbon-weekly"
+            ],
+            "one each, and the credit balance from its own read stays"
+        );
+        let general = &st.quota.limits[1];
+        assert_eq!(
+            general.scope,
+            crate::quota::Scope::ModelFamilies(vec!["gemini-".into(), "!gemini-*carbon*".into()]),
+            "named once"
+        );
+        // A disabled Carbon bucket limits nothing, so the general one keeps Carbon.
+        read(
+            &mut st,
+            json!([
+                {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0},
+                {"bucketId":"gemini-carbon-weekly","window":"weekly","remainingFraction":1,"disabled":true}]),
+        );
+        assert!(st.quota.exhausted("gemini-4-carbon-high"));
+        assert!(st.quota.exhausted("gemini-4-neon-high"));
+        assert_eq!(st.quota.limits.len(), 3);
     }
 
     #[test]

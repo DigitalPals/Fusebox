@@ -2077,13 +2077,14 @@ function renderDrawer() {
 
 function accountErrorHTML(a) {
   const local = S.errorClears[a.id];
-  if (!a.last_error && !local?.error) return '';
+  if (!a.last_error && !a.google_hold && !local?.error) return '';
   const billing = a.provider === 'claude' && /third-party apps now draw from your extra usage/i.test(a.last_error || '');
   return `<section class="account-error block" aria-label="Last error" aria-busy="${!!local?.busy}">
     ${a.last_error ? `<div class="account-error-head"><span class="label">Last error</span><button class="btn sm" type="button" data-act="clear-error" data-id="${esc(a.id)}" aria-label="Clear error for ${esc(acctLabel(a))}" ${local?.busy || !a.last_error_id ? 'disabled' : ''}>${local?.busy ? 'Clearing…' : 'Clear error'}</button></div>
     <div class="errbox">${esc(hideEmails(a.last_error))}</div>
     ${a.google_hold ? holdHTML(a.google_hold) : '<p class="meta">Clears the saved message. A new failure will appear again.</p>'}
     ${billing ? '<a class="link" href="https://claude.ai/settings/usage" target="_blank" rel="noopener noreferrer">Manage extra usage</a>' : ''}` : ''}
+    ${!a.last_error && a.google_hold ? holdHTML(a.google_hold) : ''}
     ${local?.error ? `<p class="msg err" role="alert">${esc(local.error)}</p>` : ''}
   </section>`;
 }
@@ -3984,7 +3985,7 @@ async function clearAccountError(id) {
     const updated = await api(`/accounts/${encodeURIComponent(id)}/error/clear`, { method: 'POST', body: JSON.stringify({ error_id: errorId }) });
     const current = accountById(id);
     if (current?.last_error_id === errorId) {
-      for (const field of ['last_error', 'last_error_id', 'last_error_until']) current[field] = updated[field];
+      for (const field of ['last_error', 'last_error_id', 'last_error_until', 'google_hold']) current[field] = updated[field];
     }
     delete S.errorClears[id];
     toast('Error cleared');
