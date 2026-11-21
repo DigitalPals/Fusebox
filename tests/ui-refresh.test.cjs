@@ -31,7 +31,7 @@ function dashboard(route = 'models', ignoreAbort = false) {
         if (!ignoreAbort) signal?.addEventListener('abort', () => call.reject(), { once: true });
       });
     },
-    refreshSetups() {}, expireActivity() {}, syncResetModal() {},
+    refreshSetups() {}, expireActivity() {}, syncResetModal() {}, withGroupWindows: (accounts) => accounts,
     refreshViews() { paints.push({ route: S.route, accounts: S.accounts, models: S.models }); },
   };
   vm.createContext(context);

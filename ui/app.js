@@ -327,7 +327,7 @@ async function loadAll() {
   const [overview, accounts, requests, models, routeData] = await Promise.all([
     api('/overview'), api('/accounts'), api(requestsPath(full)), api('/models'), routes ? api('/routes') : null,
   ]);
-  Object.assign(S, { overview, accounts, requests, models, requestsFull: wholeLog(requests, full), locked: null });
+  Object.assign(S, { overview, accounts: withGroupWindows(accounts), requests, models, requestsFull: wholeLog(requests, full), locked: null });
   if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
   overviewAt = Date.now();
 }
@@ -418,7 +418,7 @@ async function runRefresh() {
         ]);
         if (controller.signal.aborted || S.locked || results.some((r) => r.status === 'rejected')) continue;
         const [accounts, overview, models, routeData] = results.map((r) => r.value);
-        if (accounts) S.accounts = accounts;
+        if (accounts) S.accounts = withGroupWindows(accounts);
         if (overview) { S.overview = overview; overviewAt = Date.now(); }
         if (models) { S.models = models; refreshSetups(); }
         if (routeData) Object.assign(S, { routes: routeData, routesStale: false });
@@ -914,7 +914,9 @@ const CODEX_PLAN_NAMES = new Map([['chatgptprolite', 'Pro 100'], ['chatgptpro', 
 // Claude renamed Max 5x and Max 20x on 30 October 2026; their tier identifiers stayed.
 const CLAUDE_PLAN_NAMES = new Map([['max_5x', 'Max'], ['max_20x', 'Ultra']]);
 // A provider-reported display name (Claude's, Meta's tier name) wins over any tier identifier.
+// Google names Antigravity's plans "Google AI Ultra", "Google AI Pro": the list says "Ultra".
 const planName = (a) => (a.provider === 'codex' && CODEX_PLAN_NAMES.get(a.quota?.subscription_plan))
+  || (a.provider === 'antigravity' && a.quota?.plan_name && a.quota.plan_name.replace(/^Google AI\s+/i, ''))
   || a.quota?.plan_name
   || (a.provider === 'claude' && CLAUDE_PLAN_NAMES.get(a.quota?.plan))
   || (a.quota && a.quota.plan ? cap(String(a.quota.plan).replace(/[_-]+/g, ' ')) : '');
@@ -1024,8 +1026,49 @@ const noShortNote = (a) => (noShortLimit(a) ? ' · no 5h limit' : '')
   // Meta's key mint says when the subscription has lapsed; its meters then stop moving.
   + (a.quota?.subscription_inactive ? ' · subscription inactive' : '');
 
+// ---------------------------------------------------------------- model group windows
+
+// Antigravity reports a 5-hour and a weekly limit for each group of models ("Gemini
+// Models", "Claude and GPT models"), not for the account, as limits named "<group> ·
+// <window>". They are drawn as windows: Gemini's as the account's own meters, every other
+// group as a child row ("↳ Claude & GPT"), as Claude's Fable weekly is. `group` names the
+// group and `covers` keeps which models it limits.
+const GROUP_WINDOWS = { '5h': '5h', weekly: 'week', week: 'week', daily: 'day', day: 'day' };
+const groupLabel = (name) => String(name).replace(/\s+models$/i, '').replace(/\s+and\s+/gi, ' & ').trim();
+function groupWindows(a) {
+  const q = a.quota;
+  if (!q || q.windows?.length || !q.limits?.length) return a;
+  const found = [];
+  const rest = [];
+  for (const l of q.limits) {
+    const m = /^(.+) · (\S+)$/.exec(l.name || '');
+    const name = m && GROUP_WINDOWS[m[2].toLowerCase()];
+    const kind = l.scope?.kind;
+    if (!name || !['model_families', 'models'].includes(kind) || typeof l.used_percent !== 'number') rest.push(l);
+    else found.push({ group: groupLabel(m[1]), name, used: l.used_percent, resets_at: l.resets_at, covers: l.scope });
+  }
+  if (!found.length) return a;
+  const groups = [...new Set(found.map((w) => w.group))];
+  const main = groups.find((g) => /gemini/i.test(g)) || groups[0];
+  const windows = found.map((w) => (w.group === main ? w : { ...w, model: w.group }))
+    .sort((x, y) => (x.group === main ? 0 : 1) - (y.group === main ? 0 : 1) || groups.indexOf(x.group) - groups.indexOf(y.group)
+      || (windowSeconds(x) || 0) - (windowSeconds(y) || 0));
+  return { ...a, quota: { ...q, windows, limits: rest } };
+}
+
+const withGroupWindows = (list) => list.map(groupWindows);
+
+// Whether a window's model group limits `model` (every window without a group does).
+function covers(w, model) {
+  const scope = w?.covers;
+  if (!scope || model === '*') return true;
+  const id = String(model).toLowerCase();
+  return scope.kind === 'models' ? scope.value.some((m) => m.toLowerCase() === id) : scope.value.some((p) => id.startsWith(p));
+}
+
 const windowLabel = (w, short) => (w && !['week', 'day'].includes(w.name) ? w.name.toUpperCase() : short ? '5H' : w && w.name === 'day' ? 'DAY' : 'WK');
-const windowTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
+const windowTitle = (w) => (w.group && !w.model ? `${w.group} ${plainTitle(w).toLowerCase()}` : plainTitle(w));
+const plainTitle = (w) => (/^\d+h$/.test(w.name) ? `${w.name.replace('h', '')}-hour` : w.name === 'day' ? 'Daily' : w.name.startsWith('week') ? (w.name === 'week' ? 'Weekly' : `Weekly · ${w.name.slice(5)}`) : w.name);
 
 // A window's length from its name ("5h", "day", "week"), in seconds. A model's window
 // ("week fable") is as long as its first word says, as in src/attribution.rs.
@@ -1052,7 +1095,7 @@ function windowSpent(a, w) {
   if (!w || !w.resets_at) return false;
   const renews = Date.parse(w.resets_at) - 60000;
   const kinds = a.cooldown_kinds || {};
-  return Object.entries(a.cooldowns || {}).some(([model, until]) => kinds[model] === 'quota' && Date.parse(until) >= renews);
+  return Object.entries(a.cooldowns || {}).some(([model, until]) => kinds[model] === 'quota' && covers(w, model) && Date.parse(until) >= renews);
 }
 
 // 20 segments of 5%, lit for the displayed share, coloured by how much is used. A thin
@@ -1091,21 +1134,26 @@ const metersHTML = (a) => `<div class="meters">${!a.quota?.windows?.length && a.
 // account's or pool's rows, "↳ Fable", and takes its state colour as a whole when it runs
 // low. A wide list gives it a line of its own, its label under the name and its meter
 // under WK; on a phone it follows WK in the meters.
-function childRowHTML(model, cells, cls, wide) {
+// A model with several windows (Antigravity's Claude & GPT group: 5-hour and weekly) labels
+// each row by its window, "5H" and "WK", and names the model once, on the first; a phone
+// gives that name a line of its own.
+function childRowHTML(model, cells, cls, wide, windowCap = '', named = true) {
   const label = `<span class="sub-label"><span aria-hidden="true">↳ </span>${esc(cap(model))}</span>`;
   const level = cls ? ` data-level="${cls}"` : '';
-  return wide
-    ? `<div class="subline"${level}><span class="c-idx"></span>${label}<div class="meters"><div class="mrow"><span class="capsm"></span>${cells}</div></div></div>`
-    : `<div class="mrow sub-row"${level}>${label}${cells}</div>`;
+  if (wide) return `<div class="subline"${level}><span class="c-idx"></span>${named ? label : '<span class="sub-label"></span>'}<div class="meters"><div class="mrow"><span class="capsm">${esc(windowCap)}</span>${cells}</div></div></div>`;
+  if (!windowCap) return `<div class="mrow sub-row"${level}>${label}${cells}</div>`;
+  return `${named ? `<div class="mrow sub-row sub-head">${label}</div>` : ''}<div class="mrow sub-row"${level}><span class="capsm">${esc(windowCap)}</span>${cells}</div>`;
 }
 
 // An account's model windows as child rows, each drawn as its own rows are.
 function scopedRowsHTML(a, wide) {
-  return scopedWindows(a).map((w) => {
+  const list = scopedWindows(a);
+  return list.map((w, i) => {
     const title = scopedTitle(w);
     const tip = w.resets_at ? ` title="${esc(title)} window resets ${esc(fullResetTime(w.resets_at))}"` : '';
     const cells = `${segsHTML(w, `${title} window`)}${pctHTML(w)}<span class="rst"${tip}>${w.resets_at ? `↺ ${liveLeft(w.resets_at, true)}` : ''}</span>`;
-    return childRowHTML(w.model, cells, quotaOf(w)?.cls, wide);
+    const several = list.filter((x) => x.model === w.model).length > 1;
+    return childRowHTML(w.model, cells, quotaOf(w)?.cls, wide, several ? windowLabel(w, /^\d+h$/.test(w.name)) : '', i === 0 || list[i - 1].model !== w.model);
   }).join('');
 }
 
@@ -1157,7 +1205,7 @@ function quotaLimitsHTML(a, compact = false) {
 
 // Windows limited to one model ("week opus" on some Claude plans), shown on the account page.
 const scopedWindows = (a) => ((a.quota && a.quota.windows) || []).filter((w) => w.model && quotaOf(w))
-  .sort((x, y) => String(x.name).localeCompare(String(y.name)));
+  .sort((x, y) => String(x.model).localeCompare(String(y.model)) || (windowSeconds(x) || 0) - (windowSeconds(y) || 0));
 const scopedTitle = (w) => `${cap(w.model)} ${windowTitle({ name: w.name.split(' ')[0] }).toLowerCase()}`;
 
 function windowBlockHTML(a, w, title, size) {

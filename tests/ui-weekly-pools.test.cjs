@@ -30,7 +30,7 @@ function load(S = { quotaDisplay: 'used', accounts: [], overview: { pools: [] } 
     piece('function quotaPercent(value) {'), piece('const quotaWord ='), piece('function quotaView(q) {'),
     piece('function meterHTML(q'), piece('const PLAN_WEIGHT_NOTE ='), piece('function planCounts(list) {'),
     piece('function weeklyPools() {'), piece('function poolNextReset(p) {'), piece('function poolStatus(p) {'), piece('const POOL_OUTLOOK_NOTE ='),
-    piece('function poolQuota(p) {'), piece('function poolRateText(o) {'), piece('function childRowHTML(model, cells, cls, wide) {'),
+    piece('function poolQuota(p) {'), piece('function poolRateText(o) {'), piece('function childRowHTML('),
     piece('function poolCellsHTML(p, w, what, resetsAt, resetText) {'), piece('function poolChildRowsHTML(p, wide) {'), piece('function poolMeterHTML(p, wide = false) {'),
     piece('function poolCount(p) {'), piece('function poolBasis(pools) {'), piece('function poolStatusHTML(p) {'), piece('function ovPoolHTML() {'),
   ].join('\n'), context);
