@@ -155,7 +155,7 @@
       "This reset was requested automatically under your routing policy.": "此次重置由路由策略自动申请。",
       "Manual use asks for confirmation. Automatic redemption is off for this account.": "手动使用需要确认。此账号未启用自动使用。",
       "Automatic redemption is off. Use a reset manually before it expires.": "自动使用已关闭。请在到期前手动使用重置。",
-      "Automatic reset at 95% weekly use, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies.": "每周用量达到 95% 时自动重置；或在到期前一小时使用，无论用量多少，包括 0%。仍须满足服务提供方的使用条件。",
+      "Automatic reset once every subscription of this provider is at 95% weekly use, one subscription at a time, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies.": "同一服务提供方的所有订阅每周用量都达到 95% 时自动重置，每次只用于一个订阅；或在到期前一小时使用，无论用量多少，包括 0%。仍须满足服务提供方的使用条件。",
       "Prompt cache": "提示词缓存",
       "Unavailable": "不可用",
       "Fusebox policy": "Fusebox 策略",
