@@ -3,10 +3,13 @@ use super::*;
 use crate::config::{Config, Routing};
 use crate::quota::{Quota, Window};
 use provider::Grant;
+use std::cmp::Reverse;
 
 const WEEKLY_USED: f64 = 95.0;
 const EXPIRY_REDEEM_HOURS: i64 = 1;
 const INVENTORY_MAX_AGE_MINUTES: i64 = 35;
+/// After a reset, other subscriptions wait this long even if the fresh reading has not come in.
+const POOL_SETTLE_MINUTES: i64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -52,9 +55,21 @@ fn within_horizon(cfg: &Config, grant: &Grant, now: DateTime<Utc>) -> bool {
         })
 }
 
-fn clears(grant: &Grant, window: &Window) -> bool {
-    grant.clears.contains(&window.name)
-        || (window.model.is_none() && grant.clears.iter().any(|s| s == "subscription limits"))
+fn covers(clears: &[String], window: &Window) -> bool {
+    clears.contains(&window.name) || (window.model.is_none() && clears.iter().any(|s| s == "subscription limits"))
+}
+
+/// The limit a reset with these `clears` restores is used up: 95% or more, renewing in
+/// more than ten minutes. A weekly reset looks only at weekly windows.
+fn spent(clears: &[String], quota: &Quota, now: DateTime<Utc>) -> bool {
+    let weekly = clears.iter().any(|s| s.starts_with("week") || s == "subscription limits");
+    quota.windows.iter().filter(|w| covers(clears, w) && w.used.is_finite() && w.resets_at.is_none_or(|r| r > now)).any(
+        |w| {
+            (!weekly || w.name.starts_with("week"))
+                && w.used >= WEEKLY_USED
+                && w.resets_at.is_none_or(|r| r > now + chrono::Duration::minutes(10))
+        },
+    )
 }
 
 fn inventory(view: &View, now: DateTime<Utc>) -> Option<&Inventory> {
@@ -84,10 +99,9 @@ pub fn priority_expiry(acct: &Account, model: &str, cfg: &Config) -> Option<Date
         .iter()
         .filter(|g| within_horizon(cfg, g, now))
         .filter(|g| {
-            st.quota
-                .windows
-                .iter()
-                .any(|w| clears(g, w) && w.model.as_ref().is_none_or(|m| model.to_ascii_lowercase().contains(m)))
+            st.quota.windows.iter().any(|w| {
+                covers(&g.clears, w) && w.model.as_ref().is_none_or(|m| model.to_ascii_lowercase().contains(m))
+            })
         })
         .filter_map(|g| g.expires_at)
         .min()
@@ -97,6 +111,8 @@ pub(super) struct Decision {
     pub grant_id: String,
     pub credit_key: String,
     pub expiry_due: bool,
+    pub expires_at: DateTime<Utc>,
+    pub clears: Vec<String>,
 }
 
 fn expiry_due(grant: &Grant, now: DateTime<Utc>) -> bool {
@@ -116,30 +132,88 @@ pub(super) fn decision(cfg: &Config, quota: &Quota, inv: &Inventory, now: DateTi
         .filter(|g| {
             // The expiry deadline takes precedence over consumption and natural
             // renewal: redeem even at zero usage or with no quota observations.
-            if expiry_due(g, now) {
-                return true;
-            }
-            let affected: Vec<_> = quota
-                .windows
-                .iter()
-                .filter(|w| clears(g, w) && w.used.is_finite() && w.resets_at.is_none_or(|r| r > now))
-                .collect();
-            let weekly = g.clears.iter().any(|s| s.starts_with("week") || s == "subscription limits");
-            affected.iter().any(|w| {
-                (!weekly || w.name.starts_with("week"))
-                    && w.used >= WEEKLY_USED
-                    && w.resets_at.is_none_or(|r| r > now + chrono::Duration::minutes(10))
-            })
+            expiry_due(g, now) || spent(&g.clears, quota, now)
         })
         .min_by_key(|g| (g.expires_at, &g.id))
         .map(|g| Decision {
             grant_id: g.id.clone(),
             expiry_due: expiry_due(g, now),
+            expires_at: g.expires_at.unwrap(),
+            clears: g.clears.clone(),
             // Another grant arriving or expiring must not release this marker.
             // Only this grant's identity, expiry and remaining count identify
             // the next credit. Anonymous Codex credits conservatively share it.
             credit_key: format!("{}:{}:{}", g.id, g.expires_at.unwrap().timestamp(), g.remaining),
         })
+}
+
+/// What this account would spend now, from its last inventory and quota reading.
+pub(super) fn candidate(cfg: &Config, st: &crate::accounts::AccountState, now: DateTime<Utc>) -> Option<Decision> {
+    let inv = inventory(st.banked_resets.as_ref()?, now)?;
+    // A grant waiting for a limit may become usable on the authoritative preflight.
+    let mut planned = inv.clone();
+    for g in &mut planned.grants {
+        if g.reason.as_deref() == Some("Account must reach its limit first") {
+            g.usable = true;
+            planned.eligible = true;
+        }
+    }
+    decision(cfg, &st.quota, &planned, now)
+}
+
+/// Who goes first when several subscriptions could spend: the reset that expires first,
+/// then the subscription whose own limit renews last (it gains the most), then a fixed order.
+pub(super) type Rank = (DateTime<Utc>, Reverse<Option<DateTime<Utc>>>, String);
+
+pub(super) fn rank(decision: &Decision, quota: &Quota, account: &str) -> Rank {
+    let renews = quota.windows.iter().filter(|w| covers(&decision.clears, w)).filter_map(|w| w.resets_at).max();
+    (decision.expires_at, Reverse(renews), account.to_string())
+}
+
+/// Smart quota spreads work over every subscription of a provider, so one reset is enough
+/// while another still has room. Before the expiry hour, spend only when every other
+/// enabled subscription is used up too, and only on the one that goes first. A reset that
+/// one just used, or one still in flight, makes the rest wait.
+pub(super) fn pool_waits(
+    app: &App,
+    acct: &Account,
+    mine: &Decision,
+    rank_mine: &Rank,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
+    let cfg = app.cfg();
+    let others: Vec<_> = app
+        .pool
+        .all()
+        .into_iter()
+        .filter(|o| o.id != acct.id && o.provider == acct.provider && !o.held_out())
+        // A second file for the same subscription is not another subscription.
+        .filter_map(|o| account_id(&o).ok().filter(|id| *id != rank_mine.2).map(|id| (o, id)))
+        .filter(|(o, _)| !o.state.lock().disabled)
+        .collect();
+    for (other, _) in &others {
+        let st = other.state.lock();
+        let Some(o) = st.banked_resets.as_ref().and_then(|v| v.operation.as_ref()) else { continue };
+        if matches!(o.status.as_str(), "pending" | "unknown") {
+            return Some("Another subscription is using a reset");
+        }
+        if matches!(o.status.as_str(), "applied" | "already_used" | "reconciled_used")
+            && now - o.created_at < chrono::Duration::minutes(POOL_SETTLE_MINUTES)
+        {
+            return Some("Another subscription just used a reset");
+        }
+    }
+    // No reading counts as room: waiting costs nothing, the expiry hour still spends it.
+    if others.iter().any(|(o, _)| !spent(&mine.clears, &o.state.lock().quota, now)) {
+        return Some("Another subscription still has room");
+    }
+    others
+        .iter()
+        .any(|(o, id)| {
+            let st = o.state.lock();
+            candidate(&cfg, &st, now).is_some_and(|d| rank(&d, &st.quota, id) < *rank_mine)
+        })
+        .then_some("Another subscription goes first")
 }
 
 pub(super) fn check_journal(journal: &ledger::Journal, decision: &Decision, now: DateTime<Utc>) -> Result<()> {
@@ -166,25 +240,17 @@ pub(super) fn check_journal(journal: &ledger::Journal, decision: &Decision, now:
 /// Called by the bounded quota poller, never from a user's inference request.
 pub async fn automatic_check(app: &Arc<App>, acct: &Arc<Account>) -> bool {
     let cfg = app.cfg();
-    if !enabled(&cfg) || account_id(acct).is_err() {
+    if !enabled(&cfg) {
         return false;
     }
-    {
+    let Ok(own_id) = account_id(acct) else { return false };
+    let (decision, rank_mine) = {
         let st = acct.state.lock();
         if st.disabled || st.quota_refreshing {
             return false;
         }
         let Some(view) = st.banked_resets.as_ref() else { return false };
-        let Some(inv) = inventory(view, Utc::now()) else { return false };
-        // A grant waiting for a limit may become usable on the authoritative preflight.
-        let mut planned = inv.clone();
-        for g in &mut planned.grants {
-            if g.reason.as_deref() == Some("Account must reach its limit first") {
-                g.usable = true;
-                planned.eligible = true;
-            }
-        }
-        let Some(decision) = decision(&cfg, &st.quota, &planned, Utc::now()) else { return false };
+        let Some(decision) = candidate(&cfg, &st, Utc::now()) else { return false };
         if let Some(o) = &view.operation {
             let delay = if o.status == "refused" && decision.expiry_due {
                 300
@@ -199,6 +265,15 @@ pub async fn automatic_check(app: &Arc<App>, acct: &Arc<Account>) -> bool {
                 return false;
             }
         }
+        let rank_mine = rank(&decision, &st.quota, &own_id);
+        (decision, rank_mine)
+    };
+    // The expiry hour spends a reset that would otherwise be lost, whatever the others do.
+    if !decision.expiry_due
+        && let Some(reason) = pool_waits(app, acct, &decision, &rank_mine, Utc::now())
+    {
+        tracing::debug!(account = %acct.label, "automatic reset deferred: {reason}");
+        return false;
     }
     let result = async {
         let api = api(app, acct).await?;
@@ -245,7 +320,7 @@ pub fn plan(acct: &Account, cfg: &Config, shared: bool) -> Option<Plan> {
         auto_redeem: auto,
         due: auto && decision(cfg, &st.quota, inv, now).is_some(),
         message: if auto {
-            "Automatic reset at 95% weekly use, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies."
+            "Automatic reset once every subscription of this provider is at 95% weekly use, one subscription at a time, or one hour before expiry regardless of usage, including 0%. Provider eligibility still applies."
         } else {
             "Automatic redemption is off. Use a reset manually before it expires."
         },
