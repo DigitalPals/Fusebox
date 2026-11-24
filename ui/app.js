@@ -1487,9 +1487,12 @@ function routingSentence(short = false) {
   return text ? `${o.session_affinity === false ? 'requests' : 'new sessions'} ${text}` : '';
 }
 
+// The overview leaves disabled accounts out; the Accounts page still lists them.
+const ovAccounts = () => (S.accounts || []).filter((a) => !a.disabled);
+
 // "2 serving · 5 of 6 ready · smart routing…"; serving is left out while disconnected.
 function subsMeta(short = false) {
-  const subs = (S.accounts || []).filter(metered);
+  const subs = ovAccounts().filter(metered);
   const ready = subs.filter((a) => acctState(a).cls === 'ready');
   const serving = S.load ? `${fmt(ready.filter((a) => inFlight(a)).length)} serving · ` : '';
   return `${serving}${fmt(ready.length)} of ${fmt(subs.length)} ready · ${routingSentence(short)}`;
@@ -1508,7 +1511,7 @@ function ovSubsHTML() {
         <button class="btn" type="button" data-act="open-panel" data-panel="key">Add API key</button>
       </div></div></div>`;
   }
-  const subs = list.filter(metered);
+  const subs = ovAccounts().filter(metered);
   if (!subs.length) return '';
   // On a phone a model's child row ("↳ Fable") widens every label, so the meters stay in one column.
   const scoped = subs.some((a) => scopedWindows(a).length) ? ' scoped' : '';
@@ -1693,11 +1696,11 @@ function ovPoolHTML() {
 }
 
 function ovOtherHTML() {
-  const others = (S.accounts || []).filter((a) => !metered(a));
+  const others = ovAccounts().filter((a) => !metered(a));
   if (!others.length) return '';
   const cards = others.map((a) => {
     const st = acctState(a);
-    return `<button class="circuit${a.disabled ? ' off' : ''}" type="button" data-act="open-acc" data-id="${esc(a.id)}">
+    return `<button class="circuit" type="button" data-act="open-acc" data-id="${esc(a.id)}">
       <span class="dot s7 ${st.dot}"></span>${acctLogo(a, 16)}
       <span class="cell2"><span class="prov">${esc(provName(a))}</span><span class="acc">${esc(acctLabel(a))}</span></span>
       <span class="right"><span class="${st.cls === 'ready' ? 'fg2' : `status ${st.cls}`}">${esc(statusWord(a))}</span><span class="dim">${fmt(a.counters.requests)} req</span></span>

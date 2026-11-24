@@ -73,7 +73,10 @@ final class AppStore {
 
     var weeklyPools: [WeeklyPool] { WeeklyPool.weekly(overview: overview, accounts: accounts) }
 
-    var subscriptions: [Account] { accounts.filter(\.metered) }
+    /// The overview's subscriptions: disabled accounts stay on the Accounts tab only.
+    var subscriptions: [Account] { accounts.filter { $0.metered && !$0.disabled } }
+    /// The overview's other circuits, likewise without disabled accounts.
+    var otherCircuits: [Account] { accounts.filter { !$0.metered && !$0.disabled } }
 
     /// Accounts by provider, in the server's order.
     var groups: [(provider: String, name: String, accounts: [Account])] {

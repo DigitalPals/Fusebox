@@ -59,7 +59,7 @@ struct OverviewView: View {
     }
 
     private var bottomBlocks: [Block] {
-        (store.accounts.contains { !$0.metered } ? [.other] : []) + [.latest]
+        (store.otherCircuits.isEmpty ? [] : [.other]) + [.latest]
     }
 
     @ViewBuilder private func block(for b: Block) -> some View {
@@ -367,7 +367,7 @@ struct OtherCircuitsCard: View {
     @Environment(\.navigate) private var navigate
 
     var body: some View {
-        let others = store.accounts.filter { !$0.metered }
+        let others = store.otherCircuits
         Card(spacing: 0) {
             PanelHead("Other circuits").padding(.bottom, 2)
             Text("API keys and sign-ins without usage limits").font(Typeface.small).foregroundStyle(Palette.fg3)
