@@ -1596,3 +1596,107 @@ fn only_an_unchanged_cleared_window_counts_as_before_the_reset() {
         "nothing to clear"
     );
 }
+
+/// Claude subscriptions with their own identities, each holding a reset that expires in five
+/// days: `(weekly use, days until the weekly limit renews)` per account.
+fn pool_fixture(accounts: &[(f64, i64)]) -> (Temp, Arc<App>, Vec<Arc<Account>>) {
+    let temp = Temp::new();
+    for i in 0..accounts.len() {
+        std::fs::write(temp.0.join(format!("account-{i}.json")), json!({"type":"claude","account_id":format!("account-{i}"), "access_token":"test-only", "expired":"2099-01-01T00:00:00Z"}).to_string()).unwrap();
+    }
+    let mut cfg =
+        crate::config::Config { auth_dir: temp.0.to_string_lossy().into(), banked_resets: true, ..Default::default() };
+    cfg.routing = crate::config::Routing::SmartQuota;
+    cfg.banked_reset_policy.auto_redeem = true;
+    let app = App::new(cfg, temp.0.join("config.yaml"));
+    let mut all = app.pool.all();
+    all.sort_by_key(|a| account_id(a).unwrap());
+    // The same reset, as Anthropic gives it to every subscription, ends at the same time.
+    let now = Utc::now();
+    let ends = now + chrono::Duration::hours(120);
+    for (acct, (weekly, days)) in all.iter().zip(accounts) {
+        let mut usage = expiring_usage(*weekly, 0.0, 120);
+        usage["cedar_ember"]["grants"][0]["ends_at"] = json!(ends);
+        usage["seven_day"]["resets_at"] = json!(now + chrono::Duration::days(*days));
+        let mut st = acct.state.lock();
+        crate::quota::usage(&mut st, Provider::Claude, &usage);
+        st.banked_resets = Some(reset_view(provider::claude(&usage, Utc::now()).unwrap()));
+    }
+    (temp, app, all)
+}
+
+/// Why this account's automatic reset waits for the others, or None when it goes now.
+fn pool_turn(app: &App, acct: &Account) -> Option<&'static str> {
+    let now = Utc::now();
+    let id = account_id(acct).unwrap();
+    let (decision, rank) = {
+        let st = acct.state.lock();
+        let decision = automation::candidate(&app.cfg(), &st, now).expect("a reset is due on its own");
+        let rank = automation::rank(&decision, &st.quota, &id);
+        (decision, rank)
+    };
+    automation::pool_waits(app, acct, &decision, &rank, now)
+}
+
+fn spent_view(acct: &Account, status: &str) {
+    let mut st = acct.state.lock();
+    let view = st.banked_resets.as_mut().unwrap();
+    view.operation = Some(OperationView {
+        request_id: "r".into(),
+        grant_id: "grant-1".into(),
+        created_at: Utc::now() - chrono::Duration::minutes(1),
+        status: status.into(),
+        message: String::new(),
+        retry_until: Utc::now(),
+        automatic: true,
+    });
+}
+
+#[test]
+fn a_used_up_pool_spends_one_reset_on_the_subscription_that_renews_last() {
+    // As in production on 2026-11-24: two at 100%, one at 95% renewing last.
+    let (_temp, app, accounts) = pool_fixture(&[(100.0, 1), (100.0, 2), (95.0, 3)]);
+    let turns: Vec<_> = accounts.iter().map(|a| pool_turn(&app, a)).collect();
+    assert_eq!(turns, [Some("Another subscription goes first"), Some("Another subscription goes first"), None]);
+
+    // While its reset is in flight, and for a while after, the others wait.
+    for status in ["pending", "unknown", "applied"] {
+        spent_view(&accounts[2], status);
+        assert!(pool_turn(&app, &accounts[0]).is_some_and(|r| r.contains("reset")), "{status}");
+    }
+    // Then its fresh week is room the others use first.
+    accounts[2].state.lock().banked_resets.as_mut().unwrap().operation = None;
+    let mut usage = expiring_usage(5.0, 0.0, 120);
+    usage["seven_day"]["resets_at"] = json!(Utc::now() + chrono::Duration::days(7));
+    crate::quota::usage(&mut accounts[2].state.lock(), Provider::Claude, &usage);
+    assert_eq!(pool_turn(&app, &accounts[0]), Some("Another subscription still has room"));
+    assert_eq!(pool_turn(&app, &accounts[1]), Some("Another subscription still has room"));
+}
+
+#[test]
+fn no_reset_is_spent_while_another_subscription_has_room() {
+    let (_temp, app, accounts) = pool_fixture(&[(100.0, 2), (40.0, 1)]);
+    assert_eq!(pool_turn(&app, &accounts[0]), Some("Another subscription still has room"));
+    // A subscription with no reading yet counts as room: waiting only costs time.
+    accounts[1].state.lock().quota = Default::default();
+    assert_eq!(pool_turn(&app, &accounts[0]), Some("Another subscription still has room"));
+    // A disabled one does not.
+    accounts[1].state.lock().disabled = true;
+    assert_eq!(pool_turn(&app, &accounts[0]), None);
+}
+
+#[test]
+fn ties_go_to_the_earliest_expiring_reset_and_then_a_fixed_order() {
+    let (_temp, app, accounts) = pool_fixture(&[(100.0, 2), (100.0, 2)]);
+    assert_eq!(pool_turn(&app, &accounts[0]), None);
+    assert_eq!(pool_turn(&app, &accounts[1]), Some("Another subscription goes first"));
+    // A reset expiring sooner goes first even on an account renewing sooner.
+    let mut usage = expiring_usage(100.0, 0.0, 100);
+    usage["seven_day"]["resets_at"] = json!(Utc::now() + chrono::Duration::days(1));
+    let mut st = accounts[1].state.lock();
+    crate::quota::usage(&mut st, Provider::Claude, &usage);
+    st.banked_resets = Some(reset_view(provider::claude(&usage, Utc::now()).unwrap()));
+    drop(st);
+    assert_eq!(pool_turn(&app, &accounts[1]), None);
+    assert_eq!(pool_turn(&app, &accounts[0]), Some("Another subscription goes first"));
+}
