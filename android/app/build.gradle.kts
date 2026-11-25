@@ -32,14 +32,25 @@ android {
     namespace = "com.digitalpals.fusebox"
     compileSdk = 36
 
+    val isPlayStore = (project.findProperty("fuseboxPlayStore") as String?)?.toBoolean() == true
+
     defaultConfig {
         applicationId = "com.digitalpals.fusebox"
         minSdk = 31
         targetSdk = 36
-        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 2
-        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.1"
+        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 3
+        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.2"
+        buildConfigField("boolean", "SELF_UPDATE_ENABLED", (!isPlayStore).toString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    if (isPlayStore) {
+        sourceSets {
+            getByName("release") {
+                manifest.srcFile("src/playstore/AndroidManifest.xml")
+            }
+        }
     }
 
     val storeFilePath = signingValue("FUSEBOX_KEYSTORE_FILE", "storeFile")

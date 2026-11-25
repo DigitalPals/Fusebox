@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         store = app.store,
                         pushManager = app.pushManager,
+                        updater = app.updater,
                         pendingLink = pendingLink,
                         onConsumeLink = { pendingLink = null },
                         demoUsage = demoUsage,
@@ -56,6 +57,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        (application as FuseboxApplication).updater.onResumeAfterPermission(this)
     }
 
     override fun onNewIntent(intent: Intent) {
