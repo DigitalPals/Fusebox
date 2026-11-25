@@ -14,6 +14,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import com.digitalpals.fusebox.data.AppStore
+import com.digitalpals.fusebox.data.AppUpdateInfo
+import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.DeepLink
 import com.digitalpals.fusebox.data.DemoFixtures
 import com.digitalpals.fusebox.data.SecureStorage
@@ -232,5 +234,47 @@ class FoldableUiTest {
         composeRule.onNodeWithText("SUBSCRIPTIONS").assertIsDisplayed()
         composeRule.onNodeWithText("COMBINED WEEKLY LIMITS").assertExists()
         maybeSaveScreenshot("08-unfolded-overview-light")
+    }
+
+    @Test
+    @Config(qualifiers = "w840dp-h840dp-night-xhdpi")
+    fun updateBannerAndSettingsUpdatesSectionRenderCleanly() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val storage = SecureStorage(context)
+        val (store, push, bundle) = newDemoHarness(connected = true)
+        val updater = AppUpdater(context, storage, selfUpdateEnabled = true).apply {
+            setDemoAvailable(
+                AppUpdateInfo(
+                    version = "1.0.3",
+                    tagName = "android-v1.0.3",
+                    downloadUrl = "https://github.com/DigitalPals/Fusebox/releases/download/android-v1.0.3/fusebox-1.0.3-sideload.apk",
+                    sizeBytes = 5_120_000L,
+                ),
+            )
+        }
+        composeRule.setContent {
+            FuseboxTheme(darkTheme = true) {
+                CompositionLocalProvider(LocalFoldableState provides unfoldedFoldableState()) {
+                    MainScreen(
+                        store = store,
+                        pushManager = push,
+                        updater = updater,
+                        pendingLink = null,
+                        onConsumeLink = {},
+                        demoUsage = bundle.usage,
+                        demoSpeed = bundle.speed,
+                    )
+                }
+            }
+        }
+        composeRule.onNodeWithText("Fusebox 1.0.3 available").assertIsDisplayed()
+        composeRule.onNodeWithText("Update").assertIsDisplayed()
+        maybeSaveScreenshot("10-unfolded-update-banner-dark")
+
+        composeRule.onNodeWithText("Settings").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("UPDATES").assertExists()
+        composeRule.onNodeWithText("Update to 1.0.3").assertExists()
+        maybeSaveScreenshot("11-unfolded-settings-update-dark")
     }
 }

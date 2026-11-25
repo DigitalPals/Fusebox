@@ -28,6 +28,9 @@ they are encrypted with an Android Keystore AES-256-GCM key and excluded from cl
   the name of your device, so you can tell your devices apart in its settings.
 - **The Fusebox push relay**, only if notifications are on and your server sends them through
   the relay.
+- **GitHub Releases (`api.github.com`)**, on sideloaded Android builds only, to check for newer
+  `android-v*` releases and download the APK when you tap Update. Builds installed from Google Play
+  do not contact GitHub.
 
 The apps have no analytics, advertising, tracking or crash reporting, and ask for no account.
 They don't track you across apps or websites.

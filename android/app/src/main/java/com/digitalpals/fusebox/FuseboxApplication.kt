@@ -5,6 +5,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.digitalpals.fusebox.data.AppStore
+import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.SecureStorage
 import com.digitalpals.fusebox.push.FuseboxNotifications
 import com.digitalpals.fusebox.push.PushManager
@@ -21,6 +22,8 @@ class FuseboxApplication : Application() {
         private set
     lateinit var pushManager: PushManager
         private set
+    lateinit var updater: AppUpdater
+        private set
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -30,11 +33,13 @@ class FuseboxApplication : Application() {
         storage = SecureStorage(this)
         store = AppStore(this, storage)
         pushManager = PushManager(this, storage)
+        updater = AppUpdater(this, storage)
         FuseboxWidgetUpdater.schedulePeriodic(this)
 
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 store.resume()
+                updater.checkOnForeground()
                 appScope.launch { pushManager.onLaunchOrForeground(store.currentApi()) }
             }
 

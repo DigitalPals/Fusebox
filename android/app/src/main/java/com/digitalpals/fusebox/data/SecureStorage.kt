@@ -76,6 +76,19 @@ class SecureStorage(context: Context) {
         get() = prefs.getLong("push_relay_touched_ms", 0L)
         set(value) { prefs.edit().putLong("push_relay_touched_ms", value).apply() }
 
+    var lastUpdateCheckMs: Long
+        get() = prefs.getLong("last_update_check_ms", 0L)
+        set(value) { prefs.edit().putLong("last_update_check_ms", value).apply() }
+
+    var dismissedUpdateVersion: String?
+        get() = prefs.getString("dismissed_update_version", null)
+        set(value) {
+            prefs.edit().apply {
+                if (value == null) remove("dismissed_update_version")
+                else putString("dismissed_update_version", value)
+            }.apply()
+        }
+
     // MARK: - Widget snapshot & per-widget account choice
 
     fun saveWidgetSnapshot(snapshot: WidgetSnapshot) {
