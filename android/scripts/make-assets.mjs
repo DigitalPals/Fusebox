@@ -72,11 +72,13 @@ const renderColorsXml = (idx) => {
 write('values/colors.xml', renderColorsXml(1));
 write('values-night/colors.xml', renderColorsXml(0));
 
-// 3. Adaptive launcher icon (assets/icon.svg: 48x56 bracketed fuse centred inside 108x108 safe zone).
-// Safe zone is 66x66 centred in 108x108 -> scale ~0.95 -> 45.6 x 53.2, origin (31.2, 27.4) => clean grid:
-// scale 1.0 in 108x108: width=48, height=56 -> offset x=30, y=26 (fits squarely inside 66x66 safe circle).
-const fuseRectPath = (x, y, w, h) => `M${x},${y}h${w}v${h}h${-w}z`;
-const launcherPaths = (amberColor, barColor, ox = 30, oy = 26, s = 1) => {
+// 3. Adaptive launcher icon (assets/icon.svg: 48x56 bracketed fuse centred inside 108x108 canvas).
+// Android launchers clip 108dp down to a 72dp circle/squircle (safe zone diameter 66dp, radius 33dp).
+// Scaling by 0.7 gives 33.6 x 39.2 dp (46.7% x 54.4% of the 72dp visible mask, matching the iOS icon's
+// 46.9% x 54.7% proportion) with corner radius 25.8dp — comfortably clear of circular and squircle masks.
+const n = (v) => Number(v.toFixed(2));
+const fuseRectPath = (x, y, w, h) => `M${n(x)},${n(y)}h${n(w)}v${n(h)}h${n(-w)}z`;
+const launcherPaths = (amberColor, barColor, ox = 37.2, oy = 34.4, s = 0.7) => {
   const leftBracket = [
     fuseRectPath(ox + 0 * s, oy + 0 * s, 16 * s, 8 * s),
     fuseRectPath(ox + 0 * s, oy + 0 * s, 8 * s, 56 * s),
@@ -147,9 +149,9 @@ write(
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
-    android:viewportWidth="48"
-    android:viewportHeight="56">
-${launcherPaths('#FFFFFFFF', '#FFFFFFFF', 0, 0, 1)}
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+${launcherPaths('#FFFFFFFF', '#FFFFFFFF', 8, 4, 1)}
 </vector>
 `,
 );
