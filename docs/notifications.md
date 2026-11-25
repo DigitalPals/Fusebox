@@ -65,7 +65,25 @@ Apple delivers notifications for an app only from a server holding a push key of
 
 A device that Apple or the relay no longer knows is removed, the same way a browser's expired subscription is: for example, when the app was removed or registered against the other push environment. Opening the app registers it again.
 
-The app registers with `POST /api/push/apns`. Directly, it sends `{"token": "<hex>", "environment": "production" | "development", "label": "<device name>"}`; App Store and TestFlight builds use `production`. Through the relay, it sends `{"relay": {"handle": "<from the relay>", "key": "<32 bytes, base64>"}, "label": "<device name>"}`. Either way it gets back the subscription's `id`. `GET /api/push` lists each device with `"kind": "web"` or `"apns"` and, for app devices, `"via": "direct"` or `"relay"`. It also says whether `apns` is set up and which `relay` URL is in use (or `null`). Removing a device and **Send test** work as they do for browsers. A direct notification carries its alert, the fault count as the badge, and top-level `path` (where it opens in the dashboard, which the app maps onto its own screens), `kind`, `level`, `provider` and `account`. A relayed one carries the badge and a generic alert, plus `sealed`, which holds the same fields encrypted.
+The app registers with `POST /api/push/apns`. Directly, it sends `{"token": "<hex>", "environment": "production" | "development", "label": "<device name>"}`; App Store and TestFlight builds use `production`. Through the relay, it sends `{"relay": {"handle": "<from the relay>", "key": "<32 bytes, base64>"}, "label": "<device name>"}`. Either way it gets back the subscription's `id`. `GET /api/push` lists each device with `"kind": "web"`, `"apns"` or `"fcm"` and, for app devices, `"via": "direct"` or `"relay"`. It also says whether `apns` and `fcm` are set up and which `relay` URL is in use (or `null`). Removing a device and **Send test** work as they do for browsers. A direct notification carries its alert, the fault count as the badge, and top-level `path` (where it opens in the dashboard, which the app maps onto its own screens), `kind`, `level`, `provider` and `account`. A relayed one carries the badge and a generic alert, plus `sealed`, which holds the same fields encrypted.
+
+## The Android app
+
+The native Fusebox app for Android (phones and foldables, Android 12+) gets the same notifications through Firebase Cloud Messaging (FCM). The app turns them on for its device under **Settings, Notifications**, and the dashboard lists it among the other devices as "Android app". The events chosen in the dashboard apply to it as well.
+
+Like Apple, Google delivers FCM notifications only from a server holding the Firebase project's service account key. So the app's notifications reach your Android phone in one of two ways:
+
+- **Through the push relay (the default).** The app registers its FCM token with the Fusebox push relay at `https://push.whombat.com` (`platform: "fcm"`) and gets back a handle. It gives your Fusebox that handle and a 32-byte key it made itself. Fusebox encrypts each notification with that key (AES-256-GCM, the same `fusebox-push-v1` envelope as iOS) and gives the relay only the handle and the ciphertext. The relay sends a data-only FCM message with `sealed` to Google, and the app decrypts it locally before posting the Android notification. Neither the relay nor Google sees the notification's content. Nothing needs setting up on your Fusebox server.
+- **Directly, with your own Firebase service account key.** This is for anyone building the Android app under their own Firebase project (`android/app/google-services.json`):
+
+  ```yaml
+  fcm:
+    service-account-file: /etc/fusebox/firebase-service-account.json # readable by Fusebox only
+  ```
+
+  Fusebox mints and caches an OAuth2 access token (`firebase.messaging` scope) and sends data-only messages directly to FCM HTTP v1. When `fcm` is set, the app registers directly instead of through the relay.
+
+The app registers with `POST /api/push/fcm`. Directly, it sends `{"token": "<fcm token>", "label": "<device name>"}`. Through the relay, it sends `{"relay": {"handle": "<from the relay>", "key": "<32 bytes, base64>"}, "label": "<device name>"}`. Removing a device and **Send test** work as they do for browsers and iPhones.
 
 ## Chat and webhooks
 
