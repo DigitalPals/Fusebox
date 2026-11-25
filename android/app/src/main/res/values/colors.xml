@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fb_bg">#F6F4EF</color>
+    <color name="fb_surface">#FCFBF8</color>
+    <color name="fb_surface_pop">#FFFFFF</color>
+    <color name="fb_surface_inset">#F0EDE6</color>
+    <color name="fb_seg_on">#E3DFD5</color>
+    <color name="fb_ctl_hover">#EBE8E0</color>
+    <color name="fb_line">#E3DFD6</color>
+    <color name="fb_line_soft">#ECE9E2</color>
+    <color name="fb_line_strong">#D2CDC2</color>
+    <color name="fb_line_hover">#A9A397</color>
+    <color name="fb_rivet">#D9D4C9</color>
+    <color name="fb_fg">#1B1A17</color>
+    <color name="fb_fg_2">#4A4741</color>
+    <color name="fb_fg_3">#6B665C</color>
+    <color name="fb_idle">#A39E92</color>
+    <color name="fb_bar">#D3CEC3</color>
+    <color name="fb_meter">#3A3833</color>
+    <color name="fb_ok">#15803D</color>
+    <color name="fb_warn">#A16207</color>
+    <color name="fb_err">#BE123C</color>
+    <color name="fb_err_line">#F0C3CC</color>
+    <color name="fb_chart_1">#2A2925</color>
+    <color name="fb_chart_2">#57534B</color>
+    <color name="fb_chart_3">#7F796E</color>
+    <color name="fb_chart_4">#A39E92</color>
+    <color name="fb_chart_5">#C2BDB1</color>
+    <color name="fb_chart_other">#DCD7CC</color>
+    <color name="ic_launcher_background">#0B0B0A</color>
+</resources>

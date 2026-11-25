@@ -53,6 +53,15 @@
         ".github/scripts/*.py"
       ],
       "run": "python3 -m unittest discover -s tests -p 'test_*.py'"
+    },
+    {
+      "name": "android",
+      "about": "The Android app's JVM unit tests (fixtures, quota rules, sealed push, speed & usage charts).",
+      "when": [
+        "android/**",
+        "ios/FuseboxTests/Fixtures/**"
+      ],
+      "run": "cd android && export ANDROID_HOME=\"${ANDROID_HOME:-$HOME/Android/Sdk}\" && { [ -n \"${JAVA_HOME:-}\" ] || { j=\"$(mise where java@temurin-21 2>/dev/null)\" && [ -n \"$j\" ] && export JAVA_HOME=\"$j\"; } || true; } && ./gradlew testDebugUnitTest --console=plain"
     }
   ],
   "wide": [

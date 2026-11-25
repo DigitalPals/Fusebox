@@ -10,6 +10,7 @@
 mod apns;
 mod crypto;
 mod faults;
+mod fcm;
 pub mod relay;
 mod renewals;
 mod webhooks;
@@ -91,7 +92,10 @@ pub struct Subscription {
     /// The iPhone app, reached through Apple's push service; Web Push otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apns: Option<apns::Device>,
-    /// The iPhone app, reached through the push relay with notifications sealed for it.
+    /// The Android app, reached directly through Firebase Cloud Messaging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fcm: Option<fcm::Device>,
+    /// A mobile app (iPhone or Android), reached through the push relay with notifications sealed for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<relay::Relayed>,
 }
@@ -109,6 +113,7 @@ pub struct Push {
     stored: Mutex<Stored>,
     vapid: Mutex<Option<Arc<crypto::Vapid>>>,
     apns: apns::Tokens,
+    fcm: fcm::Tokens,
     tracker: Mutex<Tracker>,
     /// Since when each dismissed fault has been missing from the faults.
     absent: Mutex<HashMap<String, Instant>>,
@@ -129,6 +134,7 @@ impl Push {
             stored: Mutex::new(stored),
             vapid: Mutex::new(None),
             apns: apns::Tokens::default(),
+            fcm: fcm::Tokens::default(),
             tracker: Mutex::default(),
             absent: Mutex::default(),
         }
@@ -649,6 +655,23 @@ async fn deliver(app: &App, sub: &Subscription, fault: &Fault, badge: usize, urg
         return apns::send(&client, base, &app.push.apns, cfg.apns.as_ref(), device, fault, badge, high, TTL_SECONDS)
             .await;
     }
+    if let Some(device) = &sub.fcm {
+        let cfg = app.cfg();
+        let client = app.http.control(None);
+        let high = urgency == "high";
+        return fcm::send(
+            &client,
+            fcm::base_url(),
+            &app.push.fcm,
+            cfg.fcm.as_ref(),
+            device,
+            fault,
+            badge,
+            high,
+            TTL_SECONDS,
+        )
+        .await;
+    }
     let payload = json!({
         "web_push": 8030,
         "notification": {
@@ -691,6 +714,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/push", get(status))
         .route("/push/subscriptions", post(subscribe))
         .route("/push/apns", post(subscribe_apns))
+        .route("/push/fcm", post(subscribe_fcm))
         .route("/push/subscriptions/{id}", delete(unsubscribe))
         .route("/push/test", post(test))
         .route("/push/webhooks/test", post(test_webhook))
@@ -767,22 +791,40 @@ async fn status(State(app): State<Arc<App>>) -> Response {
         .subscriptions()
         .iter()
         .map(|s| {
+            let kind = if s.fcm.is_some() || s.relay.as_ref().and_then(|r| r.platform.as_deref()) == Some("fcm") {
+                "fcm"
+            } else if s.apns.is_some() || s.relay.is_some() {
+                "apns"
+            } else {
+                "web"
+            };
+            let via = if s.relay.is_some() {
+                Some("relay")
+            } else if s.apns.is_some() || s.fcm.is_some() {
+                Some("direct")
+            } else {
+                None
+            };
             json!({
                 "id": s.id,
                 "label": s.label,
                 "origin": s.origin,
                 "endpoint": s.endpoint,
                 "created_at": s.created_at,
-                "kind": if s.apns.is_some() || s.relay.is_some() { "apns" } else { "web" },
-                "via": if s.relay.is_some() { Some("relay") } else if s.apns.is_some() { Some("direct") } else { None },
+                "kind": kind,
+                "via": via,
             })
         })
         .collect();
     let cfg = app.cfg();
     let relay = (!cfg.push_relay.is_empty()).then(|| cfg.push_relay.clone());
-    Json(
-        json!({ "public_key": vapid.public_key, "subscriptions": devices, "apns": cfg.apns.is_some(), "relay": relay }),
-    )
+    Json(json!({
+        "public_key": vapid.public_key,
+        "subscriptions": devices,
+        "apns": cfg.apns.is_some(),
+        "fcm": cfg.fcm.is_some(),
+        "relay": relay,
+    }))
     .into_response()
 }
 
@@ -828,6 +870,7 @@ fn validate(new: NewSubscription) -> Result<Subscription> {
         label: clean_label(&new.label, "Browser"),
         created_at: Utc::now(),
         apns: None,
+        fcm: None,
         relay: None,
     })
 }
@@ -900,6 +943,65 @@ async fn subscribe_apns(State(app): State<Arc<App>>, Json(new): Json<NewApnsDevi
         label: clean_label(&new.label, "iPhone"),
         created_at: Utc::now(),
         apns,
+        fcm: None,
+        relay,
+    };
+    add(&app, sub)
+}
+
+#[derive(Deserialize)]
+struct NewFcmDevice {
+    /// Direct: the FCM registration token, for a Fusebox holding a Firebase service account key.
+    #[serde(default)]
+    token: Option<String>,
+    /// Through the push relay: the handle the relay gave the device, and its key.
+    #[serde(default)]
+    relay: Option<NewRelayed>,
+    #[serde(default)]
+    label: String,
+}
+
+/// The Android app registers here, with its FCM token when this Fusebox holds a Firebase
+/// service account key, or with its relay handle and key otherwise.
+async fn subscribe_fcm(State(app): State<Arc<App>>, Json(new): Json<NewFcmDevice>) -> Response {
+    let cfg = app.cfg();
+    let (endpoint, fcm, relay) = match (new.relay, new.token) {
+        (Some(r), _) => {
+            if cfg.push_relay.is_empty() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The push relay is turned off on this Fusebox (push-relay in config.yaml)",
+                );
+            }
+            match relay::Relayed::with_platform(&r.handle, &r.key, Some("fcm")) {
+                Ok(d) => (d.endpoint(), None, Some(d)),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        (None, Some(token)) => {
+            if cfg.fcm.is_none() {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "This Fusebox can't send to the Android app directly: register through the push relay, or set fcm in config.yaml",
+                );
+            }
+            match fcm::Device::new(&token) {
+                Ok(d) => (d.endpoint(), Some(d), None),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        _ => return error(StatusCode::BAD_REQUEST, "Send token, or relay with handle and key"),
+    };
+    let sub = Subscription {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        endpoint,
+        p256dh: String::new(),
+        auth: String::new(),
+        origin: String::new(),
+        label: clean_label(&new.label, "Android"),
+        created_at: Utc::now(),
+        apns: None,
+        fcm,
         relay,
     };
     add(&app, sub)

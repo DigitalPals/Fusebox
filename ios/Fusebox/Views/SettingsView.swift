@@ -133,11 +133,11 @@ struct SettingsView: View {
                 ForEach(Array(others.enumerated()), id: \.element.id) { i, d in
                     if i > 0 { Hairline(color: Palette.lineSoft) }
                     HStack(spacing: 12) {
-                        Image(systemName: d.resolvedKind == "apns" ? "iphone" : "globe").font(.system(size: 15)).foregroundStyle(Palette.fg3)
+                        Image(systemName: d.resolvedKind == "apns" ? "iphone" : d.resolvedKind == "fcm" ? "smartphone" : "globe").font(.system(size: 15)).foregroundStyle(Palette.fg3)
                             .frame(width: 20)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(d.label ?? "Device").font(Typeface.row).foregroundStyle(Palette.fg).lineLimit(1)
-                            Text("\(d.resolvedKind == "apns" ? (d.via == "relay" ? "iPhone app · relay" : "iPhone app") : "Web push")\(d.createdAt.map { " · since \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "")")
+                            Text("\(d.resolvedKind == "apns" ? (d.via == "relay" ? "iPhone app · relay" : "iPhone app") : d.resolvedKind == "fcm" ? (d.via == "relay" ? "Android app · relay" : "Android app") : "Web push")\(d.createdAt.map { " · since \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "")")
                                 .font(Typeface.small).foregroundStyle(Palette.fg3)
                         }
                         Spacer(minLength: 8)

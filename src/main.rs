@@ -120,8 +120,8 @@ enum Cmd {
     /// Show what the config and auth directory contain, without starting the server.
     /// Handy before switching from CLIProxyAPI.
     Check,
-    /// Run the push relay that gets notifications from any Fusebox to the iPhone app.
-    /// It needs the app's APNs key; a proxy or tunnel in front adds HTTPS.
+    /// Run the push relay that gets notifications from any Fusebox to the iPhone and Android apps.
+    /// Needs APNs credentials, a Firebase service account JSON file, or both; a proxy in front adds HTTPS.
     PushRelay {
         #[arg(long, env = "FUSEBOX_RELAY_LISTEN", default_value = "127.0.0.1:4750")]
         listen: std::net::SocketAddr,
@@ -129,15 +129,18 @@ enum Cmd {
         #[arg(long, env = "FUSEBOX_RELAY_STATE_DIR", default_value = "/var/lib/fusebox-push-relay")]
         state_dir: PathBuf,
         #[arg(long, env = "FUSEBOX_RELAY_TEAM_ID")]
-        team_id: String,
+        team_id: Option<String>,
         #[arg(long, env = "FUSEBOX_RELAY_KEY_ID")]
-        key_id: String,
+        key_id: Option<String>,
         /// The `AuthKey_<key-id>.p8` file.
         #[arg(long, env = "FUSEBOX_RELAY_KEY_FILE")]
-        key_file: PathBuf,
-        /// The app's bundle ID.
+        key_file: Option<PathBuf>,
+        /// The iPhone app's bundle ID.
         #[arg(long, env = "FUSEBOX_RELAY_TOPIC", default_value = "com.digitalpals.fusebox")]
         topic: String,
+        /// Firebase Admin SDK service account JSON file for Android (FCM).
+        #[arg(long, env = "FUSEBOX_RELAY_FCM_SERVICE_ACCOUNT_FILE")]
+        fcm_service_account_file: Option<PathBuf>,
     },
 }
 
@@ -222,10 +225,18 @@ async fn run() -> Result<()> {
         }
         Some(Cmd::Usage { command }) => return usage::imports::run_command(command).await,
         Some(Cmd::Collector { command }) => return usage::collector::run_command(command).await,
-        Some(Cmd::PushRelay { listen, state_dir, team_id, key_id, key_file, topic }) => {
+        Some(Cmd::PushRelay { listen, state_dir, team_id, key_id, key_file, topic, fcm_service_account_file }) => {
             init_logging(false, config::LogFormat::Text);
-            let apns = config::Apns { team_id, key_id, key_file: key_file.to_string_lossy().into_owned(), topic };
-            return push::relay::serve(push::relay::Settings { listen, state_dir, apns }).await;
+            let apns = match (team_id, key_id, key_file) {
+                (Some(team_id), Some(key_id), Some(key_file)) => {
+                    Some(config::Apns { team_id, key_id, key_file: key_file.to_string_lossy().into_owned(), topic })
+                }
+                (None, None, None) => None,
+                _ => anyhow::bail!("APNs on push-relay needs all of --team-id, --key-id and --key-file"),
+            };
+            let fcm = fcm_service_account_file
+                .map(|p| config::Fcm { service_account_file: p.to_string_lossy().into_owned() });
+            return push::relay::serve(push::relay::Settings { listen, state_dir, apns, fcm }).await;
         }
         other => other,
     };

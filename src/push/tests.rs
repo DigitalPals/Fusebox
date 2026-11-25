@@ -506,3 +506,109 @@ async fn the_iphone_app_registers_through_the_relay_without_an_apns_key() {
     assert_eq!(Config::parse("push-relay: ''\n").unwrap().push_relay, "");
     server.abort();
 }
+
+#[tokio::test]
+async fn the_android_app_registers_directly_or_through_the_relay() {
+    let temp = Temp::new();
+    let cfg = Config { auth_dir: temp.0.to_string_lossy().into(), management_key: "k".into(), ..Default::default() };
+    let app = App::new(cfg.clone(), temp.0.join("config.yaml"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let router = crate::mgmt::router(app.clone()).with_state(app.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap()
+    });
+    let client = reqwest::Client::new();
+    let handle = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    let key = base64::engine::general_purpose::STANDARD.encode([8u8; 32]);
+    let register = |body: Value| client.post(format!("{origin}/push/fcm")).bearer_auth("k").json(&body).send();
+
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!((status["fcm"].clone(), status["relay"].clone()), (json!(false), json!(relay::DEFAULT_URL)));
+
+    // Without fcm config, direct token registration returns 503.
+    let fcm_token = format!("fcmToken:APA91b{}", "x".repeat(40));
+    let direct = register(json!({ "token": fcm_token, "label": "Pixel Fold" })).await.unwrap();
+    assert_eq!(direct.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    // Relay registration works and reports kind=fcm, via=relay.
+    let body = json!({ "relay": { "handle": handle, "key": key }, "label": "Pixel Fold" });
+    let created: Value = register(body.clone()).await.unwrap().json().await.unwrap();
+    let again: Value = register(body).await.unwrap().json().await.unwrap();
+    assert_eq!(created["id"], again["id"]);
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["subscriptions"][0]["kind"], "fcm");
+    assert_eq!(status["subscriptions"][0]["via"], "relay");
+
+    // Enabling fcm allows direct registration and reports fcm=true, kind=fcm, via=direct.
+    let fcm_cfg = crate::config::Fcm { service_account_file: "/etc/fusebox/firebase.json".into() };
+    app.set_config(Config { fcm: Some(fcm_cfg.clone()), ..cfg });
+    let direct_ok: Value =
+        register(json!({ "token": fcm_token, "label": "Pixel Fold Direct" })).await.unwrap().json().await.unwrap();
+    assert!(direct_ok["id"].as_str().is_some());
+    let status: Value =
+        client.get(format!("{origin}/push")).bearer_auth("k").send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["fcm"], json!(true));
+    let direct_sub = status["subscriptions"].as_array().unwrap().iter().find(|d| d["id"] == direct_ok["id"]).unwrap();
+    assert_eq!(direct_sub["kind"], "fcm");
+    assert_eq!(direct_sub["via"], "direct");
+
+    // Direct delivery via fcm::send hits HTTP v1 endpoint and handles UNREGISTERED -> GONE.
+    let (tx, mut rx) = mpsc::unbounded_channel::<Received>();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fcm_mock = Router::new().route(
+        "/v1/projects/fusebox-direct/messages:send",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let tx = tx.clone();
+            let calls = calls.clone();
+            async move {
+                let _ = tx.send(Received { headers, body });
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    (StatusCode::OK, r#"{"name":"projects/fusebox-direct/messages/1"}"#)
+                } else {
+                    (
+                        StatusCode::NOT_FOUND,
+                        r#"{"error":{"status":"NOT_FOUND","details":[{"errorCode":"UNREGISTERED"}]}}"#,
+                    )
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fcm_base = format!("http://{}", listener.local_addr().unwrap());
+    let fcm_server = tokio::spawn(async move { axum::serve(listener, fcm_mock).await.unwrap() });
+    app.push.fcm.seed_test_token(&fcm_cfg, "fusebox-direct", "ya29.direct-token");
+    let device = fcm::Device::new(&fcm_token).unwrap();
+    let fault = Fault {
+        key: "provider:codex".into(),
+        provider: "codex".into(),
+        title: "Every Codex account is used up".into(),
+        body: "Back in 1h.".into(),
+        path: "#/accounts".into(),
+        kind: "provider",
+        level: "err",
+        ..Default::default()
+    };
+    assert_eq!(
+        fcm::send(&client, &fcm_base, &app.push.fcm, Some(&fcm_cfg), &device, &fault, 4, true, TTL_SECONDS)
+            .await
+            .unwrap(),
+        StatusCode::OK
+    );
+    let got = rx.recv().await.unwrap();
+    assert_eq!(got.headers["authorization"], "Bearer ya29.direct-token");
+    let body: Value = serde_json::from_slice(&got.body).unwrap();
+    assert_eq!(body["message"]["data"]["title"], "Every Codex account is used up");
+    assert_eq!(body["message"]["data"]["badge"], "4");
+    assert_eq!(
+        fcm::send(&client, &fcm_base, &app.push.fcm, Some(&fcm_cfg), &device, &fault, 4, true, TTL_SECONDS)
+            .await
+            .unwrap(),
+        StatusCode::GONE
+    );
+
+    fcm_server.abort();
+    server.abort();
+}

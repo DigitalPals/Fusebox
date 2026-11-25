@@ -1,48 +1,50 @@
 # Privacy
 
-Last updated: 1 November 2026
+Last updated: 25 November 2026
 
-This page covers the Fusebox iPhone app (“Fusebox - Subscription Proxy” on the App Store), the
+This page covers the Fusebox mobile apps (“Fusebox - Subscription Proxy” on iOS and Android), the
 Fusebox push relay at `push.whombat.com`, and the Fusebox server. In short: Fusebox is
 self-hosted, the developer runs no service that receives your data except the push relay, and
 the relay can't read your notifications.
 
-## The iPhone app
+## The iPhone and Android apps
 
-**What it stores on your iPhone.** The address of your Fusebox server and its management key,
+**What they store on your phone.** The address of your Fusebox server and its management key,
 the quota display setting, your notification settings, the last data shown to the widgets, and,
-if you turn on notifications through the relay, a relay handle and an encryption key. The key,
-the address, the widgets' data and the relay details are kept in the iOS Keychain. Nothing is
-sent to the developer.
+if you turn on notifications through the relay, a relay handle and an encryption key. On iOS,
+the key, address, widgets' data and relay details are kept in the iOS Keychain. On Android,
+they are encrypted with an Android Keystore AES-256-GCM key and excluded from cloud backups
+(`allowBackup="false"`). Nothing is sent to the developer.
 
-**Who it talks to.**
+**Who they talk to.**
 
 - **Your Fusebox server**, at the address you enter. The app reads accounts, quotas, faults,
   requests and usage from it, and sends your actions (refresh, turn an account on or off, dismiss
   a fault, notification settings). That server is run by you or whoever gave you its key; its
   operator decides what it keeps.
-- **Apple Push Notification service**, only if you allow notifications. iOS gives the app a
-  device token. The app sends it either to your Fusebox server (direct delivery) or to the push
-  relay (below). Your server also gets the name of your device, so you can tell your devices
-  apart in its settings.
+- **Apple Push Notification service (iOS) or Firebase Cloud Messaging (Android)**, only if you
+  allow notifications. The OS push service gives the app a device token. The app sends it either
+  to your Fusebox server (direct delivery) or to the push relay (below). Your server also gets
+  the name of your device, so you can tell your devices apart in its settings.
 - **The Fusebox push relay**, only if notifications are on and your server sends them through
   the relay.
 
-The app has no analytics, advertising, tracking, crash reporting or third-party code, and asks
-for no account. It doesn't track you across apps or websites.
+The apps have no analytics, advertising, tracking or crash reporting, and ask for no account.
+They don't track you across apps or websites.
 
 ## The push relay
 
-The relay lets any Fusebox server send notifications to the app without holding Apple's push
-key. It is run by the developer at `https://push.whombat.com` behind Cloudflare.
+The relay lets any Fusebox server send notifications to the iOS and Android apps without holding
+Apple's push key or the Firebase service account key. It is run by the developer at
+`https://push.whombat.com` behind Cloudflare.
 
-- **What it keeps:** your device's push token, whether it is a development or production build,
+- **What it keeps:** your device's push token, its platform (`apns` or `fcm`) and environment,
   and a SHA-256 hash of each random handle it gave out for that token (one per Fusebox server),
   with when each was last used. A handle that has been neither used nor touched for 180 days is
-  forgotten. When Apple reports a token as no longer valid, the relay deletes it.
+  forgotten. When Apple or Google reports a token as no longer valid, the relay deletes it.
 - **What it can't read:** the notifications. Your Fusebox server encrypts each one with a key
-  that only your iPhone and your server have (AES-256-GCM). The relay passes on a generic
-  “Fusebox” alert, the badge count and the sealed message, which the app opens on your iPhone.
+  that only your phone and your server have (AES-256-GCM). The relay passes on only the sealed
+  message (plus a generic alert on iOS), which the app decrypts on your device.
 - **What it doesn't keep:** it logs neither tokens nor handles. It uses the caller's IP address
   only in memory, to limit how often each address can register devices and send notifications.
   Cloudflare, which carries the traffic, processes IP addresses as described in its own privacy
