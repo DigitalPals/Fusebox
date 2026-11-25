@@ -34,7 +34,8 @@ use serde_json::{Value, json};
 
 use super::apns;
 use super::faults::Fault;
-use crate::config::Apns;
+use super::fcm;
+use crate::config::{Apns, Fcm};
 
 /// The relay the Fusebox iPhone app uses, unless `push-relay` names another.
 pub const DEFAULT_URL: &str = "https://push.whombat.com";
@@ -62,16 +63,23 @@ pub struct Relayed {
     pub handle: String,
     /// AES-256-GCM key, base64.
     pub key: String,
+    /// "apns" or "fcm"; absent on subscriptions created before Android support (treated as "apns").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 impl Relayed {
     pub fn new(handle: &str, key: &str) -> Result<Self> {
+        Self::with_platform(handle, key, None)
+    }
+
+    pub fn with_platform(handle: &str, key: &str, platform: Option<&str>) -> Result<Self> {
         ensure!(
             URL_SAFE_NO_PAD.decode(handle).is_ok_and(|h| h.len() == HANDLE_BYTES),
             "The relay handle isn't one the relay gives out"
         );
         ensure!(STANDARD.decode(key).is_ok_and(|k| k.len() == KEY_BYTES), "The device key must be 32 bytes, base64");
-        Ok(Self { handle: handle.into(), key: key.into() })
+        Ok(Self { handle: handle.into(), key: key.into(), platform: platform.map(String::from) })
     }
 
     /// The subscription's endpoint, which tells devices apart.
@@ -173,16 +181,21 @@ pub async fn send(
 pub struct Settings {
     pub listen: SocketAddr,
     pub state_dir: PathBuf,
-    pub apns: Apns,
+    pub apns: Option<Apns>,
+    pub fcm: Option<Fcm>,
 }
 
 struct Relay {
     db: Mutex<rusqlite::Connection>,
-    apns: Apns,
-    tokens: apns::Tokens,
+    apns: Option<Apns>,
+    apns_tokens: apns::Tokens,
+    fcm: Option<Fcm>,
+    fcm_tokens: fcm::Tokens,
     http: reqwest::Client,
     /// Apple's production and development servers; tests point both at a fake.
     bases: (String, String),
+    /// Google's FCM HTTP v1 API base URL; tests point it at a fake.
+    fcm_base: String,
     limits: Mutex<Limits>,
 }
 
@@ -220,16 +233,31 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection> {
              handle_hash BLOB PRIMARY KEY,
              token TEXT NOT NULL,
              environment TEXT NOT NULL,
+             platform TEXT NOT NULL DEFAULT 'apns',
              created_at INTEGER NOT NULL,
              used_at INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS devices_token ON devices(token);",
     )?;
+    // Upgrade databases created before Android (FCM) support.
+    let mut stmt = db.prepare("PRAGMA table_info(devices)")?;
+    let has_platform =
+        stmt.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|name| name == "platform");
+    drop(stmt);
+    if !has_platform {
+        db.execute("ALTER TABLE devices ADD COLUMN platform TEXT NOT NULL DEFAULT 'apns'", [])?;
+    }
     Ok(db)
 }
 
 impl Relay {
-    fn new(db: rusqlite::Connection, apns: Apns, bases: (String, String)) -> Arc<Self> {
+    fn new(
+        db: rusqlite::Connection,
+        apns: Option<Apns>,
+        fcm: Option<Fcm>,
+        bases: (String, String),
+        fcm_base: String,
+    ) -> Arc<Self> {
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(crate::tls::http(false))
             .connect_timeout(Duration::from_secs(10))
@@ -239,9 +267,12 @@ impl Relay {
         Arc::new(Self {
             db: Mutex::new(db),
             apns,
-            tokens: apns::Tokens::default(),
+            apns_tokens: apns::Tokens::default(),
+            fcm,
+            fcm_tokens: fcm::Tokens::default(),
             http,
             bases,
+            fcm_base,
             limits: Mutex::default(),
         })
     }
@@ -252,23 +283,26 @@ impl Relay {
         self.db.lock().execute("DELETE FROM devices WHERE used_at < ?1", [before]).unwrap_or(0)
     }
 
-    fn store_device(&self, handle: &str, device: &apns::Device, now: i64) -> rusqlite::Result<()> {
-        let environment = match device.environment {
-            apns::Environment::Production => "production",
-            apns::Environment::Development => "development",
-        };
+    fn store_device(
+        &self,
+        handle: &str,
+        platform: &str,
+        token: &str,
+        environment: &str,
+        now: i64,
+    ) -> rusqlite::Result<()> {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         tx.execute(
-            "INSERT INTO devices (handle_hash, token, environment, created_at, used_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-            rusqlite::params![hash(handle), device.token, environment, now],
+            "INSERT INTO devices (handle_hash, token, environment, platform, created_at, used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            rusqlite::params![hash(handle), token, environment, platform, now],
         )?;
         // Timestamps have second resolution: newest insertion wins ties so the
         // handle returned by registration cannot already have been evicted.
         tx.execute(
-            "DELETE FROM devices WHERE token = ?1 AND handle_hash NOT IN
-                 (SELECT handle_hash FROM devices WHERE token = ?1 ORDER BY used_at DESC, created_at DESC, rowid DESC LIMIT ?2)",
-            rusqlite::params![device.token, HANDLES_PER_TOKEN as i64],
+            "DELETE FROM devices WHERE platform = ?1 AND token = ?2 AND handle_hash NOT IN
+                 (SELECT handle_hash FROM devices WHERE platform = ?1 AND token = ?2 ORDER BY used_at DESC, created_at DESC, rowid DESC LIMIT ?3)",
+            rusqlite::params![platform, token, HANDLES_PER_TOKEN as i64],
         )?;
         tx.commit()
     }
@@ -286,11 +320,15 @@ fn router(relay: Arc<Relay>) -> Router {
 }
 
 pub async fn serve(settings: Settings) -> Result<()> {
+    ensure!(
+        settings.apns.is_some() || settings.fcm.is_some(),
+        "push-relay needs APNs credentials (--team-id/--key-id/--key-file), FCM credentials (--fcm-service-account-file), or both"
+    );
     std::fs::create_dir_all(&settings.state_dir)
         .with_context(|| format!("could not create {}", settings.state_dir.display()))?;
     let db = open_db(&settings.state_dir.join("relay.sqlite3"))?;
     let bases = (apns::Environment::Production.base().into(), apns::Environment::Development.base().into());
-    let relay = Relay::new(db, settings.apns, bases);
+    let relay = Relay::new(db, settings.apns, settings.fcm, bases, fcm::base_url().into());
     relay.tokens_ready()?;
     let purged = relay.purge();
     let worker = relay.clone();
@@ -307,7 +345,8 @@ pub async fn serve(settings: Settings) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen)
         .await
         .with_context(|| format!("could not listen on {}", settings.listen))?;
-    tracing::info!(listen = %settings.listen, topic = %relay.apns.topic, purged, "push relay listening");
+    let platforms = relay.platforms();
+    tracing::info!(listen = %settings.listen, ?platforms, purged, "push relay listening");
     axum::serve(listener, router(relay).into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -317,10 +356,27 @@ pub async fn serve(settings: Settings) -> Result<()> {
 }
 
 impl Relay {
-    /// Signs a provider token once at start, so a missing or wrong key stops the relay
+    fn platforms(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.apns.is_some() {
+            out.push("apns");
+        }
+        if self.fcm.is_some() {
+            out.push("fcm");
+        }
+        out
+    }
+
+    /// Checks configured credentials at start, so a missing or wrong key stops the relay
     /// before it accepts devices.
     fn tokens_ready(&self) -> Result<()> {
-        self.tokens.token(&self.apns).map(|_| ())
+        if let Some(apns) = &self.apns {
+            self.apns_tokens.token(apns)?;
+        }
+        if let Some(fcm) = &self.fcm {
+            self.fcm_tokens.check_config(fcm)?;
+        }
+        Ok(())
     }
 }
 
@@ -345,13 +401,16 @@ fn client_ip(addr: SocketAddr, headers: &HeaderMap) -> IpAddr {
 
 async fn health(State(relay): State<Arc<Relay>>) -> Json<Value> {
     let devices: i64 = relay.db.lock().query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0)).unwrap_or(0);
-    Json(json!({ "ok": true, "devices": devices }))
+    Json(json!({ "ok": true, "devices": devices, "platforms": relay.platforms() }))
 }
 
 #[derive(Deserialize)]
 struct Registration {
+    #[serde(default)]
+    platform: Option<String>,
     token: String,
-    environment: apns::Environment,
+    #[serde(default)]
+    environment: Option<apns::Environment>,
 }
 
 async fn register(
@@ -364,16 +423,43 @@ async fn register(
     if !relay.limits.lock().allow(format!("register:{ip}"), REGISTRATIONS_PER_HOUR, HOUR) {
         return error(StatusCode::TOO_MANY_REQUESTS, "Too many registrations from this address; try again later");
     }
-    let device = match apns::Device::new(&req.token, req.environment) {
-        Ok(d) => d,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    let platform = req.platform.as_deref().unwrap_or("apns");
+    let (token, environment) = match platform {
+        "apns" => {
+            if relay.apns.is_none() {
+                return error(StatusCode::SERVICE_UNAVAILABLE, "This push relay does not support Apple devices");
+            }
+            let Some(env) = req.environment else {
+                return error(StatusCode::BAD_REQUEST, "Send environment: production or development");
+            };
+            match apns::Device::new(&req.token, env) {
+                Ok(d) => (
+                    d.token,
+                    match d.environment {
+                        apns::Environment::Production => "production",
+                        apns::Environment::Development => "development",
+                    },
+                ),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        "fcm" => {
+            if relay.fcm.is_none() {
+                return error(StatusCode::SERVICE_UNAVAILABLE, "This push relay does not support Android devices");
+            }
+            match fcm::Device::new(&req.token) {
+                Ok(d) => (d.token, "production"),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+            }
+        }
+        _ => return error(StatusCode::BAD_REQUEST, "platform must be apns or fcm"),
     };
     let mut bytes = [0u8; HANDLE_BYTES];
     if SystemRandom::new().fill(&mut bytes).is_err() {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "no randomness");
     }
     let handle = URL_SAFE_NO_PAD.encode(bytes);
-    match relay.store_device(&handle, &device, Utc::now().timestamp()) {
+    match relay.store_device(&handle, platform, &token, environment, Utc::now().timestamp()) {
         Ok(_) => (StatusCode::CREATED, Json(json!({ "handle": handle }))).into_response(),
         Err(e) => {
             tracing::warn!("could not save a relay device: {e}");
@@ -451,39 +537,65 @@ async fn send_one(
             return error(StatusCode::TOO_MANY_REQUESTS, "Too many notifications; try again later");
         }
     }
-    let found: Option<(String, String)> = relay
+    let found: Option<(String, String, String)> = relay
         .db
         .lock()
-        .query_row("SELECT token, environment FROM devices WHERE handle_hash = ?1", [&key], |r| {
-            Ok((r.get(0)?, r.get(1)?))
+        .query_row("SELECT token, environment, platform FROM devices WHERE handle_hash = ?1", [&key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .ok();
-    let Some((token, environment)) = found else {
+    let Some((token, environment, platform)) = found else {
         return error(StatusCode::GONE, "Unknown device; it has to register again");
     };
-    let base = if environment == "development" { &relay.bases.1 } else { &relay.bases.0 };
-    let payload = json!({
-        "aps": {
-            "alert": { "title": "Fusebox", "body": "Open Fusebox to see what happened." },
-            "mutable-content": 1,
-            "badge": out.badge,
-            "sound": "default",
-            "thread-id": "fusebox",
-        },
-        "sealed": out.sealed,
-        "v": 1,
-    });
-    let message = apns::Message {
-        payload: &payload,
-        collapse_id: &out.collapse_id,
-        high: out.priority == "high",
-        ttl_seconds: out.ttl,
+    let delivery = if platform == "fcm" {
+        let Some(fcm_cfg) = &relay.fcm else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "This push relay does not support Android devices");
+        };
+        let data = json!({
+            "sealed": out.sealed,
+            "badge": out.badge.to_string(),
+            "v": "1",
+        });
+        let message = fcm::Message {
+            data: &data,
+            collapse_key: &out.collapse_id,
+            high: out.priority == "high",
+            ttl_seconds: out.ttl,
+        };
+        fcm::post(&relay.http, &relay.fcm_base, &relay.fcm_tokens, fcm_cfg, &token, &message).await
+    } else {
+        let Some(apns_cfg) = &relay.apns else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "This push relay does not support Apple devices");
+        };
+        let base = if environment == "development" { &relay.bases.1 } else { &relay.bases.0 };
+        let payload = json!({
+            "aps": {
+                "alert": { "title": "Fusebox", "body": "Open Fusebox to see what happened." },
+                "mutable-content": 1,
+                "badge": out.badge,
+                "sound": "default",
+                "thread-id": "fusebox",
+            },
+            "sealed": out.sealed,
+            "v": 1,
+        });
+        let message = apns::Message {
+            payload: &payload,
+            collapse_id: &out.collapse_id,
+            high: out.priority == "high",
+            ttl_seconds: out.ttl,
+        };
+        apns::post(&relay.http, base, &relay.apns_tokens, apns_cfg, &token, &message).await
     };
-    match apns::post(&relay.http, base, &relay.tokens, &relay.apns, &token, &message).await {
+    match delivery {
         Ok(StatusCode::GONE) => {
-            let n = relay.db.lock().execute("DELETE FROM devices WHERE token = ?1", [&token]).unwrap_or(0);
-            tracing::info!(handles = n, "Apple no longer knows a relay device; forgot it");
-            error(StatusCode::GONE, "Apple no longer knows this device")
+            let n = relay
+                .db
+                .lock()
+                .execute("DELETE FROM devices WHERE platform = ?1 AND token = ?2", rusqlite::params![platform, token])
+                .unwrap_or(0);
+            tracing::info!(handles = n, %platform, "push service no longer knows a relay device; forgot it");
+            error(StatusCode::GONE, "Push service no longer knows this device")
         }
         Ok(_) => {
             let now = Utc::now().timestamp();
@@ -550,15 +662,22 @@ mod tests {
     async fn registering_at_the_handle_cap_keeps_the_new_handle_when_timestamps_tie() {
         let relay = Relay::new(
             open_db(std::path::Path::new(":memory:")).unwrap(),
-            Apns { team_id: "test".into(), key_id: "test".into(), key_file: "unused".into(), topic: "test".into() },
+            Some(Apns {
+                team_id: "test".into(),
+                key_id: "test".into(),
+                key_file: "unused".into(),
+                topic: "test".into(),
+            }),
+            None,
             (String::new(), String::new()),
+            String::new(),
         );
         let device = apns::Device::new(&"c3".repeat(32), apns::Environment::Production).unwrap();
         let handles: Vec<_> =
             (0..=HANDLES_PER_TOKEN).map(|i| URL_SAFE_NO_PAD.encode([i as u8; HANDLE_BYTES])).collect();
         // Registration timestamps have second resolution. Rapid registrations can tie.
         for handle in &handles {
-            relay.store_device(handle, &device, 1_700_000_000).unwrap();
+            relay.store_device(handle, "apns", &device.token, "production", 1_700_000_000).unwrap();
         }
         let count: i64 = relay.db.lock().query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0)).unwrap();
         assert_eq!(count, HANDLES_PER_TOKEN as i64);
@@ -612,7 +731,13 @@ mod tests {
         let apple_url = format!("http://{}", listener.local_addr().unwrap());
         let apple = tokio::spawn(async move { axum::serve(listener, apple).await.unwrap() });
 
-        let relay = Relay::new(open_db(&dir.join("relay.sqlite3")).unwrap(), cfg, (apple_url.clone(), apple_url));
+        let relay = Relay::new(
+            open_db(&dir.join("relay.sqlite3")).unwrap(),
+            Some(cfg),
+            None,
+            (apple_url.clone(), apple_url),
+            String::new(),
+        );
         relay.tokens_ready().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay_url = format!("http://{}", listener.local_addr().unwrap());
@@ -699,6 +824,111 @@ mod tests {
         apple.abort();
         drop(relay);
         // Windows keeps the database open until the aborted server lets go of it.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn android_devices_receive_sealed_fcm_notifications_through_the_relay() {
+        let dir = std::env::temp_dir().join(format!("fusebox-relay-fcm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fcm_cfg = Fcm { service_account_file: "unused.json".into() };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Seen>();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fcm_mock = Router::new().route(
+            "/v1/projects/fusebox-test/messages:send",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let tx = tx.clone();
+                let calls = calls.clone();
+                async move {
+                    let _ = tx.send(Seen { path: "fcm".into(), headers, body });
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => (StatusCode::OK, r#"{"name":"projects/fusebox-test/messages/1"}"#),
+                        _ => (
+                            StatusCode::NOT_FOUND,
+                            r#"{"error":{"status":"NOT_FOUND","details":[{"errorCode":"UNREGISTERED"}]}}"#,
+                        ),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fcm_url = format!("http://{}", listener.local_addr().unwrap());
+        let fcm_server = tokio::spawn(async move { axum::serve(listener, fcm_mock).await.unwrap() });
+
+        let relay = Relay::new(
+            open_db(&dir.join("relay.sqlite3")).unwrap(),
+            None,
+            Some(fcm_cfg.clone()),
+            (String::new(), String::new()),
+            fcm_url,
+        );
+        relay.fcm_tokens.seed_test_token(&fcm_cfg, "fusebox-test", "ya29.test-token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = router(relay.clone()).into_make_service_with_connect_info::<SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let health: Value = client.get(format!("{relay_url}/healthz")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(health["platforms"], json!(["fcm"]));
+
+        // APNs is not enabled on this relay instance.
+        let apns_req = client
+            .post(format!("{relay_url}/v1/devices"))
+            .json(&json!({ "token": "c3".repeat(32), "environment": "production" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(apns_req.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Register Android device with FCM token.
+        let fcm_token = format!("fcmToken:APA91b{}", "z".repeat(48));
+        let registered: Value = client
+            .post(format!("{relay_url}/v1/devices"))
+            .json(&json!({ "platform": "fcm", "token": fcm_token }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let handle = registered["handle"].as_str().unwrap().to_string();
+        let key = [99u8; KEY_BYTES];
+        let device = Relayed::with_platform(&handle, &STANDARD.encode(key), Some("fcm")).unwrap();
+
+        let fault = Fault {
+            key: "provider:claude".into(),
+            provider: "claude".into(),
+            title: "Every Claude account is used up".into(),
+            body: "Back in 2h.".into(),
+            path: "#/accounts".into(),
+            kind: "provider",
+            level: "err",
+            ..Default::default()
+        };
+        assert_eq!(send(&client, &relay_url, &device, &fault, 1, true, 3600).await.unwrap(), StatusCode::OK);
+        let seen = rx.recv().await.unwrap();
+        assert_eq!(seen.headers["authorization"], "Bearer ya29.test-token");
+        let payload: Value = serde_json::from_slice(&seen.body).unwrap();
+        assert_eq!(payload["message"]["token"], fcm_token);
+        assert_eq!(payload["message"]["android"]["priority"], "high");
+        assert_eq!(payload["message"]["data"]["badge"], "1");
+        assert_eq!(payload["message"]["data"]["v"], "1");
+        assert!(!seen.body.windows(6).any(|w| w == b"Claude"), "FCM and relay see no plaintext");
+        let sealed = payload["message"]["data"]["sealed"].as_str().unwrap();
+        let opened: Value = serde_json::from_slice(&open(&key, sealed).unwrap()).unwrap();
+        assert_eq!(opened["title"], "Every Claude account is used up");
+        assert_eq!(opened["path"], "#/accounts");
+
+        // Second send hits UNREGISTERED -> GONE and removes the handle.
+        assert_eq!(send(&client, &relay_url, &device, &fault, 0, false, 60).await.unwrap(), StatusCode::GONE);
+        let touched = client.post(format!("{relay_url}/v1/devices/{handle}/touch")).send().await.unwrap();
+        assert_eq!(touched.status(), reqwest::StatusCode::GONE);
+
+        server.abort();
+        fcm_server.abort();
+        drop(relay);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -88,7 +88,10 @@ pub struct Config {
     /// Native push for the Fusebox iPhone app, through Apple's push service.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apns: Option<Apns>,
-    /// The push relay iPhone apps without `apns` get their notifications through;
+    /// Native push for the Fusebox Android app, through Firebase Cloud Messaging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fcm: Option<Fcm>,
+    /// The push relay mobile apps without direct push keys get their notifications through;
     /// empty turns it off.
     #[serde(skip_serializing_if = "is_default_push_relay")]
     pub push_relay: String,
@@ -347,6 +350,14 @@ pub struct Apns {
     pub topic: String,
 }
 
+/// Direct Firebase Cloud Messaging push for the Android app, using a Firebase Admin SDK
+/// service account JSON key file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Fcm {
+    pub service_account_file: String,
+}
+
 fn is_default_push_relay(url: &String) -> bool {
     url == crate::push::relay::DEFAULT_URL
 }
@@ -480,6 +491,7 @@ impl Default for Config {
             tls: Tls::default(),
             notifications: Notifications::default(),
             apns: None,
+            fcm: None,
             push_relay: crate::push::relay::DEFAULT_URL.into(),
             force_model_prefix: false,
             oauth_model_alias: BTreeMap::new(),
@@ -603,7 +615,12 @@ usage:
 #   key-file: /path/to/AuthKey_KEY1234567.p8
 #   topic: com.digitalpals.fusebox   # the app's bundle ID
 #
-# Without apns, the app gets them through the Fusebox push relay, sealed so the relay
+# Direct notifications for the Fusebox Android app, sent through Firebase Cloud Messaging
+# with a Firebase service account JSON key.
+# fcm:
+#   service-account-file: /path/to/firebase-service-account.json
+#
+# Without apns or fcm, the apps get them through the Fusebox push relay, sealed so the relay
 # can't read them. Another relay, or "" to turn it off:
 # push-relay: https://push.whombat.com
 
@@ -929,6 +946,12 @@ impl Config {
             anyhow::ensure!(!apns.key_file.trim().is_empty(), "apns.key-file: name the .p8 key file");
             anyhow::ensure!(!apns.topic.trim().is_empty(), "apns.topic: name the app's bundle ID");
         }
+        if let Some(fcm) = &cfg.fcm {
+            anyhow::ensure!(
+                !fcm.service_account_file.trim().is_empty(),
+                "fcm.service-account-file: name the Firebase service account JSON file"
+            );
+        }
         if !cfg.push_relay.is_empty() {
             let url = url::Url::parse(&cfg.push_relay).map_err(|_| anyhow::anyhow!("push-relay: not a URL"))?;
             anyhow::ensure!(url.scheme() == "https" || url.host_str() == Some("127.0.0.1"), "push-relay: use https");
@@ -1130,6 +1153,19 @@ mod tests {
             assert!(format!("{:#}", Config::parse(text).unwrap_err()).contains(problem), "{text}");
         }
         assert!(Config::parse("apns: {team-id: ABCDE12345, key-id: KEY1234567, key-file: k.p8, key: x}").is_err());
+    }
+
+    #[test]
+    fn fcm_settings_are_checked() {
+        let cfg = Config::parse("fcm:\n  service-account-file: /etc/fusebox/firebase.json\n").unwrap();
+        assert_eq!(cfg.fcm.as_ref().unwrap().service_account_file, "/etc/fusebox/firebase.json");
+        assert!(Config::parse("").unwrap().fcm.is_none());
+        assert!(!crate::yaml::to_string(&Config::default()).unwrap().contains("fcm"), "unset, it isn't written");
+        assert!(
+            format!("{:#}", Config::parse("fcm: {service-account-file: ' '}").unwrap_err())
+                .contains("service-account-file")
+        );
+        assert!(Config::parse("fcm: {service-account-file: f.json, extra: 1}").is_err());
     }
 
     #[test]
