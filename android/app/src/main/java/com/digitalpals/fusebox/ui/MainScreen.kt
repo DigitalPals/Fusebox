@@ -1,8 +1,10 @@
 package com.digitalpals.fusebox.ui
 
+import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,9 +31,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -61,11 +66,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.digitalpals.fusebox.R
 import com.digitalpals.fusebox.data.AppStore
+import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.DeepLink
+import com.digitalpals.fusebox.data.UpdateUiState
 import com.digitalpals.fusebox.data.UsageDashboard
 import com.digitalpals.fusebox.data.UsageSpeed
 import com.digitalpals.fusebox.push.PushManager
 import com.digitalpals.fusebox.ui.adaptive.LocalFoldableState
+import com.digitalpals.fusebox.ui.components.FuseButton
+import com.digitalpals.fusebox.ui.components.FuseButtonKind
 import com.digitalpals.fusebox.ui.components.Hairline
 import com.digitalpals.fusebox.ui.screens.AccountsScreen
 import com.digitalpals.fusebox.ui.screens.ConnectScreen
@@ -98,12 +107,15 @@ fun MainScreen(
     pushManager: PushManager,
     pendingLink: DeepLink?,
     onConsumeLink: () -> Unit,
+    updater: AppUpdater? = null,
     demoUsage: UsageDashboard? = null,
     demoSpeed: UsageSpeed? = null,
 ) {
     val state by store.state.collectAsState()
+    val updateState = updater?.state?.collectAsState()?.value
     val foldable = LocalFoldableState.current
     val colors = LocalFuseboxColors.current
+    val activity = LocalContext.current as? Activity
 
     if (!state.isConnected) {
         ConnectScreen(
@@ -206,8 +218,23 @@ fun MainScreen(
                 state = state,
                 store = store,
                 pushManager = pushManager,
+                updater = updater,
             )
         }
+    }
+
+    @Composable
+    fun UpdateBannerSlot() {
+        if (currentTab == AppTab.SETTINGS) return
+        val u = updateState ?: return
+        val upd = updater ?: return
+        if (!u.showBanner) return
+        UpdateAvailableBanner(
+            state = u,
+            onInstall = { activity?.let { upd.downloadAndInstall(it) } },
+            onDismiss = { upd.dismissBanner() },
+        )
+        Hairline()
     }
 
     if (foldable.useNavigationRail) {
@@ -236,6 +263,7 @@ fun MainScreen(
                     onOpenFaults = { faultsSheetOpen = true },
                 )
                 Hairline()
+                UpdateBannerSlot()
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     PageContent()
                 }
@@ -260,6 +288,7 @@ fun MainScreen(
                     )
                 }
                 Hairline()
+                UpdateBannerSlot()
             } else {
                 Spacer(Modifier.statusBarsPadding())
             }
@@ -485,5 +514,111 @@ private fun FuseboxNavRail(
         }
         Spacer(Modifier.weight(1f))
         FaultsHeaderButton(count = faultsCount, hasErr = hasErrFault, onClick = onOpenFaults)
+    }
+}
+
+@Composable
+private fun UpdateAvailableBanner(
+    state: UpdateUiState,
+    onInstall: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val info = state.available ?: return
+    val colors = LocalFuseboxColors.current
+    val sizeText = if (info.sizeBytes > 0L) {
+        String.format(java.util.Locale.US, "%.1f MB", info.sizeBytes / (1024.0 * 1024.0))
+    } else {
+        null
+    }
+    val subtitle = when {
+        state.error != null -> state.error
+        state.downloading && state.downloadProgress >= 0f ->
+            "Downloading · ${(state.downloadProgress * 100).toInt()}%"
+        state.downloading -> "Downloading…"
+        state.needsInstallPermission -> "Allow installs from Fusebox, then tap Install"
+        state.downloadedVersion == info.version -> "Downloaded · ready to install"
+        else -> listOfNotNull(sizeText, "Sideload release").joinToString(" · ")
+    }
+    val actionLabel = when {
+        state.downloading -> "${(state.downloadProgress.coerceAtLeast(0f) * 100).toInt()}%"
+        state.downloadedVersion == info.version -> "Install"
+        else -> "Update"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.surface)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.SystemUpdateAlt,
+                contentDescription = null,
+                tint = colors.fg,
+                modifier = Modifier.size(18.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    text = "Fusebox ${info.version} available",
+                    style = Typeface.rowMedium,
+                    color = colors.fg,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    style = Typeface.small,
+                    color = if (state.error != null) colors.err else colors.fg3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            FuseButton(
+                text = actionLabel,
+                kind = FuseButtonKind.PRIMARY,
+                enabled = !state.downloading,
+                onClick = onInstall,
+            )
+            if (!state.downloading) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, colors.line, RoundedCornerShape(6.dp))
+                        .clickable(onClick = onDismiss)
+                        .semantics { contentDescription = "Dismiss update" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = "Dismiss update",
+                        tint = colors.fg3,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+            }
+        }
+        if (state.downloading && state.downloadProgress >= 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(colors.line),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(state.downloadProgress.coerceIn(0.02f, 1f))
+                        .fillMaxHeight()
+                        .background(colors.meter),
+                )
+            }
+        }
     }
 }

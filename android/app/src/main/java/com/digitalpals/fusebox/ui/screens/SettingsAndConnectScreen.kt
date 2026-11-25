@@ -1,6 +1,7 @@
 package com.digitalpals.fusebox.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -46,6 +48,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -61,6 +64,7 @@ import com.digitalpals.fusebox.BuildConfig
 import com.digitalpals.fusebox.R
 import com.digitalpals.fusebox.data.AppStore
 import com.digitalpals.fusebox.data.AppUiState
+import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.ConnectionHelper
 import com.digitalpals.fusebox.data.Fmt
 import com.digitalpals.fusebox.data.FuseboxApi
@@ -214,12 +218,15 @@ fun SettingsScreen(
     state: AppUiState,
     store: AppStore,
     pushManager: PushManager,
+    updater: AppUpdater? = null,
     contentPadding: PaddingValues = PaddingValues(16.dp),
 ) {
     val colors = LocalFuseboxColors.current
     val context = LocalContext.current
+    val activity = context as? Activity
     val scope = rememberCoroutineScope()
     val push by pushManager.state.collectAsState()
+    val updateState = updater?.state?.collectAsState()?.value
     var confirmSignOut by remember { mutableStateOf(false) }
     var removingDevice by remember { mutableStateOf<PushStatus.Device?>(null) }
 
@@ -425,6 +432,86 @@ fun SettingsScreen(
                             contentDesc = "Live countdown when a provider runs out",
                             onCheckedChange = { store.setOutageAlertsEnabled(it) },
                         )
+                    }
+                }
+            }
+
+            // In-app updates (sideload builds only; automatically hidden on Play Store installs)
+            if (updater != null && updateState != null && updateState.supported) {
+                SettingsSection(
+                    title = "Updates",
+                    note = "Checks DigitalPals/Fusebox GitHub releases (android-v*) and verifies SHA-256 before installing.",
+                ) {
+                    CardPanel(spacing = 10.dp) {
+                        val avail = updateState.available
+                        val statusText = when {
+                            updateState.error != null -> updateState.error
+                            updateState.downloading && updateState.downloadProgress >= 0f ->
+                                "Downloading ${avail?.version.orEmpty()} · ${(updateState.downloadProgress * 100).toInt()}%"
+                            updateState.downloading -> "Downloading ${avail?.version.orEmpty()}…"
+                            updateState.needsInstallPermission ->
+                                "Allow “Install unknown apps” for Fusebox, then tap Install."
+                            updateState.checking -> "Checking GitHub releases…"
+                            avail != null -> {
+                                val mb = if (avail.sizeBytes > 0L) {
+                                    String.format(java.util.Locale.US, " · %.1f MB", avail.sizeBytes / (1024.0 * 1024.0))
+                                } else {
+                                    ""
+                                }
+                                "Version ${avail.version} available$mb"
+                            }
+                            updateState.statusMessage != null -> updateState.statusMessage
+                            else -> "Installed ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("App updates", style = Typeface.row, color = colors.fg)
+                                Text(
+                                    text = statusText,
+                                    style = Typeface.small,
+                                    color = if (updateState.error != null) colors.err else colors.fg3,
+                                )
+                            }
+                            if (avail != null) {
+                                val btnLabel = when {
+                                    updateState.downloading -> "${(updateState.downloadProgress.coerceAtLeast(0f) * 100).toInt()}%"
+                                    updateState.downloadedVersion == avail.version -> "Install ${avail.version}"
+                                    else -> "Update to ${avail.version}"
+                                }
+                                FuseButton(
+                                    text = btnLabel,
+                                    kind = FuseButtonKind.PRIMARY,
+                                    enabled = !updateState.downloading,
+                                    onClick = { activity?.let { updater.downloadAndInstall(it) } },
+                                )
+                            } else {
+                                FuseButton(
+                                    text = if (updateState.checking) "Checking…" else "Check now",
+                                    enabled = !updateState.checking,
+                                    onClick = { scope.launch { updater.checkForUpdates(manual = true) } },
+                                )
+                            }
+                        }
+                        if (updateState.downloading && updateState.downloadProgress >= 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(colors.line),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(updateState.downloadProgress.coerceIn(0.02f, 1f))
+                                        .fillMaxHeight()
+                                        .background(colors.meter),
+                                )
+                            }
+                        }
                     }
                 }
             }

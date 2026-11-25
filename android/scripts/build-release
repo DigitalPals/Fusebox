@@ -4,11 +4,12 @@
 #   - Google Play AAB: android/app/build/outputs/bundle/release/
 #
 # Usage:
-#   android/scripts/build-release [--apk-only] [--skip-tests] [--version 1.0.0] [--code 1]
+#   android/scripts/build-release [--apk-only] [--play] [--skip-tests] [--version 1.0.2] [--code 3]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK_ONLY=0
+PLAY_STORE=0
 SKIP_TESTS=0
 VERSION=""
 CODE=""
@@ -16,6 +17,7 @@ CODE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apk-only) APK_ONLY=1; shift ;;
+    --play) PLAY_STORE=1; shift ;;
     --skip-tests) SKIP_TESTS=1; shift ;;
     --version) VERSION="${2:?--version requires a value}"; shift 2 ;;
     --code) CODE="${2:?--code requires a value}"; shift 2 ;;
@@ -36,6 +38,7 @@ fi
 ARGS=()
 [[ -n "$VERSION" ]] && ARGS+=("-PfuseboxVersionName=$VERSION")
 [[ -n "$CODE" ]] && ARGS+=("-PfuseboxVersionCode=$CODE")
+[[ "$PLAY_STORE" -eq 1 ]] && ARGS+=("-PfuseboxPlayStore=true")
 
 TASKS=()
 [[ "$SKIP_TESTS" -eq 0 ]] && TASKS+=(testDebugUnitTest)

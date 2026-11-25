@@ -64,10 +64,22 @@ cd android
 Or use the convenience build script:
 
 ```sh
-android/scripts/build-release                    # unit tests + release APK (sideload) + AAB (Play)
-android/scripts/build-release --apk-only         # sideload APK only
-android/scripts/build-release --version 1.0.0 --code 2
+android/scripts/build-release                    # unit tests + sideload APK + AAB
+android/scripts/build-release --apk-only         # sideload APK only (with in-app updater)
+android/scripts/build-release --play             # Play Store AAB (strips REQUEST_INSTALL_PACKAGES)
+android/scripts/build-release --version 1.0.2 --code 3
 ```
+
+### In-app updates (sideload builds)
+
+Sideloaded builds automatically check `DigitalPals/Fusebox` GitHub releases (`android-v*`) at most
+once every 6 hours (and on demand under **Settings → Updates**). When a newer `.apk` release exists,
+a banner appears with one-tap download, SHA-256 verification (against the release notes' `SHA-256`
+line), and hand-off to Android's package installer via `FileProvider`.
+
+Play Store builds (`-PfuseboxPlayStore=true` / `--play`) and any app installed from Google Play
+(`com.android.vending`) automatically disable self-updates and strip `REQUEST_INSTALL_PACKAGES` from
+the manifest so Google Play handles updates cleanly.
 
 Outputs are written to `android/app/build/outputs/apk/release/` (sideload APK) and
 `android/app/build/outputs/bundle/release/` (Play Store AAB).
