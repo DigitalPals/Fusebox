@@ -156,7 +156,7 @@ const Usage = {
 const ux = UsageTools.escape;
 const usageCount = UsageTools.count;
 const usageSensitive = (value) => ux(UsageTools.privateLabel(value, S.private));
-const usageSource = (source) => ({ proxy: 'Proxy', claude_code: 'Claude Code history', codex: 'Codex history' }[source] || source || 'Unknown source');
+const usageSource = (source) => ({ proxy: 'Proxy', claude_code: 'Claude Code history', codex: 'Codex history', antigravity: 'Antigravity history' }[source] || source || 'Unknown source');
 const usageTime = (value) => value == null || value === 0 ? 'Not reported' : UsageTools.timeText(value, Usage.timezone, 'timestamp', 'Not reported');
 const usageClock = (value) => value == null || value === 0 ? 'Not reported' : UsageTools.timeText(value, Usage.timezone, 'clock');
 const usageButton = (act, label, extra = '', disabled = false, cls = 'btn') => `<button class="${cls}" type="button" data-usage-act="${act}" ${extra}${disabled || Usage.busy ? ' disabled' : ''}>${label}</button>`;
@@ -263,7 +263,7 @@ function usageHeadHTML() {
     return `<div class="u-head">${presets}${custom}<div class="u-headline">${usageBoundary()}${collection}</div>${pills ? `<div class="u-pills">${pills}</div>` : ''}</div>`;
   }
   return `<div class="u-head">
-    <div class="u-titlerow"><div class="u-title"><h1 class="h-page">Usage</h1><p class="meta">What your traffic would cost at published API prices, in USD. Proxy traffic and imported Claude Code and Codex history are combined, with each call counted once. An estimate, not a subscription bill.</p></div>${presets}${collection}</div>
+    <div class="u-titlerow"><div class="u-title"><h1 class="h-page">Usage</h1><p class="meta">What your traffic would cost at published API prices, in USD. Proxy traffic and imported Claude Code, Codex and Antigravity history are combined, with each call counted once. An estimate, not a subscription bill.</p></div>${presets}${collection}</div>
     ${custom}
     <div class="u-filterrow">${pills ? `${pills}<button class="u-clear" type="button" data-usage-act="clear-filters">Clear filters</button>` : '<span class="meta">All models, accounts, providers and clients. Click a row in the breakdown to narrow it down.</span>'}<span class="grow"></span>${usageBoundary()}${refresh}</div>
   </div>`;
@@ -798,7 +798,7 @@ function usageDrawerHTML() {
         ${usageDatabaseHTML(status?.database)}
         ${gaps || health.recovery_warning ? `<div class="notice warn"><span class="dot s7 warn"></span><span class="grow">${ux(gapText)}${health.recovery_warning ? `${gaps ? ' ' : ''}An earlier or concurrent writer may have left usage uncommitted.` : ''}</span></div>` : ''}
         <span class="meta">Proxy records count once they are committed to disk. Gaps and writer errors can make totals incomplete.</span></div>
-      <div class="block"><span class="label">LOCAL HISTORY IMPORTS</span><span class="meta">Reads usage metadata from Claude Code or Codex history on this server and rescans about every 30 seconds. Each record keeps the time it happened, not the time it was imported. No transcript content is stored.</span>${['claude_code', 'codex'].map(usageImportHTML).join('')}</div>
+      <div class="block"><span class="label">LOCAL HISTORY IMPORTS</span><span class="meta">Reads usage metadata from Claude Code, Codex or Antigravity history on this server and rescans about every 30 seconds. Each record keeps the time it happened, not the time it was imported. No transcript content is stored.</span>${['claude_code', 'codex', 'antigravity'].map(usageImportHTML).join('')}</div>
       <div class="block"><span class="label">COLLECTORS</span><span class="meta">Send usage metadata from another machine. Each credential is shown once. Last contact is a health signal; last sync reports durable ingestion.</span>
         <form id="usage-enroll" class="u-inline"><input name="label" type="${S.private ? 'password' : 'text'}" value="${S.private ? '' : ux(Usage.collectorDraft)}" placeholder="${S.private ? 'Label hidden' : 'Label, e.g. Work laptop'}" aria-label="Collector label" maxlength="120" required autocomplete="off"${Usage.busy ? ' disabled' : ''}><button class="btn" type="submit"${Usage.busy ? ' disabled' : ''}>Enroll collector</button></form>
         ${usageCredentialHTML()}
@@ -824,7 +824,8 @@ function usageImportHTML(source) {
     <span class="meta">${item.imported ? `${usageCount(item.imported)} imported · ${usageCount(item.duplicate)} duplicates · ${usageCount(item.skipped)} skipped · ${usageCount(item.unsupported)} unsupported · ${usageCount(item.failed)} failed` : 'Nothing imported yet'} · last scan ${ux(usageTime(item.last_scan_at_ms))}</span>
     ${item.last_error ? `<span class="err meta">${S.private ? 'Import error; details hidden' : ux(item.last_error)}</span>` : ''}
     <div class="u-actions">${usageButton('scan', 'Scan now', `data-source="${source}"`, !item.enabled, 'btn sm')}${usageButton('toggle-import', item.enabled ? 'Disable' : 'Enable', `data-index="${index}"`, false, 'btn sm')}</div></div>`).join('');
-  const form = `<form data-usage-import="${source}" class="u-inline"><input name="root" type="${S.private ? 'password' : 'text'}" autocomplete="off" spellcheck="false" aria-label="${ux(usageSource(source))} root on the server" placeholder="${S.private ? 'Path hidden · enter a root' : source === 'claude_code' ? '/path/to/.claude/projects' : '/path/to/.codex/sessions'}" value="${S.private ? '' : ux(Usage.roots[source] || '')}"${Usage.busy ? ' disabled' : ''}><button class="btn" type="submit"${Usage.busy ? ' disabled' : ''}>Enable import</button></form>`;
+  const rootPlaceholder = { claude_code: '/path/to/.claude/projects', codex: '/path/to/.codex/sessions', antigravity: '/path/to/antigravity/brain' }[source] || '/path/to/history';
+  const form = `<form data-usage-import="${source}" class="u-inline"><input name="root" type="${S.private ? 'password' : 'text'}" autocomplete="off" spellcheck="false" aria-label="${ux(usageSource(source))} root on the server" placeholder="${S.private ? 'Path hidden · enter a root' : rootPlaceholder}" value="${S.private ? '' : ux(Usage.roots[source] || '')}"${Usage.busy ? ' disabled' : ''}><button class="btn" type="submit"${Usage.busy ? ' disabled' : ''}>Enable import</button></form>`;
   if (!roots.length) return `<div class="u-import"><div class="statline"><span class="dot s7 idle"></span><span class="u-strong">${ux(usageSource(source))}</span><span class="grow"></span><span class="fg2">Not set up</span></div>${form}</div>`;
   return `<div class="u-import">${list}${enabled ? '' : form}</div>`;
 }
