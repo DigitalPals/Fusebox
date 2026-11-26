@@ -1679,6 +1679,124 @@ async fn overload_errors_expire_without_another_inference_over_http_and_streams(
     }
 }
 
+/// Anthropic's overload often arrives as an `error` event in a stream it already opened
+/// with a 200, before any text. The client has seen nothing, so the same account is asked
+/// again with growing waits: the session keeps its account and prompt cache, and a lone
+/// account rides out a short burst instead of failing at once. Only an overload that
+/// outlasts the retries reaches the client, or moves the request to another account.
+#[tokio::test]
+async fn an_overload_rides_out_on_the_same_account_over_http_and_streams() {
+    let fixture = Fixture::new(Routing::RoundRobin, false).await;
+    // How many more calls are refused as overloaded, and whether inside a stream.
+    let overloads = Arc::new(Mutex::new(0u64));
+    let in_stream = Arc::new(AtomicBool::new(true));
+    let (anthropic, calls) = scripted({
+        let (overloads, in_stream) = (overloads.clone(), in_stream.clone());
+        move |account| {
+            let overloaded = account == "a" && {
+                let mut left = overloads.lock();
+                let met = *left > 0;
+                *left = left.saturating_sub(1);
+                met
+            };
+            let error = json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}});
+            if overloaded && !in_stream.load(Ordering::Relaxed) {
+                return (StatusCode::from_u16(529).unwrap(), Json(error)).into_response();
+            }
+            let start = json!({"type":"message_start","message":{"id":"msg","type":"message","role":"assistant",
+                "model":"claude-opus-5-5","content":[],"usage":{"input_tokens":1,"output_tokens":0}}});
+            let mut events = vec![("message_start", start)];
+            if overloaded {
+                events.push(("error", error));
+            } else {
+                events.extend([
+                    (
+                        "content_block_start",
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":account}}),
+                    ),
+                    ("content_block_stop", json!({"type":"content_block_stop","index":0})),
+                    (
+                        "message_delta",
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+                    ),
+                    ("message_stop", json!({"type":"message_stop"})),
+                ]);
+            }
+            let sse: String =
+                events.into_iter().map(|(name, data)| format!("event: {name}\ndata: {data}\n\n")).collect();
+            ([("content-type", "text/event-stream")], sse).into_response()
+        }
+    })
+    .await;
+    let mut cfg = fixture.cfg.clone();
+    cfg.claude_api_key = std::mem::take(&mut cfg.codex_api_key);
+    for key in &mut cfg.claude_api_key {
+        key.base_url = Some(anthropic.url.clone());
+    }
+    let mut one = cfg.clone();
+    one.claude_api_key.truncate(1);
+    let ask = || async {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/messages", fixture.proxy.url))
+            .header("x-api-key", "client-one")
+            .header("x-claude-code-session-id", "task")
+            .json(&json!({"model":"claude-opus-5-5","max_tokens":16,"stream":true,
+                "messages":[{"role":"user","content":"question"}]}))
+            .send()
+            .await
+            .unwrap();
+        (response.status().as_u16(), response.text().await.unwrap())
+    };
+    let answered_by = |text: &str| {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+            .find_map(|v| v["delta"]["text"].as_str().map(String::from))
+    };
+    let called = |from: usize| calls.lock()[from..].to_vec();
+
+    // One account, four overloads in a row, inside the stream and over plain HTTP: it answers.
+    fixture.app.set_config(one.clone());
+    for stream in [true, false] {
+        in_stream.store(stream, Ordering::Relaxed);
+        *overloads.lock() = 4;
+        let before = calls.lock().len();
+        let (status, text) = ask().await;
+        assert_eq!(status, 200, "stream {stream}: {text}");
+        assert_eq!(answered_by(&text).as_deref(), Some("a"), "{text}");
+        assert_eq!(called(before), ["a"; 5], "stream {stream}");
+        let account = fixture.app.pool.all().into_iter().next().unwrap();
+        assert_eq!(account.snapshot()["last_error"], Value::Null, "a ridden-out overload marks nothing");
+    }
+
+    // With two accounts the session stays on its own through a short burst...
+    fixture.app.set_config(cfg);
+    in_stream.store(true, Ordering::Relaxed);
+    *overloads.lock() = 2;
+    let before = calls.lock().len();
+    let (status, text) = ask().await;
+    assert_eq!((status, answered_by(&text).as_deref()), (200, Some("a")), "{text}");
+    assert_eq!(called(before), ["a"; 3]);
+    // ...and moves on only once the overload outlasts every retry.
+    *overloads.lock() = u64::MAX;
+    let before = calls.lock().len();
+    let (status, text) = ask().await;
+    assert_eq!((status, answered_by(&text).as_deref()), (200, Some("b")), "{text}");
+    assert_eq!(called(before), ["a", "a", "a", "a", "a", "a", "b"], "one call and five retries");
+
+    // Alone, a lasting overload reaches the client as Anthropic's own 529.
+    fixture.app.set_config(one);
+    let before = calls.lock().len();
+    let (status, text) = ask().await;
+    assert_eq!(status, 529, "{text}");
+    assert!(text.contains("overloaded"), "{text}");
+    assert_eq!(called(before), ["a"; 6]);
+}
+
 #[tokio::test]
 async fn connection_errors_expire_without_another_inference() {
     use tokio::io::AsyncReadExt;
