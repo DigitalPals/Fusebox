@@ -20,7 +20,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 
 <br>
 
-<img src="assets/screenshots/overview.png" alt="Fusebox dashboard: an hour of load, every subscription's 5-hour and weekly limits with its plan, and each provider's combined weekly limit with a forecast" width="100%">
+<img src="assets/screenshots/overview.png" alt="Fusebox dashboard: an hour of load and every subscription's 5-hour and weekly limits with its plan" width="100%">
 
 <br>
 
@@ -32,7 +32,7 @@ Point Claude Code, Codex, your editor or any SDK at one URL and stop caring whic
 - **Many accounts, no babysitting.** Each new coding session goes to the account with the most quota left and stays there, so its prompt cache keeps paying off. Used-up accounts sit out until they reset, failed requests move to the next account (even mid-stream), and sign-ins refresh themselves.
 - **A key per tool.** Each machine or tool gets its own key, with its own models, request rate, daily tokens, monthly budget and end date. Model groups give one name to several models that back each other up.
 - **Images, video and WebSockets.** Image generation and edits, xAI video, and Codex's WebSocket sessions, relayed natively.
-- **A dashboard you'll actually open.** Live 5-hour and weekly limits for every subscription, a forecast of whether the week's quota will last, a request log that explains each routing decision, cost per client, and a config editor. It works on a phone, and installs as an app with push notifications.
+- **A dashboard you'll actually open.** Live 5-hour and weekly limits for every subscription, a request log that explains each routing decision, cost per client, and a config editor. It works on a phone, and installs as an app with push notifications.
 - **Drop-in for CLIProxyAPI.** Same credential files, `config.yaml`, Docker paths and flags.
 
 ## Install
@@ -183,7 +183,7 @@ gemini-api-key:
 | --- | --- |
 | [Install and run](docs/install.md) | Binary, Docker, CLIProxyAPI, servers, HTTPS, monitoring |
 | [Tools, endpoints and models](docs/api.md) | Client setup, endpoints, providers, new models, images |
-| [The dashboard](docs/dashboard.md) | Quota meters, forecast, notifications, banked resets |
+| [The dashboard](docs/dashboard.md) | Quota meters, notifications, banked resets |
 | [Configuration](docs/configuration.md) | Settings, clients and their limits, model groups |
 | [Routing, retries and sessions](docs/routing.md) | Account choice, failover, prompt caching |
 | [Notifications](docs/notifications.md) · [Moving Fusebox](docs/moving.md) · [Source addresses](docs/source-addresses.md) | |

@@ -84,9 +84,11 @@ final class ScreenshotTests: XCTestCase {
     func testTour() throws {
         app.launch()
         waitForData()
-        // The scene restores where it was left; start the tour on the Overview.
-        if !app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 5) { tab("Overview") }
-        XCTAssertTrue(app.descendants(matching: .any)["combined-weekly"].waitForExistence(timeout: 20))
+        // The scene restores where it was left; start the tour on the Overview, whose
+        // subscription rows appear nowhere else.
+        let subscription = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'subscription-'")).firstMatch
+        if !subscription.waitForExistence(timeout: 5) { tab("Overview") }
+        XCTAssertTrue(subscription.waitForExistence(timeout: 20))
         sleep(1)
         shot("01-overview")
         app.swipeUp()
@@ -316,7 +318,7 @@ final class ScreenshotTests: XCTestCase {
         XCUIDevice.shared.press(.home)
     }
 
-    /// Adds the Combined weekly widget to the home screen through the widget gallery and
+    /// Adds the Subscription widget to the home screen through the widget gallery and
     /// photographs it. Springboard's gallery changes between iOS versions: best effort.
     func testAddWidget() throws {
         app.launch()

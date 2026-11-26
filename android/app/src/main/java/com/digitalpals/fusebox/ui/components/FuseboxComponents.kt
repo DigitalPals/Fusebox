@@ -724,7 +724,6 @@ fun MeterRow(
     mode: QuotaDisplay,
     resetsAt: Instant? = null,
     window: QuotaWindow? = null,
-    runsOutEarly: Boolean = false,
     labelWidth: Dp = 28.dp,
     child: Boolean = false,
     now: Instant = rememberTicker(),
@@ -748,7 +747,7 @@ fun MeterRow(
         }
         targetReset != null && targetReset.isAfter(now) -> {
             resetText = "↺ ${Fmt.compactLeft(targetReset, now)}"
-            resetColor = if (runsOutEarly) colors.warn else childTint ?: colors.fg3
+            resetColor = childTint ?: colors.fg3
         }
         else -> {
             resetText = ""

@@ -70,11 +70,10 @@ public struct Overview: Codable, Sendable, Equatable {
     public var active: Int?
     public var series: [MinuteBucket]?
     public var accounts: AccountSummary?
-    public var pools: [Pool]?
     public var models: Int?
 
     enum CodingKeys: String, CodingKey {
-        case version, routing, totals, active, series, accounts, pools, models
+        case version, routing, totals, active, series, accounts, models
         case startedAt = "started_at", bankedResets = "banked_resets", sessionAffinity = "session_affinity"
         case managementKey = "management_key"
     }
@@ -84,46 +83,6 @@ public struct Overview: Codable, Sendable, Equatable {
         public var active: Int?
         public var cooling: Int?
         public var disabled: Int?
-    }
-}
-
-/// A provider's subscriptions together, per window: the dashboard's combined limits.
-public struct Pool: Codable, Sendable, Equatable, Identifiable {
-    public var provider: String
-    public var window: String
-    public var model: String?
-    public var accounts: Int
-    public var accountIDs: [String]?
-    public var reported: Int
-    public var used: Double?
-    public var pace: Double?
-    public var priced: Bool?
-    public var runsOutEarly: Bool?
-    public var until: Date?
-    public var outlook: Outlook?
-
-    public var id: String { "\(provider):\(window):\(model ?? "")" }
-
-    enum CodingKeys: String, CodingKey {
-        case provider, window, model, accounts, reported, used, pace, priced, until, outlook
-        case accountIDs = "account_ids", runsOutEarly = "runs_out_early"
-    }
-
-    public struct Outlook: Codable, Sendable, Equatable {
-        public var state: String?
-        public var reason: String?
-        public var nextResetAt: Date?
-        public var exhaustsAt: Date?
-        public var recoversAt: Date?
-        public var learningUntil: Date?
-        public var ratePerDay: Double?
-        public var observedHours: Double?
-
-        enum CodingKeys: String, CodingKey {
-            case state, reason
-            case nextResetAt = "next_reset_at", exhaustsAt = "exhausts_at", recoversAt = "recovers_at"
-            case learningUntil = "learning_until", ratePerDay = "rate_per_day", observedHours = "observed_hours"
-        }
     }
 }
 

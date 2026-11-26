@@ -54,7 +54,6 @@ data class AppUiState(
     val demoMode: Boolean = false,
 ) {
     val badgeCount: Int get() = faults.count { it.countsOnBadge }
-    val weeklyPools: List<WeeklyPool> get() = WeeklyPool.weekly(overview, accounts)
     val subscriptions: List<Account> get() = accounts.filter { it.metered && !it.disabled }
     val otherCircuits: List<Account> get() = accounts.filter { !it.metered && !it.disabled }
 

@@ -698,7 +698,8 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "active": app.stats.active.load(Ordering::Relaxed),
         "series": app.stats.series(),
         "accounts": { "total": accounts.len(), "active": active, "cooling": cooling, "disabled": disabled, "signin": signin, "providers": providers },
-        // Each provider's subscriptions together, per window: the dashboard's combined limits.
+        // Each provider's subscriptions together, per window, as the pace faults see them.
+        // Older iOS and Android builds still draw them.
         "pools": crate::push::current_pools(&app),
         "models": app.pool.models().len(),
         "config_path": app.cfg_path.display().to_string(),
@@ -2686,11 +2687,8 @@ mod tests {
         let app = App::new(cfg, "/nonexistent/config.yaml".into());
         let resets = chrono::Utc::now() + chrono::Duration::days(3);
         for (a, used) in app.pool.all().iter().zip([90.0, 60.0]) {
-            let mut state = a.state.lock();
-            state.quota.windows =
+            a.state.lock().quota.windows =
                 vec![crate::quota::Window { name: "week".into(), used, resets_at: Some(resets), model: None }];
-            state.attribution.history =
-                vec![crate::outlook::test_history(&state.quota.windows[0], chrono::Utc::now(), 20.0)];
         }
         let Json(view) = overview(State(app.clone())).await;
         let [pool] = view["pools"].as_array().unwrap().as_slice() else { panic!("one pool: {}", view["pools"]) };
@@ -2701,9 +2699,6 @@ mod tests {
         );
         assert_eq!((pool["priced"].as_bool(), pool["runs_out_early"].as_bool()), (Some(false), Some(true)));
         assert_eq!(pool["until"], resets.to_rfc3339());
-        assert_eq!(pool["outlook"]["state"], "run_out");
-        assert_eq!(pool["outlook"]["min_remaining"], 0.0);
-        assert_eq!(pool["outlook"]["recovers_at"], json!(resets));
         let faults = crate::push::current_faults(&app);
         let pace: Vec<&Value> = faults.as_array().unwrap().iter().filter(|f| f["kind"] == "pace").collect();
         assert_eq!(pace.len(), 1);

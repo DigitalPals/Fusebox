@@ -35,7 +35,7 @@ until it is signed in again. Run one proxy per auth directory.
      lift early: accounts are tried again, and one held out after failed
      refreshes is retried.
    - `.quota-attribution.state` — which clients and sessions used each quota
-     window, and the weekly outlook history. Lost, the history starts again.
+     window. Lost, it starts again.
    - `.routing-sessions.state` — coding-session account assignments. Lost,
      sessions move accounts and lose their prompt caches.
    - `.quota.state` — last quota readings, including confirmed no-5h-limit

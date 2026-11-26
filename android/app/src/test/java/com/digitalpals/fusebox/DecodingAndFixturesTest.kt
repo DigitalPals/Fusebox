@@ -12,7 +12,6 @@ import com.digitalpals.fusebox.data.PushStatus
 import com.digitalpals.fusebox.data.RequestLog
 import com.digitalpals.fusebox.data.UsageDashboard
 import com.digitalpals.fusebox.data.UsageSpeed
-import com.digitalpals.fusebox.data.WeeklyPool
 import kotlinx.serialization.builtins.ListSerializer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -59,9 +58,13 @@ class DecodingAndFixturesTest {
         val speed = FuseboxJson.decodeFromString(UsageSpeed.serializer(), readFixture("usage-speed"))
         assertNotNull(speed)
 
-        // Ensure weekly pools resolve cleanly against fixture accounts
-        val pools = WeeklyPool.weekly(overview, accounts)
-        assertNotNull(pools)
+        // Servers that still send combined weekly `pools` decode cleanly: the field is ignored.
+        val withPools = FuseboxJson.decodeFromString(
+            Overview.serializer(),
+            """{"version":"0.18.0","pools":[{"provider":"claude","window":"week","accounts":2,"reported":2,"used":40.5,"outlook":{"state":"tight"}}],"models":3}""",
+        )
+        assertEquals("0.18.0", withPools.version)
+        assertEquals(3, withPools.models)
     }
 
     @Test

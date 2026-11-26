@@ -878,14 +878,7 @@ pub async fn poll_plan(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let mut st = acct.state.lock();
     // A different account signed in to this file while the plan was read.
     if st.quota_epoch == epoch {
-        let before = (st.quota.plan.clone(), st.quota.subscription_plan.clone());
         st.quota.plan_read(Utc::now(), details.as_ref().ok().cloned());
-        if before.0.as_ref().zip(st.quota.plan.as_ref()).is_some_and(|(old, new)| !same_plan(old, new))
-            || before.1.as_ref().zip(st.quota.subscription_plan.as_ref()).is_some_and(|(old, new)| old != new)
-        {
-            st.attribution.history.clear();
-            st.attribution.dirty = true;
-        }
     }
     details.map(drop)
 }
@@ -1208,8 +1201,6 @@ mod tests {
         // A spent Gemini group leaves Claude routable.
         assert!(st.quota.exhausted("gemini-4-neon-high"));
         assert!(!st.quota.exhausted("claude-opus-5-5-high"));
-        // The weekly Gemini window is the account's own history for the forecast.
-        assert!(st.attribution.history.iter().any(|h| h.name == "week" && h.model.is_none()));
     }
 
     #[test]
@@ -1575,13 +1566,10 @@ mod tests {
         st.set_quota(vec![week(10.0)], Some("max_20x".into()));
         st.set_quota(vec![week(11.0)], Some("max_20x".into()));
         st.quota.plan_name = Some("Ultra".into());
-        assert!(!st.attribution.history.is_empty());
         st.set_quota(vec![week(12.0)], Some("ultra".into()));
-        assert!(!st.attribution.history.is_empty(), "a new identifier for the same plan keeps the history");
-        assert_eq!(st.quota.plan_name.as_deref(), Some("Ultra"));
+        assert_eq!(st.quota.plan_name.as_deref(), Some("Ultra"), "a new identifier for the same plan keeps the name");
         st.set_quota(vec![week(13.0)], Some("max_5x".into()));
-        assert!(st.attribution.history.len() <= 1, "a real change of plan starts over");
-        assert_eq!(st.quota.plan_name, None);
+        assert_eq!(st.quota.plan_name, None, "a real change of plan forgets it");
     }
 
     #[test]

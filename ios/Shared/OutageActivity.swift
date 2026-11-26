@@ -28,12 +28,11 @@ public struct OutageAttributes: ActivityAttributes, Sendable {
 /// What the widgets show when they can't reach the server: the app's last good data.
 public struct WidgetSnapshot: Codable, Sendable {
     public var savedAt: Date
-    public var overview: Overview?
     public var accounts: [Account]
     public var faults: [Fault]
 
-    public init(savedAt: Date = .now, overview: Overview?, accounts: [Account], faults: [Fault]) {
-        self.savedAt = savedAt; self.overview = overview; self.accounts = accounts; self.faults = faults
+    public init(savedAt: Date = .now, accounts: [Account], faults: [Fault]) {
+        self.savedAt = savedAt; self.accounts = accounts; self.faults = faults
     }
 
     /// Kept in the shared keychain group, which the widget extension can read.

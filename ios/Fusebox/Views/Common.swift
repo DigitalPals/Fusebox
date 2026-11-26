@@ -232,15 +232,8 @@ struct EmptyState: View {
 /// pace so far uses the window up before it resets (DESIGN.md "Pace mark").
 struct ResetCell: View {
     var window: QuotaWindow?
-    var resetsAt: Date?
-    var runsOutEarly = false
     /// A child row running low ("↳ Fable") tints its countdown with its state colour.
     var tint: Color?
-
-    init(window: QuotaWindow?, tint: Color? = nil) { self.window = window; resetsAt = window?.resetsAt; self.tint = tint }
-    init(resetsAt: Date?, runsOutEarly: Bool = false, tint: Color? = nil) {
-        window = nil; self.resetsAt = resetsAt; self.runsOutEarly = runsOutEarly; self.tint = tint
-    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { ctx in
@@ -248,8 +241,8 @@ struct ResetCell: View {
             Group {
                 if let out {
                     Text("out \(Fmt.compactLeft(out, now: ctx.date))").foregroundStyle(Palette.warn)
-                } else if let resetsAt, resetsAt > ctx.date {
-                    Text("↺ \(Fmt.compactLeft(resetsAt, now: ctx.date))").foregroundStyle(runsOutEarly ? Palette.warn : tint ?? Palette.fg3)
+                } else if let resetsAt = window?.resetsAt, resetsAt > ctx.date {
+                    Text("↺ \(Fmt.compactLeft(resetsAt, now: ctx.date))").foregroundStyle(tint ?? Palette.fg3)
                 } else {
                     Text(" ")
                 }
@@ -268,7 +261,7 @@ enum MeterLabel {
 }
 
 /// One list meter row: "5H [segments] 47% ↺ 2h 14m". A `child` row is a window limited to
-/// one model under its account's or pool's own (DESIGN.md "Model rows"): "↳ Fable" in
+/// one model under its account's own (DESIGN.md "Model rows"): "↳ Fable" in
 /// sentence case, and running low, its label and countdown take the state colour too.
 struct MeterRow: View {
     var label: String
@@ -276,7 +269,6 @@ struct MeterRow: View {
     var reading: QuotaReading?
     var pace: Double?
     var window: QuotaWindow?
-    var resetsAt: Date?
     var mode: QuotaDisplay
     var height: CGFloat = 9
     var knockout = Palette.surface
@@ -315,10 +307,8 @@ struct MeterRow: View {
                 .font(Typeface.data(13, relativeTo: .footnote))
                 .foregroundStyle(reading.map { $0.level == .normal ? Palette.fg : Palette.level($0.level) } ?? Palette.fg3)
                 .frame(width: 44, alignment: .trailing)
-            Group {
-                if let window { ResetCell(window: window, tint: tint) } else { ResetCell(resetsAt: resetsAt, tint: tint) }
-            }
-            .frame(width: 72, alignment: .leading)
+            ResetCell(window: window, tint: tint)
+                .frame(width: 72, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
     }

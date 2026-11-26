@@ -33,7 +33,6 @@ mod mgmt;
 mod model_catalog;
 mod muse_code;
 mod oauth;
-mod outlook;
 mod policy;
 mod pools;
 mod provider_sessions;

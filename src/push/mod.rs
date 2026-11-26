@@ -530,8 +530,8 @@ fn all_faults(app: &App, accounts: &[AccountView]) -> Vec<Fault> {
     current
 }
 
-/// Each provider's subscriptions taken together, per window: the overview's combined
-/// limits, worked out as the pace faults work them out.
+/// Each provider's subscriptions taken together, per window, worked out as the pace
+/// faults work them out.
 pub fn current_pools(app: &App) -> Value {
     Value::Array(faults::pools(&views(app), Utc::now()).iter().map(crate::pools::Pool::json).collect())
 }
@@ -596,7 +596,6 @@ fn views(app: &App) -> Vec<AccountView> {
                     }
                     _ => st.quota.windows.clone(),
                 },
-                history: st.attribution.history.clone(),
                 failures,
                 clients: st
                     .attribution

@@ -34,11 +34,6 @@ public enum Palette {
         switch l { case .normal: meter; case .warn: warn; case .err: err }
     }
 
-    /// A state word's colour ("ok", "warn", "err"; anything else reads as plain text).
-    public static func state(_ level: String?) -> Color {
-        switch level { case "err": err; case "warn": warn; case "ok": ok; default: fg2 }
-    }
-
     /// Usage's stacked chart: neutral steps from `meter` down; colour stays for state.
     public static let chart: [Color] = [Color("chart-1"), Color("chart-2"), Color("chart-3"), Color("chart-4"), Color("chart-5")]
     public static let chartOther = Color("chart-other")

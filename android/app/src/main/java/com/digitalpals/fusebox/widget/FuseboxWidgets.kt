@@ -61,7 +61,6 @@ import com.digitalpals.fusebox.data.QuotaDisplay
 import com.digitalpals.fusebox.data.QuotaReading
 import com.digitalpals.fusebox.data.Quotas
 import com.digitalpals.fusebox.data.SecureStorage
-import com.digitalpals.fusebox.data.WeeklyPool
 import com.digitalpals.fusebox.data.WidgetSnapshot
 import com.digitalpals.fusebox.data.metered
 import com.digitalpals.fusebox.data.noShortLimit
@@ -94,13 +93,6 @@ private object WidgetColors {
         QuotaReading.Level.WARN -> warn
         QuotaReading.Level.ERR -> err
         else -> meter
-    }
-
-    fun state(level: String): ColorProvider = when (level) {
-        "err" -> err
-        "warn" -> warn
-        "ok" -> ok
-        else -> fg2
     }
 
     fun accountState(kind: AccountState.Kind): ColorProvider = when (kind) {
@@ -192,109 +184,6 @@ private fun WidgetNotConnected(context: Context) {
             style = TextStyle(color = WidgetColors.fg2, fontSize = 12.sp),
         )
     }
-}
-
-// MARK: - Combined Weekly Limit Widget
-
-class CombinedWeeklyWidget : GlanceAppWidget() {
-    override val sizeMode = SizeMode.Responsive(setOf(DpSize(140.dp, 110.dp), DpSize(250.dp, 120.dp)))
-
-    override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val data = loadWidgetData(context)
-        provideContent { CombinedWeeklyWidgetContent(data) }
-    }
-}
-
-@Composable
-private fun CombinedWeeklyWidgetContent(data: LoadedWidgetData) {
-    val context = LocalContext.current
-    val size = LocalSize.current
-    val compact = size.width < 220.dp
-    if (!data.connected) {
-        WidgetNotConnected(context)
-        return
-    }
-    val pools = WeeklyPool.weekly(data.snapshot.overview, data.snapshot.accounts)
-    val badge = data.snapshot.faults.count { it.countsOnBadge }
-    val hasErr = data.snapshot.faults.any { it.level == "err" }
-    val updated = Instant.ofEpochMilli(data.snapshot.savedAtEpochMs)
-
-    Column(
-        modifier = GlanceModifier
-            .fillMaxSize()
-            .background(WidgetColors.bg)
-            .padding(12.dp)
-            .clickable(actionStartActivity(deepLinkIntent(context, "fusebox://overview"))),
-    ) {
-        Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = if (compact) "WEEKLY" else "COMBINED WEEKLY",
-                style = TextStyle(color = WidgetColors.fg3, fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                maxLines = 1,
-                modifier = GlanceModifier.defaultWeight(),
-            )
-            if (badge > 0) {
-                Box(
-                    modifier = GlanceModifier
-                        .size(7.dp)
-                        .cornerRadius(4.dp)
-                        .background(if (hasErr) WidgetColors.err else WidgetColors.warn),
-                ) {}
-                Spacer(GlanceModifier.width(4.dp))
-                Text(
-                    text = "$badge",
-                    style = TextStyle(color = WidgetColors.fg, fontSize = 11.sp, fontFamily = FontFamily.Monospace),
-                )
-            }
-        }
-        Spacer(GlanceModifier.height(6.dp))
-        if (pools.isEmpty()) {
-            Text(
-                text = if (data.snapshot.accounts.isEmpty()) "No data" else "No combined limits",
-                style = TextStyle(color = WidgetColors.fg3, fontSize = 12.sp),
-            )
-        } else {
-            val shown = pools.take(if (compact) 1 else 3)
-            shown.forEachIndexed { idx, pool ->
-                if (idx > 0) Spacer(GlanceModifier.height(8.dp))
-                val r = pool.reading
-                Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = pool.providerName,
-                        style = TextStyle(color = WidgetColors.fg, fontSize = 12.sp, fontWeight = FontWeight.Medium),
-                        maxLines = 1,
-                        modifier = GlanceModifier.defaultWeight(),
-                    )
-                    Text(
-                        text = r?.let { Fmt.percent(it.value(data.mode)) } ?: "–",
-                        style = TextStyle(
-                            color = if (r == null || r.level == QuotaReading.Level.NORMAL) WidgetColors.fg else WidgetColors.level(r.level),
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                    )
-                }
-                Spacer(GlanceModifier.height(3.dp))
-                GlanceSegmentedBar(r, data.mode)
-                Spacer(GlanceModifier.height(2.dp))
-                val reset = pool.pool.outlook?.nextResetAt?.let { " · ↺ ${Fmt.compactLeft(it)}" }.orEmpty()
-                Text(
-                    text = pool.status.first + if (compact) "" else reset,
-                    style = TextStyle(color = WidgetColors.state(pool.status.second), fontSize = 10.sp),
-                    maxLines = 1,
-                )
-            }
-        }
-        Spacer(GlanceModifier.defaultWeight())
-        Text(
-            text = "${if (data.stale) "Last seen" else "Updated"} ${Fmt.hm(updated)}",
-            style = TextStyle(color = WidgetColors.fg3, fontSize = 9.sp, fontFamily = FontFamily.Monospace),
-        )
-    }
-}
-
-class CombinedWeeklyWidgetReceiver : GlanceAppWidgetReceiver() {
-    override val glanceAppWidget: GlanceAppWidget = CombinedWeeklyWidget()
 }
 
 // MARK: - Single Subscription Widget
@@ -428,7 +317,6 @@ class WidgetRefreshWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        runCatching { CombinedWeeklyWidget().updateAll(applicationContext) }
         runCatching { SubscriptionWidget().updateAll(applicationContext) }
         return Result.success()
     }
@@ -440,8 +328,7 @@ object FuseboxWidgetUpdater {
     fun updateAll(context: Context) {
         val appContext = context.applicationContext
         scope.launch {
-            runCatching { CombinedWeeklyWidget().updateAll(appContext) }
-            runCatching { SubscriptionWidget().updateAll(appContext) }
+                runCatching { SubscriptionWidget().updateAll(appContext) }
         }
     }
 

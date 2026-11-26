@@ -22,11 +22,6 @@ struct DecodingTests {
         let o = try decode(Overview.self, "overview")
         #expect(o.version?.isEmpty == false)
         #expect((o.series ?? []).count >= 1)
-        let pools = try #require(o.pools)
-        #expect(!pools.isEmpty)
-        let week = try #require(pools.first { $0.window == "week" && $0.model == nil })
-        #expect(week.accounts >= 1)
-        #expect(week.accountIDs?.isEmpty == false)
         #expect(o.totals?.requests != nil)
     }
 
@@ -41,16 +36,6 @@ struct DecodingTests {
         #expect(claude.metered)
         #expect(claude.quota?.windows?.contains { $0.name == "week" } == true)
         #expect(claude.planName != nil)
-        // Accounts and pools refer to the same ids.
-        let o = try decode(Overview.self, "overview")
-        let pools = WeeklyPool.weekly(overview: o, accounts: accounts)
-        #expect(!pools.isEmpty)
-        #expect(pools[0].accounts.count == pools[0].pool.accountIDs?.count)
-        // The capture has Claude's Fable week as its own pool: it rides under the week.
-        let fable = try #require(pools[0].scoped.first { $0.pool.model == "fable" })
-        #expect(fable.name == "Fable")
-        #expect(fable.pool.window == "week fable")
-        #expect(fable.pool.accountIDs == pools[0].pool.accountIDs)
     }
 
     @Test func bankedResets() throws {
