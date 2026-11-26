@@ -714,6 +714,30 @@ fn soft_failure(
     }
 }
 
+/// Anthropic says it is overloaded (529 `overloaded_error`), over HTTP or inside a
+/// stream. Such bursts hit a model on every account at once and pass within seconds to
+/// minutes, so the same account is asked again for longer than for other blips: moving
+/// on would only lose the prompt cache, and with one account the request would fail at
+/// once. Other providers' capacity errors keep their own handling.
+fn overloaded(status: u16, text: &str) -> bool {
+    status == 529 || (status >= 500 && text.contains("overloaded_error"))
+}
+
+/// Waits before each retry of an overloaded account, about 30 s in all; jittered so
+/// sessions refused together don't come back together.
+const OVERLOAD_WAITS_MS: [u64; 5] = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+/// How long to wait before asking an overloaded account again after `tries` retries,
+/// or `None` once the overload has outlasted them.
+fn overload_wait(tries: u32) -> Option<std::time::Duration> {
+    let base = *OVERLOAD_WAITS_MS.get(tries as usize)?;
+    // Tests wait a thousandth as long.
+    let base = if cfg!(test) { base / 1_000 } else { base };
+    let jitter = base / 5;
+    let spread = rand::random::<u64>() % (2 * jitter + 1);
+    Some(std::time::Duration::from_millis(base - jitter + spread))
+}
+
 /// A 429 is also used for burst limits. Move a pinned task only when quota
 /// headers or an explicit provider error confirm subscription exhaustion.
 pub fn quota_exhausted(acct: &Account, model: &str, status: u16, body: &str) -> bool {
@@ -2486,9 +2510,16 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
             }
             if let Some(delay) = soft_failure(provider, status, &headers, &text) {
                 let n = soft_tries.entry(acct.id.clone()).or_default();
-                if call.pinned_account.is_none() && *n < 2 {
+                let next = if overloaded(status, &text) {
+                    overload_wait(*n)
+                } else {
+                    (*n < 2).then(|| std::time::Duration::from_secs(if *n == 0 { 1 } else { 3 }))
+                };
+                if call.pinned_account.is_none()
+                    && let Some(next) = next
+                {
                     *n += 1;
-                    let wait = delay.max(std::time::Duration::from_secs(if *n == 1 { 1 } else { 3 }));
+                    let wait = delay.max(next);
                     let upstream_wait = upstream_retry_after(&headers).filter(|_| at_capacity(status, &text));
                     tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
                         status, retry_delay_seconds = wait.as_secs(), upstream_retry_after_seconds = upstream_wait,
@@ -2631,7 +2662,7 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                 }
                 Boot::Failed { status, message, held } => {
                     tracing::warn!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
-                        status, "upstream failed before its first token; trying another account");
+                        status, "upstream failed before its first token");
                     // What it reported before failing still counts for this attempt.
                     let tap = tracker.wire_tap();
                     let mut dec = SseDecoder::with_limit(cfg.stream_limits.for_model(&upstream_model));
@@ -2656,6 +2687,24 @@ async fn execute_inner(app: Arc<App>, call: Call, budget: &mut RetryBudget) -> R
                     // The error's code tells a capacity shortage too, whatever its message says.
                     let capacity = at_capacity(status, &message)
                         || first_error.as_ref().is_some_and(|e| at_capacity(status, &e.raw));
+                    // The client has seen nothing of this stream, so an overload is asked
+                    // again on the same account, as over plain HTTP: the session keeps its
+                    // account and prompt cache, and a lone account rides out the burst.
+                    let raw = first_error.as_ref().map_or("", |e| e.raw.as_str());
+                    if call.pinned_account.is_none() && (overloaded(status, &message) || overloaded(status, raw)) {
+                        let n = soft_tries.entry(acct.id.clone()).or_default();
+                        if let Some(wait) = overload_wait(*n) {
+                            *n += 1;
+                            tracing::info!(request_id = tracker.log.id, account = ?crate::diagnostics::fingerprint(Some(&acct.id)),
+                                status, retry_delay_seconds = wait.as_secs(), "upstream busy before its first token; retrying");
+                            last_error = Some((status, formats::error_body(call.format, status, &message)));
+                            if !budget.wait(wait).await {
+                                break;
+                            }
+                            retry_same = Some(acct.id.clone());
+                            continue;
+                        }
+                    }
                     if status == 429 && quota_exhausted(&acct, &model, status, &message) {
                         mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &message);
                     } else if status == 429 && !capacity {
@@ -3659,6 +3708,23 @@ mod tests {
         assert!(!budget.wait(std::time::Duration::from_secs(2)).await);
         budget.started = Instant::now() - RETRY_BUDGET;
         assert!(!budget.take("one", "a"));
+    }
+
+    #[test]
+    fn only_anthropics_overload_waits_longer_and_its_waits_are_bounded_and_jittered() {
+        assert!(overloaded(529, "{}"));
+        assert!(overloaded(500, r#"{"type":"error","error":{"type":"overloaded_error"}}"#));
+        assert!(!overloaded(503, r#"{"error":{"code":"server_is_overloaded"}}"#), "Codex keeps its own handling");
+        assert!(!overloaded(429, "overloaded_error"), "a 429 is a rate limit or capacity");
+        for (tries, base) in OVERLOAD_WAITS_MS.iter().enumerate() {
+            // Tests wait a thousandth as long, so `base` is in microseconds here.
+            let wait = overload_wait(tries as u32).unwrap().as_micros() as u64;
+            assert!(wait >= base * 4 / 5 && wait <= base * 6 / 5, "try {tries}: {wait}");
+        }
+        assert_eq!(overload_wait(OVERLOAD_WAITS_MS.len() as u32), None, "a lasting overload stops retrying");
+        let spread: std::collections::HashSet<_> =
+            (0..50).map(|_| overload_wait(OVERLOAD_WAITS_MS.len() as u32 - 1).unwrap()).collect();
+        assert!(spread.len() > 1, "waits are jittered");
     }
 
     #[test]
