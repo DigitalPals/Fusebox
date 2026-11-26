@@ -1,6 +1,6 @@
 # Privacy
 
-Last updated: 25 November 2026
+Last updated: 26 November 2026
 
 This page covers the Fusebox mobile apps (“Fusebox - Subscription Proxy” on iOS and Android), the
 Fusebox push relay at `push.whombat.com`, and the Fusebox server. In short: Fusebox is
@@ -29,8 +29,9 @@ they are encrypted with an Android Keystore AES-256-GCM key and excluded from cl
 - **The Fusebox push relay**, only if notifications are on and your server sends them through
   the relay.
 - **GitHub Releases (`api.github.com`)**, on sideloaded Android builds only, to check for newer
-  `android-v*` releases and download the APK when you tap Update. Builds installed from Google Play
-  do not contact GitHub.
+  `android-v*` releases every 6 hours and download and install a newer APK (or, with automatic updates
+  turned off in Settings → Updates, when you tap Update). Builds installed from Google Play do not
+  contact GitHub.
 
 The apps have no analytics, advertising, tracking or crash reporting, and ask for no account.
 They don't track you across apps or websites.

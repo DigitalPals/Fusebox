@@ -535,12 +535,14 @@ private fun UpdateAvailableBanner(
         state.downloading && state.downloadProgress >= 0f ->
             "Downloading · ${(state.downloadProgress * 100).toInt()}%"
         state.downloading -> "Downloading…"
+        state.installing -> "Installing…"
         state.needsInstallPermission -> "Allow installs from Fusebox, then tap Install"
         state.downloadedVersion == info.version -> "Downloaded · ready to install"
         else -> listOfNotNull(sizeText, "Sideload release").joinToString(" · ")
     }
     val actionLabel = when {
         state.downloading -> "${(state.downloadProgress.coerceAtLeast(0f) * 100).toInt()}%"
+        state.installing -> "Installing"
         state.downloadedVersion == info.version -> "Install"
         else -> "Update"
     }
@@ -582,10 +584,10 @@ private fun UpdateAvailableBanner(
             FuseButton(
                 text = actionLabel,
                 kind = FuseButtonKind.PRIMARY,
-                enabled = !state.downloading,
+                enabled = !state.downloading && !state.installing,
                 onClick = onInstall,
             )
-            if (!state.downloading) {
+            if (!state.downloading && !state.installing) {
                 Box(
                     modifier = Modifier
                         .size(32.dp)

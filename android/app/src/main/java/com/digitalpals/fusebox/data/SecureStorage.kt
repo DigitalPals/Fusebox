@@ -82,12 +82,35 @@ class SecureStorage(context: Context) {
 
     var dismissedUpdateVersion: String?
         get() = prefs.getString("dismissed_update_version", null)
-        set(value) {
-            prefs.edit().apply {
-                if (value == null) remove("dismissed_update_version")
-                else putString("dismissed_update_version", value)
-            }.apply()
-        }
+        set(value) = putOrRemove("dismissed_update_version", value)
+
+    /** Install new versions by themselves (Settings → Updates); on unless turned off. */
+    var autoUpdate: Boolean
+        get() = prefs.getBoolean("auto_update", true)
+        set(value) { prefs.edit().putBoolean("auto_update", value).apply() }
+
+    /** The version this app handed to Android to install over itself, until it runs. */
+    var pendingSelfUpdateVersion: String?
+        get() = prefs.getString("pending_self_update_version", null)
+        set(value) = putOrRemove("pending_self_update_version", value)
+
+    /** The last version that failed to download or install by itself, and when. */
+    var autoUpdateFailedVersion: String?
+        get() = prefs.getString("auto_update_failed_version", null)
+        set(value) = putOrRemove("auto_update_failed_version", value)
+
+    var autoUpdateFailedAtMs: Long
+        get() = prefs.getLong("auto_update_failed_at_ms", 0L)
+        set(value) { prefs.edit().putLong("auto_update_failed_at_ms", value).apply() }
+
+    /** The version a "can't install yet" notification was shown for, so it shows once. */
+    var permissionPromptedVersion: String?
+        get() = prefs.getString("permission_prompted_version", null)
+        set(value) = putOrRemove("permission_prompted_version", value)
+
+    private fun putOrRemove(key: String, value: String?) {
+        prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+    }
 
     // MARK: - Widget snapshot & per-widget account choice
 

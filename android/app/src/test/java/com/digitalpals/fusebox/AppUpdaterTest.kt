@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.AppVersion
+import com.digitalpals.fusebox.data.AutoUpdateOutcome
 import com.digitalpals.fusebox.data.ReleasePicker
 import com.digitalpals.fusebox.data.SecureStorage
 import kotlinx.coroutines.test.runTest
@@ -17,6 +18,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.security.MessageDigest
 
@@ -151,6 +153,86 @@ class AppUpdaterTest {
             } catch (e: IllegalStateException) {
                 assertTrue(e.message.orEmpty().contains("checksum mismatch", ignoreCase = true))
             }
+        } finally {
+            server.close()
+        }
+    }
+
+    /** A release list with one newer APK, served by [server]; [sha] null leaves the checksum out. */
+    private fun release(server: MockWebServer, version: String, apk: ByteArray, sha: String?): String {
+        val url = server.url("/downloads/fusebox-$version-sideload.apk").toString()
+        val body = if (sha == null) "No checksum here." else "- **SHA-256:** `$sha`"
+        return """
+            [{ "tag_name": "android-v$version", "draft": false, "prerelease": true, "body": "$body",
+               "assets": [{ "name": "fusebox-$version-sideload.apk", "size": ${apk.size}, "browser_download_url": "$url" }] }]
+        """.trimIndent()
+    }
+
+    private fun sha256(bytes: ByteArray) =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun updaterFor(server: MockWebServer, storage: SecureStorage) = AppUpdater(
+        context = ApplicationProvider.getApplicationContext<Application>(),
+        storage = storage,
+        releasesUrl = server.url("/releases").toString(),
+        currentVersion = "1.0.3",
+        selfUpdateEnabled = true,
+    )
+
+    @Test
+    fun automaticUpdatesNeverInstallWhatTheyCannotCheck() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        shadowOf(context.packageManager).setCanRequestPackageInstalls(true)
+        val apk = "not-really-an-apk".toByteArray()
+        val server = MockWebServer()
+        server.start()
+        try {
+            val storage = SecureStorage(context).apply { autoUpdate = true; autoUpdateFailedVersion = null }
+            val updater = updaterFor(server, storage)
+
+            // A release without a SHA-256 line is only offered, never installed by itself.
+            server.enqueue(MockResponse(code = 200, body = release(server, "1.0.4", apk, sha = null)))
+            assertEquals(AutoUpdateOutcome.NO_CHECKSUM, updater.autoUpdate())
+            assertEquals("1.0.4", updater.state.value.available?.version)
+            assertEquals(1, server.requestCount)
+
+            // Automatic updates off: the banner still offers it, nothing is downloaded.
+            storage.autoUpdate = false
+            server.enqueue(MockResponse(code = 200, body = release(server, "1.0.4", apk, sha256(apk))))
+            assertEquals(AutoUpdateOutcome.OFF, updater.autoUpdate())
+            assertEquals(2, server.requestCount)
+
+            // A download that isn't a Fusebox APK signed like this one is refused and kept off
+            // for a day, so a bad release isn't fetched every 6 hours.
+            storage.autoUpdate = true
+            server.enqueue(MockResponse(code = 200, body = release(server, "1.0.4", apk, sha256(apk))))
+            server.enqueue(MockResponse(code = 200, body = String(apk)))
+            assertEquals(AutoUpdateOutcome.FAILED, updater.autoUpdate())
+            assertEquals("The download is not an Android app", updater.state.value.error)
+            assertEquals("1.0.4", storage.autoUpdateFailedVersion)
+            assertTrue(!updater.state.value.installing && !updater.state.value.downloading)
+            server.enqueue(MockResponse(code = 200, body = release(server, "1.0.4", apk, sha256(apk))))
+            assertEquals(AutoUpdateOutcome.FAILED_RECENTLY, updater.autoUpdate())
+            assertEquals("no second download", 5, server.requestCount)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun withoutInstallPermissionItAsksOncePerVersion() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        shadowOf(context.packageManager).setCanRequestPackageInstalls(false)
+        val apk = "payload".toByteArray()
+        val server = MockWebServer()
+        server.start()
+        try {
+            val storage = SecureStorage(context).apply { autoUpdate = true; permissionPromptedVersion = null }
+            val updater = updaterFor(server, storage)
+            server.enqueue(MockResponse(code = 200, body = release(server, "1.0.4", apk, sha256(apk))))
+            assertEquals(AutoUpdateOutcome.NEEDS_PERMISSION, updater.autoUpdate())
+            assertEquals("1.0.4", storage.permissionPromptedVersion)
+            assertEquals("nothing downloaded", 1, server.requestCount)
         } finally {
             server.close()
         }
