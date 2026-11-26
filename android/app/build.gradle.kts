@@ -38,8 +38,8 @@ android {
         applicationId = "com.digitalpals.fusebox"
         minSdk = 31
         targetSdk = 36
-        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 3
-        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.2"
+        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 4
+        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.3"
         buildConfigField("boolean", "SELF_UPDATE_ENABLED", (!isPlayStore).toString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

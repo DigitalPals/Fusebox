@@ -67,7 +67,7 @@ Or use the convenience build script:
 android/scripts/build-release                    # unit tests + sideload APK + AAB
 android/scripts/build-release --apk-only         # sideload APK only (with in-app updater)
 android/scripts/build-release --play             # Play Store AAB (strips REQUEST_INSTALL_PACKAGES)
-android/scripts/build-release --version 1.0.2 --code 3
+android/scripts/build-release --version 1.0.3 --code 4
 ```
 
 ### In-app updates (sideload builds)
