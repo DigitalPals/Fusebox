@@ -577,7 +577,10 @@ fn fill_batch(batch: &mut Batch, records: Vec<(u64, String)>, limit: usize) -> R
 
 async fn synchronize(store: &Store, state: &LocalState) -> Result<Value> {
     let url = validate_destination(&state.destination)?;
+    // Same roots as every other outbound client: the Mozilla set plus the system store,
+    // so a destination behind a locally installed CA verifies too.
     let client = reqwest::Client::builder()
+        .use_preconfigured_tls(crate::tls::http(false))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?;
