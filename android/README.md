@@ -2,9 +2,9 @@
 
 A native Kotlin + Jetpack Compose app for a Fusebox server, built for phones and foldables
 (Android 12+, API 31–36): every subscription's 5-hour and weekly meters with the even-pace mark,
-each provider's combined weekly limit, faults, the live request log with its routing explanation,
-usage and costs with interactive charts, native FCM push (direct or encrypted via the push relay),
-Glance home screen widgets, and Android 16 Live Updates for provider outages.
+faults, the live request log with its routing explanation, usage and costs with interactive
+charts, native FCM push (direct or encrypted via the push relay), Glance home screen widgets, and
+Android 16 Live Updates for provider outages.
 
 It reads the same management API as the web dashboard (`ui/app.js`, `ui/usage.js`, `ui/config.js`)
 and matches the iOS app's data rules and `DESIGN.md` design system.

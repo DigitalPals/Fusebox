@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Fusebox</string>
-    <string name="widget_combined_weekly_name">Combined weekly limit</string>
-    <string name="widget_combined_weekly_desc">Each provider\'s subscriptions together, with the even-pace mark and next reset.</string>
     <string name="widget_subscription_name">Subscription</string>
     <string name="widget_subscription_desc">One subscription\'s 5-hour and weekly meters with the even-pace mark.</string>
 </resources>

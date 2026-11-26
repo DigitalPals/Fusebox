@@ -182,7 +182,7 @@ class FoldableUiTest {
         }
         // Unfolded Overview (2 columns + Navigation Rail)
         composeRule.onNodeWithText("SUBSCRIPTIONS").assertIsDisplayed()
-        composeRule.onNodeWithText("COMBINED WEEKLY LIMITS").assertExists()
+        composeRule.onNodeWithText("COMBINED WEEKLY LIMITS", ignoreCase = true).assertDoesNotExist()
         maybeSaveScreenshot("04-unfolded-overview-dark")
 
         // Switch to Accounts -> 2-pane List-Detail (BOTH list and detail pane visible simultaneously!)
@@ -232,7 +232,7 @@ class FoldableUiTest {
             }
         }
         composeRule.onNodeWithText("SUBSCRIPTIONS").assertIsDisplayed()
-        composeRule.onNodeWithText("COMBINED WEEKLY LIMITS").assertExists()
+        composeRule.onNodeWithText("COMBINED WEEKLY LIMITS", ignoreCase = true).assertDoesNotExist()
         maybeSaveScreenshot("08-unfolded-overview-light")
     }
 

@@ -154,7 +154,6 @@ data class Overview(
     val active: Int? = null,
     val series: List<MinuteBucket>? = null,
     val accounts: AccountSummary? = null,
-    val pools: List<Pool>? = null,
     val models: Int? = null,
 ) {
     @Serializable
@@ -163,36 +162,6 @@ data class Overview(
         val active: Int? = null,
         val cooling: Int? = null,
         val disabled: Int? = null,
-    )
-}
-
-@Serializable
-data class Pool(
-    val provider: String,
-    val window: String,
-    val model: String? = null,
-    val accounts: Int,
-    @SerialName("account_ids") val accountIDs: List<String>? = null,
-    val reported: Int,
-    val used: Double? = null,
-    val pace: Double? = null,
-    val priced: Boolean? = null,
-    @SerialName("runs_out_early") val runsOutEarly: Boolean? = null,
-    val until: FbInstant? = null,
-    val outlook: Outlook? = null,
-) {
-    val id: String get() = "$provider:$window:${model ?: ""}"
-
-    @Serializable
-    data class Outlook(
-        val state: String? = null,
-        val reason: String? = null,
-        @SerialName("next_reset_at") val nextResetAt: FbInstant? = null,
-        @SerialName("exhausts_at") val exhaustsAt: FbInstant? = null,
-        @SerialName("recovers_at") val recoversAt: FbInstant? = null,
-        @SerialName("learning_until") val learningUntil: FbInstant? = null,
-        @SerialName("rate_per_day") val ratePerDay: Double? = null,
-        @SerialName("observed_hours") val observedHours: Double? = null,
     )
 }
 

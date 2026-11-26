@@ -7,15 +7,12 @@ import com.digitalpals.fusebox.data.Fmt
 import com.digitalpals.fusebox.data.FuseboxDate
 import com.digitalpals.fusebox.data.FuseboxJson
 import com.digitalpals.fusebox.data.MeterModel
-import com.digitalpals.fusebox.data.Overview
-import com.digitalpals.fusebox.data.Pool
 import com.digitalpals.fusebox.data.Quota
 import com.digitalpals.fusebox.data.QuotaDisplay
 import com.digitalpals.fusebox.data.QuotaReading
 import com.digitalpals.fusebox.data.QuotaWindow
 import com.digitalpals.fusebox.data.Quotas
 import com.digitalpals.fusebox.data.Renewal
-import com.digitalpals.fusebox.data.WeeklyPool
 import com.digitalpals.fusebox.data.cooldownReason
 import com.digitalpals.fusebox.data.metered
 import com.digitalpals.fusebox.data.noShortLimit
@@ -180,35 +177,21 @@ class QuotaAndMeterTest {
         assertFalse(a.windowSpent(mainWeek))
         assertEquals(listOf("antigravity:disabled", "x"), a.quota?.limits?.map { it.id })
 
-        // Combined weekly pools with Fable model week
-        val member = { id: String, fableHrs: Long ->
-            Account(
-                id = id,
-                provider = "claude",
-                label = id,
-                quota = Quota(
-                    plan = "max_20x",
-                    noFiveHourLimit = true,
-                    windows = listOf(
-                        QuotaWindow("week", 20.0, now.plusSeconds(60 * 3600)),
-                        QuotaWindow("week fable", 30.0, now.plusSeconds(fableHrs * 3600), model = "fable"),
-                    ),
+        // A plan without a 5-hour limit, with a Fable model week
+        val ultra = Account(
+            id = "a",
+            provider = "claude",
+            label = "a",
+            quota = Quota(
+                plan = "max_20x",
+                noFiveHourLimit = true,
+                windows = listOf(
+                    QuotaWindow("week", 20.0, now.plusSeconds(60 * 3600)),
+                    QuotaWindow("week fable", 30.0, now.minusSeconds(3600), model = "fable"),
                 ),
-            )
-        }
-        val accts = listOf(member("a", -1), member("b", 30), member("c", 42))
-        val ov = Overview(
-            pools = listOf(
-                Pool("claude", "week", null, 3, listOf("a", "b", "c"), 3, 22.0, 0.5, true),
-                Pool("claude", "week fable", "fable", 3, listOf("a", "b", "c"), 3, 61.25, 0.25, true),
             ),
         )
-        val pools = WeeklyPool.weekly(ov, accts, now)
-        assertEquals(1, pools.size)
-        assertEquals(1, pools[0].scoped.size)
-        assertEquals("Fable", pools[0].scoped[0].name)
-        assertEquals(now.plusSeconds(30 * 3600), pools[0].scoped[0].nextReset)
-        assertTrue(accts[0].noShortLimit(now))
+        assertTrue(ultra.noShortLimit(now))
     }
 
     @Test

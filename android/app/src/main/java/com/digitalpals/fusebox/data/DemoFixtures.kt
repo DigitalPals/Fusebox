@@ -143,41 +143,6 @@ object DemoFixtures {
             managementKey = true,
             active = 2,
             series = series,
-            pools = listOf(
-                Pool(
-                    provider = "claude",
-                    window = "week",
-                    accounts = 2,
-                    accountIDs = listOf(claude1.id, claude2.id),
-                    reported = 2,
-                    used = 67.3,
-                    pace = 0.54,
-                    priced = true,
-                    outlook = Pool.Outlook(state = "tight", nextResetAt = now.plusSeconds(2 * 86_400 + 11 * 3600)),
-                ),
-                Pool(
-                    provider = "claude",
-                    window = "week fable",
-                    model = "fable",
-                    accounts = 2,
-                    accountIDs = listOf(claude1.id, claude2.id),
-                    reported = 2,
-                    used = 84.0,
-                    pace = 0.61,
-                    priced = true,
-                ),
-                Pool(
-                    provider = "codex",
-                    window = "week",
-                    accounts = 1,
-                    accountIDs = listOf(codex1.id),
-                    reported = 1,
-                    used = 39.0,
-                    pace = 0.48,
-                    priced = false,
-                    outlook = Pool.Outlook(state = "on_track", nextResetAt = now.plusSeconds(5 * 86_400 + 3 * 3600)),
-                ),
-            ),
         )
 
         val faults = listOf(

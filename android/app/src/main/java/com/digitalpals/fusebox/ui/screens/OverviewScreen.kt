@@ -40,7 +40,6 @@ import com.digitalpals.fusebox.data.Fmt
 import com.digitalpals.fusebox.data.LiveState
 import com.digitalpals.fusebox.data.QuotaDisplay
 import com.digitalpals.fusebox.data.Routing
-import com.digitalpals.fusebox.data.WeeklyPool
 import com.digitalpals.fusebox.data.bankedCount
 import com.digitalpals.fusebox.data.bankedLabel
 import com.digitalpals.fusebox.data.bankedNeedsReview
@@ -61,7 +60,6 @@ import com.digitalpals.fusebox.ui.components.Hairline
 import com.digitalpals.fusebox.ui.components.LinkButton
 import com.digitalpals.fusebox.ui.components.LiveBadge
 import com.digitalpals.fusebox.ui.components.LoadChart
-import com.digitalpals.fusebox.ui.components.MeterRow
 import com.digitalpals.fusebox.ui.components.PanelHead
 import com.digitalpals.fusebox.ui.components.ProviderLogo
 import com.digitalpals.fusebox.ui.components.SectionHead
@@ -85,9 +83,8 @@ fun OverviewScreen(
     val colors = LocalFuseboxColors.current
     val scope = rememberCoroutineScope()
     val now = rememberTicker()
-    val pools = state.weeklyPools
     val subs = state.subscriptions
-    val labelWidth = if (subs.any { it.scopedWindows(now).isNotEmpty() } || pools.any { it.scoped.isNotEmpty() }) 56.dp else 28.dp
+    val labelWidth = if (subs.any { it.scopedWindows(now).isNotEmpty() }) 56.dp else 28.dp
 
     PullToRefreshBox(
         isRefreshing = state.isRefreshing,
@@ -157,26 +154,6 @@ fun OverviewScreen(
                                     labelWidth = labelWidth,
                                     now = now,
                                     onClick = { onNavigate(DeepLink.Account(acct.id)) },
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (pools.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SectionHead(title = "Combined weekly limits", meta = WeeklyPool.basisText(pools))
-                    FoldAwareColumns(items = pools, minColumnWidth = 330.dp) { column ->
-                        CardPanel(padding = 0.dp, spacing = 0.dp) {
-                            column.forEachIndexed { i, pool ->
-                                if (i > 0) Hairline(Modifier.padding(horizontal = 16.dp))
-                                PoolRowView(
-                                    pool = pool,
-                                    mode = state.quotaDisplay,
-                                    labelWidth = labelWidth,
-                                    now = now,
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                                 )
                             }
@@ -288,58 +265,6 @@ fun AccountRowContent(
                 style = Typeface.small,
                 color = colors.fg3,
             )
-        }
-    }
-}
-
-@Composable
-private fun PoolRowView(
-    pool: WeeklyPool,
-    mode: QuotaDisplay,
-    labelWidth: Dp,
-    now: Instant,
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalFuseboxColors.current
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ProviderLogo(pool.logo, size = 20.dp)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(pool.providerName, style = Typeface.rowMedium, color = colors.fg)
-                Text(pool.countText, style = Typeface.small, color = colors.fg3)
-            }
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            MeterRow(
-                label = "WK",
-                reading = pool.reading,
-                pace = if (pool.reading == null) null else pool.pool.pace,
-                mode = mode,
-                resetsAt = pool.pool.outlook?.nextResetAt,
-                runsOutEarly = pool.pool.runsOutEarly == true,
-                labelWidth = labelWidth,
-                now = now,
-            )
-            pool.scoped.forEach { sp ->
-                MeterRow(
-                    label = sp.name,
-                    reading = sp.reading,
-                    pace = if (sp.reading == null) null else sp.pool.pace,
-                    mode = mode,
-                    resetsAt = sp.nextReset,
-                    labelWidth = labelWidth,
-                    child = true,
-                    now = now,
-                )
-            }
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = pool.status.first,
-                style = Typeface.sans(13.sp, FontWeight.Medium),
-                color = colors.state(pool.status.second),
-            )
-            Text(text = pool.detail(now), style = Typeface.small, color = colors.fg3)
         }
     }
 }
