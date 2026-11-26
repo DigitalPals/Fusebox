@@ -511,21 +511,6 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
   .subs .th, .subs .tr { grid-template-columns: 28px minmax(0, 1.2fr) minmax(250px, 2.2fr) 196px 72px 84px; }
   .subs .c-idx, .subs .c-req { display: block; }
 }
-/* Combined weekly quota: the current quota as an account row, the forecast's verdict beside it. */
-#ov-pool:empty { display: none; }
-.pool .tr { min-height: 52px; }
-.pool .tr:first-child { border-top: 0; }
-.pool-name { color: var(--fg); }
-.pool-gap { font-size: 12px; color: var(--fg-3); white-space: nowrap; }
-.pool-gap.warn { color: var(--warn); }
-.pool-gap.err { color: var(--err); }
-.pool-gap.good { color: var(--ok); }
-.pool-note { font-size: 11px; line-height: 1.5; color: var(--fg-3); overflow-wrap: anywhere; }
-.pool .meters { min-width: 0; }
-.pool .c-status { grid-column: 3 / -1; }
-.pool.stack-list .c-status { margin-top: 9px; }
-@media (min-width: 1180px) { .pool .c-status { grid-column: 4 / -1; } }
-.stack-list .pool-gap { flex: none; }
 .c-status { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .c-status .subs-line .linkbtn { font-size: 12px; }
 .resets-line { padding: 0; background: none; border: 0; font-size: 12px; color: var(--fg-3); text-align: left; white-space: nowrap; }
@@ -548,7 +533,7 @@ html.ios-pull-refresh, .ios-pull-refresh body { overscroll-behavior-y: none; }
 .stack-list .meters .segs { max-width: none; min-width: 0; }
 .stack-list .meters .capsm { width: 20px; }
 .stack-list .meters .pct { width: 38px; }
-/* A model's window ("↳ Fable") is a child row of its account or pool. A wide list gives it
+/* A model's window ("↳ Fable") is a child row of its account. A wide list gives it
    a line of its own: its label under the name (past the 20px logo and the 12px gap), its
    meter under WK. On a phone it follows WK, and the list's labels widen to fit it. Running
    low, the whole row takes the state colour. */

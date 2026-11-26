@@ -776,7 +776,6 @@ function refreshViews() {
     patchFigures();
     patchBars();
     patch('ov-subs', ovSubsHTML);
-    patchChanged('ov-pool', ovPoolHTML);
     patch('ov-other', ovOtherHTML);
     patch('recent', recentHTML);
   } else if (S.route === 'accounts') {
@@ -1364,16 +1363,16 @@ function runAlert(i) {
   if (!al) return;
   closeFaults();
   if (al.kind === 'storage') { location.hash = al.path || '#/usage'; return; }
-  if (!al.id) return showPools();
+  if (!al.id) return showSubscriptions();
   const a = accountById(al.id);
   if (al.signin && a) return signInAgain(a);
   openAccount(al.id);
 }
 
-// A provider's pace warning opens on the overview's combined limits, after the route
-// change has scrolled to the top.
-function showPools() {
-  const show = () => $('#ov-pool')?.scrollIntoView({ block: 'start' });
+// A provider's warning opens on the overview's subscriptions, after the route change has
+// scrolled to the top.
+function showSubscriptions() {
+  const show = () => $('#ov-subs')?.scrollIntoView({ block: 'start' });
   if (S.route === 'overview') return show();
   addEventListener('hashchange', show, { once: true });
   location.hash = '#/overview';
@@ -1388,15 +1387,14 @@ function overviewHTML() {
       <div class="bars" id="bars">${barsHTML()}</div>
       <div class="axis" aria-hidden="true"><span>60 min ago</span><span>now</span></div></section>`;
   const subs = `<section class="sec" id="ov-subs" aria-label="Subscriptions">${ovSubsHTML()}</section>`;
-  const pool = `<section class="sec" id="ov-pool" aria-label="Combined weekly quota">${ovPoolHTML()}</section>`;
   const other = `<section class="sec" id="ov-other" aria-label="Other circuits">${ovOtherHTML()}</section>`;
   const latest = `<section class="sec" aria-labelledby="latest-title"><div class="sec-head"><h2 class="h-sec" id="latest-title">Latest requests</h2><span class="grow"></span><a class="link" href="#/requests">All requests →</a></div>
       <div id="recent">${recentHTML()}</div></section>`;
   if (mob()) {
     const loadSec = `<section class="sec" aria-labelledby="load-title-m"><h2 class="h-sec" id="load-title-m">Load · last 60 min</h2>${load.replace(' aria-labelledby="load-title"', '').replace('<h2 class="label" id="load-title">Load · last 60 min</h2>', '')}</section>`;
-    return main + subs + pool + loadSec + other + latest;
+    return main + subs + loadSec + other + latest;
   }
-  return `${main}${load}${subs}${pool}${other}${latest}`;
+  return `${main}${load}${subs}${other}${latest}`;
 }
 
 function figuresHTML() {
@@ -1543,156 +1541,6 @@ function ovSubsHTML() {
     <div class="card rivets table subs" role="table" aria-label="Subscriptions">
       <div class="th" role="row"><span class="c-idx">#</span><span>Account</span><span>Limits · ${quotaWord()}</span><span>Status</span><span class="c-req r">Requests</span><span class="r">Activity</span></div>
       ${rows}</div>`;
-}
-
-// Plans count by Claude's published weekly allowance; the weights themselves are in src/pools.rs.
-const PLAN_WEIGHT_NOTE = 'Each account counts by its plan’s weekly allowance: Claude Pro 1, Max 5, Ultra 10';
-
-// How many accounts are on each known plan, most first: [["Ultra", 2], ["Pro", 1]].
-function planCounts(list) {
-  const counts = new Map();
-  for (const a of list) {
-    const name = planName(a);
-    if (name) counts.set(name, (counts.get(name) || 0) + 1);
-  }
-  return [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
-}
-
-// Server forecasts for each provider with several subscriptions; quota and resets
-// are weighted consistently in src/pools.rs and src/outlook.rs. A provider's weeks
-// limited to one model (Claude's Fable) come along as `scoped`, drawn under its own.
-function weeklyPools() {
-  const all = (S.overview && S.overview.pools) || [];
-  return all.filter((p) => p.window === 'week' && !p.model).map((p) => {
-    const list = (p.account_ids || []).map(accountById).filter(Boolean);
-    const scoped = all.filter((m) => m.provider === p.provider && m.model && String(m.window).split(' ')[0] === 'week')
-      .sort((x, y) => String(x.model).localeCompare(String(y.model)));
-    return list.length ? { ...p, account: list[0], plans: planCounts(list), scoped } : null;
-  }).filter(Boolean);
-}
-
-// A pooled window's first renewal, from its members' own readings: the forecast that
-// names the weekly one leaves model windows out.
-function poolNextReset(p) {
-  const now = Date.now();
-  let next = null;
-  for (const a of (p.account_ids || []).map(accountById).filter(Boolean)) {
-    const w = (a.quota?.windows || []).find((x) => x.name === p.window && (x.model || null) === (p.model || null));
-    const at = Date.parse(w?.resets_at);
-    if (at > now && !(Date.parse(next) <= at)) next = w.resets_at;
-  }
-  return next;
-}
-
-// The status beside the bar comes from this forecast; the bar itself is current quota.
-const POOL_OUTLOOK_NOTE = 'Forecast of the next 7 days from recent consumption and each account’s scheduled resets. Assumes usage can move between accounts. Five-hour and model limits are separate; banked resets are not predicted.';
-
-// Current combined quota, once every account reports its weekly window.
-function poolQuota(p) {
-  return p.accounts > 0 && p.reported === p.accounts ? quotaOf({ used: p.used }) : null;
-}
-
-// What the forecast assumes: the daily use, and the shortest account history behind it.
-function poolRateText(o) {
-  if (!Number.isFinite(o.rate_per_day)) return '';
-  const h = Math.floor(o.observed_hours);
-  const age = h >= 24 ? `${Math.floor(h / 24)}d${h % 24 ? ` ${h % 24}h` : ''}` : `${h}h`;
-  const short = Number.isFinite(o.observed_hours) && o.observed_hours < 168 ? ` The shortest account history is ${age}.` : '';
-  return ` · Recent use is ${quotaPercent(o.rate_per_day)} of the combined quota a day, the average of the last day and the last week of readings.${short}`;
-}
-
-function poolStatus(p) {
-  const o = p.outlook || {};
-  if (o.state === 'run_out') return { text: 'Quota gap expected', cls: 'err' };
-  if (o.state === 'tight') return { text: 'Low reserve', cls: 'warn' };
-  if (o.state === 'on_track') return { text: 'Expected to last', cls: 'good' };
-  if (o.state === 'learning') return { text: 'Learning usage', cls: '' };
-  return { text: 'Forecast unavailable', cls: '' };
-}
-
-// A pooled window as an account's row: the current quota in the selected mode with the
-// even-pace mark and the next account's reset.
-function poolCellsHTML(p, w, what, resetsAt, resetText) {
-  const q = poolQuota(w);
-  const pct = q ? `<span class="pct ${q.cls}">${esc(quotaPercent(q[S.quotaDisplay]))}</span>` : '<span class="pct dim" title="Quota not reported">–</span>';
-  const reset = resetsAt ? `<span class="rst" title="${esc(`${resetText} ${fullResetTime(resetsAt)}`)}">↺ ${liveLeft(resetsAt, true)}</span>` : '<span class="rst"></span>';
-  return `${meterHTML(q, q && w.pace, `${provName(p.account)} combined ${what}`)}${pct}${reset}`;
-}
-
-// The provider's model weeks (Fable) as child rows of its combined week.
-function poolChildRowsHTML(p, wide) {
-  return (p.scoped || []).map((m) => {
-    const name = cap(m.model);
-    return childRowHTML(m.model, poolCellsHTML(p, m, `${name} weekly`, poolNextReset(m), `Next account’s ${name} weekly limit resets`), poolQuota(m)?.cls, wide);
-  }).join('');
-}
-
-// The combined week's meter; on a phone its model weeks follow inside it, while a wide
-// row gives them lines of their own.
-function poolMeterHTML(p, wide = false) {
-  const week = `<div class="mrow"><span class="capsm">WK</span>${poolCellsHTML(p, p, 'weekly', p.outlook?.next_reset_at, 'Next account resets')}</div>`;
-  return `<div class="meters">${week}${wide ? '' : poolChildRowsHTML(p, false)}</div>`;
-}
-
-function poolStatusHTML(p) {
-  const o = p.outlook || {};
-  const status = poolStatus(p);
-  let detail = 'Next 7 days at recent usage';
-  if (o.state === 'run_out') {
-    detail = o.exhausts_at && o.recovers_at ? `Runs out ${when(o.exhausts_at)} · Back ${when(o.recovers_at)}` : 'Expected to exhaust weekly quota';
-  } else if (o.state === 'learning') {
-    detail = o.learning_until ? `Estimate after ${when(o.learning_until)}` : 'Needs 6h of recent quota readings';
-  } else if (!['on_track', 'tight'].includes(o.state)) {
-    detail = ({ stale_readings: 'Quota readings are stale', missing_quota: 'Waiting for every account’s weekly quota',
-      missing_reset: 'Waiting for every account’s reset time', awaiting_reset: 'Waiting for reset confirmation',
-      unavailable_account: 'An account needs to sign in again' })[o.reason] || 'Waiting for quota history';
-  }
-  const title = ['on_track', 'tight', 'run_out'].includes(o.state) ? POOL_OUTLOOK_NOTE + poolRateText(o) : '';
-  return `<span class="pool-gap ${status.cls}"${title ? ` title="${esc(title)}"` : ''}>${status.text}</span><span class="pool-note">${esc(detail)}</span>`;
-}
-
-// "3 accounts · Ultra" when they share a plan, "2 Ultra, 1 Pro" when every plan is known
-// and they differ, and the count first whenever some plan or weekly window is missing.
-function poolCount(p) {
-  const count = p.reported < p.accounts ? `${fmt(p.reported)} of ${plural(p.accounts, 'account')} reporting` : plural(p.accounts, 'account');
-  const plans = p.plans || [];
-  const known = plans.reduce((sum, [, n]) => sum + n, 0);
-  if (plans.length === 1 && known === p.accounts) return `${count} · ${plans[0][0]}`;
-  const mix = plans.map(([name, n]) => `${fmt(n)} ${name}`).join(', ');
-  if (mix && known === p.accounts && p.reported === p.accounts) return mix;
-  return [count, mix].filter(Boolean).join(' · ');
-}
-
-// How the accounts of each pool count: by plan allowance, or equally when a plan is unknown.
-function poolBasis(pools) {
-  const names = (priced) => pools.filter((p) => !!p.priced === priced).map((p) => provName(p.account)).join(', ');
-  const [priced, equal] = [names(true), names(false)];
-  if (!equal) return 'Each provider’s subscriptions together, weighted by plan allowance';
-  if (!priced) return 'Each provider’s subscriptions together, weighted equally';
-  return `${priced} weighted by plan allowance, ${equal} equally`;
-}
-// Each provider's weekly quota now; the status says whether it lasts until the coming resets.
-function ovPoolHTML() {
-  const pools = weeklyPools();
-  if (!pools.length) return '';
-  const note = pools.some((p) => p.priced) ? ` title="${esc(PLAN_WEIGHT_NOTE)}"` : '';
-  const heading = `<div class="sec-head"><h2 class="h-sec">Combined weekly quota</h2><span class="meta"${note}>${esc(poolBasis(pools))}</span></div>`;
-  const scoped = pools.some((p) => p.scoped.length) ? ' scoped' : '';
-  if (mob()) {
-    const items = pools.map((p) => `<div class="item">
-        <div class="item-top">${acctLogo(p.account, 18)}<div class="cell2"><span>${esc(provName(p.account))}</span><span>${esc(poolCount(p))}</span></div></div>
-        <div class="indent">${poolMeterHTML(p)}<div class="c-status">${poolStatusHTML(p)}</div></div>
-      </div>`).join('');
-    return `${heading}<div class="card stack-list pool${scoped}">${items}</div>`;
-  }
-  const rows = pools.map((p) => `<div class="tr">
-      <span class="c-idx"></span>
-      <div class="who">${acctLogo(p.account)}<div class="cell2"><span class="pool-name">${esc(provName(p.account))}</span><span class="sub">${esc(poolCount(p))}</span></div></div>
-      ${poolMeterHTML(p, true)}
-      <div class="c-status">${poolStatusHTML(p)}</div>
-      ${poolChildRowsHTML(p, true)}
-    </div>`).join('');
-  return `${heading}<div class="card table subs pool">${rows}</div>`;
 }
 
 function ovOtherHTML() {
@@ -4585,7 +4433,7 @@ async function pollOverview() {
   overviewAt = Date.now();
   try {
     S.overview = await api('/overview');
-    if (S.route === 'overview') { patchFigures(); patchBars(); patchChanged('ov-pool', ovPoolHTML); }
+    if (S.route === 'overview') { patchFigures(); patchBars(); }
     if (S.route === 'accounts' && S.sub) loadActivity(S.sub, true);
   } catch {}
 }
