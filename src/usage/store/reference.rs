@@ -112,7 +112,7 @@ pub(super) fn summary(conn: &mut Connection, q: &Query) -> Result<Value> {
     let conflicts:i64=conn.query_row(&format!("SELECT COUNT(*) FROM usage_entries o INDEXED BY usage_entries_event_time WHERE {where_sql} AND o.source='proxy' AND EXISTS(SELECT 1 FROM usage_observations x WHERE x.association_key=o.association_key AND ((x.model IS NOT NULL AND o.model IS NOT NULL AND x.model<>o.model) OR (x.account_id IS NOT NULL AND o.account_id IS NOT NULL AND x.account_id<>o.account_id) OR (x.input IS NOT NULL AND o.input IS NOT NULL AND x.input<>o.input) OR (x.cache_read IS NOT NULL AND o.cache_read IS NOT NULL AND x.cache_read<>o.cache_read) OR (x.cache_write IS NOT NULL AND o.cache_write IS NOT NULL AND x.cache_write<>o.cache_write) OR (x.output IS NOT NULL AND o.output IS NOT NULL AND x.output<>o.output)))"),rusqlite::params_from_iter(&values),|row|row.get(0))?;
     proxy["conflicts"] = json!(conflicts);
     let mut sources = Vec::new();
-    for source in ["proxy", "claude_code", "codex"] {
+    for source in ["proxy", "claude_code", "codex", "antigravity"] {
         let mut source_values = values.clone();
         source_values.push(source.to_owned().into());
         let mut totals = aggregate(conn, &source_entries(), &format!("{where_sql} AND o.source=?"), &source_values)?;

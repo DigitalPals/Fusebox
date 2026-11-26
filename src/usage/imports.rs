@@ -191,7 +191,7 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn source_ok(source: &str) -> Result<()> {
-    if !matches!(source, "codex" | "claude_code") {
+    if !matches!(source, "codex" | "claude_code" | "antigravity") {
         bail!("unsupported import source");
     }
     Ok(())
@@ -298,8 +298,11 @@ pub async fn status(store: &Store) -> Result<Value> {
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| home.as_ref().map(|p| p.join(".codex")));
     let claude =
         std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home.as_ref().map(|p| p.join(".claude")));
+    let antigravity = std::env::var_os("ANTIGRAVITY_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|p| p.join(".gemini").join("antigravity-cli").join("brain")));
     Ok(
-        json!({"imports":imports,"candidates":[{"source":"codex","root":codex,"scanned":false},{"source":"claude_code","root":claude,"scanned":false}]}),
+        json!({"imports":imports,"candidates":[{"source":"codex","root":codex,"scanned":false},{"source":"claude_code","root":claude,"scanned":false},{"source":"antigravity","root":antigravity,"scanned":false}]}),
     )
 }
 #[derive(Clone)]
@@ -331,6 +334,8 @@ pub(crate) struct Context {
     legacy_totals: BTreeMap<String, String>,
     #[serde(skip)]
     superseded: Vec<String>,
+    #[serde(skip)]
+    antigravity_key: Option<String>,
     #[serde(default)]
     turns: BTreeMap<String, String>,
     #[serde(default)]
@@ -569,6 +574,64 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
         o.validate().map_err(|_| anyhow!("invalid usage metadata"))?;
         return Ok(Some(o));
     }
+    if source == "antigravity" {
+        if v.get("type").and_then(Value::as_str) != Some("PLANNER_RESPONSE") {
+            return Ok(None);
+        }
+        let status = v.get("status").and_then(Value::as_str);
+        if !matches!(status, Some("DONE" | "ERROR")) {
+            return Ok(None);
+        }
+        valid_numbers(
+            v,
+            &[
+                "input_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "output_tokens",
+                "thinking_tokens",
+                "reasoning_tokens",
+            ],
+        )?;
+        let step = v.get("step_index").and_then(Value::as_u64).ok_or_else(|| anyhow!("missing step index"))?;
+        let at = v
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp_millis())
+            .ok_or_else(|| anyhow!("missing timestamp"))?;
+        let conv = context
+            .antigravity_key
+            .as_deref()
+            .or(context.session.as_deref())
+            .ok_or_else(|| anyhow!("missing conversation identity"))?;
+        let input = number(v.get("input_tokens"));
+        let cache_read =
+            if v.get("cache_read_tokens").is_none() { input.map(|_| 0) } else { number(v.get("cache_read_tokens")) };
+        let cache_write =
+            if v.get("cache_write_tokens").is_none() { input.map(|_| 0) } else { number(v.get("cache_write_tokens")) };
+        let output = number(v.get("output_tokens"));
+        let reasoning = number(v.get("thinking_tokens")).or_else(|| number(v.get("reasoning_tokens")));
+        if status == Some("ERROR")
+            && input.unwrap_or(0) == 0
+            && cache_read.unwrap_or(0) == 0
+            && cache_write.unwrap_or(0) == 0
+            && output.unwrap_or(0) == 0
+        {
+            return Ok(None);
+        }
+        let mut o = Observation::new(source, format!("step:{conv}:{step}"), "antigravity", at);
+        o.parser_version = PARSER.into();
+        o.actual_model = label(v.get("model"));
+        o.session_id = context.session.clone();
+        o.service_tier = Some("standard".into());
+        o.set_requested_speed(Some("standard"));
+        o.tokens = Tokens { input, cache_read, cache_write, output, reasoning, ..Tokens::default() };
+        o.completeness =
+            if status == Some("DONE") && o.tokens.total().is_some() { "complete" } else { "partial" }.into();
+        o.validate().map_err(|_| anyhow!("invalid usage metadata"))?;
+        return Ok(Some(o));
+    }
     if source != "codex" {
         bail!("unsupported source")
     }
@@ -776,7 +839,22 @@ fn parse_record_inner(source: &str, v: &Value, context: &mut Context) -> Result<
     }
 }
 
-fn files(root: &Path) -> Result<Vec<PathBuf>> {
+/// Antigravity stores transcripts at `<brain>/<uuid>/.system_generated/logs/transcript.jsonl`.
+/// Only a validated UUID parent is kept as a session identity so directory names never leak.
+fn antigravity_conversation_uuid(path: &Path) -> Option<String> {
+    let logs = path.parent()?;
+    if logs.file_name().and_then(|v| v.to_str()) != Some("logs") {
+        return None;
+    }
+    let sysgen = logs.parent()?;
+    if sysgen.file_name().and_then(|v| v.to_str()) != Some(".system_generated") {
+        return None;
+    }
+    let conv = sysgen.parent()?.file_name()?.to_str()?;
+    uuid::Uuid::parse_str(conv).ok().map(|u| u.to_string())
+}
+
+fn files(source: &str, root: &Path) -> Result<Vec<PathBuf>> {
     let mut stack = vec![root.to_path_buf()];
     let mut found = Vec::new();
     let mut dirs = 0;
@@ -785,10 +863,59 @@ fn files(root: &Path) -> Result<Vec<PathBuf>> {
         use std::os::unix::fs::MetadataExt;
         fs::metadata(root)?.dev()
     };
+    let same_device = |path: &Path| -> Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(fs::metadata(path)?.dev() == device)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(true)
+        }
+    };
+    let record_file = |found: &mut Vec<PathBuf>, path: PathBuf| -> Result<()> {
+        if path.extension().and_then(|v| v.to_str()) == Some("zst") && path.with_extension("").exists() {
+            return Ok(());
+        }
+        if found.len() >= MAX_FILES {
+            bail!("file scan bound exceeded");
+        }
+        found.push(path);
+        Ok(())
+    };
     while let Some(dir) = stack.pop() {
         dirs += 1;
         if dirs > MAX_FILES {
             bail!("directory scan bound exceeded")
+        }
+        if source == "antigravity" {
+            // A conversation folder keeps its transcript under `.system_generated/logs/`;
+            // check that path directly so sibling `scratch`, `.user_uploaded`, and
+            // `.system_generated/steps/*` subtrees never eat the directory scan budget.
+            let sysgen = dir.join(".system_generated");
+            if let Ok(meta) = fs::symlink_metadata(&sysgen)
+                && meta.file_type().is_dir()
+                && same_device(&sysgen)?
+            {
+                let logs = sysgen.join("logs");
+                if let Ok(meta) = fs::symlink_metadata(&logs)
+                    && meta.file_type().is_dir()
+                    && same_device(&logs)?
+                {
+                    for name in ["transcript.jsonl", "transcript.jsonl.zst"] {
+                        let candidate = logs.join(name);
+                        if let Ok(meta) = fs::symlink_metadata(&candidate)
+                            && meta.file_type().is_file()
+                            && same_device(&candidate)?
+                        {
+                            record_file(&mut found, candidate)?;
+                        }
+                    }
+                }
+                continue;
+            }
         }
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
@@ -796,30 +923,27 @@ fn files(root: &Path) -> Result<Vec<PathBuf>> {
             if kind.is_symlink() {
                 continue;
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if entry.metadata()?.dev() != device {
-                    continue;
-                }
+            if !same_device(&entry.path())? {
+                continue;
             }
             if kind.is_dir() {
+                if source == "antigravity"
+                    && dir.file_name().and_then(|v| v.to_str()) == Some(".system_generated")
+                    && entry.file_name().to_str() != Some("logs")
+                {
+                    continue;
+                }
                 stack.push(entry.path())
             } else if kind.is_file()
-                && entry
-                    .path()
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .is_some_and(|s| s.ends_with(".jsonl") || s.ends_with(".jsonl.zst"))
+                && entry.path().file_name().and_then(|v| v.to_str()).is_some_and(|s| {
+                    if source == "antigravity" {
+                        s == "transcript.jsonl" || s == "transcript.jsonl.zst"
+                    } else {
+                        s.ends_with(".jsonl") || s.ends_with(".jsonl.zst")
+                    }
+                })
             {
-                if found.len() >= MAX_FILES {
-                    bail!("file scan bound exceeded")
-                };
-                let path = entry.path();
-                if path.extension().and_then(|v| v.to_str()) == Some("zst") && path.with_extension("").exists() {
-                    continue;
-                };
-                found.push(path);
+                record_file(&mut found, entry.path())?;
             }
         }
     }
@@ -923,6 +1047,11 @@ fn read_file(path: &Path, root: &Root, checkpoint: Option<&Checkpoint>, remainin
         }
     }
     cp.context.parser_version = PARSER.into();
+    if root.source == "antigravity" {
+        let uuid = antigravity_conversation_uuid(path);
+        cp.context.session = uuid.clone();
+        cp.context.antigravity_key = Some(uuid.unwrap_or_else(|| id.clone()));
+    }
     let mut observations = BTreeMap::<String, Observation>::new();
     let mut counts = Counts::default();
     let start = cp.offset;
@@ -1046,7 +1175,7 @@ async fn scan_mode(store: &Store, source: Option<String>, outbox: bool, reimport
         let parse_root = root.clone();
         let parsed = tokio::task::spawn_blocking(move || -> Result<Vec<ParsedFile>> {
             validate_root(&parse_root.path)?;
-            let paths = files(&parse_root.path)?;
+            let paths = files(&parse_root.source, &parse_root.path)?;
             let mut remaining = MAX_BYTES;
             let mut results = Vec::new();
             for path in paths {
