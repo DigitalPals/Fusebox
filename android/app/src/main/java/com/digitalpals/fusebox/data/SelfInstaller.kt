@@ -20,6 +20,7 @@ import com.digitalpals.fusebox.BuildConfig
 import com.digitalpals.fusebox.FuseboxApplication
 import com.digitalpals.fusebox.MainActivity
 import com.digitalpals.fusebox.R
+import com.digitalpals.fusebox.push.FuseboxNotifications
 import java.io.File
 
 /**
@@ -112,6 +113,7 @@ object SelfInstaller {
     }
 
     private fun notify(context: Context, id: Int, title: String, text: String, tap: PendingIntent) {
+        if (!FuseboxNotifications.hasPermission(context)) return
         ensureChannel(context)
         val notification = NotificationCompat.Builder(context, CHANNEL_UPDATES)
             .setSmallIcon(R.drawable.ic_stat_fusebox)
@@ -121,7 +123,11 @@ object SelfInstaller {
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .build()
-        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        try {
+            NotificationManagerCompat.from(context).notify(id, notification)
+        } catch (_: SecurityException) {
+            // Notifications turned off between the check and here.
+        }
     }
 
     private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(

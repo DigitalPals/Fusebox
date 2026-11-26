@@ -78,7 +78,7 @@ foreground (at most every 6 hours) and on demand under **Settings → Updates**.
 downloaded, checked against the release notes' `SHA-256` line, checked to be Fusebox with a higher
 version code signed with the installed app's key, and installed through a `PackageInstaller`
 session that asks for no user action (Android 12+, `UPDATE_PACKAGES_WITHOUT_USER_ACTION`; on
-Android 14+ it also requests update ownership).
+Android 14+ it also requests update ownership, `ENFORCE_UPDATE_OWNERSHIP`).
 
 Android installs without asking only when Fusebox is the installer of record of the installed copy.
 After a manual install (browser, file manager, `adb`), the first update therefore asks once: on the
@@ -90,8 +90,9 @@ automatically** turns it off (the banner then offers new versions as before). Te
 another release list with `-PfuseboxReleasesUrl=<url>`.
 
 Play Store builds (`-PfuseboxPlayStore=true` / `--play`) and any app installed from Google Play
-(`com.android.vending`) automatically disable self-updates and strip `REQUEST_INSTALL_PACKAGES` and
-`UPDATE_PACKAGES_WITHOUT_USER_ACTION` from the manifest so Google Play handles updates cleanly.
+(`com.android.vending`) automatically disable self-updates and strip `REQUEST_INSTALL_PACKAGES`,
+`UPDATE_PACKAGES_WITHOUT_USER_ACTION` and `ENFORCE_UPDATE_OWNERSHIP` from the manifest so Google
+Play handles updates cleanly.
 
 Outputs are written to `android/app/build/outputs/apk/release/` (sideload APK) and
 `android/app/build/outputs/bundle/release/` (Play Store AAB).

@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 12+: updates of this app install without a prompt once it is their installer. -->
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- Android 14+: Fusebox stays the update owner, so other installers ask before replacing it. -->
+    <uses-permission android:name="android.permission.ENFORCE_UPDATE_OWNERSHIP" />
 
     <application
         android:name=".FuseboxApplication"
