@@ -14,7 +14,6 @@ struct OverviewView: View {
                 // The dashboard's phone order, subscriptions before load, folded or unfolded.
                 if !store.faults.isEmpty { FaultsCard() }
                 subscriptions
-                pools
                 LoadCard()
                 FoldAwareColumns(items: bottomBlocks, minColumnWidth: 360) { block(for: $0) }
             }
@@ -25,11 +24,9 @@ struct OverviewView: View {
         .navigationTitle(AppSection.overview.pageTitle)
     }
 
-    /// A model's child row ("↳ Fable") in either list widens both lists' meter labels, so
-    /// their meters line up.
+    /// A model's child row ("↳ Fable") widens every row's meter labels, so the meters line up.
     private var labelWidth: CGFloat {
-        store.subscriptions.contains { !$0.scopedWindows().isEmpty } || store.weeklyPools.contains { !$0.scoped.isEmpty }
-            ? MeterLabel.wide : MeterLabel.narrow
+        store.subscriptions.contains { !$0.scopedWindows().isEmpty } ? MeterLabel.wide : MeterLabel.narrow
     }
 
     @ViewBuilder private var subscriptions: some View {
@@ -39,20 +36,6 @@ struct OverviewView: View {
                 SectionHead("Subscriptions", meta: subsMeta) { QuotaModeToggle() }
                 FoldAwareColumns(items: store.subscriptions, minColumnWidth: 340) { column in
                     RowsPanel(items: column, rivets: true) { SubscriptionRow(account: $0, labelWidth: width) }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var pools: some View {
-        let pools = store.weeklyPools
-        if !pools.isEmpty {
-            let width = labelWidth
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHead("Combined weekly limits", meta: PoolsBasis.text(pools))
-                    .accessibilityIdentifier("combined-weekly")
-                FoldAwareColumns(items: pools, minColumnWidth: 340) { column in
-                    RowsPanel(items: column) { PoolRow(pool: $0, labelWidth: width) }
                 }
             }
         }
@@ -222,53 +205,6 @@ struct AccountRowContent: View {
                     .font(Typeface.small).foregroundStyle(Palette.fg3)
             }
         }
-    }
-}
-
-/// A provider's combined weekly limit: its subscriptions together, with the weighted even
-/// pace, the next reset and the forecast's verdict. Its model weeks follow WK as child rows
-/// ("↳ Fable") with their own pace and the first member's renewal; the verdict stays the week's.
-struct PoolRow: View {
-    @Environment(AppStore.self) private var store
-    var pool: WeeklyPool
-    var labelWidth = MeterLabel.narrow
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                ProviderLogo(pool.logo, size: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pool.providerName).font(Typeface.rowMedium).foregroundStyle(Palette.fg)
-                    Text(pool.countText).font(Typeface.small).foregroundStyle(Palette.fg3)
-                }
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                MeterRow(label: "WK", title: "\(pool.providerName) combined weekly", reading: pool.reading,
-                         pace: pool.reading == nil ? nil : pool.pool.pace, resetsAt: pool.pool.outlook?.nextResetAt, mode: store.quotaDisplay,
-                         labelWidth: labelWidth)
-                ForEach(pool.scoped) { s in
-                    MeterRow(label: s.name, title: "\(pool.providerName) combined \(s.name) weekly", reading: s.reading,
-                             pace: s.reading == nil ? nil : s.pool.pace, resetsAt: s.nextReset, mode: store.quotaDisplay,
-                             labelWidth: labelWidth, child: true)
-                }
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(pool.status.text).font(Typeface.sans(13, .medium, relativeTo: .footnote)).foregroundStyle(Palette.state(pool.status.level))
-                Text(pool.detail()).font(Typeface.small).foregroundStyle(Palette.fg3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-enum PoolsBasis {
-    static func text(_ pools: [WeeklyPool]) -> String {
-        let priced = pools.filter { $0.pool.priced == true }.map(\.providerName)
-        let equal = pools.filter { $0.pool.priced != true }.map(\.providerName)
-        if equal.isEmpty { return "Each provider’s subscriptions together, weighted by plan price" }
-        if priced.isEmpty { return "Each provider’s subscriptions together, weighted equally" }
-        return "\(priced.joined(separator: ", ")) weighted by plan price, \(equal.joined(separator: ", ")) equally"
     }
 }
 

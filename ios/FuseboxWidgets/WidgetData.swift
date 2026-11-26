@@ -5,7 +5,6 @@ import WidgetKit
 /// The widgets' data: read from the server with the shared key, or the app's last snapshot
 /// when the server can't be reached (no tailnet, locked keychain).
 struct WidgetData: Sendable {
-    var overview: Overview?
     var accounts: [Account]
     var faults: [Fault]
     var date: Date
@@ -16,22 +15,19 @@ struct WidgetData: Sendable {
 
     static func load() async -> WidgetData {
         guard let api = Connection.api else {
-            return WidgetData(overview: nil, accounts: [], faults: [], date: .now, stale: false, connected: false)
+            return WidgetData(accounts: [], faults: [], date: .now, stale: false, connected: false)
         }
         do {
-            async let o = api.overview()
             async let a = api.accounts()
             async let f = api.faults()
-            let (ov, ac, fa) = try await (o, a, f)
-            return WidgetData(overview: ov, accounts: ac, faults: fa, date: .now, stale: false, connected: true)
+            let (ac, fa) = try await (a, f)
+            return WidgetData(accounts: ac, faults: fa, date: .now, stale: false, connected: true)
         } catch {
             let s = WidgetSnapshot.load()
-            return WidgetData(overview: s?.overview, accounts: s?.accounts ?? [], faults: s?.faults ?? [],
+            return WidgetData(accounts: s?.accounts ?? [], faults: s?.faults ?? [],
                               date: s?.savedAt ?? .now, stale: true, connected: true)
         }
     }
-
-    var pools: [WeeklyPool] { WeeklyPool.weekly(overview: overview, accounts: accounts) }
 
     /// Next refresh: about every 20 minutes, sooner when a reset or a cooldown ends first.
     func nextRefresh(now: Date = .now) -> Date {
@@ -49,11 +45,7 @@ struct WidgetData: Sendable {
         let a = Account(id: "preview", provider: "claude", label: "you@example.com",
                         quota: Quota(windows: [QuotaWindow(name: "5h", used: 42, resetsAt: .now.addingTimeInterval(7200)),
                                                QuotaWindow(name: "week", used: 31, resetsAt: reset)], plan: "max_20x"))
-        var pool = Pool(provider: "claude", window: "week", model: nil, accounts: 1, accountIDs: ["preview"], reported: 1, used: 31, pace: 0.5)
-        pool.outlook = Pool.Outlook(state: "on_track", nextResetAt: reset)
-        var o = Overview()
-        o.pools = [pool]
-        return WidgetData(overview: o, accounts: [a], faults: [], date: .now, stale: false, connected: true)
+        return WidgetData(accounts: [a], faults: [], date: .now, stale: false, connected: true)
     }()
 }
 

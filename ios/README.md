@@ -1,10 +1,10 @@
 # Fusebox for iPhone
 
 A native SwiftUI app for a Fusebox server: every subscription's 5-hour and weekly meters with the
-even-pace mark, each provider's combined weekly limit, faults, the request log with its routing
-explanation, usage and costs, native push, Home and Lock Screen widgets and a Live Activity. It
-reads the same management API as the web dashboard (`ui/app.js`, `ui/usage.js`, `ui/config.js`)
-and uses its words. It runs on iPhone, including the foldable iPhone Duo, iOS 27.0 or later.
+even-pace mark, faults, the request log with its routing explanation, usage and costs, native
+push, Home and Lock Screen widgets and a Live Activity. It reads the same management API as the
+web dashboard (`ui/app.js`, `ui/usage.js`, `ui/config.js`) and uses its words. It runs on iPhone,
+including the foldable iPhone Duo, iOS 27.0 or later.
 
 - Bundle `com.digitalpals.fusebox` (display name “Fusebox”; App Store name “Fusebox - Subscription
   Proxy”, app record 6829404456), widgets `com.digitalpals.fusebox.widgets`, notification service
@@ -35,7 +35,7 @@ ios/
     SealedPush.swift       the relay device (handle, key) and opening sealed notifications
                            (also in the notification service)
     Formatting.swift       RFC 3339 with nanoseconds, and the dashboard's wording (fmt, left, compactLeft, …)
-    QuotaRules.swift       quotaOf, windowOf, even pace, account state, plans, combined pools, routing text
+    QuotaRules.swift       quotaOf, windowOf, even pace, account state, plans, routing text
     Connection.swift       URL/Keychain storage and the API client
     DeepLink.swift         notification `path` and fusebox:// routing
     Components.swift       the segmented meter (with the pace mark), provider logos, status dots
@@ -265,13 +265,11 @@ node scripts/relay-e2e.mjs - health                       # "devices": 0
 
 ## Widgets and the Live Activity
 
-- **Combined weekly limit** (small, medium, Lock Screen rectangular and circular): each provider's
-  subscriptions together with the even-pace mark, the forecast's verdict and the next reset.
 - **Subscription** (small, medium, Lock Screen rectangular), configurable with an AppIntent: one
   account's 5-hour and weekly meters.
-- Both read the server with the shared key and fall back to the app's last snapshot (in the shared
-  keychain group) when it can't be reached. They refresh about every 20 minutes, sooner when a reset or a
-  cooldown ends first, and the app reloads them when faults change (otherwise at most every 5 min).
+- It reads the server with the shared key and falls back to the app's last snapshot (in the shared
+  keychain group) when it can't be reached. It refreshes about every 20 minutes, sooner when a reset
+  or a cooldown ends first, and the app reloads it when faults change (otherwise at most every 5 min).
 - **Live Activity:** when a provider's every account is out (the `provider` fault), the app starts
   one counting down to the first account back (`Text(timerInterval:)`), updates it while it runs and
   ends it (“Claude is back”) when the fault clears. Local updates only, no push-to-update; it can be

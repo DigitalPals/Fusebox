@@ -71,8 +71,6 @@ final class AppStore {
 
     var badgeCount: Int { faults.filter(\.countsOnBadge).count }
 
-    var weeklyPools: [WeeklyPool] { WeeklyPool.weekly(overview: overview, accounts: accounts) }
-
     /// The overview's subscriptions: disabled accounts stay on the Accounts tab only.
     var subscriptions: [Account] { accounts.filter { $0.metered && !$0.disabled } }
     /// The overview's other circuits, likewise without disabled accounts.
@@ -118,7 +116,7 @@ final class AppStore {
         Connection.setKey(nil)
         api = nil
         overview = nil; accounts = []; faults = []; dismissedFaults = []; requests = []; load = [:]; activity = [:]
-        WidgetSnapshot(overview: nil, accounts: [], faults: []).save()
+        WidgetSnapshot(accounts: [], faults: []).save()
         WidgetCenter.shared.reloadAllTimelines()
         UNUserNotificationCenter.current().setBadgeCount(0)
     }
@@ -336,7 +334,7 @@ final class AppStore {
     }
 
     private func dataChanged() {
-        WidgetSnapshot(overview: overview, accounts: accounts, faults: faults).save()
+        WidgetSnapshot(accounts: accounts, faults: faults).save()
         reloadWidgets(force: false)
     }
 
@@ -344,7 +342,7 @@ final class AppStore {
     private func reloadWidgets(force: Bool) {
         guard force || Date.now.timeIntervalSince(widgetReloadedAt) > 300 else { return }
         widgetReloadedAt = .now
-        WidgetSnapshot(overview: overview, accounts: accounts, faults: faults).save()
+        WidgetSnapshot(accounts: accounts, faults: faults).save()
         WidgetCenter.shared.reloadAllTimelines()
     }
 
