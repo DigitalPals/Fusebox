@@ -48,6 +48,11 @@ def main():
     def claude(path,msg,at=None):
         row={'type':'assistant','uuid':'row-'+msg,'sessionId':'session-'+msg,'timestamp':at or stamp(),'cwd':'/PRIVATE_PROJECT_PATH','requestId':'req-'+msg,'message':{'id':msg,'model':'claude-sonnet-5-5','role':'assistant','content':[{'type':'text','text':MARKER},{'type':'tool_use','input':{'secret':MARKER}}],'usage':{'input_tokens':100,'output_tokens':50,'cache_read_input_tokens':20,'cache_creation_input_tokens':0,'cache_creation':{'ephemeral_5m_input_tokens':0,'ephemeral_1h_input_tokens':0},'service_tier':'standard'}}}
         with path.open('a') as f:f.write(json.dumps(row)+'\n')
+    def antigravity(brain,conv,step,at=None):
+        logs=brain/conv/'.system_generated'/'logs';logs.mkdir(parents=True,exist_ok=True)
+        row={'step_index':step,'source':'MODEL','type':'PLANNER_RESPONSE','status':'DONE','created_at':at or stamp(),'model':'gemini-4-neon-xhigh','input_tokens':1000,'cache_read_tokens':5000,'output_tokens':200,'thinking':MARKER,'tool_calls':[{'name':'read_file','args':{'Path':'/PRIVATE_PROJECT_PATH'}}]}
+        with (logs/'transcript.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
+        with (logs/'transcript_full.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
     try:
         start();states=[];tokens=[];ids=[];histories=[]
         for i in range(2):
@@ -77,6 +82,14 @@ def main():
         request('/api/usage-ingest',raw=b'x'*(600*1024),key=tokens[0],expected=413);checks.append('management/inference separation, wrong credential and oversized batch rejection')
         request('/api/usage/collectors/'+ids[0]+'/revoke',{});claude(histories[0],'msg-revoked');cli('collector','run','--once','--state-dir',states[0],expected=1);request('/api/usage-ingest',{'version':1,'observations':[]},key=tokens[0],expected=401);checks.append('revocation rejects upload and retains offline data')
         rotated=request('/api/usage/collectors/'+ids[1]+'/rotate',{});request('/api/usage-ingest',{'version':1,'observations':[]},key=tokens[1],expected=401);credential=root/'rotated';credential.write_text(rotated['credential']);credential.chmod(0o600);cli('collector','enroll','--state-dir',states[1],'--destination',base+'/api/usage-ingest','--credential-file',credential);cli('collector','run','--once','--state-dir',states[1]);checks.append('credential rotation and local re-enrollment preserve idempotency')
+        # Antigravity collector: reads transcript.jsonl, skips transcript_full.jsonl, prices models and drops thinking/tool text.
+        agy_brain=root/'antigravity-brain';agy_conv='431d189b-1084-4dd9-a0e9-f0f108ab59b7';antigravity(agy_brain,agy_conv,1)
+        agy_enroll=request('/api/usage/collectors',{'label':'Antigravity host'});agy_cred=root/'agy-cred';agy_cred.write_text(agy_enroll['credential']);agy_cred.chmod(0o600);agy_state=root/'collector-agy'
+        cli('collector','enroll','--state-dir',agy_state,'--destination',base+'/api/usage-ingest','--credential-file',agy_cred,'--antigravity-root',agy_brain)
+        cli('collector','run','--once','--state-dir',agy_state)
+        agy_dash=request('/api/usage/dashboard?source=antigravity')
+        assert agy_dash['combined']['totals']['observations']==1 and agy_dash['combined']['totals']['unpriced']==0 and (agy_dash['combined']['totals']['estimated_cost_nanos'] or 0)>0,agy_dash
+        checks.append('antigravity collector reads transcript.jsonl without duplicating transcript_full.jsonl and prices usage')
         # Server-side history import dated 10 days ago lands priced on its own local date.
         history=root/'server-history';history.mkdir();tz=zoneinfo.ZoneInfo('Europe/Amsterdam')
         old=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=10)).replace(hour=22,minute=30,second=0,microsecond=0)
@@ -90,7 +103,8 @@ def main():
         checks.append('imported history from 10 days ago is priced on its local date in the combined trend')
         local=cli('collector','status','--state-dir',states[1]);assert local['collector']['outbox']['storage']['journal_mode']=='delete';assert local['collector']['outbox']['storage']['database_limit_bytes']==64*1024*1024
         status=request('/api/usage/status');assert isinstance(status['imports'],list) and isinstance(status['collectors'],list)
-        assert all(c['last_contact_at_ms'] and c['last_sync_at_ms'] for c in status['collectors']);assert all(any(p['source']=='claude_code' and p['imported']>=1 and p['last_scan_at_ms'] for p in c['progress']) for c in status['collectors']);assert all(t not in json.dumps(status) for t in tokens)
+        assert all(c['last_contact_at_ms'] and c['last_sync_at_ms'] for c in status['collectors'])
+        assert all(any(p['source']==('antigravity' if c['id']==agy_enroll['collector']['id'] else 'claude_code') and p['imported']>=1 and p['last_scan_at_ms'] for p in c['progress']) for c in status['collectors']);assert all(t not in json.dumps(status) for t in tokens+[agy_enroll['credential']])
         for format in ['json','csv']:
             export=request('/api/usage/export?format='+format+'&limit=50&offset=0&timezone=Europe%2FAmsterdam&source=claude_code');assert MARKER not in str(export) and 'PRIVATE_PROJECT_PATH' not in str(export)
         stop();assert cli('usage','reprice','--database',root/'usage.sqlite3')=={'repriced':0};checks.append('usage reprice CLI is idempotent on an already priced database')

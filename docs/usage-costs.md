@@ -1,6 +1,6 @@
 # Usage and cost estimates
 
-Fusebox keeps a local history of token usage reported by requests sent through the proxy. It can also import metadata from opted-in Claude Code and Codex history files, or receive that metadata from a standalone collector on another machine. The Usage page combines these sources into one total that counts each provider response once, and shows an estimated API list-price equivalent when the model and reported token categories have a matching rate.
+Fusebox keeps a local history of token usage reported by requests sent through the proxy. It can also import metadata from opted-in Claude Code, Codex and Antigravity history files, or receive that metadata from a standalone collector on another machine. The Usage page combines these sources into one total that counts each provider response once, and shows an estimated API list-price equivalent when the model and reported token categories have a matching rate.
 
 These numbers are for comparison and troubleshooting. They are not invoices, provider-reported subscription charges, or a forecast of remaining subscription allowance. Subscription quota windows remain on the Accounts page and are never converted into dollars or added to API-token estimates.
 
@@ -84,9 +84,9 @@ Named clients add stable attribution to an inference credential. They are additi
 
 With a running server, use **Usage** in the dashboard to inspect totals, source coverage, health, imports, collectors, and the pricing assumptions. `/api/usage/dashboard`, `/api/usage/observations`, `/api/usage/status`, and `/api/usage/export` use the dashboard's management authentication. `/api/usage/export` returns one page of records at a time, as JSON or CSV. Use a local database backup for a complete archive. The former `/api/usage/summary` endpoint returns a management-authenticated `410 Gone`; migrate to the dashboard contract rather than expecting its former per-source or request/attempt aggregate fields.
 
-## Import Claude Code and Codex history
+## Import Claude Code, Codex and Antigravity history
 
-Native-history import is disabled until you explicitly enable a source root. Fusebox only reads the selected directory, not provider credentials or settings. It scans local JSONL history for usage-bearing records and stores a small metadata projection. Claude Code roots are normally under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`); Codex roots are normally under `$CODEX_HOME` or `~/.codex`, which contains `sessions` and `archived_sessions`. The importer recursively scans the root, including archived and compressed Codex JSONL files. When a plain `.jsonl` file and its `.jsonl.zst` sibling both exist, the plain file is preferred.
+Native-history import is disabled until you explicitly enable a source root. Fusebox only reads the selected directory, not provider credentials or settings. It scans local JSONL history for usage-bearing records and stores a small metadata projection. Claude Code roots are normally under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`); Codex roots are normally under `$CODEX_HOME` or `~/.codex`, which contains `sessions` and `archived_sessions`; Antigravity roots are normally under `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, or an ACP data directory's `brain` folder (reading `transcript.jsonl` under `.system_generated/logs/` and skipping `transcript_full.jsonl`). The importer recursively scans the root, including archived and compressed JSONL files. When a plain `.jsonl` file and its `.jsonl.zst` sibling both exist, the plain file is preferred.
 
 The source formats are version-sensitive. The importer recognizes Claude Code assistant rows carrying `message.usage`, and Codex `token_usage_record` events plus legacy cumulative `token_count` snapshots. Prompt history and generic token estimates are not usage records. Codex's durable response record is preferred over its overlapping cumulative snapshots. Copied Codex histories deduplicate by stable response identity when available; filename or ordinal alone is not treated as a reliable event identity. Claude Code message IDs are preferred, with the transcript row UUID as a fallback. The native Claude Code JSONL billing schema and universal request-ID guarantee are not published as a stable contract, so weaker identities can leave visible duplicates or conflicts. Imports never infer the account currently signed in to Fusebox as the account that produced old local history.
 
@@ -99,6 +99,7 @@ fusebox usage status --database ./usage.sqlite3
 fusebox usage enable --database ./usage.sqlite3 --source codex --root "$HOME/.codex/sessions"
 fusebox usage enable --database ./usage.sqlite3 --source codex --root "$HOME/.codex/archived_sessions"
 fusebox usage enable --database ./usage.sqlite3 --source claude_code --root "$HOME/.claude/projects"
+fusebox usage enable --database ./usage.sqlite3 --source antigravity --root "$HOME/.gemini/antigravity-cli/brain"
 fusebox usage scan --database ./usage.sqlite3
 fusebox usage status --database ./usage.sqlite3
 fusebox usage reprice --database ./usage.sqlite3
@@ -183,7 +184,8 @@ printf '%s' "$COLLECTOR_TOKEN" | fusebox collector enroll \
   --destination 'https://fusebox.example/api/usage-ingest' \
   --codex-root "$HOME/.codex/sessions" \
   --codex-root "$HOME/.codex/archived_sessions" \
-  --claude-root "$HOME/.claude/projects"
+  --claude-root "$HOME/.claude/projects" \
+  --antigravity-root "$HOME/.gemini/antigravity-cli/brain"
 unset COLLECTOR_TOKEN
 ```
 

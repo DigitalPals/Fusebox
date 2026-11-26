@@ -1,6 +1,6 @@
 # Collector progress and local storage limits
 
-Authenticated collector batches may include `progress`, an optional array with at most one report for each of `codex` and `claude_code`. Older batches may omit it. The dashboard collector status returns the last committed reports in each collector's `progress` array; it remains empty until a collector reports progress.
+Authenticated collector batches may include `progress`, an optional array with at most one report for each of `codex`, `claude_code` and `antigravity`. Older batches may omit it, and `antigravity` is sent only when an Antigravity root is configured. The dashboard collector status returns the last committed reports in each collector's `progress` array; it remains empty until a collector reports progress.
 
 Each report contains only `source`, `state`, `imported`, `duplicate`, `skipped`, `unsupported`, `failed`, and `last_scan_at_ms`. Sources and states are strict enums. Counters must be between zero and one trillion. The timestamp may be null or fall between January 2020 and tomorrow; `ready` requires a scan timestamp. Unknown fields, duplicate sources, invalid enum values, and out-of-bound values reject the batch. Reports are committed atomically with observations and supersession, under the authenticated collector identity. They contain no root paths, project names, prompts, transcript text, credentials, or free-form diagnostics.
 
