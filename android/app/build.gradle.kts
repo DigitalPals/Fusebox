@@ -38,9 +38,13 @@ android {
         applicationId = "com.digitalpals.fusebox"
         minSdk = 31
         targetSdk = 36
-        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 4
-        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.3"
+        versionCode = (project.findProperty("fuseboxVersionCode") as String?)?.toIntOrNull() ?: 5
+        versionName = (project.findProperty("fuseboxVersionName") as String?) ?: "1.0.4"
         buildConfigField("boolean", "SELF_UPDATE_ENABLED", (!isPlayStore).toString())
+        // Where the app looks for new versions; a test build can point at a local server.
+        val releasesUrl = (project.findProperty("fuseboxReleasesUrl") as String?)
+            ?: "https://api.github.com/repos/DigitalPals/Fusebox/releases?per_page=20"
+        buildConfigField("String", "RELEASES_URL", "\"$releasesUrl\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

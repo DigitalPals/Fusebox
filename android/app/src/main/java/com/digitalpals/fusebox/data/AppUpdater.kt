@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -76,12 +77,14 @@ data class AppUpdateInfo(
 
 data class UpdateUiState(
     val supported: Boolean = true,
+    val autoUpdate: Boolean = true,
     val checking: Boolean = false,
     val available: AppUpdateInfo? = null,
     val dismissedVersion: String? = null,
     val downloading: Boolean = false,
     val downloadProgress: Float = 0f,
     val downloadedVersion: String? = null,
+    val installing: Boolean = false,
     val needsInstallPermission: Boolean = false,
     val statusMessage: String? = null,
     val error: String? = null,
@@ -89,7 +92,7 @@ data class UpdateUiState(
     /** Banner appears above screens whenever an undismissed update (or active download) exists. */
     val showBanner: Boolean
         get() = supported && available != null &&
-            (downloading || needsInstallPermission || available.version != dismissedVersion)
+            (downloading || installing || needsInstallPermission || available.version != dismissedVersion)
 }
 
 @Serializable
@@ -160,7 +163,9 @@ object ReleasePicker {
 
 /**
  * Checks GitHub Releases (`android-v*`) for newer sideload APKs, downloads them with SHA-256
- * verification, and hands them to the Android package installer via FileProvider.
+ * verification, checks they are Fusebox signed with the installed app's key, and installs them
+ * through [SelfInstaller]. With automatic updates on (the default), it does all of that by itself:
+ * when the app comes to the foreground and every 6 hours in the background ([UpdateWorker]).
  * Automatically disabled on Google Play installs and Play Store builds.
  */
 class AppUpdater(
@@ -182,11 +187,14 @@ class AppUpdater(
     private val _state = MutableStateFlow(
         UpdateUiState(
             supported = supported,
+            autoUpdate = storage.autoUpdate,
             dismissedVersion = storage.dismissedUpdateVersion,
         ),
     )
     val state: StateFlow<UpdateUiState> = _state.asStateFlow()
 
+    /** One check, download or install at a time (foreground, background job and taps). */
+    private val busy = Mutex()
     private var downloadJob: Job? = null
     private var downloadedApkFile: File? = null
 
@@ -194,11 +202,66 @@ class AppUpdater(
         if (!supported) return
         val now = System.currentTimeMillis()
         if (now - storage.lastUpdateCheckMs < CHECK_INTERVAL_MS) return
-        scope.launch { checkForUpdates(manual = false) }
+        scope.launch { autoUpdate() }
+    }
+
+    fun setAutoUpdate(on: Boolean) {
+        storage.autoUpdate = on
+        _state.update { it.copy(autoUpdate = on) }
+        if (on) {
+            storage.lastUpdateCheckMs = 0L
+            scope.launch { autoUpdate() }
+        }
+    }
+
+    /**
+     * Checks for a newer release and, with automatic updates on, downloads and installs it.
+     * Returns what happened, for logs and tests.
+     */
+    suspend fun autoUpdate(): AutoUpdateOutcome {
+        if (!supported) return AutoUpdateOutcome.UNSUPPORTED
+        if (!busy.tryLock()) return AutoUpdateOutcome.BUSY
+        try {
+            val update = check(manual = false) ?: return AutoUpdateOutcome.UP_TO_DATE
+            if (!storage.autoUpdate) return AutoUpdateOutcome.OFF
+            // Never install by itself what it can't check: the release must name its SHA-256.
+            if (update.expectedSha256 == null) return AutoUpdateOutcome.NO_CHECKSUM
+            val now = System.currentTimeMillis()
+            if (storage.autoUpdateFailedVersion == update.version && now - storage.autoUpdateFailedAtMs < RETRY_AFTER_FAILURE_MS) {
+                return AutoUpdateOutcome.FAILED_RECENTLY
+            }
+            if (!SelfInstaller.canInstall(appContext)) {
+                if (storage.permissionPromptedVersion != update.version) {
+                    storage.permissionPromptedVersion = update.version
+                    SelfInstaller.notifyPermissionNeeded(appContext, update.version)
+                }
+                return AutoUpdateOutcome.NEEDS_PERMISSION
+            }
+            val apk = try {
+                download(update)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                failed(update.version, e.message ?: "Download failed")
+                return AutoUpdateOutcome.FAILED
+            }
+            return if (install(apk, update.version)) AutoUpdateOutcome.INSTALLING else AutoUpdateOutcome.FAILED
+        } finally {
+            busy.unlock()
+        }
     }
 
     suspend fun checkForUpdates(manual: Boolean = true): AppUpdateInfo? {
         if (!supported) return null
+        if (!busy.tryLock()) return _state.value.available
+        try {
+            return check(manual)
+        } finally {
+            busy.unlock()
+        }
+    }
+
+    private suspend fun check(manual: Boolean): AppUpdateInfo? {
         _state.update {
             it.copy(
                 checking = true,
@@ -224,6 +287,7 @@ class AppUpdater(
             }
             update
         } catch (ce: CancellationException) {
+            _state.update { it.copy(checking = false) }
             throw ce
         } catch (e: Exception) {
             _state.update {
@@ -244,48 +308,29 @@ class AppUpdater(
 
     fun downloadAndInstall(activity: Activity) {
         val info = _state.value.available ?: return
-        if (_state.value.downloading) return
+        if (_state.value.downloading || _state.value.installing) return
 
-        // If already downloaded and verified for this version, go straight to installer.
+        // If already downloaded and verified for this version, go straight to installing.
         val cached = downloadedApkFile
         if (cached != null && cached.isFile && _state.value.downloadedVersion == info.version) {
-            triggerInstall(activity, cached)
+            triggerInstall(activity, cached, info.version)
             return
         }
 
         downloadJob?.cancel()
         downloadJob = scope.launch {
-            _state.update {
-                it.copy(
-                    downloading = true,
-                    downloadProgress = 0f,
-                    error = null,
-                    statusMessage = null,
-                    needsInstallPermission = false,
-                )
-            }
-            try {
-                val apkFile = withContext(Dispatchers.IO) { downloadApk(info) }
-                downloadedApkFile = apkFile
-                _state.update {
-                    it.copy(
-                        downloading = false,
-                        downloadProgress = 1f,
-                        downloadedVersion = info.version,
-                    )
-                }
-                triggerInstall(activity, apkFile)
+            if (!busy.tryLock()) return@launch
+            val apk = try {
+                download(info)
             } catch (ce: CancellationException) {
-                _state.update { it.copy(downloading = false) }
                 throw ce
             } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        downloading = false,
-                        error = e.message ?: "Download failed",
-                    )
-                }
+                _state.update { it.copy(error = e.message ?: "Download failed") }
+                null
+            } finally {
+                busy.unlock()
             }
+            if (apk != null) triggerInstall(activity, apk, info.version)
         }
     }
 
@@ -293,9 +338,20 @@ class AppUpdater(
         if (!_state.value.needsInstallPermission) return
         val apk = downloadedApkFile ?: return
         if (!apk.isFile) return
-        if (appContext.packageManager.canRequestPackageInstalls()) {
+        if (SelfInstaller.canInstall(appContext)) {
             _state.update { it.copy(needsInstallPermission = false) }
-            launchInstallerIntent(activity, apk)
+            install(apk, _state.value.downloadedVersion ?: return, activity)
+        }
+    }
+
+    /** [SelfInstaller.StatusReceiver]: Android did not install it (null: the user said no). */
+    fun onInstallFailed(message: String?) {
+        _state.update {
+            it.copy(
+                installing = false,
+                error = message ?: it.error,
+                statusMessage = if (message == null) "Install cancelled" else it.statusMessage,
+            )
         }
     }
 
@@ -311,6 +367,52 @@ class AppUpdater(
                 error = null,
                 statusMessage = null,
             )
+        }
+    }
+
+    private suspend fun download(info: AppUpdateInfo): File {
+        _state.update {
+            it.copy(downloading = true, downloadProgress = 0f, error = null, statusMessage = null, needsInstallPermission = false)
+        }
+        try {
+            val apk = withContext(Dispatchers.IO) { downloadApk(info) }
+            downloadedApkFile = apk
+            _state.update { it.copy(downloading = false, downloadProgress = 1f, downloadedVersion = info.version) }
+            return apk
+        } catch (e: Throwable) {
+            _state.update { it.copy(downloading = false) }
+            throw e
+        }
+    }
+
+    private fun failed(version: String, message: String) {
+        storage.autoUpdateFailedVersion = version
+        storage.autoUpdateFailedAtMs = System.currentTimeMillis()
+        _state.update { it.copy(downloading = false, installing = false, error = message) }
+    }
+
+    /**
+     * Checks the download and hands it to [SelfInstaller]. With [activity] (a tap), falls back to
+     * Android's installer screen if a session can't be used.
+     */
+    private fun install(apk: File, version: String, activity: Activity? = null): Boolean {
+        SelfInstaller.problemWith(appContext, apk)?.let { problem ->
+            failed(version, problem)
+            apk.delete()
+            return false
+        }
+        _state.update { it.copy(installing = true, error = null, statusMessage = "Installing $version…") }
+        return try {
+            SelfInstaller.install(appContext, apk, version, storage)
+            true
+        } catch (e: Exception) {
+            if (activity != null && launchInstallerIntent(activity, apk)) {
+                _state.update { it.copy(installing = false, statusMessage = null) }
+                true
+            } else {
+                failed(version, e.message ?: "Could not install $version")
+                false
+            }
         }
     }
 
@@ -398,8 +500,8 @@ class AppUpdater(
         return finalFile
     }
 
-    private fun triggerInstall(activity: Activity, apkFile: File) {
-        if (!appContext.packageManager.canRequestPackageInstalls()) {
+    private fun triggerInstall(activity: Activity, apkFile: File, version: String) {
+        if (!SelfInstaller.canInstall(appContext)) {
             _state.update {
                 it.copy(
                     needsInstallPermission = true,
@@ -413,10 +515,11 @@ class AppUpdater(
             runCatching { activity.startActivity(intent) }
             return
         }
-        launchInstallerIntent(activity, apkFile)
+        install(apkFile, version, activity)
     }
 
-    private fun launchInstallerIntent(activity: Activity, apkFile: File) {
+    /** Android's own installer screen, for when a session can't be used. */
+    private fun launchInstallerIntent(activity: Activity, apkFile: File): Boolean {
         val uri = FileProvider.getUriForFile(
             appContext,
             "${appContext.packageName}.fileprovider",
@@ -426,17 +529,19 @@ class AppUpdater(
             setDataAndType(uri, APK_MIME_TYPE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        runCatching { activity.startActivity(intent) }.onFailure { err ->
+        return runCatching { activity.startActivity(intent) }.onFailure { err ->
             _state.update { it.copy(error = err.message ?: "Could not open installer") }
-        }
+        }.isSuccess
     }
 
     companion object {
-        const val DEFAULT_RELEASES_URL =
-            "https://api.github.com/repos/DigitalPals/Fusebox/releases?per_page=20"
+        /** GitHub's releases list, or `-PfuseboxReleasesUrl` for a test build. */
+        val DEFAULT_RELEASES_URL: String = BuildConfig.RELEASES_URL
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val PLAY_STORE_PACKAGE = "com.android.vending"
-        private const val CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L // 6 hours
+        internal const val CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L // 6 hours
+        /** A version that failed to download or install is tried again after a day. */
+        private const val RETRY_AFTER_FAILURE_MS = 24L * 60L * 60L * 1000L
 
         fun isPlayStoreInstall(context: Context): Boolean = runCatching {
             val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -447,5 +552,12 @@ class AppUpdater(
             }
             installer == PLAY_STORE_PACKAGE
         }.getOrDefault(false)
+
+        /** Whether this build and install update themselves at all. */
+        fun selfUpdateSupported(context: Context): Boolean =
+            BuildConfig.SELF_UPDATE_ENABLED && !isPlayStoreInstall(context)
     }
 }
+
+/** What one automatic update run did. */
+enum class AutoUpdateOutcome { UNSUPPORTED, BUSY, UP_TO_DATE, OFF, NO_CHECKSUM, FAILED_RECENTLY, NEEDS_PERMISSION, FAILED, INSTALLING }

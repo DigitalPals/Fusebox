@@ -67,19 +67,31 @@ Or use the convenience build script:
 android/scripts/build-release                    # unit tests + sideload APK + AAB
 android/scripts/build-release --apk-only         # sideload APK only (with in-app updater)
 android/scripts/build-release --play             # Play Store AAB (strips REQUEST_INSTALL_PACKAGES)
-android/scripts/build-release --version 1.0.3 --code 4
+android/scripts/build-release --version 1.0.4 --code 5
 ```
 
 ### In-app updates (sideload builds)
 
-Sideloaded builds automatically check `DigitalPals/Fusebox` GitHub releases (`android-v*`) at most
-once every 6 hours (and on demand under **Settings → Updates**). When a newer `.apk` release exists,
-a banner appears with one-tap download, SHA-256 verification (against the release notes' `SHA-256`
-line), and hand-off to Android's package installer via `FileProvider`.
+Sideloaded builds update themselves from `DigitalPals/Fusebox` GitHub releases (`android-v*`). They
+check every 6 hours in the background (WorkManager, with a network), when the app comes to the
+foreground (at most every 6 hours) and on demand under **Settings → Updates**. A newer `.apk` is
+downloaded, checked against the release notes' `SHA-256` line, checked to be Fusebox with a higher
+version code signed with the installed app's key, and installed through a `PackageInstaller`
+session that asks for no user action (Android 12+, `UPDATE_PACKAGES_WITHOUT_USER_ACTION`; on
+Android 14+ it also requests update ownership).
+
+Android installs without asking only when Fusebox is the installer of record of the installed copy.
+After a manual install (browser, file manager, `adb`), the first update therefore asks once: on the
+Android installer screen when the app is open, or through a "ready to install" notification when it
+isn't. Every update after that installs by itself, with an "Updated to X" notification. A release
+without a `SHA-256` line is only offered in the banner, never installed by itself; a version that
+fails to download or install is tried again after a day. **Settings → Updates → Install updates
+automatically** turns it off (the banner then offers new versions as before). Test builds can read
+another release list with `-PfuseboxReleasesUrl=<url>`.
 
 Play Store builds (`-PfuseboxPlayStore=true` / `--play`) and any app installed from Google Play
-(`com.android.vending`) automatically disable self-updates and strip `REQUEST_INSTALL_PACKAGES` from
-the manifest so Google Play handles updates cleanly.
+(`com.android.vending`) automatically disable self-updates and strip `REQUEST_INSTALL_PACKAGES` and
+`UPDATE_PACKAGES_WITHOUT_USER_ACTION` from the manifest so Google Play handles updates cleanly.
 
 Outputs are written to `android/app/build/outputs/apk/release/` (sideload APK) and
 `android/app/build/outputs/bundle/release/` (Play Store AAB).

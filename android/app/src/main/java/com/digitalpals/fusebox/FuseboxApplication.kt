@@ -7,6 +7,8 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.digitalpals.fusebox.data.AppStore
 import com.digitalpals.fusebox.data.AppUpdater
 import com.digitalpals.fusebox.data.SecureStorage
+import com.digitalpals.fusebox.data.SelfInstaller
+import com.digitalpals.fusebox.data.UpdateWorker
 import com.digitalpals.fusebox.push.FuseboxNotifications
 import com.digitalpals.fusebox.push.PushManager
 import com.digitalpals.fusebox.widget.FuseboxWidgetUpdater
@@ -34,6 +36,8 @@ class FuseboxApplication : Application() {
         store = AppStore(this, storage)
         pushManager = PushManager(this, storage)
         updater = AppUpdater(this, storage)
+        SelfInstaller.ensureChannel(this)
+        UpdateWorker.schedule(this)
         FuseboxWidgetUpdater.schedulePeriodic(this)
 
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {

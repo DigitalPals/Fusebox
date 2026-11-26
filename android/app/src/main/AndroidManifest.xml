@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 12+: updates of this app install without a prompt once it is their installer. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <application
         android:name=".FuseboxApplication"
@@ -78,6 +80,18 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="fusebox_faults" />
+
+        <!-- Results of installing a new version of this app, and the new version's first run -->
+        <receiver
+            android:name=".data.SelfInstaller$StatusReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".data.SelfInstaller$UpdatedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- FileProvider for handing downloaded sideload APKs to the Android package installer -->
         <provider

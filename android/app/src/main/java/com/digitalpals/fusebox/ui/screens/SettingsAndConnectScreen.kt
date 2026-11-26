@@ -440,15 +440,38 @@ fun SettingsScreen(
             if (updater != null && updateState != null && updateState.supported) {
                 SettingsSection(
                     title = "Updates",
-                    note = "Checks DigitalPals/Fusebox GitHub releases (android-v*) and verifies SHA-256 before installing.",
+                    note = "Checks DigitalPals/Fusebox GitHub releases (android-v*) every 6 hours. A new version must match its " +
+                        "SHA-256 and this app's signing key. Android asks once to confirm the first update; after that, " +
+                        "updates install by themselves.",
                 ) {
                     CardPanel(spacing = 10.dp) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Install updates automatically", style = Typeface.row, color = colors.fg)
+                                Text(
+                                    text = if (updateState.autoUpdate) "On · downloads and installs new versions" else "Off · shows a banner instead",
+                                    style = Typeface.small,
+                                    color = colors.fg3,
+                                )
+                            }
+                            BreakerSwitch(
+                                checked = updateState.autoUpdate,
+                                contentDesc = "Install updates automatically",
+                                onCheckedChange = { updater.setAutoUpdate(it) },
+                            )
+                        }
+                        Hairline()
                         val avail = updateState.available
                         val statusText = when {
                             updateState.error != null -> updateState.error
                             updateState.downloading && updateState.downloadProgress >= 0f ->
                                 "Downloading ${avail?.version.orEmpty()} · ${(updateState.downloadProgress * 100).toInt()}%"
                             updateState.downloading -> "Downloading ${avail?.version.orEmpty()}…"
+                            updateState.installing -> "Installing ${avail?.version.orEmpty()}…"
                             updateState.needsInstallPermission ->
                                 "Allow “Install unknown apps” for Fusebox, then tap Install."
                             updateState.checking -> "Checking GitHub releases…"
@@ -479,13 +502,14 @@ fun SettingsScreen(
                             if (avail != null) {
                                 val btnLabel = when {
                                     updateState.downloading -> "${(updateState.downloadProgress.coerceAtLeast(0f) * 100).toInt()}%"
+                                    updateState.installing -> "Installing"
                                     updateState.downloadedVersion == avail.version -> "Install ${avail.version}"
                                     else -> "Update to ${avail.version}"
                                 }
                                 FuseButton(
                                     text = btnLabel,
                                     kind = FuseButtonKind.PRIMARY,
-                                    enabled = !updateState.downloading,
+                                    enabled = !updateState.downloading && !updateState.installing,
                                     onClick = { activity?.let { updater.downloadAndInstall(it) } },
                                 )
                             } else {
