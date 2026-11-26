@@ -140,5 +140,6 @@ test('model setup and scoped quota explanations translate without changing model
   assert.equal(tr('Model: team/coding'),'模型：team/coding');
   assert.equal(tr('Model metadata overrides'),'模型元数据覆盖');
   assert.equal(tr('Download file'),'下载文件');
+  assert.equal(tr('Antigravity history'), 'Antigravity 历史');
 });
 

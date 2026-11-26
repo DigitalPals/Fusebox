@@ -458,6 +458,24 @@ async fn progress_bounds_privacy_and_atomic_roundtrip() {
     );
     let saved = status(&store).await.unwrap()["collectors"][0]["progress"].clone();
     assert_eq!(saved, good["progress"]);
+    let three = json!({
+        "version": 1,
+        "observations": [],
+        "progress": [
+            progress(),
+            {"source":"claude_code","state":"ready","imported":1,"duplicate":0,"skipped":0,"unsupported":0,"failed":0,"last_scan_at_ms":chrono::Utc::now().timestamp_millis()},
+            {"source":"antigravity","state":"ready","imported":2,"duplicate":0,"skipped":0,"unsupported":0,"failed":0,"last_scan_at_ms":chrono::Utc::now().timestamp_millis()}
+        ]
+    });
+    assert_eq!(
+        ingest(&store, headers(token), Bytes::from(serde_json::to_vec(&three).unwrap())).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        ingest(&store, headers(token), Bytes::from(serde_json::to_vec(&good).unwrap())).await.status(),
+        StatusCode::OK
+    );
+    let saved = status(&store).await.unwrap()["collectors"][0]["progress"].clone();
     for (field, value) in [
         ("source", json!("proxy")),
         ("state", json!("complete")),
@@ -695,4 +713,57 @@ fn usage_collector_batch_sizing_benchmark() {
             "observation_serializations_before":MAX_BATCH*(MAX_BATCH+1)/2,"observation_serializations_after":MAX_BATCH,
             "repeated_batch_ms":before.as_secs_f64()*1000.0,"incremental_size_ms":after.as_secs_f64()*1000.0})
     );
+}
+
+#[tokio::test]
+async fn antigravity_collector_ingest_validates_provider_and_emits_progress_only_when_configured() {
+    let dir = TestDir::new();
+    let store = dir.store();
+    let enrolled = enroll(&store, "dragon".into()).await.unwrap();
+    let token = enrolled["credential"].as_str().unwrap();
+
+    let mut good_obs = Observation::new(
+        "antigravity",
+        "step:431d189b-1084-4dd9-a0e9-f0f108ab59b7:1".into(),
+        "antigravity",
+        chrono::Utc::now().timestamp_millis(),
+    );
+    good_obs.actual_model = Some("gemini-4-neon-xhigh".into());
+    good_obs.service_tier = Some("standard".into());
+    good_obs.set_requested_speed(Some("standard"));
+    good_obs.tokens = crate::usage::types::Tokens {
+        input: Some(1000),
+        cache_read: Some(5000),
+        cache_write: Some(0),
+        output: Some(200),
+        ..Default::default()
+    };
+    good_obs.completeness = "complete".into();
+
+    let good_batch = json!({"version":1,"observations":[good_obs],"pending":0});
+    assert_eq!(
+        ingest(&store, headers(token), Bytes::from(serde_json::to_vec(&good_batch).unwrap())).await.status(),
+        StatusCode::OK
+    );
+
+    let mut wrong_provider = good_obs.clone();
+    wrong_provider.provider = "google".into();
+    let bad_batch = json!({"version":1,"observations":[wrong_provider],"pending":0});
+    assert_eq!(
+        ingest(&store, headers(token), Bytes::from(serde_json::to_vec(&bad_batch).unwrap())).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Without an antigravity root, source_progress keeps two entries for older server compatibility.
+    let status_two = json!({"imports":[{"source":"codex","root":"/tmp/a","enabled":true,"last_error":null,"last_scan_at_ms":chrono::Utc::now().timestamp_millis(),"imported":1,"duplicate":0,"skipped":0,"unsupported":0,"failed":0}]});
+    assert_eq!(source_progress(&status_two).unwrap().len(), 2);
+
+    // With an antigravity root configured, source_progress includes antigravity.
+    let status_three = json!({"imports":[{"source":"antigravity","root":"/tmp/b","enabled":true,"last_error":null,"last_scan_at_ms":chrono::Utc::now().timestamp_millis(),"imported":3,"duplicate":0,"skipped":0,"unsupported":0,"failed":0}]});
+    let progress = source_progress(&status_three).unwrap();
+    assert_eq!(progress.len(), 3);
+    assert_eq!(progress[2].source, ProgressSource::Antigravity);
+    assert_eq!(progress[2].state, ProgressState::Ready);
+    assert_eq!(progress[2].imported, 3);
+    store.shutdown().await.unwrap();
 }

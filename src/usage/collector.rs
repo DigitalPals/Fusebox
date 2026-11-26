@@ -45,6 +45,8 @@ pub enum CollectorCommand {
         codex_root: Vec<PathBuf>,
         #[arg(long)]
         claude_root: Vec<PathBuf>,
+        #[arg(long)]
+        antigravity_root: Vec<PathBuf>,
     },
     /// Scan consented roots and deliver metadata, without loading proxy configuration.
     Run {
@@ -87,12 +89,14 @@ pub struct Batch {
 pub enum ProgressSource {
     Codex,
     ClaudeCode,
+    Antigravity,
 }
 impl ProgressSource {
     fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude_code",
+            Self::Antigravity => "antigravity",
         }
     }
 }
@@ -129,7 +133,11 @@ impl SourceProgress {
 }
 fn source_progress(status: &Value) -> Result<Vec<SourceProgress>> {
     let roots = status["imports"].as_array().ok_or_else(|| anyhow!("import progress unavailable"))?;
-    [ProgressSource::Codex, ProgressSource::ClaudeCode]
+    let mut sources = vec![ProgressSource::Codex, ProgressSource::ClaudeCode];
+    if roots.iter().any(|root| root["source"].as_str() == Some("antigravity")) {
+        sources.push(ProgressSource::Antigravity);
+    }
+    sources
         .into_iter()
         .map(|source| {
             let selected: Vec<_> = roots.iter().filter(|root| root["source"].as_str() == Some(source.name())).collect();
@@ -319,17 +327,20 @@ pub async fn ingest(store: &Store, headers: HeaderMap, body: Bytes) -> Response 
         || batch.superseded.len() > MAX_BATCH
         || batch.superseded.iter().any(|s| !valid_supersession(&s.source_event_id))
         || batch.pending > (imports::OUTBOX_LIMIT * 2) as u64
-        || batch.progress.len() > 2
+        || batch.progress.len() > 3
         || batch.progress.iter().any(|p| !p.valid())
-        || (batch.progress.len() == 2 && batch.progress[0].source == batch.progress[1].source)
+        || batch.progress.iter().enumerate().any(|(i, a)| batch.progress[i + 1..].iter().any(|b| a.source == b.source))
     {
         return response(StatusCode::BAD_REQUEST, "unsupported batch or bounds");
     }
     for o in &mut batch.observations {
-        if !matches!(o.source.as_str(), "claude_code" | "codex") {
+        if !matches!(o.source.as_str(), "claude_code" | "codex" | "antigravity") {
             return response(StatusCode::BAD_REQUEST, "collector source not allowed");
         }
         if o.source == "claude_code" && o.provider != "anthropic" {
+            return response(StatusCode::BAD_REQUEST, "collector provider mismatch");
+        }
+        if o.source == "antigravity" && o.provider != "antigravity" {
             return response(StatusCode::BAD_REQUEST, "collector provider mismatch");
         }
         if o.validate().is_err() {
@@ -700,7 +711,14 @@ async fn run_loop(store: &Store, state: &LocalState, once: bool) -> Result<()> {
 
 pub async fn run_command(command: CollectorCommand) -> Result<()> {
     match command {
-        CollectorCommand::Enroll { state_dir, destination, credential_file, codex_root, claude_root } => {
+        CollectorCommand::Enroll {
+            state_dir,
+            destination,
+            credential_file,
+            codex_root,
+            claude_root,
+            antigravity_root,
+        } => {
             validate_destination(&destination)?;
             let directory = state_dir.clone();
             let state = tokio::task::spawn_blocking(move || -> Result<LocalState> {
@@ -733,6 +751,9 @@ pub async fn run_command(command: CollectorCommand) -> Result<()> {
                 }
                 for root in claude_root {
                     imports::configure(&store, "claude_code", &root.to_string_lossy(), true).await?;
+                }
+                for root in antigravity_root {
+                    imports::configure(&store, "antigravity", &root.to_string_lossy(), true).await?;
                 }
                 local_status(&store, &state).await
             }

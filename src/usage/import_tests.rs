@@ -814,3 +814,158 @@ async fn upgraded_parser_repairs_stored_duplicate_and_resumes_once() {
         store.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn antigravity_transcripts_import_prune_deduplicate_and_price() {
+    let dir = TestDir::new();
+    let brain = dir.0.join("PRIVATE-ANTIGRAVITY-BRAIN");
+    let conv_id = "431d189b-1084-4dd9-a0e9-f0f108ab59b7";
+    let conv = brain.join(conv_id);
+    let logs = conv.join(".system_generated").join("logs");
+    let steps = conv.join(".system_generated").join("steps").join("1");
+    let scratch = conv.join("scratch").join("nested");
+    fs::create_dir_all(&logs).unwrap();
+    fs::create_dir_all(&steps).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    // Noise in pruned subtrees and sibling transcript_full.jsonl must be ignored.
+    write_rows(
+        &steps.join("transcript.jsonl"),
+        &[
+            json!({"step_index":99,"type":"PLANNER_RESPONSE","status":"DONE","created_at":now(),"model":"gemini-4-neon-xhigh","input_tokens":1,"cache_read_tokens":0,"output_tokens":1}),
+        ],
+    );
+    write_rows(
+        &scratch.join("transcript.jsonl"),
+        &[
+            json!({"step_index":98,"type":"PLANNER_RESPONSE","status":"DONE","created_at":now(),"model":"gemini-4-neon-xhigh","input_tokens":1,"cache_read_tokens":0,"output_tokens":1}),
+        ],
+    );
+    let gemini_row = json!({
+        "step_index": 1,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": now(),
+        "model": "gemini-4-neon-xhigh",
+        "input_tokens": 10_000,
+        "cache_read_tokens": 40_000,
+        "output_tokens": 2_000,
+        "thinking": "PRIVATE-PROMPT-MARKER",
+        "tool_calls": [{"name": "read_file", "args": {"Path": "PRIVATE-PROJECT-MARKER"}}]
+    });
+    let claude_row = json!({
+        "step_index": 5,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": now(),
+        "model": "claude-opus-5-5-high",
+        "input_tokens": 5_000,
+        "cache_read_tokens": 20_000,
+        "output_tokens": 500
+    });
+    let error_with_usage = json!({
+        "step_index": 9,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "ERROR",
+        "created_at": now(),
+        "model": "gemini-4-neon-xhigh",
+        "input_tokens": 2_000,
+        "cache_read_tokens": 10_000,
+        "output_tokens": 300,
+        "error": "PRIVATE-ERROR-MARKER"
+    });
+    let error_zero = json!({
+        "step_index": 10,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "ERROR",
+        "created_at": now(),
+        "model": "gemini-4-neon-xhigh",
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 0
+    });
+    let rows = vec![
+        json!({"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":now(),"content":"PRIVATE-PROMPT-MARKER"}),
+        gemini_row.clone(),
+        claude_row.clone(),
+        error_with_usage.clone(),
+        error_zero,
+        json!({"step_index":11,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":now(),"model":"gemini-4-neon-xhigh","input_tokens":10,"cache_read_tokens":0,"output_tokens":1}),
+        json!({"step_index":12,"type":"PLANNER_RESPONSE","status":"DONE","created_at":now(),"model":"gemini-4-neon-xhigh","input_tokens":-1,"cache_read_tokens":0,"output_tokens":1}),
+    ];
+    let transcript = logs.join("transcript.jsonl");
+    write_rows(&transcript, &rows);
+    // Exact sibling copy that Antigravity writes beside transcript.jsonl.
+    write_rows(&logs.join("transcript_full.jsonl"), &[gemini_row.clone(), claude_row.clone()]);
+
+    // A non-UUID flat folder must still import safely without leaking its folder name.
+    let flat = brain.join("PRIVATE-NON-UUID-FOLDER");
+    fs::create_dir_all(&flat).unwrap();
+    write_rows(
+        &flat.join("transcript.jsonl"),
+        &[
+            json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":now(),"model":"gemini-3.8-flash-low","input_tokens":1000,"cache_read_tokens":500,"output_tokens":100}),
+        ],
+    );
+
+    let store = dir.store();
+    configure(&store, "antigravity", brain.to_str().unwrap(), true).await.unwrap();
+    let first = scan(&store, Some("antigravity".into())).await.unwrap();
+    assert_eq!(first["scans"][0]["report"]["counts"]["imported"], 4, "{first}");
+    assert_eq!(first["scans"][0]["report"]["counts"]["failed"], 1, "{first}");
+    assert_eq!(count(&store).await, 4);
+
+    // Copying the same UUID conversation into a backup folder deduplicates by step:<uuid>:<step>.
+    let copy_logs = dir.0.join("backup").join(conv_id).join(".system_generated").join("logs");
+    fs::create_dir_all(&copy_logs).unwrap();
+    fs::copy(&transcript, copy_logs.join("transcript.jsonl")).unwrap();
+    configure(&store, "antigravity", dir.0.join("backup").to_str().unwrap(), true).await.unwrap();
+    scan(&store, Some("antigravity".into())).await.unwrap();
+    assert_eq!(count(&store).await, 4);
+
+    // Appending a new step resumes from checkpoint and adds only the new row.
+    let mut file = fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"step_index":15,"type":"PLANNER_RESPONSE","status":"DONE","created_at":now(),"model":"gemini-4-neon-high","input_tokens":4000,"cache_read_tokens":50000,"output_tokens":400})
+    )
+    .unwrap();
+    let second = scan(&store, Some("antigravity".into())).await.unwrap();
+    let imported: u64 =
+        second["scans"].as_array().unwrap().iter().map(|s| s["report"]["counts"]["imported"].as_u64().unwrap()).sum();
+    assert_eq!(imported, 1, "{second}");
+    assert_eq!(count(&store).await, 5);
+
+    // Verify pricing, session identity, completeness, and absence of any private markers.
+    let details =
+        store.details(store::Query { source: Some("antigravity".into()), ..Default::default() }).await.unwrap();
+    let items = details["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(
+        items
+            .iter()
+            .all(|i| i["provider"] == "antigravity" && i["estimated_cost_nanos"].as_i64().is_some_and(|c| c > 0))
+    );
+    assert!(
+        items.iter().any(|i| i["source_event_id"] == format!("step:{conv_id}:1") && i["completeness"] == "complete")
+    );
+    assert!(
+        items.iter().any(|i| i["source_event_id"] == format!("step:{conv_id}:9") && i["completeness"] == "partial")
+    );
+    assert!(items.iter().any(|i| i["actual_model"] == "claude-opus-5-5-high"));
+    let dumped = details.to_string();
+    for secret in [
+        "PRIVATE-PROMPT-MARKER",
+        "PRIVATE-PROJECT-MARKER",
+        "PRIVATE-ERROR-MARKER",
+        "PRIVATE-NON-UUID-FOLDER",
+        "PRIVATE-ANTIGRAVITY-BRAIN",
+    ] {
+        assert!(!dumped.contains(secret), "{secret}");
+    }
+    store.shutdown().await.unwrap();
+}

@@ -1142,7 +1142,7 @@ pub fn suppress_source_event(
     source_event_id: &str,
     reason: &str,
 ) -> Result<Value> {
-    if !matches!(source, "codex" | "claude_code") {
+    if !matches!(source, "codex" | "claude_code" | "antigravity") {
         bail!("only native fallback observations may be suppressed");
     }
     super::types::valid_label(source_event_id).map_err(|e| anyhow!(e))?;
@@ -1156,7 +1156,7 @@ pub fn suppress_origin_event(
     origin: &str,
     reason: &str,
 ) -> Result<Value> {
-    if !matches!(source, "codex" | "claude_code") {
+    if !matches!(source, "codex" | "claude_code" | "antigravity") {
         bail!("only native fallback observations may be suppressed");
     }
     for label in [source_event_id, origin, reason] {

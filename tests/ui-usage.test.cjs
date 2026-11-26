@@ -850,3 +850,28 @@ test('output speed keeps untimed models last, by speed and by first token', () =
     assert.ok(got.indexOf(got.find((k) => /untimed-a/.test(k))) < got.indexOf(got.find((k) => /untimed-b/.test(k))), 'untimed by calls');
   }
 });
+
+test('Collection drawer includes Antigravity history import and collector source labels', () => {
+  const d = dashboard();
+  d.seed({
+    loaded: true,
+    drawerOpen: true,
+    summary: { combined: { totals: {}, trend: [], breakdowns: {} }, facets: {} },
+    status: {
+      health: { state: 'healthy' },
+      imports: [{ source: 'antigravity', root: '/private/antigravity/brain', enabled: true, state: 'ready', imported: 9, duplicate: 0, skipped: 3, unsupported: 0, failed: 0 }],
+      collectors: [{ id: 'dragon-id', label: 'The Dragon', state: 'synced', covered_sources: ['antigravity'], progress: [{ source: 'antigravity', state: 'ready', imported: 9, duplicate: 0, skipped: 3, unsupported: 0, failed: 0 }] }],
+    },
+  });
+  let html = d.run('usageHTML()');
+  assert.ok(html.includes('Antigravity history'));
+  assert.ok(html.includes('/private/antigravity/brain'));
+  assert.ok(html.includes('Claude Code, Codex and Antigravity history'));
+  d.run('Usage.status.imports = []');
+  html = d.run('usageHTML()');
+  assert.ok(html.includes('data-usage-import="antigravity"'));
+  assert.ok(html.includes('/path/to/antigravity/brain'));
+  d.run('S.private = true');
+  html = d.run('usageHTML()');
+  assert.ok(!html.includes('/path/to/antigravity/brain'));
+});

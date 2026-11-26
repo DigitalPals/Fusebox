@@ -137,7 +137,7 @@ impl Observation {
         if self.schema_version != SCHEMA_VERSION {
             return Err("unsupported schema version".into());
         }
-        if !matches!(self.source.as_str(), "proxy" | "claude_code" | "codex") {
+        if !matches!(self.source.as_str(), "proxy" | "claude_code" | "codex" | "antigravity") {
             return Err("unsupported source".into());
         }
         if !matches!(self.completeness.as_str(), "complete" | "partial" | "missing") {
